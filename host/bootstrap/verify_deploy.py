@@ -38,6 +38,7 @@ from typing import Any, Callable
 from host.constants import (
     ADMIN_API_PORT,
     EMBEDDING_SOCKET_PATH,
+    HOST_INFERENCE_SOCKET_PATH,
     TRANSCRIPTION_SOCKET_PATH,
     WORKSPACE_AGENT_SOCKET_PATH,
     AGENT_NETWORK_SOCKET_PATH,
@@ -60,6 +61,7 @@ CORE_UNITS = (
     "kern-postgres.service",
     "kern-network-proxy.service",
     "kern-tools.service",
+    "kern-host-inference.service",
     "kern-agent-network.service",
     "kern-host-errors.service",
     "kern-admin-api.service",
@@ -172,6 +174,7 @@ CLOUDFLARE_PATH_FACTS: tuple[PathFact, ...] = (
 # socket path -> owning service account
 SOCKET_OWNERS = {
     TOOLS_SOCKET_PATH: "kern-tools",
+    HOST_INFERENCE_SOCKET_PATH: "kern-host-inference",
     WORKSPACE_AGENT_SOCKET_PATH: "kern-workspace",
     AGENT_NETWORK_SOCKET_PATH: "kern-agent-network",
     WORKSPACE_ADMIN_SOCKET_PATH: "kern-admin",

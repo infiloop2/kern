@@ -29,10 +29,17 @@ leave the canvas on an obsolete Loading placeholder. Generated JavaScript runs
 in a Worker inside an opaque sandbox iframe whose CSP denies network access and
 dynamic evaluation. The broker exposes only bounded rendering, JSON mutation,
 notification, and ask-agent capabilities. Worker calls remain pinned to the
-app and revisions that created the Worker. Worker startup has a separate
-bounded deadline; the three-second generated-execution limit begins only after
-the Worker is ready, and startup, execution, and trusted-render failures are
-reported distinctly.
+app and revisions that created the Worker. Each turn has a five-second total
+deadline from run creation, covering startup, generated execution, and network
+waits. Startup, execution, and trusted-render failures are reported distinctly.
+Independent reads and collection queries can run concurrently; their waits
+overlap without extending the deadline. Brokered writes apply in issue order against
+the revision the previous write produced. An interaction that arrives during
+a running turn is queued (newest wins) and starts when the turn completes.
+When a turn times out or fails, the frame records a short runtime report
+naming the action, the elapsed time, and the host requests it waited on,
+and appends it to the operator's next composer message so the agent sees the
+actual cause.
 
 Browser and agent writes share per-app locks and one optimistic `revision`.
 Every data operation, atomic data batch, or UI publish compares and increments
@@ -50,13 +57,31 @@ document cannot be pulled accidentally. In that mode `set` and `append`
 resolve to the submitted value, `delete` resolves to `null`, and callers can
 read the resulting stored branch when they need the authoritative container.
 
-Each retained revision is a complete UI-and-data snapshot. Recovery always
-restores both together as a new forward revision; App name and archive state
-remain outside revision history. Retention keeps the newest five revisions
-exactly, then one recovery point per four-hour interval during the first day
-and one per day from day two through day seven, up to 17 snapshots per App.
-Global Memory and Schedules are separate Workspace resources and are never
-included in App recovery.
+Each retained revision is one complete recovery checkpoint for the interface,
+JSON document, and all collections. Restore replaces all three atomically as
+a new forward revision. App name, archive state, Global Memory, and Schedules
+remain outside App recovery. Retention still keeps the newest five revisions
+exactly, then one per four-hour interval during the first day and one per day
+from day two through day seven, capped at 17 visible checkpoints.
+
+Internally, checkpoints reference immutable interface and document versions;
+unchanged components are shared. Collection history stores full row values
+with inclusive `valid_from` and exclusive `valid_until` revisions. Updating a
+row closes its previous interval and opens a new one; deleting it closes the
+interval without a replacement. Document and interface writes never scan or
+copy the live collections. Collection writes version only the touched rows.
+Restoring selects rows valid at the checkpoint, without replaying operations,
+and records the restored rows as the next state in the same transaction.
+
+All writers, restores, and history pruning hold the App row lock. Pruning
+removes a component only after its last checkpoint reference disappears;
+closed row intervals survive while any retained checkpoint falls inside them.
+Open intervals represent live rows and remain available for future checkpoints.
+Migration 0065 discards pre-upgrade recovery history and creates one fresh
+checkpoint per App from its current live state, keeping its revision number.
+Live data, collections, interface, and settings remain unchanged. Rollback
+materializes the retained new checkpoints for the older runtime; discarded
+pre-upgrade history does not return.
 
 Polling never swaps a newer App underneath an interactive canvas. A successful
 mutation from the displayed generated App advances it immediately. Any newer

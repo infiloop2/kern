@@ -106,6 +106,9 @@ PENDING_PUSH_HISTORY_LIMIT = 100
 # daily source counters for diagnosis without accumulating one row per model
 # per day for the lifetime of the host.
 BEDROCK_USAGE_RETAIN_DAYS = 400
+# Host inference has the same operator-facing current-month view and the same
+# bounded daily/model cardinality as Bedrock usage.
+HOST_INFERENCE_USAGE_RETAIN_DAYS = 400
 # Full-text ranking can otherwise sort up to the complete retained event log
 # for a very common token. Keep each relevance query inside a fixed database
 # execution budget; callers turn a cancellation into an actionable narrow-

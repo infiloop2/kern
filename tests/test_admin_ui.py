@@ -580,6 +580,22 @@ class AdminUiStaticTests(unittest.TestCase):
             (runtime / "admin_ui" / "admin_ui.css").read_text(),
         )
         self.assertIn('id="home-integration-groups"', html)
+        self.assertIn('id="home-runtime-groups"', html)
+        self.assertIn('id="home-runtimes-title">Agent runtimes</h2>', html)
+        self.assertIn('id="integration-detail-nav-section"', html)
+        self.assertIn("open OpenAI under Agent runtimes", catalog)
+        self.assertIn("open Claude under Agent runtimes", catalog)
+        self.assertNotIn("open OpenAI under Integrations", catalog)
+        self.assertNotIn("open Claude under Integrations", catalog)
+        orchestrator = (Path(__file__).parents[1] / "host/runtime/agent_runtime/orchestrator.py").read_text()
+        api_doc = (Path(__file__).parents[1] / "docs/api/AdminAPI.md").read_text()
+        self.assertIn("enable its provider under Home > Agent runtimes", orchestrator)
+        self.assertIn("enable its provider under Home > Agent runtimes", api_doc)
+        self.assertNotIn("enable its provider under Home > Integrations", orchestrator)
+        self.assertIn("integration-detail-nav-section", guide)
+        self.assertIn("Agent runtimes", guide)
+        self.assertNotIn("Review combined tool access", html)
+        self.assertNotIn('id="tools-cross-access-notice"', html)
         self.assertIn("Integration guide", html)
         self.assertNotIn('id="panel-connection-guide"', html)
         self.assertNotIn("What each integration enables", html)
@@ -649,6 +665,8 @@ class AdminUiStaticTests(unittest.TestCase):
         integration_doc = (
             Path(__file__).parents[1] / "docs/architecture/xai-integration.md"
         ).read_text()
+        self.assertIn("Home > Agent runtimes >\nGrok", integration_doc)
+        self.assertNotIn("Home > Integrations >\nGrok", integration_doc)
         controls_doc = (
             Path(__file__).parents[1] / "docs/api/NetworkControls.md"
         ).read_text()
@@ -749,6 +767,9 @@ class AdminUiStaticTests(unittest.TestCase):
         # the Cost Explorer display is gone with the polling it required.
         self.assertIn("bedrockUsage(account)", health)
         self.assertIn("runtime-summary-bedrock", combined)
+        self.assertIn("runtime-summary-host-inference", combined)
+        self.assertIn('hostInferenceSummary("openai", "OpenAI host", "host_openai")', health)
+        self.assertIn('hostInferenceSummary("typesafe", "TypeSafe", "host_typesafe")', health)
         self.assertIn("bedrock-usage-box", network)
         self.assertIn("MTD est.", health)
         self.assertNotIn("Cost Explorer", combined)
@@ -913,11 +934,11 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("stroke-width: 1.25;", css)
         self.assertIn(".usage-window { font-size: 0.44rem;", css)
         self.assertIn(
-            ".runtime-overview.expanded .runtime-stat-value { font-size: 0.64rem; }",
+            ".runtime-overview-group.expanded .runtime-stat-value { font-size: 0.64rem; }",
             css,
         )
         self.assertIn(
-            ".runtime-overview.expanded .runtime-stat-label { font-size: 0.5rem; }",
+            ".runtime-overview-group.expanded .runtime-stat-label { font-size: 0.5rem; }",
             css,
         )
 
@@ -931,7 +952,8 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn("resets_at_text", health_js)
         # The countdown shares the single window-label line under the ring so
         # the top bar keeps a constant height.
-        self.assertIn('const display = available ? `${Math.round(percent)}` : "--";', health_js)
+        self.assertIn('if (!available) return "";', health_js)
+        self.assertIn('const display = `${Math.round(percent)}`;', health_js)
         self.assertNotIn('`${Math.round(percent)}%`', health_js)
         self.assertIn('${esc(label)}${countdown ? ` · ${countdown}` : ""}', health_js)
         self.assertNotIn("usage-reset", health_js)

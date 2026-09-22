@@ -4,8 +4,10 @@
 
 import { api } from "./api.js";
 import { $, esc, inlineCode, setHtml } from "./helpers.js";
-import { CUSTOM_DOMAIN_GUIDE, MANAGED_INTEGRATIONS } from "./integration_catalog.js";
+import { CUSTOM_DOMAIN_GUIDE, HOST_INFERENCE_INTEGRATIONS, MANAGED_INTEGRATIONS } from "./integration_catalog.js";
+import { renderHomeManagedStatuses } from "./network.js";
 
+const HOME_RUNTIME_IDS = ["openai", "claude", "xai", "bedrock"];
 let selectedGuideId = "openai";
 // Managed integrations are static, so their detail pages can open immediately
 // while the bundled-tool catalog is still loading.
@@ -26,6 +28,7 @@ const INTEGRATION_LOGOS = {
   npm_packages: `<span class="integration-logo-word integration-logo-word-npm">npm</span>`,
   "tool:apify": `<span class="integration-logo-word integration-logo-word-apify">A</span>`,
   "tool:apify_developer": `<span class="integration-logo-word integration-logo-word-apify">A</span>`,
+  "tool:cloudwatch_logs": `<span class="integration-logo-word integration-logo-word-aws">aws</span><svg class="integration-logo-smile" viewBox="0 0 32 10"><path d="M4 2.5c6.5 4.8 14.8 5.1 23.8.2"/><path d="m24.2 1 4.2 1.4-2 3.8"/></svg>`,
   "tool:brave_search": `<svg viewBox="0 0 32 32"><path fill="none" stroke="currentColor" stroke-width="2.2" d="m16 3 10 4.2-1 14.2L16 28l-9-6.6L6 7.2 16 3Z"/><path fill="currentColor" d="M11 8.8h7c4 0 5.2 5 2.1 6.5 3.8 1.3 2.5 7.7-2 7.7H11V8.8Zm4 3v2.4h2.7c1.6 0 1.6-2.4 0-2.4H15Zm0 5.2v3h3c1.9 0 1.9-3 0-3h-3Z"/></svg>`,
   "tool:gmail": `<svg viewBox="0 0 32 32"><path class="gmail-blue" d="M4 10v15h5V14.3Z"/><path class="gmail-red" d="M4 10 8 7l8 6.2L24 7l4 3v15h-5V14.2L16 20 9 14.3V25H4Z"/><path class="gmail-yellow" d="m24 7 4 3-5 4.2V8Z"/><path class="gmail-green" d="M23 14.2 28 10v15h-5Z"/></svg>`,
   "tool:google_calendar": `<svg viewBox="0 0 32 32"><path class="calendar-blue" d="M6 5h20v22H6z"/><path class="calendar-green" d="M6 5h14v7H6z"/><path class="calendar-yellow" d="M6 12h7v15H6z"/><path class="calendar-red" d="M20 5h6v7h-6z"/><path fill="#fff" d="M13 14h6.3c3.1 0 4.7 1.6 4.7 3.7 0 1.5-.9 2.7-2.3 3.1v.1c1.7.3 2.7 1.5 2.7 3.2 0 .5-.1 1-.2 1.4H20c.2-.4.3-.8.3-1.3 0-1.3-.9-2.1-2.5-2.1h-1.5v-2.7h1.4c1.4 0 2.2-.7 2.2-1.8 0-1-.8-1.7-2.1-1.7H13V14Z"/></svg>`,
@@ -52,6 +55,8 @@ const INTEGRATION_LOGOS = {
 // The bundled OpenAI image tool carries the same brand mark as the managed
 // OpenAI network integration: one definition, two guide ids.
 INTEGRATION_LOGOS["tool:openai_images"] = INTEGRATION_LOGOS.openai;
+INTEGRATION_LOGOS.host_openai = INTEGRATION_LOGOS.openai;
+INTEGRATION_LOGOS.host_typesafe = `<span class="integration-logo-word">Jev</span>`;
 
 function integrationLogo(guide) {
   const mark = INTEGRATION_LOGOS[guide.id];
@@ -131,6 +136,7 @@ function toolGuide(tool) {
       imageAlt: step.image_alt,
       showCallback: step.show_callback,
       showConfig: step.show_config,
+      code: step.code,
     })),
     capabilities: (tool.actions || []).map(action => ({
       name: action.id,
@@ -157,14 +163,17 @@ function toolGuide(tool) {
 
 function allGuides(tools) {
   const managed = Object.entries(MANAGED_INTEGRATIONS).map(([id, guide]) => ({ id, ...guide }));
+  const hostInference = Object.entries(HOST_INFERENCE_INTEGRATIONS).map(([id, guide]) => ({ id, ...guide }));
   const bundled = tools.map(toolGuide);
-  return [...managed, ...bundled, CUSTOM_DOMAIN_GUIDE]
+  return [...managed, ...hostInference, ...bundled, CUSTOM_DOMAIN_GUIDE]
     .sort((left, right) => left.label.localeCompare(right.label, undefined, { sensitivity: "base" }));
 }
 
 function guideKind(guide) {
   return guide.id.startsWith("tool:")
     ? "Bundled MCP tool"
+    : guide.hostInference
+      ? "Host AI inference"
     : guide.id === "custom_domain"
       ? "Custom rule"
       : "Direct network integration";
@@ -184,7 +193,7 @@ function homeIntegrationCard(guide) {
 }
 
 function sortHomeIntegrationCards() {
-  for (const grid of document.querySelectorAll("#home-integration-groups .home-card-grid")) {
+  for (const grid of document.querySelectorAll("#home-runtime-groups .home-card-grid, #home-integration-groups .home-card-grid")) {
     const cards = Array.from(grid.querySelectorAll(".home-integration-card"));
     cards.sort((left, right) => {
       const leftEnabled = left.querySelector("[data-home-integration-status]")?.classList.contains("active") === true;
@@ -200,28 +209,33 @@ function sortHomeIntegrationCards() {
 
 document.addEventListener("kern-home-integration-statuses-updated", sortHomeIntegrationCards);
 
+function homeCardGrid(guides) {
+  return `<div class="home-card-grid">${guides.map(homeIntegrationCard).join("")}</div>`;
+}
+
 function renderHomeIntegrationGroups() {
   const byId = new Map(loadedGuides.map(guide => [guide.id, guide]));
-  const inferenceIds = new Set(["openai", "claude", "xai", "bedrock"]);
+  const runtimes = HOME_RUNTIME_IDS.map(id => byId.get(id)).filter(Boolean);
+  const hostInferenceIds = new Set(Object.keys(HOST_INFERENCE_INTEGRATIONS));
   const groups = [
-    ["AI inference", ["openai", "claude", "xai", "bedrock"].map(id => byId.get(id)).filter(Boolean)],
-    ["Tools", loadedGuides.filter(guide => guide.id !== "custom_domain" && !inferenceIds.has(guide.id))],
+    ["Host AI inference", [...hostInferenceIds].map(id => byId.get(id)).filter(Boolean)],
+    ["Tools", loadedGuides.filter(guide => guide.id !== "custom_domain" && !HOME_RUNTIME_IDS.includes(guide.id) && !hostInferenceIds.has(guide.id))],
     ["Manual", loadedGuides.filter(guide => guide.id === "custom_domain")],
   ];
+  setHtml($("home-runtime-groups"), homeCardGrid(runtimes));
   setHtml($("home-integration-groups"), groups.filter(([, guides]) => guides.length).map(([label, guides]) => `
     <div class="home-integration-group">
       <h3>${esc(label)}</h3>
-      <div class="home-card-grid">${guides.map(homeIntegrationCard).join("")}</div>
+      ${homeCardGrid(guides)}
     </div>`).join(""));
   sortHomeIntegrationCards();
-  document.dispatchEvent(new CustomEvent("kern-home-integration-cards-rendered"));
+  renderHomeManagedStatuses();
 }
 
 export async function refreshConnectionGuide() {
   try {
     const response = await api("GET", "/v1/tools");
     const tools = Array.isArray(response.tools) ? response.tools : [];
-    $("tools-cross-access-notice").hidden = tools.filter(tool => tool.enabled).length < 2;
     const toolState = new Map(tools.map(tool => [`tool:${tool.tool_id}`, tool.enabled === true]));
     loadedGuides = allGuides(tools).map(guide => ({ ...guide, enabled: toolState.get(guide.id) === true }));
     if (!loadedGuides.some(guide => guide.id === selectedGuideId)) {
@@ -250,16 +264,22 @@ function renderConnectionGuide() {
     $("integration-detail-kind").textContent = guideKind(selected);
     $("integration-detail-title").textContent = selected.label;
     $("integration-detail-summary").textContent = selected.summary;
+    $("integration-detail-nav-section").textContent = HOME_RUNTIME_IDS.includes(selected.id)
+      ? "Agent runtimes"
+      : "Integrations";
   }
 }
 
 function renderGuide(guide) {
-  return `
-    <article class="connection-guide-entry" data-guide-section="${esc(guide.id)}" tabindex="-1">
-      <section class="guide-section">
+  const capabilities = Array.isArray(guide.capabilities) && guide.capabilities.length
+    ? `<section class="guide-section">
         <h3>What it enables</h3>
         <div class="guide-capabilities">${guide.capabilities.map(renderCapability).join("")}</div>
-      </section>
+      </section>`
+    : "";
+  return `
+    <article class="connection-guide-entry" data-guide-section="${esc(guide.id)}" tabindex="-1">
+      ${capabilities}
       <section class="guide-section">
         <h3>Connection</h3>
         ${renderSetup(guide)}

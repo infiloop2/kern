@@ -2,10 +2,12 @@
 
 Analytics appears below Memory in the operator sidebar. It shows today and
 the previous six UTC dates, with daily usage by Chats, Apps, and Schedules,
-a 24-hour UTC profile combined across those seven dates, provider/model
-summaries, and threads ranked by known token consumption. Selecting a thread
-filters both charts; active threads also link to their conversation. Data starts with new turns after deployment. There is no backfill,
-provider-quota polling, attribution estimate, or token-to-dollar conversion.
+a 24-hour UTC profile combined across those seven dates, model summaries
+combined across runtimes and effort levels, and threads ranked by known token
+consumption. Selecting a thread filters both charts; active threads also link
+to their conversation. Data starts with new turns after deployment. There is
+no backfill, provider-quota polling, attribution estimate, or token-to-dollar
+conversion.
 
 ## Accounting unit
 

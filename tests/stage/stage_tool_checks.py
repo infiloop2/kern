@@ -133,7 +133,12 @@ class StageToolChecks:
         ]
         connected = (entry.get("connection_status") or {}).get("connected") is True
         needs_connection = manifest.connection in {"oauth", "mcp_oauth", "whatsapp_linked_device"}
-        if entry.get("enabled") and not missing_config and (not needs_connection or connected):
+        missing_stage_inputs = []
+        if tool_id == "cloudwatch_logs" and not os.environ.get(
+            "KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP", ""
+        ).strip():
+            missing_stage_inputs.append("KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP")
+        if entry.get("enabled") and not missing_config and not missing_stage_inputs and (not needs_connection or connected):
             state = "connected" if needs_connection else "configured"
             print(f"  [credential ok] {tool_id}: enabled and {state}", flush=True)
             return []
@@ -150,6 +155,8 @@ class StageToolChecks:
         if needs_connection and not connected:
             verb = "link" if manifest.connection == "whatsapp_linked_device" else "connect"
             problems.append(f"{verb} its stage account once in the admin UI")
+        if missing_stage_inputs:
+            problems.append(f"set stage probe input via {', '.join(missing_stage_inputs)}")
         if not entry.get("enabled"):
             problems.append("enable the tool")
         return [f"{tool_id}: {'; '.join(problems)}"]
@@ -360,6 +367,7 @@ class StageToolChecks:
             "apify": self._check_apify_live,
             "apify_developer": self._check_apify_developer_live,
             "brave_search": self._check_brave_live,
+            "cloudwatch_logs": self._check_cloudwatch_logs_live,
             "elevenlabs": self._check_elevenlabs_live,
             "gmail": self._check_gmail_live,
             "google_calendar": self._check_calendar_live,
@@ -419,6 +427,27 @@ class StageToolChecks:
         suffix = "; publish proposal denied" if tool_id == "linkedin" else ""
         read_count = len(calls) + (1 if tool_id == "ibkr" else 0)
         return f"{read_count} live read(s) completed{suffix}"
+
+    def _check_cloudwatch_logs_live(self) -> str:
+        from datetime import datetime, timedelta, timezone
+
+        group = os.environ.get("KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP", "").strip()
+        if not group:
+            raise AssertionError("KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP must name one test log group")
+        end = datetime.now(timezone.utc).replace(microsecond=0)
+        start = end - timedelta(minutes=5)
+        result = self._successful_tool_call(
+            "cloudwatch_logs_filter_log_events",
+            {
+                "log_group": group,
+                "start_time": start.isoformat().replace("+00:00", "Z"),
+                "end_time": end.isoformat().replace("+00:00", "Z"),
+                "limit": 1,
+            },
+        )
+        if not isinstance(result.get("events"), list) or result.get("event_count") != len(result["events"]):
+            raise AssertionError("CloudWatch Logs stage read returned an invalid event page")
+        return "one live five-minute read against the stage test log group completed"
 
     def _check_apify_developer_live(self) -> str:
         self._successful_tool_call("apify_developer_get_account_usage", {})

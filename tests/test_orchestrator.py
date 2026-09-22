@@ -48,8 +48,8 @@ from host.runtime.core.state import (
 
 # The default (model, effort) per runtime for seeded threads and turns.
 DEFAULT_SESSION = {
-    "codex": ("gpt-5.6-terra", "high"),
-    "claude_code": ("claude-opus-5", "high"),
+    "codex": ("gpt-6-astra", "high"),
+    "claude_code": ("claude-opus-5-5", "high"),
     "grok": ("grok-4.6", "high"),
     "hermes": ("qwen.qwen3-coder-next", "high"),
     "script": ("bash", "fixed"),
@@ -353,7 +353,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(response["thread"]["thread_id"], "thread-chat")
             self.wait_until_idle("thread-chat")
 
-        self.assertEqual(observed_config, [("gpt-5.6-terra", "high")])
+        self.assertEqual(observed_config, [("gpt-6-astra", "high")])
         events = thread_events("thread-chat")
         self.assertEqual(
             event_summary(events),
@@ -1229,7 +1229,7 @@ class OrchestratorTests(unittest.TestCase):
         with state.mutation() as cur:
             state.save_thread_session(
                 cur, "codex", thread_id, "deleted-session", state.utc_now(),
-                "gpt-5.6-terra", "high",
+                "gpt-6-astra", "high",
             )
             state.append_agent_event(
                 cur, "thread.message", thread_id,
@@ -1286,7 +1286,7 @@ class OrchestratorTests(unittest.TestCase):
                 "thread-stale-claude",
                 "deleted-session",
                 state.utc_now(),
-                "claude-opus-5",
+                "claude-opus-5-5",
                 "high",
             )
             state.append_agent_event(

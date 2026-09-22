@@ -12,6 +12,27 @@ let badgeLoading = false;
 let counts = { pending_count: 0, history_count: 0 };
 const keyOf = item => `${item.kind}:${item.id}`;
 const disabled = () => busy || loading ? " disabled" : "";
+const riskScoreLabels = {
+  commits_money_or_obligation: "Commits money or obligation",
+  sensitive_data: "Sensitive data",
+  summary_mismatch: "Summary mismatch",
+};
+
+function riskAnnotation(item) {
+  const entries = Object.entries(riskScoreLabels).map(([id, label]) => {
+    const score = item.risk_scores?.[id];
+    if (!Number.isFinite(score) || score < 0 || score > 1) return null;
+    const percent = Math.round(score * 100);
+    const level = score > 0.66 ? "high" : score > 0.33 ? "moderate" : "low";
+    return `<div class="approval-risk-score ${level}" aria-label="${esc(label)} risk ${percent}%">
+      <span class="approval-risk-label">${esc(label)}</span>
+      <progress class="approval-risk-track" value="${percent}" max="100" aria-hidden="true"></progress>
+      <strong>${percent}%</strong>
+    </div>`;
+  });
+  if (entries.some(entry => entry === null)) return "";
+  return `<div class="approval-risk-scores" role="group" aria-label="TypeSafe Jev risk scores">${entries.join("")}</div>`;
+}
 
 function clearLoadError() {
   $("approval-feedback").querySelector("[data-approval-load-error]")?.remove();
@@ -56,6 +77,7 @@ function render() {
     <article class="approval-card" data-approval-key="${esc(keyOf(item))}">
       <div class="approval-card-top"><span class="approval-source">${esc(item.source)}${item.account_label ? `<span class="muted"> / ${esc(item.account_label)}</span>` : ""}${item.connection_id ? `<span class="muted"> · ${esc(item.connection_id)}</span>` : ""}</span>${badge(item.status)}</div>
       <h2>${esc(item.summary)}</h2>
+      ${riskAnnotation(item)}
       <div class="approval-card-meta"><time>${esc(formatUnixTime(view === "pending" ? item.created_at : item.updated_at))}</time><span>${esc(item.kind === "github_push" ? `push-${item.id}` : item.action_id)}</span></div>
       <details data-approval-details="${esc(keyOf(item))}"><summary>${item.kind === "tool" ? "View exact request" : "View changes"}</summary><pre class="approval-payload">${item.kind === "github_push" ? esc(JSON.stringify({ refs: item.ref_updates, paths: item.changed_paths }, null, 2)) : ""}</pre></details>
       ${item.result ? `<div class="approval-result">${esc(typeof item.result === "string" ? item.result : JSON.stringify(item.result))}</div>` : ""}

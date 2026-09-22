@@ -537,7 +537,7 @@ def _trusted_token_account(cur: Any, runtime_type: str, account: dict[str, Any])
     if trusted_account_id:
         if account_id != trusted_account_id:
             raise ProviderAccountTrustError(
-                f"{label} account changed; reset the linked account under Home > Integrations in the admin UI"
+                f"{label} account changed; reset the linked account under Home > Agent runtimes in the admin UI"
             )
         return _with_operator_approval(anchored, account)
     raise ProviderAccountNotApproved(
@@ -591,7 +591,7 @@ def _trusted_claude_account(
     if not attested_uuid:
         raise ProviderAccountTrustError("Claude account attestation has no account uuid")
     if trusted_account_id and attested_uuid != trusted_account_id:
-        raise ProviderAccountTrustError("Claude account changed; reset the linked account under Home > Integrations in the admin UI")
+        raise ProviderAccountTrustError("Claude account changed; reset the linked account under Home > Agent runtimes in the admin UI")
     return _with_identity(account, attested_uuid, attested)
 
 

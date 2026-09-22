@@ -50,15 +50,27 @@ MICROPHONE = """
 def run(page, url: str, log_in) -> None:
     page.add_init_script(MICROPHONE)
     ready = {"value": True}
-    page.route("**/v1/dictation/ready", lambda route: route.fulfill(
-        status=200 if ready["value"] else 503,
-        json={"ready": True} if ready["value"] else {"error": {"message": "Transcription model isn't loaded yet. Click the mic to retry."}},
-    ))
+
+    def readiness(route):
+        assert route.request.headers["x-kern-csrf"] == "1"
+        assert route.request.headers["x-kern-session-activity"] == "1"
+        route.fulfill(
+            status=200 if ready["value"] else 503,
+            json=(
+                {"ready": True}
+                if ready["value"]
+                else {"error": {"message": "Transcription model isn't loaded yet. Click the mic to retry."}}
+            ),
+        )
+
+    page.route("**/v1/dictation/ready", readiness)
     responses = ["First spoken sentence.", "Second spoken sentence."]
     requests = []
 
     def transcribe(route):
         assert set(route.request.post_data_json) == {"audio"}
+        assert route.request.headers["x-kern-csrf"] == "1"
+        assert route.request.headers["x-kern-session-activity"] == "1"
         requests.append(route.request)
         route.fulfill(json={"text": responses.pop(0)})
 

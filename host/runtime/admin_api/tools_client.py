@@ -185,6 +185,7 @@ def _tool_entry(tool: Any, enabled_ids: set[str], configured_keys: set[str]) -> 
                 "image_alt": step.image_alt,
                 "show_callback": step.show_callback,
                 "show_config": step.show_config,
+                "code": step.code,
             }
             for step in manifest.setup_steps
         ],

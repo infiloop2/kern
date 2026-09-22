@@ -155,8 +155,8 @@ SMOKE_OAUTH_RUNTIMES = ("codex", "claude_code")
 SMOKE_MANAGED_PROVIDERS = {"openai": True, "claude": True, "bedrock": True}
 SMOKE_BEDROCK_REGION = "us-east-1"
 SMOKE_RUNTIME_MODELS = {
-    "codex": "gpt-5.6-terra",
-    "claude_code": "claude-opus-5",
+    "codex": "gpt-6-astra",
+    "claude_code": "claude-opus-5-5",
     "grok": "grok-4.6",
     "hermes": "qwen.qwen3-coder-next",
 }
@@ -186,6 +186,17 @@ SMOKE_MANAGED_DOMAINS = (
     "bedrock-runtime.us-west-2.amazonaws.com",
 )
 SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
+    "cloudwatch_logs": (
+        (
+            "filter_log_events",
+            {
+                "log_group": "/aws/lambda/kern-smoke",
+                "start_time": "2026-09-21T00:00:00Z",
+                "end_time": "2026-09-21T00:05:00Z",
+                "limit": 1,
+            },
+        ),
+    ),
     "apify_developer": (
         ("get_account_usage", {}),
         ("search_store", {"query": "website", "limit": 1}),
@@ -626,6 +637,7 @@ class AwsSmoke:
             self.check_proxy_concurrency,
             self.check_pre_login_provider_guards,
             self.check_precredential_bedrock_harness_launchers,
+            self.check_installed_claude_cli,
             self.check_installed_agent_script_launcher,
             self.check_tools_surface,
             self.check_network_event_prune_race,
@@ -1251,9 +1263,11 @@ class AwsSmoke:
             'data-action="reset-linked-account"',
             'Disconnect</button>',
             "usageRing",
-            'id="ai-inference-integrations"',
+            'id="agent-runtime-integrations"',
+            'id="host-ai-inference-integrations"',
             'id="tools"',
-            "AI Inference",
+            "Agent runtimes",
+            "Host AI inference",
             "Manual",
             'id="github-repos"',
             'id="domain-rules"',
@@ -1266,6 +1280,9 @@ class AwsSmoke:
             'id="github-app-private-key"',
             'id="github-credential-status"',
             'id="home-integration-groups"',
+            'id="home-runtime-groups"',
+            'id="integration-detail-nav-section"',
+            "Agent runtimes",
             'data-action="open-home-integration"',
             'data-action="open-home-view"',
             'data-action="home-back"',
@@ -1797,6 +1814,37 @@ class AwsSmoke:
                 f"{page_id} did not {expectation} for {search_query!r}; last={last}"
             )
 
+        # Warm the socket-activated model before page writes wake the background
+        # indexer. This keeps cold model startup separate from the measured load,
+        # just as the dictation check below waits for its resident model before
+        # timing inference. Only start the load after the real agent search path
+        # has completed hybrid inference successfully once.
+        warm_started = time.monotonic()
+        warm_deadline = warm_started + 60
+        warm_status = 0
+        warm_response: dict = {}
+        while time.monotonic() < warm_deadline:
+            warm_status, warm_response = agent_memory_search(
+                "Embedding service readiness probe"
+            )
+            if (
+                warm_status == 200
+                and warm_response.get("search_mode") == "hybrid"
+            ):
+                break
+            if warm_status not in {200, 409}:
+                raise AssertionError(
+                    "embedding readiness search returned HTTP "
+                    f"{warm_status}: {warm_response}"
+                )
+            time.sleep(1)
+        else:
+            raise AssertionError(
+                "embedding service did not become ready for hybrid search; "
+                f"last={warm_response}"
+            )
+        warm_seconds = time.monotonic() - warm_started
+
         content_suffix = " ".join(["bounded local semantic indexing"] * 55)
         for index in range(page_count):
             if index == 0:
@@ -1929,6 +1977,7 @@ class AwsSmoke:
 
         current_memory = properties.get("MemoryCurrent", "unknown")
         self._ok(
+            f"model ready in {warm_seconds:.1f}s; "
             f"{page_count} pages indexed in {initial_seconds:.1f}s, "
             f"{revised_count} replacements in {replacement_seconds:.1f}s; "
             f"semantic retrieval in {initial_retrieval_seconds:.1f}s/"
@@ -3154,6 +3203,26 @@ class AwsSmoke:
             "the real Hermes launch path reached the proxy's local missing-credential denial; "
             "no AWS credential was stored and no upstream model call was possible"
         )
+
+    def check_installed_claude_cli(self) -> None:
+        """Check the pinned binary through the real admin/root/agent launcher."""
+        self._step("installed Claude CLI version and headless flags")
+        bootstrap = (Path(__file__).resolve().parents[2] / "host/bootstrap/bootstrap.sh").read_text()
+        expected = next(line.partition("=")[2] for line in bootstrap.splitlines()
+                        if line.startswith("CLAUDE_CODE_VERSION="))
+        command = (
+            "sudo -u kern-admin -- timeout 30 sudo -n "
+            "/usr/local/lib/kern-host/run-claude-code web-search=off "
+        )
+        version = self._ssh_code(command + "--version 2>&1")
+        help_text = self._ssh_code(command + "--help 2>&1")
+        if version.strip() != f"{expected} (Claude Code)":
+            raise AssertionError(f"Claude version differs from pin: {version!r}")
+        for flag in ("--model", "--effort", "--input-format", "--output-format", "--verbose",
+                     "--resume", "--setting-sources", "--strict-mcp-config", "--mcp-config", "--settings"):
+            if not re.search(rf"(?<![\w-]){re.escape(flag)}(?![\w-])", help_text):
+                raise AssertionError(f"Claude CLI dropped required flag: {flag}")
+        self._ok(f"Claude Code {expected} starts through the installed launcher with required flags")
 
     def check_installed_agent_script_launcher(self) -> None:
         """Run a real agent-home script through the installed launcher.
@@ -4409,6 +4478,13 @@ class AwsSmoke:
 
         try:
             return attempt()
+        except TimeoutError as exc:
+            # A connected request may already have mutated state, so do not
+            # retry it. Preserve the operation that timed out instead of
+            # collapsing the whole smoke failure to the socket's "timed out".
+            raise AssertionError(
+                f"{method} {path} timed out after 30 seconds"
+            ) from exc
         except (urllib.error.URLError, ConnectionError) as exc:
             # The tunnel can drop during a long idle; the failure then hits the
             # connect of the NEXT request, which never reached the server, so

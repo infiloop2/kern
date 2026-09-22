@@ -28,7 +28,7 @@ and complete `agent_settings`; use the id for every subsequent read and write.
   mapping to model keys and their supported effort lists) and `active_runtimes`.
   Read these choices before configuring an App; do not guess model names.
 - `PUT /agent/apps/{app_id}/agent-settings` with
-  `{"agent_runtime":"codex","model":"gpt-5.6-sol","effort":"high"}` saves the
+  `{"agent_runtime":"codex","model":"gpt-6-sol","effort":"high"}` saves the
   complete configuration for the App's next agent message. All three fields
   are required and validated against the session options. This does not start
   an agent turn. A running App agent returns 409; wait until it is idle before

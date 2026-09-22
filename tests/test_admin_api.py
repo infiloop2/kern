@@ -56,10 +56,10 @@ def save_approved_openai_account(account_id: str, **extra: Any) -> None:
 # One offered (model, effort) pair per runtime for tests that do not care
 # which configuration a thread runs.
 DEFAULT_SESSION_OPTIONS = {
-    "codex": ("gpt-5.6-terra", "high"),
-    "codex-2": ("gpt-5.6-terra", "high"),
-    "codex-3": ("gpt-5.6-terra", "high"),
-    "claude_code": ("claude-opus-5", "high"),
+    "codex": ("gpt-6-astra", "high"),
+    "codex-2": ("gpt-6-astra", "high"),
+    "codex-3": ("gpt-6-astra", "high"),
+    "claude_code": ("claude-opus-5-5", "high"),
     "grok": ("grok-4.6", "high"),
     "grok-2": ("grok-4.6", "high"),
     "hermes": ("deepseek.v3.2", "high"),
@@ -1383,7 +1383,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {
                     "message": "from app",
                     "agent_runtime": "codex",
-                    "model": "gpt-5.6-terra",
+                    "model": "gpt-6-astra",
                     "effort": "high",
                 },
             )
@@ -1419,7 +1419,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         request = {
             "message": "from app",
             "agent_runtime": "codex",
-            "model": "gpt-5.6-terra",
+            "model": "gpt-6-astra",
             "effort": "high",
         }
         with patch.object(
@@ -1444,7 +1444,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {
                     "message": "from app",
                     "agent_runtime": "codex",
-                    "model": "gpt-5.6-terra",
+                    "model": "gpt-6-astra",
                     "effort": "high",
                 },
             )
@@ -1501,7 +1501,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {
                     "message": "too long",
                     "agent_runtime": "codex",
-                    "model": "gpt-5.6-terra",
+                    "model": "gpt-6-astra",
                     "effort": "high",
                 },
             )
@@ -1884,7 +1884,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "summary": "Claude Code is unavailable",
             "detail": "Claude authentication probe timed out after 30 seconds",
             "next_step": (
-                "Open Home > Integrations > Claude Code, refresh its status, "
+                "Open Home > Agent runtimes > Claude Code, refresh its status, "
                 "and reconnect or revalidate the account if the error continues."
             ),
         }])
@@ -2474,7 +2474,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             )
         self.assertEqual(error.exception.code, 409)
         self.assertIn(
-            "Claude Code runtime is deactivated; enable its provider",
+            "Claude Code runtime is deactivated; enable its provider under Home > Agent runtimes",
             error.exception.read().decode(),
         )
         # The rejected messages recorded no events on the existing threads.
@@ -2527,7 +2527,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "2026-06-08T00:00:00Z",
         )
         set_runtime_statuses(codex="active", claude_code="active")
-        seed_thread_session("thread-codex-options", model="gpt-5.6-luna", effort="max")
+        seed_thread_session("thread-codex-options", model="gpt-6-luna", effort="max")
         seed_thread_session(
             "thread-claude-options",
             "claude_code",
@@ -2543,13 +2543,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {
                     "message": "codex turn",
                     "agent_runtime": "codex",
-                    "model": "gpt-5.6-luna",
+                    "model": "gpt-6-luna",
                     "effort": "max",
                 },
             )
             self.assertEqual(status, 200)
             self.assertEqual(
-                (codex["thread"]["model"], codex["thread"]["effort"]), ("gpt-5.6-luna", "max")
+                (codex["thread"]["model"], codex["thread"]["effort"]), ("gpt-6-luna", "max")
             )
 
             status, claude = self.request(
@@ -2569,9 +2569,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
             )
 
         invalid = [
-            {"model": "gpt-5.6-luna", "effort": "ultra"},
-            {"model": "claude-opus-5", "effort": "high"},
-            {"model": "gpt-5.6-terra"},
+            {"model": "gpt-6-luna", "effort": "ultra"},
+            {"model": "claude-opus-5-5", "effort": "high"},
+            {"model": "gpt-6-astra"},
             {"effort": "high"},
             {"model": None, "effort": None},
         ]
@@ -2591,7 +2591,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         body = {
             "message": "first",
             "agent_runtime": "codex",
-            "model": "gpt-5.6-terra",
+            "model": "gpt-6-astra",
             "effort": "high",
         }
         path = "/v1/threads/thread-fixed-options/messages"
@@ -2611,8 +2611,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
             self.mock_memory_recall.reset_mock()
             for fields in (
-                {"model": "gpt-5.6-sol", "effort": "high"},
-                {"model": "gpt-5.6-terra", "effort": "max"},
+                {"model": "gpt-6-sol", "effort": "high"},
+                {"model": "gpt-6-astra", "effort": "max"},
             ):
                 with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
                     self.request("POST", path, {**body, "message": "conflict", **fields})
@@ -2622,7 +2622,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 )
             with self.assertRaises(urllib.error.HTTPError) as partial_error:
                 self.request(
-                    "POST", path, {"message": "partial conflict", "model": "gpt-5.6-terra"}
+                    "POST", path, {"message": "partial conflict", "model": "gpt-6-astra"}
                 )
             self.assertEqual(partial_error.exception.code, 400)
             self.assertIn("must be provided together", partial_error.exception.read().decode())
@@ -2649,7 +2649,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         seed_thread_session(
             "thread-switchable",
             "codex",
-            model="gpt-5.6-terra",
+            model="gpt-6-astra",
             effort="high",
             provider_session_id="old-provider-session",
         )
@@ -2690,7 +2690,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {
                     "message": "continue here",
                     "agent_runtime": "claude_code",
-                    "model": "claude-opus-5",
+                    "model": "claude-opus-5-5",
                     "effort": "max",
                 },
             )
@@ -2699,7 +2699,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         assert config is not None
         self.assertEqual(
             (config["agent_runtime"], config["model"], config["effort"]),
-            ("claude_code", "claude-opus-5", "max"),
+            ("claude_code", "claude-opus-5-5", "max"),
         )
         self.assertIsNone(config["provider_session_id"])
         launched_turn, launch_message, provider_session_id = launch.call_args.args
@@ -2729,8 +2729,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(change["title"], "Agent provider changed")
         self.assertEqual(change["kind"], "status")
         self.assertEqual(change["phase"], "completed")
-        self.assertIn("Codex · gpt-5.6-terra · high", change["detail"])
-        self.assertIn("Claude Code · claude-opus-5 · max", change["detail"])
+        self.assertIn("Codex · gpt-6-astra · high", change["detail"])
+        self.assertIn("Claude Code · claude-opus-5-5 · max", change["detail"])
         visible_messages = [
             event["payload"]["message"]
             for event in events["events"]
@@ -2967,7 +2967,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {
                     "message": "unowned",
                     "agent_runtime": "codex",
-                    "model": "gpt-5.6-terra",
+                    "model": "gpt-6-astra",
                     "effort": "high",
                 },
             )
@@ -3008,6 +3008,30 @@ class AdminApiIntegrationTests(unittest.TestCase):
             state.thread_session_config("thread-rotatable")["agent_runtime"], "codex"
         )
 
+    def test_retired_codex_threads_can_switch_to_gpt_6_without_changing_accounts(self) -> None:
+        set_runtime_statuses(**{r: "active" for r in ("codex", "codex-2", "codex-3")})
+        for runtime in ("codex", "codex-2", "codex-3"):
+            for old_model, new_model in (
+                ("gpt-5.6-sol", "gpt-6-sol"),
+                ("gpt-5.6-luna", "gpt-6-luna"),
+                ("gpt-5.6-terra", "gpt-6-astra"),
+            ):
+                thread_id = f"thread-{runtime}-{old_model}".replace(".", "-")
+                with self.subTest(runtime=runtime, model=old_model):
+                    seed_thread_session(thread_id, runtime, model=old_model, effort="high")
+                    with self.assertRaises(urllib.error.HTTPError) as error:
+                        self.request("POST", f"/v1/threads/{thread_id}/messages", {"message": "continue"})
+                    self.assertEqual(error.exception.code, 409)
+                    self.assertIn("no longer offered", error.exception.read().decode())
+                    with patch.object(orchestrator, "launch_turn"):
+                        _, switched = self.request(
+                            "POST", f"/v1/threads/{thread_id}/messages",
+                            {"message": "continue", "agent_runtime": runtime,
+                             "model": new_model, "effort": "high"},
+                        )
+                    self.assertEqual(switched["thread"]["agent_runtime"], runtime)
+                    self.assertEqual(switched["thread"]["model"], new_model)
+
     def test_thread_on_superseded_fable_5_can_switch_to_an_offered_model(self) -> None:
         seed_thread_session(
             "thread-fable-5-thread",
@@ -3041,19 +3065,19 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {
                     "message": "continue on a current model",
                     "agent_runtime": "codex",
-                    "model": "gpt-5.6-terra",
+                    "model": "gpt-6-astra",
                     "effort": "high",
                 },
             )
         self.assertEqual(switched["thread"]["agent_runtime"], "codex")
-        self.assertEqual(switched["thread"]["model"], "gpt-5.6-terra")
+        self.assertEqual(switched["thread"]["model"], "gpt-6-astra")
 
         # The same thread stays in the listing on its replacement
         # configuration, and a superseded model is still refused for new
         # threads.
         _, threads = self.request("GET", "/v1/threads")
         listed = {thread["thread_id"]: thread for thread in threads["threads"]}
-        self.assertEqual(listed["thread-fable-5-thread"]["model"], "gpt-5.6-terra")
+        self.assertEqual(listed["thread-fable-5-thread"]["model"], "gpt-6-astra")
         self.assertEqual(listed["thread-fable-5-thread"]["status"], "running")
 
         with self.assertRaises(admin_api.ApiError) as new_thread_error:
@@ -3084,7 +3108,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.workspace_request(
                 "POST",
                 "/v1/threads/thread-partial-options/messages",
-                {"message": "first", "agent_runtime": "codex", "model": "gpt-5.6-terra"},
+                {"message": "first", "agent_runtime": "codex", "model": "gpt-6-astra"},
             )
 
         self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
@@ -3202,7 +3226,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             {
                 "thread_id": "thread-t1",
                 "agent_runtime": "codex",
-                "model": "gpt-5.6-terra",
+                "model": "gpt-6-astra",
                 "effort": "high",
                 "last_used_at": "2026-06-08T00:00:03Z",
                 "status": "idle",
@@ -3269,11 +3293,11 @@ class AdminApiIntegrationTests(unittest.TestCase):
             for n in range(map_limit + 5):
                 state.save_thread_session(
                     cur, "codex", f"thread-codex-chat-{n}", f"thread_{n}",
-                    f"2026-06-08T{n // 60:02d}:{n % 60:02d}:00Z", "gpt-5.6-terra", "high",
+                    f"2026-06-08T{n // 60:02d}:{n % 60:02d}:00Z", "gpt-6-astra", "high",
                 )
                 state.save_thread_session(
                     cur, "claude_code", f"thread-claude-chat-{n}", f"session_{n}",
-                    f"2026-06-09T{n // 60:02d}:{n % 60:02d}:00Z", "claude-opus-5", "high",
+                    f"2026-06-09T{n // 60:02d}:{n % 60:02d}:00Z", "claude-opus-5-5", "high",
                 )
                 # Script schedules use the same stable schedule thread shape,
                 # and their runtime participates in the same bounded map.
@@ -3372,7 +3396,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         seed_thread_session(
             "thread-switched",
             "codex",
-            model="gpt-5.6-terra",
+            model="gpt-6-astra",
             effort="high",
             provider_session_id="codex-session",
         )
@@ -3389,7 +3413,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {
                     "message": "fresh start",
                     "agent_runtime": "codex",
-                    "model": "gpt-5.6-sol",
+                    "model": "gpt-6-sol",
                     "effort": "max",
                 },
             )
@@ -3581,7 +3605,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.request(
                 "POST",
                 "/v1/threads/thread-used-by-codex/messages",
-                {"message": "bad", "model": "gpt-5.6-sol"},
+                {"message": "bad", "model": "gpt-6-sol"},
             )
         self.assertEqual(codex_error.exception.code, 400)
 
@@ -3686,9 +3710,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn("Agent volume", ui)
         self.assertIn("filesystemMountTile", ui)
         self.assertIn("memorySwapTile", ui)
-        self.assertIn('data-action="refresh-provider-usage"', ui)
+        self.assertIn('data-overview-group="runtimes"', ui)
+        self.assertIn('data-overview-group="host-ai"', ui)
         self.assertIn('id="runtime-overview"', html)
-        self.assertNotIn("Agent runtimes", html)
+        self.assertIn('id="home-runtimes-title">Agent runtimes</h2>', html)
+        self.assertIn('id="home-runtime-groups"', html)
+        self.assertNotIn("Review combined tool access", html)
+        self.assertNotIn('id="tools-cross-access-notice"', html)
         self.assertNotIn("Provider usage", html)
         self.assertIn("usageRing", ui)
         self.assertIn("/v1/agent-runtime/refresh", ui)
@@ -3710,9 +3738,11 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('button[data-action]', ui)
         self.assertNotIn("onclick=", ui)
         self.assertNotIn("oninput=", ui)
-        self.assertIn('id="ai-inference-integrations"', html)
+        self.assertIn('id="agent-runtime-integrations"', html)
+        self.assertIn('id="host-ai-inference-integrations"', html)
         self.assertIn('id="tools"', html)
-        self.assertLess(html.index('id="ai-inference-heading"'), html.index('id="tools-heading"'))
+        self.assertLess(html.index('id="agent-runtimes-heading"'), html.index('id="host-ai-inference-heading"'))
+        self.assertLess(html.index('id="host-ai-inference-heading"'), html.index('id="tools-heading"'))
         self.assertLess(html.index('id="tools-heading"'), html.index('id="manual-heading"'))
         self.assertIn('id="github-expansion"', html)
         self.assertIn('id="github-repos"', html)
@@ -3881,7 +3911,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {
                     "message": "hello",
                     "agent_runtime": "codex",
-                    "model": "gpt-5.6-terra",
+                    "model": "gpt-6-astra",
                     "effort": "high",
                 },
             )
@@ -3893,7 +3923,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {
                     "message": "hello",
                     "agent_runtime": "codex",
-                    "model": "gpt-5.6-terra",
+                    "model": "gpt-6-astra",
                     "effort": "high",
                 },
             )
@@ -3906,7 +3936,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {
                     "message": "hello",
                     "agent_runtime": "codex",
-                    "model": "gpt-5.6-terra",
+                    "model": "gpt-6-astra",
                     "effort": "high",
                 },
             )
@@ -6290,6 +6320,11 @@ class ToolRoutesTests(unittest.TestCase):
         self.assertFalse(config_keys["GOOGLE_OAUTH_CLIENT_ID"]["set"])
         # All config values are secrets; there is no per-key secret flag.
         self.assertNotIn("secret", config_keys["GOOGLE_OAUTH_CLIENT_ID"])
+
+        cloudwatch_logs = self.tool_entry(body, "cloudwatch_logs")
+        self.assertIn('"Action": "logs:FilterLogEvents"', cloudwatch_logs["setup_steps"][0]["code"])
+        self.assertIn('"Resource": "*"', cloudwatch_logs["setup_steps"][0]["code"])
+        self.assertNotIn("kms:", " ".join(step["code"] for step in cloudwatch_logs["setup_steps"]))
 
         discovery = self.tool_entry(body, "instagram_discovery")
         self.assertIn("at most 25 unique items", " ".join(discovery["protections"]))

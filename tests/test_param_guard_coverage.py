@@ -30,6 +30,10 @@ from test_tools import FakeHostAPI
 # (tool_id, action_id, field) -> guarded free-text parameter. The tool's
 # package test and the behavioral tests below exercise each.
 GUARDED_FIELDS = {
+    ("cloudwatch_logs", "filter_log_events", "request_id"),
+    ("cloudwatch_logs", "filter_log_events", "search_text"),
+    ("cloudwatch_logs", "filter_log_events", "next_token"),
+
     ("elevenlabs", "list_voices", "search"),
     ("elevenlabs", "list_voices", "next_page_token"),
     ("elevenlabs", "design_voice", "voice_description"),
@@ -154,6 +158,12 @@ APPROVAL_GATED = "approval-gated content: the operator approval is the control"
 TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning"
 
 EXEMPT_FIELDS = {
+    ("cloudwatch_logs", "filter_log_events", "log_group"): TYPED,
+    ("cloudwatch_logs", "filter_log_events", "start_time"): TYPED,
+    ("cloudwatch_logs", "filter_log_events", "end_time"): TYPED,
+    ("cloudwatch_logs", "filter_log_events", "limit"): TYPED,
+    ("cloudwatch_logs", "filter_log_events", "order"): TYPED,
+
     ("elevenlabs", "list_voices", "page_size"): TYPED,
     ("elevenlabs", "design_voice", "model"): TYPED,
     ("elevenlabs", "design_voice", "should_enhance"): TYPED,

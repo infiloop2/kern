@@ -176,6 +176,7 @@ class SetupStep:
     image_alt: str = ""
     show_callback: bool = False
     show_config: bool = False
+    code: str = ""
 
 
 @dataclass(frozen=True)
@@ -344,6 +345,8 @@ class ToolManifest:
                 raise ValueError(f"ToolManifest.setup_steps[{index}] image_path and image_alt must be set together for {self.tool_id}.")
             if step.image_path and not GUIDE_IMAGE_RE.fullmatch(step.image_path):
                 raise ValueError(f"ToolManifest.setup_steps[{index}] image_path must name a local PNG guide asset for {self.tool_id}.")
+            if step.code and not step.code.strip():
+                raise ValueError(f"ToolManifest.setup_steps[{index}] code must be non-blank for {self.tool_id}.")
         if len(self.data_summary.cards) != 4:
             raise ValueError(f"ToolManifest.data_summary must have exactly four cards for {self.tool_id}.")
         for card_index, card in enumerate(self.data_summary.cards):

@@ -23,7 +23,7 @@ from host.runtime.workspace.web_apps import backend as web_apps
 
 SESSION = {
     "agent_runtime": "codex",
-    "model": "gpt-5.6-terra",
+    "model": "gpt-6-astra",
     "effort": "high",
 }
 SCRIPT_SESSION = {
@@ -79,6 +79,9 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
         self.addCleanup(db.close_pool)
+        judge_patch = patch.object(memory, "judge", return_value=None)
+        judge_patch.start()
+        self.addCleanup(judge_patch.stop)
 
     def test_onboarding_status_is_derived_from_live_resources(self) -> None:
         active = patch.object(

@@ -607,6 +607,34 @@ def list_tool_approvals(limit: int, tool_id: str | None = None) -> list[dict[str
         return [_tool_approval_dict(row) for row in cur.fetchall()]
 
 
+def save_tool_approval_risk_assessment(
+    approval_id: str,
+    *,
+    model: str,
+    assessed_at: int,
+    scores: dict[str, float],
+) -> bool:
+    """Store one annotation only while its approval remains pending."""
+    number = _approval_number(approval_id)
+    if number is None:
+        raise ValueError("approval id is invalid")
+    with mutation() as cur:
+        cur.execute(
+            "INSERT INTO tool_approval_risk_assessments"
+            " (approval_number, model, assessed_at, scores)"
+            " SELECT number, %s, %s, %s FROM tool_approvals"
+            " WHERE number = %s AND status = 'pending'"
+            " ON CONFLICT (approval_number) DO NOTHING RETURNING 1",
+            (
+                model,
+                assessed_at,
+                db.jsonb(scores),
+                number,
+            ),
+        )
+        return cur.fetchone() is not None
+
+
 def transition_tool_approval(
     approval_id: str,
     from_status: str,

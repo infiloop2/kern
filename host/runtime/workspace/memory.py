@@ -20,6 +20,7 @@ from host.memory_recall import task_query, topic_terms
 from host.memory_recall_rules import CANDIDATE_LIMIT, MAX_QUERY_BYTES, RELEVANT_PAGE_LIMIT, STOPWORDS
 from host.runtime.core import db, host_errors, pgclient
 from host.runtime.embeddings import client as embedding_client
+from host.runtime.host_inference import typesafe_jev_judgment as judge
 from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.query import one as _one
 
@@ -37,6 +38,7 @@ MAX_PAGE_LIMIT = 100
 MAX_REVISION_PAGE_LIMIT = 50
 MAX_SEARCH_BYTES = 200
 RECALL_RELEVANT_LIMIT = RELEVANT_PAGE_LIMIT
+RECALL_RERANK_TIMEOUT_SECONDS = 1.2
 MAX_RECALLED_PAGES = RECALL_RELEVANT_LIMIT + 1
 MAX_CURSOR_BYTES = 512
 SEMANTIC_CANDIDATES = 200
@@ -217,7 +219,6 @@ def recall_pages(body: Any) -> dict[str, Any]:
             HTTPStatus.BAD_REQUEST,
             "message must be a string",
         )
-
     started = time.monotonic()
     details: list[str] = []
     pages: list[dict[str, Any]] = []
@@ -267,19 +268,107 @@ def recall_pages(body: Any) -> dict[str, Any]:
     summaries = [] if matches.get("match_mode") == "weak" else matches.get("pages", [])
     best_search_match = summaries[0] if summaries else None
     terms = {term.casefold() for term in topic_terms(query)}
-    summaries = sorted(summaries, key=lambda page: -len(
+    lexical_summaries = sorted(summaries, key=lambda page: -len(
         terms & {term.casefold() for term in topic_terms(page["page_id"] + " " + page["description"])}
     ))
-    # Keep the strongest original search result even when its wording uses
-    # synonyms rather than matching the task metadata literally.
-    if best_search_match is not None and best_search_match not in summaries[:RECALL_RELEVANT_LIMIT]:
-        summaries.remove(best_search_match)
-        summaries.insert(RECALL_RELEVANT_LIMIT - 1, best_search_match)
+    _add_jev_relevance_scores(
+        lexical_summaries,
+        query=query,
+        details=details,
+    )
+    if lexical_summaries and all("jev_score" in page for page in lexical_summaries):
+        summaries = sorted(
+            lexical_summaries,
+            key=lambda page: -float(page["jev_score"]),
+        )
+        details.append(
+            "Jev selection: "
+            + ", ".join(
+                page["page_id"] for page in summaries[:RECALL_RELEVANT_LIMIT]
+            )
+            + "."
+        )
+    else:
+        summaries = lexical_summaries
+        # Preserve the existing deterministic fallback exactly when Jev is
+        # disabled or unavailable.
+        if best_search_match is not None and best_search_match not in summaries[:RECALL_RELEVANT_LIMIT]:
+            summaries.remove(best_search_match)
+            summaries.insert(RECALL_RELEVANT_LIMIT - 1, best_search_match)
     _append_recalled_pages(
         pages, summaries, RECALL_RELEVANT_LIMIT,
         thread_id=thread_id, selection="relevant",
     )
     return _recall_response(pages, details, started)
+
+
+def _add_jev_relevance_scores(
+    summaries: list[dict[str, Any]],
+    *,
+    query: str,
+    details: list[str],
+) -> None:
+    """Attach a complete, valid Jev score set; otherwise leave summaries unchanged."""
+    for page in summaries:
+        page.pop("jev_score", None)
+    candidates = [
+        {"page_id": page["page_id"], "description": page["description"]}
+        for page in summaries[:CANDIDATE_LIMIT]
+    ]
+    if not candidates:
+        return
+    questions = {
+        candidate["page_id"]: {
+            "type": "noul",
+            "instructions": "Would an agent doing this task need to read this memory page before acting?",
+        }
+        for candidate in candidates
+    }
+    try:
+        result = judge(
+            {
+                "task_query": query,
+                "candidates": candidates,
+            },
+            questions,
+            timeout_seconds=RECALL_RERANK_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        result = None
+    model = result.get("model") if isinstance(result, dict) else None
+    answers = result.get("answers") if isinstance(result, dict) else None
+    if (
+        not isinstance(model, str)
+        or not model
+        or not isinstance(answers, dict)
+        or set(answers) != set(questions)
+    ):
+        details.append("Jev scores unavailable; existing recall order used.")
+        return
+    probabilities: dict[str, float] = {}
+    for page_id, answer in answers.items():
+        probability = answer.get("noul") if isinstance(answer, dict) else None
+        if (
+            not isinstance(answer, dict)
+            or set(answer) != {"type", "noul"}
+            or answer.get("type") != "noul"
+            or not isinstance(probability, (int, float))
+            or isinstance(probability, bool)
+            or not 0 <= probability <= 1
+        ):
+            details.append("Jev scores unavailable; existing recall order used.")
+            return
+        probabilities[page_id] = float(probability)
+    for page in summaries:
+        page["jev_score"] = probabilities[page["page_id"]]
+    details.append(f"Jev response model: {model}.")
+    details.extend(
+        "Jev response "
+        f"{page['page_id']}: memory relevance "
+        f"{float(page.get('memory_relevance_score', 0.0)):.6f}; "
+        f"Jev score {probabilities[page['page_id']]:.3f}."
+        for page in summaries
+    )
 
 
 def _recall_response(pages: list[dict[str, Any]], details: list[str], started: float) -> dict[str, Any]:
@@ -456,13 +545,15 @@ def _search_pages(
             search_mode = "lexical_fallback"
             continuation_mode = "fallback"
 
-    initial = _hybrid_memory_rows(exact_rows, fused_lexical, semantic_rows, [])
+    initial, _initial_scores = _hybrid_memory_rows(
+        exact_rows, fused_lexical, semantic_rows, []
+    )
     graph_rows = _search_pages_graph(
         [str(row[0]) for row in initial[:GRAPH_SEEDS]],
         scope=scope,
         limit=GRAPH_SEEDS * GRAPH_NEIGHBORS_PER_SEED,
     ) if include_graph else []
-    fused = _hybrid_memory_rows(
+    fused, relevance_scores = _hybrid_memory_rows(
         exact_rows,
         fused_lexical,
         semantic_rows,
@@ -477,10 +568,14 @@ def _search_pages(
                 if channel == "semantic":
                     label += f" cosine {float(row[8]):.3f}"
                 evidence.setdefault(str(row[0]), []).append(label)
-        diagnostics.append(f"Ranked candidates: {len(fused)}; showing first 12 (before revision revalidation).")
+        diagnostics.append(
+            f"Ranked candidates: {len(fused)}; showing first {min(limit, len(fused))} "
+            "(before revision revalidation)."
+        )
         diagnostics.extend(
-            f"Candidate {rank}: {row[0]} r{row[3]} — {', '.join(evidence[str(row[0])])}"
-            for rank, row in enumerate(fused[:12], start=1)
+            f"Candidate {rank}: {row[0]} r{row[3]}; memory relevance "
+            f"{relevance_scores[str(row[0])]:.6f} — {', '.join(evidence[str(row[0])])}"
+            for rank, row in enumerate(fused[:limit], start=1)
         )
     # Candidates are carried as page ids from here on: the revalidation pass
     # re-reads whatever is actually returned, so the fused tuples are only
@@ -513,8 +608,14 @@ def _search_pages(
         return fallback_response
     if page and offset == 0 and record_top_hit:
         _record_memory_top_hit(str(page[0][0]))
+    summaries = [_page_summary(row) for row in page]
+    if diagnostics is not None:
+        for summary in summaries:
+            summary["memory_relevance_score"] = relevance_scores.get(
+                str(summary["page_id"]), 0.0
+            )
     response: dict[str, Any] = {
-        "pages": [_page_summary(row) for row in page],
+        "pages": summaries,
         "search_mode": search_mode,
     }
     if position < len(ranked):
@@ -723,7 +824,7 @@ def _hybrid_memory_rows(
     lexical_rows: list[tuple[Any, ...]],
     semantic_rows: list[tuple[Any, ...]],
     graph_rows: list[tuple[Any, ...]],
-) -> list[tuple[Any, ...]]:
+) -> tuple[list[tuple[Any, ...]], dict[str, float]]:
     by_page: dict[str, tuple[Any, ...]] = {}
     scores: dict[str, float] = {}
     for rank, row in enumerate(exact_rows, start=1):
@@ -742,10 +843,11 @@ def _hybrid_memory_rows(
         page_id = str(row[0])
         by_page.setdefault(page_id, row)
         scores[page_id] = scores.get(page_id, 0.0) + 0.5 / (60 + rank)
-    return sorted(
+    ranked = sorted(
         by_page.values(),
         key=lambda row: (-scores[str(row[0])], str(row[0])),
     )
+    return ranked, scores
 
 
 def _memory_search_response(

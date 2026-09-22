@@ -779,11 +779,34 @@ import tests.stage.stage_aws
             )
         )
 
+    def test_cloudwatch_preflight_requires_the_stage_probe_group(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        entry = {
+            "tool_id": "cloudwatch_logs",
+            "enabled": True,
+            "connection_status": {"connected": False},
+            "config": [
+                {"key": requirement.key, "set": True}
+                for requirement in BUNDLED_TOOLS["cloudwatch_logs"].manifest.config
+            ],
+        }
+        with patch.object(stage, "_api", return_value={"tools": [entry]}):
+            with patch.dict(os.environ, {}, clear=True):
+                failures = stage._tool_credential_failures("cloudwatch_logs")
+            self.assertIn("KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP", " ".join(failures))
+
+            with patch.dict(
+                os.environ,
+                {"KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP": "/aws/lambda/stage-check"},
+                clear=True,
+            ):
+                self.assertEqual(stage._tool_credential_failures("cloudwatch_logs"), [])
+
     def test_stage_message_body_always_defaults_to_the_cheapest_model_and_effort(self) -> None:
         self.assertEqual(
             CHEAP_MODELS,
             {
-                "codex": "gpt-5.6-luna",
+                "codex": "gpt-6-luna",
                 "claude_code": "claude-sonnet-5",
                 "grok": "grok-4.6",
                 "hermes": "qwen.qwen3-coder-next",

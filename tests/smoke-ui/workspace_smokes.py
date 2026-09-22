@@ -40,6 +40,13 @@ def web_app_worker_startup_smoke(page: Any) -> None:
     smoke(page)
 
 
+def web_app_turn_budget_smoke(page: Any) -> None:
+    smoke = getattr(_load_workspace_smoke("web_apps"), "turn_budget_smoke", None)
+    if smoke is None:
+        raise AssertionError("web_apps smoke.py is missing turn_budget_smoke()")
+    smoke(page)
+
+
 def _run_workspace_smokes(function_name: str, page: Any) -> None:
     for workspace_id, module in _iter_workspace_smokes():
         smoke = getattr(module, function_name, None)

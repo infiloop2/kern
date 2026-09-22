@@ -5,7 +5,8 @@
 | `kern-network-proxy.service` | `kern-proxy` | Policy proxy on `127.0.0.1:7445`. |
 | `kern-postgres.service` | `postgres` | Admin-state PostgreSQL, Unix socket only (no TCP listener). |
 | `kern-admin-api.service` | `kern-admin` | Admin API on `127.0.0.1:7443`. Owns admin state; holds no internet egress. |
-| `kern-tools.service` | `kern-tools` | Runs the bundled tool packages and owns the agent-facing tools socket `/run/kern-tools/tools.sock` (peer-credential authenticated). The only Kern application service besides the proxy with DNS+HTTPS egress; its Postgres role is scoped to the five tool tables plus read access to the encryption key needed for tool secrets. |
+| `kern-tools.service` | `kern-tools` | Runs the bundled tool packages and owns the agent-facing tools socket `/run/kern-tools/tools.sock` (peer-credential authenticated). Has DNS+HTTPS egress; its Postgres role is scoped to tool state plus the encryption key needed for tool secrets. |
+| `kern-host-inference.service` | `kern-host-inference` | Runs the bounded OpenAI and TypeSafe Jev adapters behind `/run/kern-host-inference/host-inference.sock`. Admin, Workspace, and tools may use its fixed provider routes. It has direct DNS+HTTPS egress and alone reads Host AI provider credentials plus their encryption key. |
 | `kern-agent-network.service` | `kern-agent-network` | Serves read-only network integration and denial introspection on `/run/kern-agent-network/agent-network.sock`. No egress; its Postgres role has SELECT-only policy and network-event grants. |
 | `kern-host-errors.service` | `kern-admin` | Follows structured error and warning records from journald and copies them best-effort into the bounded Postgres host-diagnostics log. |
 | `kern-workspace.service` | `kern-workspace` | One Chat, Web Apps, global Memory, and Schedules backend on `127.0.0.1:7450` (reachable only from the admin API), plus the peer-authenticated agent socket `/run/kern-workspace/agent.sock`. Its Postgres role has explicit DML-only access to the Workspace tables in `public` and no egress. |
@@ -23,6 +24,7 @@
 | `kern-postgres.service` | `postgres` | systemd | Stores admin state; local Unix-socket connections only. |
 | `kern-admin-api.service` | `kern-admin` | systemd | Serves localhost API/UI, owns thread state, and supervises runtime work. |
 | `kern-tools.service` | `kern-tools` | systemd | Executes bundled tool calls and operator-delegated OAuth/approval work; owns the peer-authenticated tools socket. |
+| `kern-host-inference.service` | `kern-host-inference` | systemd | Executes concrete host-owned OpenAI and TypeSafe Jev calls for peer-authenticated host callers; there is no agent-facing API. |
 | `kern-agent-network.service` | `kern-agent-network` | systemd | Serves the peer-authenticated network-introspection socket from SELECT-only policy and event state, without egress. |
 | `kern-host-errors.service` | `kern-admin` | systemd | Validates tagged records from trusted Kern systemd units and stores/coalesces them for the read-only Host diagnostics panel. |
 | `kern-workspace.service` | `kern-workspace` | systemd | Serves all browser Workspace resources on the admin-only loopback port, the agent Workspace API on a peer-authenticated Unix socket, generated Web Apps, and global scheduled runs. |
@@ -48,6 +50,7 @@
 | --- | --- | --- |
 | HTTP handler threads | admin API | One per concurrent API request. Mutations use state transactions and run slow helper calls outside the state lock. |
 | Tools socket handler threads | tools service | One per agent tool call (and per delegated operator operation), bounded by a concurrency cap; tool packages run their third-party requests on these threads. |
+| Host-inference socket handler threads | host-inference service | One per admin or Workspace provider call, with service-wide connection/call caps, bounded payloads and adapter-specific network-inactivity timeouts. |
 | Network-introspection socket handler threads | agent-network service | One per local request, bounded by a concurrency cap; calls perform read-only policy or denial queries. |
 | Workspace agent socket handler threads | Workspace service | Peer-authenticated before allocation, with separate connection and active-call caps; calls use bounded explicit Workspace routes. |
 | Maintenance thread | admin API | Periodically prunes bounded state and event history. |

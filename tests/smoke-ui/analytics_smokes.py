@@ -146,7 +146,7 @@ def check_token_totals(page, response):
     report = fixture()
     fields = ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens']
     # These are the disjoint buckets delivered by each runtime adapter.
-    # All four providers must show 100 input (60 cached) and 20 output.
+    # Multiple runtimes using the same model collapse into one model total.
     report['groups'] = [
         dict(thread_id=f'thread-provider-{i}', name=runtime, runtime=runtime, model='test-model',
              kind='chats', day=report['days'][-1], hour=12, turns=1, active=False,
@@ -155,6 +155,7 @@ def check_token_totals(page, response):
     ]
     response['json'] = report
     page.locator('#analytics-refresh').click()
+    expect(page.locator('#analytics-detail h2').nth(2)).to_have_text('Models')
     expect(page.locator('#analytics-cards .stat-label')).to_have_text(['Input tokens', 'Output tokens'])
     expect(page.locator('#analytics-cards .stat-value > span')).to_have_text(['400', '80'])
     expect(page.locator('#analytics-cards .token-cache-detail')).to_have_text('Of which cached: 240')
@@ -164,8 +165,11 @@ def check_token_totals(page, response):
         expect(row.locator('td').nth(2).locator(':scope > span')).to_have_text('100')
         expect(row.locator('.token-cache-detail')).to_have_text('Of which cached: 60')
         expect(row.locator('td').nth(3)).to_have_text('20')
-    expect(page.locator('#analytics-providers .token-cache-detail')).to_have_text(['Of which cached: 60'] * 4)
-    expect(page.locator('#analytics-providers .analytics-provider-counts > div > span')).to_have_text(['100', '20'] * 4)
+    expect(page.locator('#analytics-providers .analytics-provider')).to_have_count(1)
+    expect(page.locator('#analytics-providers strong')).to_have_text('test-model')
+    expect(page.locator('#analytics-providers')).not_to_contain_text('Codex')
+    expect(page.locator('#analytics-providers .token-cache-detail')).to_have_text('Of which cached: 240')
+    expect(page.locator('#analytics-providers .analytics-provider-counts > div > span')).to_have_text(['400', '80'])
     expect(page.locator('#analytics-chart')).to_have_attribute('aria-label', '; '.join(
         f'{day}: {480 if day == report["days"][-1] else 0} measured tokens' for day in report['days']))
     # A missing write bucket still contributes the known input and cache read,

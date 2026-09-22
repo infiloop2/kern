@@ -170,11 +170,12 @@ def main(argv: list[str] | None = None) -> int:
             def check_claude() -> None:
                 stage.agent_runtime = "claude_code"
                 stage.check_claude_auth_and_task()
+                stage.check_claude_upgrade_contract()
                 stage.check_agent_mcp_catalog("claude_code")
                 stage.check_agent_steering()
                 stage.check_agent_kill_and_thread_survival()
 
-            if _record_check(report, "claude", check_claude, "guards, MCP catalog, turns, steering, and stop recovery"):
+            if _record_check(report, "claude", check_claude, "guards, CLI pin, usage, model/effort matrix, MCP, native resume, steering, and stop recovery"):
                 passed_runtimes.append("claude_code")
         if availability.get("grok") is None and "grok" in availability:
             def check_grok() -> None:

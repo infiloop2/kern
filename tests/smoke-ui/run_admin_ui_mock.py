@@ -172,6 +172,30 @@ class ApiError(Exception):
 @dataclass
 class MockState:
     xai_video_storage: dict[str, Any] = field(default_factory=lambda: {"configured": False})
+    host_inference_providers: dict[str, dict[str, Any]] = field(default_factory=lambda: {
+        "openai": {
+            "provider": "openai", "enabled": False,
+            "configured": False, "features": {},
+            "updated_at": "1970-01-01T00:00:00Z",
+            "usage": {
+                "month_to_date": 0.001234, "currency": "USD", "requests": 12,
+                "measured_requests": 12, "priced_requests": 11,
+                "input_tokens": 4_200, "cached_input_tokens": 1_000,
+                "output_tokens": 300,
+            },
+        },
+        "typesafe": {
+            "provider": "typesafe", "enabled": False,
+            "configured": False, "features": {},
+            "updated_at": "1970-01-01T00:00:00Z",
+            "usage": {
+                "month_to_date": 0.000084, "currency": "USD", "requests": 7,
+                "measured_requests": 7, "priced_requests": 7,
+                "input_tokens": 2_000, "cached_input_tokens": 0,
+                "output_tokens": 56,
+            },
+        },
+    })
     lock: threading.Lock = field(default_factory=threading.Lock)
     public_https_preview: bool = False
     passkey_configured: bool = False
@@ -780,11 +804,11 @@ def seed_state() -> None:
                 "thread_id": thread_id,
                 "agent_runtime": spec["agent_runtime"],
                 "model": (
-                    "claude-opus-5"
+                    "claude-opus-5-5"
                     if spec["agent_runtime"] == "claude_code"
                     else "grok-4.6"
                     if spec["agent_runtime"] in {"grok", "grok-2"}
-                    else "gpt-5.6-terra"
+                    else "gpt-6-astra"
                 ),
                 "effort": "high",
                 "last_used_at": ago(spec["completed_min"]),
@@ -844,7 +868,7 @@ def seed_state() -> None:
         STATE.threads[thread_id] = {
             "thread_id": thread_id,
             "agent_runtime": "codex",
-            "model": "gpt-5.6-luna",
+            "model": "gpt-6-luna",
             "effort": "high",
             "last_used_at": ago(2000 + index),
         }
@@ -1381,6 +1405,33 @@ def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dic
             return {"network_controls": STATE.policy}
         if method == "PUT":
             return replace_policy(body)
+    if method == "GET" and path == "/v1/host-inference/providers":
+        with STATE.lock:
+            return {"providers": [dict(provider) for provider in STATE.host_inference_providers.values()]}
+    host_inference_match = re.fullmatch(r"/v1/host-inference/providers/([a-z0-9_-]+)", path)
+    if method == "PUT" and host_inference_match:
+        provider_id = host_inference_match.group(1)
+        if provider_id not in STATE.host_inference_providers or not isinstance(body, dict):
+            raise ApiError(HTTPStatus.NOT_FOUND, "host inference provider not found")
+        with STATE.lock:
+            provider = STATE.host_inference_providers[provider_id]
+            if isinstance(body.get("api_key"), str) and body["api_key"]:
+                provider["configured"] = True
+            if body.get("enabled") is True and not provider["configured"]:
+                raise ApiError(HTTPStatus.CONFLICT, "Save an API key before enabling this provider")
+            if isinstance(body.get("enabled"), bool):
+                provider["enabled"] = body["enabled"]
+            if isinstance(body.get("features"), dict):
+                provider["features"] = dict(body["features"])
+            provider["updated_at"] = STATE.now()
+            return {"provider": dict(provider)}
+    if method == "DELETE" and host_inference_match:
+        with STATE.lock:
+            provider = STATE.host_inference_providers[host_inference_match.group(1)]
+            provider["enabled"] = False
+            provider["configured"] = False
+            provider["updated_at"] = STATE.now()
+            return {"provider": dict(provider)}
     if path == "/v1/network-tools/xai-video-storage":
         with STATE.lock:
             if method == "PUT":
@@ -1485,6 +1536,7 @@ def list_tools() -> dict[str, Any]:
                         "image_alt": step.image_alt,
                         "show_callback": step.show_callback,
                         "show_config": step.show_config,
+                        "code": step.code,
                     }
                     for step in manifest.setup_steps
                 ],
@@ -1721,15 +1773,22 @@ def agent_accounts() -> dict[str, Any]:
                             # Deliberately mixed so the top bar shows every
                             # ring state at once: a healthy 5h window resetting
                             # in minutes, and a near-full weekly window (warning
-                            # threshold) resetting days out.
+                            # threshold) resetting days out. Codex 3 omits the
+                            # 5h window to exercise partial usage snapshots.
                             "codex_usage": {
                                 "last_checked_at": checked_at,
                                 "rate_limits": {
-                                    "primary": {
-                                        "used_percent": 8,
-                                        "window_duration_mins": 300,
-                                        "resets_at": int(time.time()) + 40 * 60,
-                                    },
+                                    **(
+                                        {}
+                                        if runtime == "codex-3"
+                                        else {
+                                            "primary": {
+                                                "used_percent": 8,
+                                                "window_duration_mins": 300,
+                                                "resets_at": int(time.time()) + 40 * 60,
+                                            }
+                                        }
+                                    ),
                                     "secondary": {
                                         "used_percent": 84,
                                         "window_duration_mins": 10080,
@@ -2097,7 +2156,7 @@ def send_thread_message(thread_id: str, body: Any) -> dict[str, Any]:
         if status == "deactivated":
             raise ApiError(
                 HTTPStatus.CONFLICT,
-                f"{label} runtime is deactivated; enable its provider under Home > Integrations",
+                f"{label} runtime is deactivated; enable its provider under Home > Agent runtimes",
             )
         if status != "active":
             raise ApiError(

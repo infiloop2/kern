@@ -23,70 +23,7 @@ import hmac
 import re
 import urllib.parse
 
-
-@dataclass(frozen=True)
-class SignedRequest:
-    url: str
-    headers: dict[str, str]
-    body: bytes
-
-
-def sign_post(
-    *,
-    host: str,
-    region: str,
-    service: str,
-    access_key_id: str,
-    secret_access_key: str,
-    body: bytes,
-    content_type: str,
-    extra_headers: dict[str, str] | None = None,
-    now: datetime.datetime | None = None,
-) -> SignedRequest:
-    """A signed ``POST https://<host>/`` request. ``extra_headers`` (for
-    example ``x-amz-target``) are included in the signature; header names must
-    be lowercase."""
-    when = now or datetime.datetime.now(datetime.timezone.utc)
-    amz_date = when.strftime("%Y%m%dT%H%M%SZ")
-    date_stamp = when.strftime("%Y%m%d")
-    payload_hash = hashlib.sha256(body).hexdigest()
-    headers = {
-        "content-type": content_type,
-        "host": host,
-        "x-amz-date": amz_date,
-        **(extra_headers or {}),
-    }
-    signed_header_names = ";".join(sorted(headers))
-    canonical_headers = "".join(f"{name}:{headers[name].strip()}\n" for name in sorted(headers))
-    canonical_request = "\n".join(
-        ("POST", "/", "", canonical_headers, signed_header_names, payload_hash)
-    )
-    credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
-    string_to_sign = "\n".join(
-        (
-            "AWS4-HMAC-SHA256",
-            amz_date,
-            credential_scope,
-            hashlib.sha256(canonical_request.encode()).hexdigest(),
-        )
-    )
-    signing_key = _signing_key(secret_access_key, date_stamp, region, service)
-    signature = hmac.new(signing_key, string_to_sign.encode(), hashlib.sha256).hexdigest()
-    authorization = (
-        f"AWS4-HMAC-SHA256 Credential={access_key_id}/{credential_scope}, "
-        f"SignedHeaders={signed_header_names}, Signature={signature}"
-    )
-    request_headers = dict(headers)
-    del request_headers["host"]  # urllib sets Host from the URL
-    request_headers["authorization"] = authorization
-    return SignedRequest(url=f"https://{host}/", headers=request_headers, body=body)
-
-
-def _signing_key(secret_access_key: str, date_stamp: str, region: str, service: str) -> bytes:
-    key = hmac.new(f"AWS4{secret_access_key}".encode(), date_stamp.encode(), hashlib.sha256).digest()
-    key = hmac.new(key, region.encode(), hashlib.sha256).digest()
-    key = hmac.new(key, service.encode(), hashlib.sha256).digest()
-    return hmac.new(key, b"aws4_request", hashlib.sha256).digest()
+from host.tools.shared.aws_sigv4 import SignedRequest, sign_post, signing_key as _signing_key
 
 
 @dataclass(frozen=True)

@@ -116,6 +116,7 @@ class SocketTests(unittest.TestCase):
             set(verify_deploy.SOCKET_OWNERS.values()),
             {
                 "kern-tools",
+                "kern-host-inference",
                 "kern-workspace",
                 "kern-agent-network",
                 "kern-admin",

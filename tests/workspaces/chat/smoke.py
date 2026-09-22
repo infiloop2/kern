@@ -197,13 +197,13 @@ def desktop_smoke(page: Any) -> None:
         f"#chat-nav-items [data-action='open-chat'][data-item-id='{WEBSITE_THREAD_ID}']"
     )
     expect(website_nav.locator(".workspace-nav-meta")).to_have_text(
-        "Claude Code · claude-opus-5 · high"
+        "Claude Code · claude-opus-5-5 · high"
     )
     thread_nav = page.locator(
         "#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']"
     )
     expect(thread_nav.locator(".workspace-nav-meta")).to_have_text(
-        "Codex · gpt-5.6-terra · high"
+        "Codex · gpt-6-astra · high"
     )
 
     _open_host_thread(page, WEBSITE_THREAD_ID)
@@ -271,12 +271,14 @@ def desktop_smoke(page: Any) -> None:
     ).to_have_text("Codex")
     fable = frame.locator("#new-task-model option[value='claude-fable-5-1']")
     expect(fable).to_have_text("Fable 5.1")
+    expect(frame.locator("#new-task-model option[value='claude-opus-5-5']")).to_have_text("Opus 5.5")
+    expect(frame.locator("#new-task-model option[value='claude-opus-5']")).to_have_count(0)
     frame.locator("#new-task-model").select_option("claude-fable-5-1")
     expect(frame.locator("#session-change-warning")).to_be_visible()
     expect(frame.locator("#session-change-warning")).to_contain_text(
         "provider cache reads will be invalidated"
     )
-    frame.locator("#new-task-model").select_option("claude-opus-5")
+    frame.locator("#new-task-model").select_option("claude-opus-5-5")
     expect(frame.locator("#session-change-warning")).to_be_hidden()
     frame.get_by_role("button", name="Rename thread", exact=True).click()
     expect(frame.get_by_role("dialog", name="Rename thread")).to_be_visible()
@@ -433,9 +435,9 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#new-task-effort option")).to_have_count(2)
     expect(frame.locator("#new-task-effort")).to_contain_text("Xhigh")
     frame.locator("#new-task-runtime").select_option("codex")
-    expect(frame.locator("#new-task-model option")).to_have_count(4)
+    expect(frame.locator("#new-task-model option")).to_have_count(3)
     expect(frame.locator("#new-task-model option[value='gpt-6-astra']")).to_have_count(1)
-    frame.locator("#new-task-model").select_option("gpt-5.6-luna")
+    frame.locator("#new-task-model").select_option("gpt-6-luna")
     expect(frame.locator("#new-task-effort option")).to_have_count(2)
     expect(frame.locator("#new-task-effort")).not_to_contain_text("Ultra")
     frame.locator("#new-task-effort").select_option("max")
@@ -543,19 +545,19 @@ def desktop_smoke(page: Any) -> None:
     expect(page.locator("#chat-nav-items")).to_contain_text(generated_thread)
     _open_host_thread(page, generated_thread)
     # A new thread opens on the first active runtime's named default configuration,
-    # however it was started. The thread open here runs gpt-5.6-luna at max, and neither its
+    # however it was started. The thread open here runs gpt-6-luna at max, and neither its
     # model nor its effort may carry into a thread started from the host
     # navigation, which reaches the composer through a different control than
     # the in-frame button.
-    expect(frame.locator("#new-task-model")).to_have_value("gpt-5.6-luna")
+    expect(frame.locator("#new-task-model")).to_have_value("gpt-6-luna")
     expect(frame.locator("#new-task-effort")).to_have_value("max")
     _start_host_chat(page)
     expect(frame.locator("#new-task-runtime")).to_have_value("codex")
-    expect(frame.locator("#new-task-model")).to_have_value("gpt-5.6-sol")
+    expect(frame.locator("#new-task-model")).to_have_value("gpt-6-sol")
     expect(frame.locator("#new-task-effort")).to_have_value("high")
     # A new thread uses the named default for its runtime.
     frame.locator("#new-task-runtime").select_option("claude_code")
-    expect(frame.locator("#new-task-model")).to_have_value("claude-opus-5")
+    expect(frame.locator("#new-task-model")).to_have_value("claude-opus-5-5")
     expect(frame.locator("#new-task-effort")).to_have_value("high")
     _open_host_thread(page, generated_thread)
     _assert_single_scroll(page, frame, "Chat workspace (desktop)")
@@ -1084,12 +1086,14 @@ def _assert_mobile_usage_overlay_over_app(page: Any) -> None:
 
     surface = page.locator("#panel-workspace-chat")
     surface_before = surface.bounding_box()
-    overview_toggle = page.locator(".runtime-overview-toggle")
+    overview_toggle = page.locator(
+        '[data-overview-group="runtimes"] .runtime-overview-toggle'
+    )
     expect(overview_toggle).to_have_attribute("aria-expanded", "false")
     with page.expect_request(re.compile(r"/v1/agent-runtime/refresh")):
         overview_toggle.click()
     expect(overview_toggle).to_have_attribute("aria-expanded", "true")
-    panel = page.locator("#runtime-overview .runtime-overview-panel")
+    panel = page.locator("#runtime-overview-runtimes-panel")
     expect(panel).to_be_visible()
     expect(panel).to_have_css("position", "absolute")
     surface_expanded = surface.bounding_box()

@@ -5,7 +5,10 @@ const MAX_WORKER_MESSAGES_PER_SECOND = 100;
 const MAX_WORKER_MESSAGES_PER_TURN = 128;
 const MAX_WORKER_MUTATIONS_PER_TURN = 16;
 const WORKER_START_TIMEOUT_MS = 15 * 1000;
-const WORKER_TURN_TIMEOUT_MS = 3000;
+// One end-to-end deadline, including worker startup and host requests.
+const WORKER_TURN_TIMEOUT_MS = 5000;
+const RUNTIME_REPORT_MAX_BYTES = 400;
+const MAX_COMPOSER_MESSAGE_BYTES = 50_000;
 const MAX_RENDER_HTML_BYTES = 128 * 1024;
 const MAX_RENDER_CSS_BYTES = 64 * 1024;
 const MAX_RENDER_NODES = 5000;
@@ -37,10 +40,10 @@ const localFiles = new Map();
 let sessionOptions = {};
 let activeRuntimes = null;
 const DEFAULT_MODELS = Object.freeze({
-  codex: "gpt-5.6-sol",
-  "codex-2": "gpt-5.6-sol",
-  "codex-3": "gpt-5.6-sol",
-  claude_code: "claude-opus-5",
+  codex: "gpt-6-sol",
+  "codex-2": "gpt-6-sol",
+  "codex-3": "gpt-6-sol",
+  claude_code: "claude-opus-5-5",
   grok: "grok-4.6",
   "grok-2": "grok-4.6",
   hermes: "moonshotai.kimi-k2.5",
@@ -67,6 +70,12 @@ let generatedStyleLink = null;
 let generatedStyleUrl = null;
 let workerRun = null;
 let armedWorker = null;
+// The newest interaction that arrived while a turn was running; it starts
+// when that turn completes instead of being dropped.
+let queuedGeneratedEvent = null;
+// Per App, the last generated-runtime failure the operator saw. It travels
+// with their next composer message so the agent learns what actually failed.
+const runtimeReports = new Map();
 let bundleUrl = null;
 let lastRenderKey = "";
 let cssCacheKey = null;
@@ -416,8 +425,12 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
       durableData = clone(message.data);
       resolvePromise()
         .then(() => message.load && loadHandler ? loadHandler() : undefined)
-        .then(() => send({ type: "initialized" }))
-        .catch(() => send({ type: "initialization-error", reason: "load-handler" }));
+        .then(() => {
+          send({ type: "initialized" });
+        })
+        .catch(() => {
+          send({ type: "initialization-error", reason: "load-handler" });
+        });
       return;
     }
     if (message.type === "data-result") {
@@ -457,10 +470,14 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
     if (message.type === "event") {
       const handler = handlers.get(message.action);
       resolvePromise(handler ? handler(clone(message.event)) : undefined)
-        .then(() => send({ type: "turn-complete", turn_id: message.turn_id }))
-        .catch(() => send({
-          type: "turn-error", turn_id: message.turn_id, reason: "action-handler",
-        }));
+        .then(() => {
+          send({ type: "turn-complete", turn_id: message.turn_id });
+        })
+        .catch(() => {
+          send({
+            type: "turn-error", turn_id: message.turn_id, reason: "action-handler",
+          });
+        });
     }
   });
   // The generated source is appended after this bootstrap invocation. Defer
@@ -961,11 +978,7 @@ function generatedInteraction(event) {
   const target = event.target.closest("[data-action]");
   if (!target || !generatedRoot.contains(target)) return;
   event.preventDefault();
-  if (workerRun) {
-    showRuntimeStatus("Finishing the previous app action");
-    return;
-  }
-  runCapabilityWorker({ action: target.dataset.action, event: eventPayload(target) });
+  queueGeneratedEvent({ action: target.dataset.action, event: eventPayload(target) });
 }
 
 function generatedEnterInteraction(event) {
@@ -977,12 +990,8 @@ function generatedEnterInteraction(event) {
   const target = event.target.closest("input[data-enter-action], textarea[data-enter-action]");
   if (!target || !generatedRoot.contains(target)) return;
   event.preventDefault();
-  if (workerRun) {
-    showRuntimeStatus("Finishing the previous app action");
-    return;
-  }
   const action = target.dataset.enterAction;
-  runCapabilityWorker({ action, event: eventPayload(target, action) });
+  queueGeneratedEvent({ action, event: eventPayload(target, action) });
 }
 
 function setGeneratedDropTarget(target) {
@@ -1066,14 +1075,21 @@ function generatedDrop(event) {
   const action = target.dataset.dropAction;
   const draggedValue = generatedDrag.value;
   clearGeneratedDrag();
-  if (workerRun) {
-    showRuntimeStatus("Finishing the previous app action");
-    return;
-  }
-  runCapabilityWorker({
+  queueGeneratedEvent({
     action,
     event: eventPayload(target, action, draggedValue),
   });
+}
+
+function queueGeneratedEvent(pendingEvent) {
+  if (!workerRun) {
+    runCapabilityWorker(pendingEvent);
+    return;
+  }
+  // One turn runs at a time. Keep the newest interaction rather than dropping
+  // it, so a click during a slow turn still happens once that turn completes.
+  queuedGeneratedEvent = { appId: workerRun.appId, ...pendingEvent };
+  showRuntimeStatus("Finishing the previous app action…");
 }
 
 // --- Capability worker lifecycle ---------------------------------------------
@@ -1146,18 +1162,21 @@ function discardArmedWorker() {
   armedWorker = null;
 }
 
-async function hydrateCapabilityData(holder, dataMode) {
+async function hydrateCapabilityData(holder, dataMode, trackRequests = false) {
   if (!["full", "targeted"].includes(dataMode)) return false;
   holder.dataMode = dataMode;
   if (dataMode === "targeted") holder.data = {};
   else if (holder.data === undefined) {
     let response;
+    if (trackRequests) beginHostRequest(holder);
     try {
       response = await api(
         "GET", `/apps/${encodeURIComponent(holder.appId)}/state/data`,
       );
     } catch (_error) {
       return false;
+    } finally {
+      if (trackRequests) endHostRequest(holder);
     }
     if (!response.app || response.app.revision !== holder.revision) {
       void refreshSelectedApp(holder.appId);
@@ -1278,18 +1297,29 @@ async function runCapabilityWorker(pendingEvent = null) {
     count: 0,
     totalMessages: 0,
     mutations: 0,
-    mutationPending: false,
+    mutationPending: false, // Owns the queue through response reconciliation.
+    mutationRequestPending: false, // Only an unresolved write may explain a poll's revision.
+    mutationChain: Promise.resolve(),
     agentRequested: false,
     finished: false,
     windowStarted: performance.now(),
     timer: null,
+    startedAt: performance.now(),
+    inflight: 0,
+    hostRequests: 0,
+    hostWaitMs: 0,
+    waitStartedAt: null,
     finish(reason, stage = this.state) {
       if (this.finished) return;
       this.finished = true;
       clearTimeout(this.timer);
       worker.terminate();
       const current = workerRun === this;
-      if (current) workerRun = null;
+      const settlingWrite = current && this.mutationPending;
+      if (current && !settlingWrite) workerRun = null;
+      if (current && (reason === "timeout" || reason === "error")) {
+        recordRuntimeReport(this, reason, stage);
+      }
       if (current && reason === "timeout" && stage === "starting") {
         showRuntimeStatus(
           "This app could not start its isolated renderer. Refresh and try again.",
@@ -1297,7 +1327,10 @@ async function runCapabilityWorker(pendingEvent = null) {
           true,
         );
       } else if (current && reason === "timeout") {
-        showRuntimeStatus("This app action took too long and was stopped. Ask the agent to fix it.", "error");
+        showRuntimeStatus(
+          `This app action took too long and was stopped (${describeTurn(this)}). Ask the agent to fix it.`,
+          "error",
+        );
       } else if (current && reason === "error" && stage === "render") {
         showRuntimeStatus(
           "This app could not render safely. Ask the agent to fix its interface.",
@@ -1319,15 +1352,38 @@ async function runCapabilityWorker(pendingEvent = null) {
       } else if (current && reason === "error") {
         showRuntimeStatus("This app action failed. Ask the agent to fix it.", "error");
       }
-      if (current && reason === "complete") setTimeout(armCapabilityWorker, 0);
+      if (!current) return;
+      const release = () => {
+        // Termination stops generated code, not an already submitted write.
+        // Keep this run as the interaction owner until its write is reconciled.
+        if (settlingWrite) {
+          if (workerRun !== this) return;
+          workerRun = null;
+        }
+        const queued = queuedGeneratedEvent;
+        queuedGeneratedEvent = null;
+        const startupFailure = stage === "starting" || stage === "worker-create";
+        if (queued && queued.appId === selectedAppId && !startupFailure) {
+          setTimeout(() => {
+            if (!workerRun && selectedAppId === queued.appId && !appWritesBlocked()) {
+              runCapabilityWorker({ action: queued.action, event: queued.event });
+            }
+          }, 0);
+        } else if (settlingWrite && this.lateMutationAcknowledged) {
+          // The terminated handler could not render its successful save.
+          // Offer the normal refresh when no queued action will render next.
+          pendingApp = snapshot.app;
+          syncAppRefreshButton();
+        } else if (reason === "complete") setTimeout(armCapabilityWorker, 0);
+      };
+      if (settlingWrite) this.mutationChain.then(release, release);
+      else release();
     },
   };
   workerRun = run;
-  run.timer = setTimeout(() => run.finish("timeout", "starting"), WORKER_START_TIMEOUT_MS);
+  run.timer = setTimeout(() => run.finish("timeout"), WORKER_TURN_TIMEOUT_MS);
   if (armed) {
     clearTimeout(armed.timer);
-    clearTimeout(run.timer);
-    run.timer = setTimeout(() => run.finish("timeout", "execution"), WORKER_TURN_TIMEOUT_MS);
     armed.run = run;
     worker.postMessage({
       type: "event", action: pendingEvent.action, event: pendingEvent.event, turn_id: "turn",
@@ -1341,9 +1397,59 @@ async function runCapabilityWorker(pendingEvent = null) {
   worker.addEventListener("message", event => handleWorkerMessage(run, event.data));
 }
 
+// Track overlapping request waits for diagnostics without changing the deadline.
+function beginHostRequest(run) {
+  run.hostRequests += 1;
+  if (run.inflight++ === 0) run.waitStartedAt = performance.now();
+}
+
+function endHostRequest(run) {
+  if (--run.inflight === 0 && run.waitStartedAt !== null) {
+    run.hostWaitMs += performance.now() - run.waitStartedAt;
+    run.waitStartedAt = null;
+  }
+}
+
+function describeTurn(run) {
+  const seconds = value => `${(Math.max(0, value) / 1000).toFixed(1)}s`;
+  const waited = run.hostWaitMs
+    + (run.waitStartedAt === null ? 0 : performance.now() - run.waitStartedAt);
+  const parts = [`${seconds(performance.now() - run.startedAt)} elapsed`];
+  if (run.hostRequests) {
+    parts.push(
+      `${run.hostRequests} host request${run.hostRequests === 1 ? "" : "s"} waited ${seconds(waited)}`,
+    );
+  }
+  return parts.join(", ");
+}
+
+const RUNTIME_FAILURE_STAGES = Object.freeze({
+  starting: "could not start its renderer",
+  "worker-create": "could not start the browser sandbox",
+  "data-load": "could not load its data",
+  "load-handler": "failed inside app.onLoad",
+  initializing: "failed inside app.onLoad",
+  event: "failed inside its action handler",
+  render: "produced markup the renderer refused",
+});
+
+function recordRuntimeReport(run, reason, stage) {
+  const action = run.event
+    ? `action "${String(run.event.action).replace(/[^\w-]/g, "").slice(0, 64)}"`
+    : "startup";
+  let outcome;
+  if (reason === "timeout" && stage === "starting") outcome = "could not start its renderer in time";
+  else if (reason === "timeout" && stage === "data-load") outcome = `was stopped while loading data after ${describeTurn(run)}`;
+  else if (reason === "timeout") outcome = `was stopped after ${describeTurn(run)}`;
+  else outcome = RUNTIME_FAILURE_STAGES[stage] || `failed (${String(stage).slice(0, 32)})`;
+  const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
+  const report = `[App runtime report: ${action} ${outcome}; revision ${run.revision}; ${stamp} UTC]`;
+  runtimeReports.set(run.appId, report.slice(0, RUNTIME_REPORT_MAX_BYTES));
+}
+
 async function handleWorkerMessage(run, message) {
   if (
-    workerRun !== run || appWritesBlocked() || selectedAppId !== run.appId
+    workerRun !== run || run.finished || appWritesBlocked() || selectedAppId !== run.appId
     || !message || typeof message !== "object"
   ) return;
   const now = performance.now();
@@ -1356,12 +1462,12 @@ async function handleWorkerMessage(run, message) {
     return;
   }
   if (message.type === "ready" && run.state === "starting") {
-    if (!await hydrateCapabilityData(run, message.data_mode)) {
+    run.state = "data-load";
+    if (!await hydrateCapabilityData(run, message.data_mode, true)) {
       run.finish("error", "data-load");
       return;
     }
-    clearTimeout(run.timer);
-    run.timer = setTimeout(() => run.finish("timeout", "execution"), WORKER_TURN_TIMEOUT_MS);
+    if (run.finished || workerRun !== run) return;
     run.state = "initializing";
     run.worker.postMessage({ type: "init", data: run.data, load: !run.event });
     return;
@@ -1440,28 +1546,34 @@ async function handleWorkerDataRead(run, message) {
     run.finish("error");
     return;
   }
+  let response = null;
+  beginHostRequest(run);
   try {
-    const response = await api(
+    response = await api(
       "POST",
       `/apps/${encodeURIComponent(run.appId)}/runtime/data/read`,
       { path: message.path },
     );
-    if (workerRun !== run || selectedAppId !== run.appId) return;
-    if (!response.app || response.app.revision !== run.revision) {
-      run.worker.postMessage({ type: "read-result", request_id: message.request_id, ok: false });
-      await refreshSelectedApp(run.appId);
-      return;
-    }
-    run.worker.postMessage({
-      type: "read-result",
-      request_id: message.request_id,
-      ok: true,
-      value: response.app.value,
-    });
   } catch (_error) {
-    if (workerRun !== run) return;
-    run.worker.postMessage({ type: "read-result", request_id: message.request_id, ok: false });
+    response = null;
   }
+  endHostRequest(run);
+  if (workerRun !== run || selectedAppId !== run.appId) return;
+  if (!response) {
+    run.worker.postMessage({ type: "read-result", request_id: message.request_id, ok: false });
+    return;
+  }
+  if (!response.app || response.app.revision !== run.revision) {
+    run.worker.postMessage({ type: "read-result", request_id: message.request_id, ok: false });
+    await refreshSelectedApp(run.appId);
+    return;
+  }
+  run.worker.postMessage({
+    type: "read-result",
+    request_id: message.request_id,
+    ok: true,
+    value: response.app.value,
+  });
 }
 
 async function handleWorkerCollectionQuery(run, message) {
@@ -1478,41 +1590,47 @@ async function handleWorkerCollectionQuery(run, message) {
     run.finish("error");
     return;
   }
+  let response = null;
+  beginHostRequest(run);
   try {
-    const response = await api(
+    response = await api(
       "POST",
       `/apps/${encodeURIComponent(run.appId)}/runtime/collections/${encodeURIComponent(message.collection)}/query`,
       message.query,
     );
-    if (workerRun !== run || selectedAppId !== run.appId) return;
-    if (!response.collection || response.collection.revision !== run.revision) {
-      run.worker.postMessage({
-        type: "collection-query-result",
-        request_id: message.request_id,
-        ok: false,
-      });
-      await refreshSelectedApp(run.appId);
-      return;
-    }
-    run.worker.postMessage({
-      type: "collection-query-result",
-      request_id: message.request_id,
-      ok: true,
-      collection: response.collection,
-    });
   } catch (_error) {
-    if (workerRun !== run) return;
+    response = null;
+  }
+  endHostRequest(run);
+  if (workerRun !== run || selectedAppId !== run.appId) return;
+  if (!response) {
     run.worker.postMessage({
       type: "collection-query-result",
       request_id: message.request_id,
       ok: false,
     });
+    return;
   }
+  if (!response.collection || response.collection.revision !== run.revision) {
+    run.worker.postMessage({
+      type: "collection-query-result",
+      request_id: message.request_id,
+      ok: false,
+    });
+    await refreshSelectedApp(run.appId);
+    return;
+  }
+  run.worker.postMessage({
+    type: "collection-query-result",
+    request_id: message.request_id,
+    ok: true,
+    collection: response.collection,
+  });
 }
 
 async function handleWorkerDataAction(run, message) {
   if (
-    run.state !== "event" || run.mutationPending
+    run.state !== "event"
     || run.mutations >= MAX_WORKER_MUTATIONS_PER_TURN
     || typeof message.request_id !== "string"
     || !/^mutation-[1-9][0-9]{0,8}$/.test(message.request_id)
@@ -1524,13 +1642,8 @@ async function handleWorkerDataAction(run, message) {
     run.finish("error");
     return;
   }
-  run.mutationPending = true;
   run.mutations += 1;
-  const body = {
-    action: message.action,
-    expected_revision: run.revision,
-    path: message.path,
-  };
+  const body = { action: message.action, path: message.path };
   let canonicalValue;
   if (message.action !== "delete") {
     try {
@@ -1544,44 +1657,84 @@ async function handleWorkerDataAction(run, message) {
     }
     body.value = canonicalValue;
   }
+  // Writes apply in the order generated code issued them, each against the
+  // revision the previous one produced, so concurrent app.set calls serialize
+  // instead of failing the turn.
+  run.mutationChain = run.mutationChain.then(
+    () => performWorkerMutation(run, message, body, canonicalValue),
+  );
+  await run.mutationChain;
+}
+
+async function performWorkerMutation(run, message, body, canonicalValue) {
+  if (run.finished || workerRun !== run) return;
+  body.expected_revision = run.revision;
+  run.mutationPending = true;
+  run.mutationRequestPending = true;
+  let response = null;
+  beginHostRequest(run);
   try {
-    const response = await api(
+    response = await api(
       "POST",
       `/apps/${encodeURIComponent(run.appId)}/runtime/actions`,
       body,
     );
-    if (workerRun !== run || selectedAppId !== run.appId) return;
-    const acknowledged = { ...message, value: canonicalValue };
-    const updatedData = run.dataMode === "full"
-      ? applyLocalDataAction(run.data, acknowledged)
-      : run.data;
-    snapshot.app = {
-      ...snapshot.app,
-      data: updatedData,
-      revision: response.app.revision,
-      updated_at: response.app.updated_at,
-    };
-    run.data = updatedData;
-    run.revision = response.app.revision;
-    renderedRevision = response.app.revision;
-    // A successful generated-App write used the displayed revision, so this
-    // canvas is already authoritative and stays interactive.
-    pendingApp = null;
-    syncAppRefreshButton();
-    markSelectedAppSeen();
-    run.mutationPending = false;
-    run.worker.postMessage({
-      type: "data-result",
-      request_id: message.request_id,
-      ok: true,
-      value: canonicalValue,
-    });
   } catch (_error) {
-    if (workerRun !== run) return;
-    run.mutationPending = false;
-    run.worker.postMessage({ type: "data-result", request_id: message.request_id, ok: false });
-    await refreshSelectedApp(run.appId);
+    response = null;
   }
+  endHostRequest(run);
+  run.mutationRequestPending = false;
+  if (workerRun !== run || selectedAppId !== run.appId) {
+    run.mutationPending = false;
+    return;
+  }
+  if (!response) {
+    // A failed write may reflect a newer server revision. Keep ownership of
+    // the queue until that state is reconciled, before rejecting the handler.
+    try {
+      await refreshSelectedApp(run.appId);
+    } catch (_error) {
+      if (workerRun === run) {
+        queuedGeneratedEvent = null;
+        run.finish("error", "data-load");
+      }
+    } finally {
+      run.mutationPending = false;
+    }
+    if (workerRun === run && !run.finished) {
+      run.worker.postMessage({ type: "data-result", request_id: message.request_id, ok: false });
+    }
+    return;
+  }
+  const acknowledged = { ...message, value: canonicalValue };
+  const updatedData = run.dataMode === "full"
+    ? applyLocalDataAction(run.data, acknowledged)
+    : run.data;
+  snapshot.app = {
+    ...snapshot.app,
+    data: updatedData,
+    revision: response.app.revision,
+    updated_at: response.app.updated_at,
+  };
+  run.data = updatedData;
+  run.revision = response.app.revision;
+  if (!run.finished) renderedRevision = response.app.revision;
+  // A successful generated-App write used the displayed revision, so this
+  // canvas is already authoritative and stays interactive.
+  pendingApp = null;
+  syncAppRefreshButton();
+  markSelectedAppSeen();
+  run.mutationPending = false;
+  if (run.finished) {
+    run.lateMutationAcknowledged = true;
+    return;
+  }
+  run.worker.postMessage({
+    type: "data-result",
+    request_id: message.request_id,
+    ok: true,
+    value: canonicalValue,
+  });
 }
 
 function validDataPath(path) {
@@ -1939,11 +2092,22 @@ async function sendMessage(forcedMessage = null, targetAppId = null) {
     const fileReferences = attachments
       .map(attachment => `[User-uploaded file: ${attachment.file.path}]`)
       .join("\n");
-    const content = attachments.length
+    // The operator usually describes a runtime failure loosely ("it timed
+    // out"). Attach the frame's precise report so the agent fixes the actual
+    // cause instead of guessing.
+    const operatorContent = attachments.length
       ? `${message || (attachments.length === 1
         ? "Please review the uploaded file."
         : "Please review the uploaded files.")}\n\n${fileReferences}`
       : message;
+    let runtimeReport = fromGeneratedApp ? null : runtimeReports.get(appId) || null;
+    let content = runtimeReport ? `${operatorContent}\n\n${runtimeReport}` : operatorContent;
+    if (runtimeReport && textEncoder.encode(content).length > MAX_COMPOSER_MESSAGE_BYTES) {
+      // The backend bounds the whole message; a report must never turn an
+      // acceptable draft into a rejected one. It stays pending for a shorter message.
+      runtimeReport = null;
+      content = operatorContent;
+    }
     const body = { content };
     if (includeSubmittedSettings) {
       body.agent_runtime = submittedSettings.agent_runtime;
@@ -1957,6 +2121,7 @@ async function sendMessage(forcedMessage = null, targetAppId = null) {
       body,
       AGENT_DELIVERY_TIMEOUT_MS,
     );
+    if (runtimeReport && runtimeReports.get(appId) === runtimeReport) runtimeReports.delete(appId);
     if (!fromGeneratedApp && selectedAppId === appId) {
       const clearedSubmittedDraft = clearComposerDraft(appId, submittedDraft);
       if (clearedSubmittedDraft && $("message").value === submittedDraft) {
@@ -2699,7 +2864,9 @@ function syncWorkspaceControls() {
 }
 
 function stopCapabilityWorker() {
+  queuedGeneratedEvent = null;
   if (workerRun) workerRun.finish("workspace-switched");
+  workerRun = null;
   discardArmedWorker();
 }
 
@@ -2716,7 +2883,7 @@ function compareAppVersions(left, right) {
 function appMutationInFlight(appId, currentRevision, observedRevision) {
   return Boolean(
     workerRun?.appId === appId
-    && workerRun.mutationPending
+    && workerRun.mutationRequestPending
     && workerRun.revision === currentRevision
     && observedRevision === currentRevision + 1
   );

@@ -840,6 +840,127 @@ class StageIntegrationChecks(AwsSmoke):
             )
         self._ok("Claude account guard passed; real turn completed and resumed through the proxy")
 
+    def check_claude_upgrade_contract(self) -> None:
+        """Real launcher/adapter/MCP turns on every offered Claude selection.
+
+        High-effort turns also resume their exact provider session. A fresh
+        provider session with a replayed transcript must not count as resume.
+        """
+        from host.session_options import public_session_options
+        from host.runtime.agent_runtime.claude_code import _parse_claude_usage_result
+
+        self.check_installed_claude_cli()
+        self._step("Claude live usage, model/effort matrix, Workspace MCP, and native resume")
+        refreshed = self._api("POST", "/v1/agent-runtime/refresh", {"agent_runtime": "claude_code"})
+        account = next((item for item in refreshed.get("accounts", [])
+                        if item.get("agent_runtime") == "claude_code"), {})
+        if account.get("status") != "active":
+            raise AssertionError("Claude forced provider refresh did not remain active")
+        self._assert_provider_metadata("claude_code", account)
+        # Stored account metadata can retain a previous usage snapshot when a
+        # new CLI output format parses to no windows. Check a fresh response
+        # through the installed launcher independently of that metadata.
+        raw_usage = json.loads(self._ssh_code(
+            "sudo -u kern-admin -- timeout 45 sudo -n "
+            "/usr/local/lib/kern-host/run-claude-code web-search=off "
+            "-p /usage --output-format json"
+        ))
+        if (not isinstance(raw_usage, dict) or raw_usage.get("is_error")
+                or raw_usage.get("subtype") != "success" or not isinstance(raw_usage.get("result"), str)):
+            raise AssertionError("Claude installed /usage did not return a successful text result")
+        usage = _parse_claude_usage_result(raw_usage["result"])
+        for prefix in ("current_session", "weekly"):
+            percent = usage.get(prefix + "_used_percent")
+            reset = usage.get(prefix + "_resets_at")
+            if type(percent) not in (int, float) or not 0 <= percent <= 100:
+                raise AssertionError(f"Claude refresh omitted valid {prefix} usage")
+            if type(reset) is not int or reset <= 0:
+                raise AssertionError(f"Claude refresh omitted the {prefix} reset time")
+        # Model-scoped windows depend on the subscription; validate if present,
+        # but do not require a Fable entitlement for an Opus-only account.
+        if "fable_weekly_used_percent" in usage:
+            percent = usage["fable_weekly_used_percent"]
+            if type(percent) not in (int, float) or not 0 <= percent <= 100:
+                raise AssertionError("Claude Fable usage is invalid")
+
+        baseline_network = max((event["seq"] for event in self._network_events()), default=0)
+        for model, efforts in public_session_options()["claude_code"].items():
+            for effort in efforts:
+                # The stage prefix already identifies this run. Keep the complete
+                # product thread ID within the host's 64-character limit.
+                thread_name = f"claude-matrix-{model.removeprefix('claude-')}-{effort}"
+                baseline = self._latest_thread_event_seq(thread_name)
+                started = self.send_message(
+                    thread_name,
+                    "Call workspace_api exactly once with method GET and path /agent/identity. "
+                    "Reply with exactly the returned body.thread_id and nothing else. Do not delegate.",
+                    runtime="claude_code", model=model, effort=effort,
+                )
+                thread = started.get("thread") or {}
+                if started.get("status") != "accepted" or (thread.get("model"), thread.get("effort")) != (model, effort):
+                    raise AssertionError(f"Claude matrix did not accept {model}/{effort}")
+                done = self._wait_for_turn(thread_name, since=baseline, timeout=300)
+                expected = self.api_thread_id(thread_name)
+                if done.get("status") != "completed" or str(done.get("output_message") or "").strip() != expected:
+                    raise AssertionError(f"Claude {model}/{effort} failed the Workspace identity turn")
+                activities = [(event.get("payload") or {}).get("activity") or {}
+                              for event in self._thread_events(thread_name, since=baseline)
+                              if event.get("event_type") == "thread.activity"]
+                workspace_calls = []
+                for activity in activities:
+                    if activity.get("phase") != "started" or activity.get("title") != "Tool: mcp__kern__workspace_api":
+                        continue
+                    request = json.loads(activity.get("detail") or "{}")
+                    activity_id = activity.get("activity_id")
+                    if (isinstance(request, dict) and request.get("method") == "GET"
+                            and request.get("path") == "/agent/identity"
+                            and isinstance(activity_id, str) and activity_id):
+                        workspace_calls.append(activity_id)
+                results = [activity for activity in activities
+                           if activity.get("kind") == "tool" and activity.get("phase") == "completed"
+                           and activity.get("status") == "completed"
+                           and activity.get("activity_id") in workspace_calls]
+                if len(workspace_calls) != 1 or len(results) != 1:
+                    raise AssertionError(f"Claude {model}/{effort} persisted no successful Workspace tool result")
+                response = json.loads(results[0].get("output") or "null")
+                if isinstance(response, list):
+                    response = json.loads("\n".join(item.get("text", "") for item in response
+                                                    if isinstance(item, dict) and item.get("type") == "text"))
+                if not isinstance(response, dict) or response.get("status") != 200 or response.get("body") != {"thread_id": expected}:
+                    raise AssertionError(f"Claude {model}/{effort} Workspace result was not its authenticated identity")
+                initialized = [json.loads(activity["detail"]) for activity in activities
+                               if activity.get("title") == "Claude session initialized" and activity.get("detail")]
+                if not initialized or any(item.get("model") != model for item in initialized):
+                    raise AssertionError(f"Claude {model}/{effort} initialized on an unexpected model")
+                if effort == "high":
+                    session = self._claude_provider_session(expected)
+                    follow_baseline = self._latest_thread_event_seq(thread_name)
+                    follow = self.send_follow_up(thread_name,
+                        "Without calling tools, repeat exactly the thread id you returned in the previous turn.")
+                    if follow.get("status") != "accepted":
+                        raise AssertionError(f"Claude {model} follow-up was not accepted")
+                    resumed = self._wait_for_turn(thread_name, since=follow_baseline, timeout=300)
+                    if resumed.get("status") != "completed" or str(resumed.get("output_message") or "").strip() != expected:
+                        raise AssertionError(f"Claude {model} lost its prior context on resume")
+                    if self._claude_provider_session(expected) != session:
+                        raise AssertionError(f"Claude {model} replaced its native session on resume")
+                print(f"    [Claude matrix] model={model} effort={effort} passed", flush=True)
+        events = [event for event in self._network_events(since=baseline_network)
+                  if event.get("host") == "api.anthropic.com" and str(event.get("path", "")).startswith("/v1/messages")]
+        if not any(event.get("decision") == "allowed" for event in events) or any(
+            event.get("decision") == "denied" for event in events
+        ):
+            raise AssertionError("Claude matrix did not have clean allowed inference traffic")
+        self._ok("all offered Claude model/effort pairs used real Workspace MCP; native resumes and usage passed")
+
+    def _claude_provider_session(self, thread_id: str) -> str:
+        query = ("SELECT provider_session_id FROM thread_sessions WHERE agent_runtime='claude_code' "
+                 "AND thread_id='" + thread_id.replace("'", "''") + "'")
+        session = self._ssh_code("sudo -u postgres psql -tA -d kern_admin -c " + shlex.quote(query))
+        if not session:
+            raise AssertionError("Claude completed without a persisted provider session id")
+        return session
+
     def check_package_client_headers_e2e(self) -> None:
         """Drive the real pip and npm-registry clients through the proxy.
 

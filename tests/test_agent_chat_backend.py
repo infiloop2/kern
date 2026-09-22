@@ -48,25 +48,22 @@ class AgentChatBackendTests(unittest.TestCase):
             {
                 "session_options": {
                     "codex": {
-                        "gpt-5.6-terra": ["high", "max", "ultra"],
-                        "gpt-5.6-sol": ["high", "max", "ultra"],
-                        "gpt-5.6-luna": ["high", "max"],
+                        "gpt-6-sol": ["high", "max", "ultra"],
+                        "gpt-6-luna": ["high", "max"],
                         "gpt-6-astra": ["high", "max", "ultra"],
                     },
                     "codex-2": {
-                        "gpt-5.6-terra": ["high", "max", "ultra"],
-                        "gpt-5.6-sol": ["high", "max", "ultra"],
-                        "gpt-5.6-luna": ["high", "max"],
+                        "gpt-6-sol": ["high", "max", "ultra"],
+                        "gpt-6-luna": ["high", "max"],
                         "gpt-6-astra": ["high", "max", "ultra"],
                     },
                     "codex-3": {
-                        "gpt-5.6-terra": ["high", "max", "ultra"],
-                        "gpt-5.6-sol": ["high", "max", "ultra"],
-                        "gpt-5.6-luna": ["high", "max"],
+                        "gpt-6-sol": ["high", "max", "ultra"],
+                        "gpt-6-luna": ["high", "max"],
                         "gpt-6-astra": ["high", "max", "ultra"],
                     },
                     "claude_code": {
-                        "claude-opus-5": ["high", "max", "ultracode"],
+                        "claude-opus-5-5": ["high", "max", "ultracode"],
                         "claude-fable-5-1": ["high", "max", "ultracode"],
                         "claude-sonnet-5": ["high", "max", "ultracode"],
                     },
@@ -187,8 +184,8 @@ class AgentChatBackendTests(unittest.TestCase):
 
     def test_composer_restores_the_new_thread_draft_on_startup(self) -> None:
         source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
-        self.assertIn('codex: "gpt-5.6-sol"', source)
-        self.assertIn('claude_code: "claude-opus-5"', source)
+        self.assertIn('codex: "gpt-6-sol"', source)
+        self.assertIn('claude_code: "claude-opus-5-5"', source)
         self.assertIn('hermes: "moonshotai.kimi-k2.5"', source)
         self.assertIn('defaultingNewThread && efforts.includes("high")', source)
         startup = source.rsplit("setSessionOptions();", 1)[1]
@@ -253,7 +250,7 @@ class AgentChatBackendTests(unittest.TestCase):
                         "input_message": "continue",
                         "thread_id": "thread-7",
                         "agent_runtime": "codex",
-                        "model": "gpt-5.6-sol",
+                        "model": "gpt-6-sol",
                         "effort": "high",
                     }
                 ),
@@ -267,7 +264,7 @@ class AgentChatBackendTests(unittest.TestCase):
             {
                 "message": "continue",
                 "agent_runtime": "codex",
-                "model": "gpt-5.6-sol",
+                "model": "gpt-6-sol",
                 "effort": "high",
             },
         )
@@ -279,7 +276,7 @@ class AgentChatBackendTests(unittest.TestCase):
         }
         saved = {
             "agent_runtime": "codex",
-            "model": "gpt-5.6-terra",
+            "model": "gpt-6-astra",
             "effort": "max",
         }
         with (
@@ -338,7 +335,7 @@ class AgentChatBackendTests(unittest.TestCase):
         request = {
             "input_message": "start",
             "agent_runtime": "codex",
-            "model": "gpt-5.6-sol",
+            "model": "gpt-6-sol",
             "effort": "max",
         }
         response = {
@@ -363,7 +360,7 @@ class AgentChatBackendTests(unittest.TestCase):
             {
                 "message": "start",
                 "agent_runtime": "codex",
-                "model": "gpt-5.6-sol",
+                "model": "gpt-6-sol",
                 "effort": "max",
             },
         )
@@ -639,7 +636,7 @@ class AgentChatBackendTests(unittest.TestCase):
                 {
                     "thread_id": "thread-1",
                     "agent_runtime": "codex",
-                    "model": "gpt-5.6-sol",
+                    "model": "gpt-6-sol",
                     "effort": "high",
                     "last_used_at": "2026-07-17T10:00:00Z",
                     "latest_event_seq": 12,
@@ -649,7 +646,7 @@ class AgentChatBackendTests(unittest.TestCase):
                 {
                     "thread_id": "thread-2",
                     "agent_runtime": "claude_code",
-                    "model": "claude-opus-5",
+                    "model": "claude-opus-5-5",
                     "effort": "max",
                     "last_used_at": "2026-07-17T09:00:00Z",
                     "status": "idle",
@@ -700,7 +697,7 @@ class AgentChatBackendTests(unittest.TestCase):
             "threads": [{
                 "thread_id": "thread-1",
                 "agent_runtime": "codex",
-                "model": "gpt-5.6-sol",
+                "model": "gpt-6-sol",
                 "effort": "high",
                 "last_used_at": "2026-07-17T10:00:00Z",
                 "status": "idle",
@@ -726,7 +723,7 @@ class AgentChatBackendTests(unittest.TestCase):
         transaction.__enter__.return_value = cursor
         active_row = (
             "schedule-7", "Morning review", 7, "codex",
-            "gpt-5.6-terra", "high", "2026-07-18T09:00:00Z",
+            "gpt-6-astra", "high", "2026-07-18T09:00:00Z",
             "2026-07-17T09:00:00Z",
         )
         cursor.fetchall.return_value = [active_row]
@@ -836,7 +833,7 @@ class AgentChatBackendTests(unittest.TestCase):
             "threads": [{
                 "thread_id": "thread-1",
                 "agent_runtime": "codex",
-                "model": "gpt-5.6-sol",
+                "model": "gpt-6-sol",
                 "effort": "high",
                 "last_used_at": "2026-07-17T10:00:00Z",
                 "status": "queued",

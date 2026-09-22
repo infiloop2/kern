@@ -26,7 +26,7 @@ from typing import Any, Iterator, Mapping, cast
 
 from host.param_guard import OutboundGuardService
 from host.runtime.core import host_errors, state
-from host.runtime.tools import assets as tool_assets
+from host.runtime.tools import approval_assessment, assets as tool_assets
 import host.tools
 from host.tools import (
     ActionExecuted,
@@ -335,6 +335,11 @@ class HostApprovals:
             raise ApprovalBackpressureError(
                 f"Too many pending tool approvals. Decide or deny existing approvals before queuing more."
             ) from exc
+        approval_assessment.schedule(
+            record,
+            action_description=spec.description,
+            data_policy=spec.data_policy,
+        )
         return _approval_record(record)
 
 

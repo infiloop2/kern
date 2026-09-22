@@ -14,12 +14,15 @@ APPROVAL_PAGE_SIZE = 10
 _APPROVAL_ROWS = """
     SELECT 'tool' AS kind, number::text AS item_key, number AS sequence, status,
            created_at AS created, COALESCE(NULLIF(decided_at, 0), created_at) AS updated,
-           jsonb_build_object(
+           jsonb_strip_nulls(jsonb_build_object(
                'tool_id', tool_id, 'action_id', action_id, 'summary', summary,
                'check_token', check_token, 'result', result,
-               'connection_id', connection_id, 'account_label', account_label
-           ) AS detail
-    FROM tool_approvals
+               'connection_id', connection_id, 'account_label', account_label,
+               'risk_scores', assessment.scores
+           )) AS detail
+    FROM tool_approvals AS approval
+    LEFT JOIN tool_approval_risk_assessments AS assessment
+      ON assessment.approval_number = approval.number
     UNION ALL
     SELECT 'github_push', id, NULL::bigint, status,
            EXTRACT(EPOCH FROM requested_at::timestamptz)::bigint,

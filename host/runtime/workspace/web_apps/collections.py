@@ -8,6 +8,7 @@ import re
 from typing import Any, Callable
 
 from host.runtime.core import db
+from host.runtime.workspace.web_apps import recovery
 from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.web_apps.data_shape import utf8_length as _utf8_length
 
@@ -392,6 +393,9 @@ def apply_collection_actions(
                         HTTPStatus.CONFLICT,
                         f"an app may retain at most {MAX_COLLECTIONS} collections",
                     )
+        recovery.record_collection_changes(
+            cur, app_id, collection, expected_revision + 1, operations,
+        )
         for name, row_id, stored_value, value_bytes in operations:
             if name == "delete":
                 cur.execute(

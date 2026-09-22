@@ -1961,7 +1961,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("systemctl enable --now kern-postgres.service", bootstrap)
         self.assertIn(
             "After=network-online.target kern-network-proxy.service kern-postgres.service "
-            "kern-tools.service kern-agent-network.service",
+            "kern-tools.service kern-host-inference.service kern-agent-network.service",
             bootstrap,
         )
         # Schema migrations and config seeding run as kern-admin, after
@@ -2100,6 +2100,16 @@ class DeployUnitTests(unittest.TestCase):
             "GitHub Actions runs them.",
             wrapper,
         )
+
+    def test_host_test_wrapper_selects_and_preflights_its_interpreter(self) -> None:
+        wrapper = Path("tests/scripts/test").read_text()
+        self.assertIn("KERN_TEST_PYTHON", wrapper)
+        self.assertNotIn("/mnt/kern-agent/agent-home", wrapper)
+        self.assertIn("KERN_TEST_PYTHON=/path/to/python", wrapper)
+        self.assertIn("sys.version_info >= (3, 11)", wrapper)
+        self.assertIn('hasattr(unittest.TestCase, "enterContext")', wrapper)
+        self.assertIn("import playwright.sync_api", wrapper)
+        self.assertIn('"$test_python" -m unittest', wrapper)
 
     def test_agent_scratch_is_reaped_after_abrupt_runtime_exit(self) -> None:
         bootstrap = render._render_bootstrap()
