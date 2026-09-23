@@ -20,7 +20,7 @@ behind the **host API**.
 agent / chat / MCP gateway
         │  action calls
         ▼
-host  (host API: credentials · secrets · config · approvals · staged assets)
+host  (host API: credentials · secrets · config · approvals · staged assets · costs)
         │  Tool.execute(action, input, api)
         ▼
 tool package
@@ -102,11 +102,13 @@ class ActionSpec:
     approval: ApprovalKind = "direct"
     returns_asset: bool = False             # the whole result is one streamed file
     input_protections: dict[str, InputProtection] = field(default_factory=dict)
+    cost_description: str = ""
 
 @dataclass(frozen=True)
 class ToolManifest:
     # ...identity, actions, connection, and operator-facing metadata...
     service: str = ""                       # optional trusted module:attribute
+    reports_cost: bool = False              # tool code can report USD charges
 
 @dataclass(frozen=True)
 class ConfigRequirement:
@@ -325,6 +327,8 @@ class HostAPI(Protocol):
     def assets(self) -> Assets: ...                     # opaque, tool-scoped staged bytes
     @property
     def outbound(self) -> Outbound: ...                 # request-parameter guard
+    @property
+    def costs(self) -> Costs: ...                       # call-scoped USD cost reporting
 ```
 
 Host implementations validate every argument: invalid types, formats, or
@@ -625,3 +629,50 @@ connections that still hold the older, broader grant.
    a label or event to change) still matches what was proposed. On any mismatch it
    fails and asks for a new approval, so the user never approves one thing and
    gets another.
+
+
+## Tool-reported costs
+
+`ToolManifest.reports_cost` declares whether the tool reports USD charges.
+Each action has `cost_description` metadata explaining its charges; reporting
+tools must describe every action, including free actions and actions whose
+cost cannot be calculated. The flag is published by `describe_tool` and the
+operator catalog, and action descriptions appear in the integration guide.
+False means **not tracked**, never implicitly free.
+
+Tool code owns all pricing and supplies one USD amount. The host has no price
+catalog and no actual-versus-estimate categories:
+
+```python
+api.costs.record("0.00015")
+api.costs.record("0.30", charge_id="provider-request:123")
+```
+
+Amounts are finite, nonnegative decimal strings with at most nine decimal
+places and less than 1 billion USD. The host stores integer nanodollars and
+binds every row to the executing
+tool, action, connection, execution id, origin thread, and optional approval id.
+`record` is available in both `execute` and `execute_approved`; OAuth setup has
+no action scope and cannot use it. Approval preparation can itself make paid
+reads; record those reads when they happen. Merely requesting, denying, or
+expiring an approval does not create a charge. Record charges before result
+normalization so a later tool failure does not erase incurred spend.
+
+The optional `charge_id` is 1–256 ASCII letters/digits or `_.:/-`. It deduplicates
+within the tool across calls and connections. Tool code must namespace it by
+provider account/app when ids are not globally unique. Without it, one id per
+execution is used; approved execution uses its stable approval id. Multiple
+billable operations in one execution must use distinct ids. A known amount is
+immutable: recording its id again cannot add or overwrite a charge.
+The host advances a UTC-day counter for the tool and action in the same
+transaction as a newly inserted charge. Duplicate charge IDs leave the counter
+unchanged; the Tools month-to-date total sums daily counters instead of
+scanning the ledger.
+
+Only report a dollar amount; if a tool cannot calculate it, it reports nothing.
+There are no pending records or settlement states. Failed storage writes produce
+Host diagnostics and do not turn completed provider
+work into a retryable tool failure. No paid call is retried by accounting.
+Historical charge rows are retained independently of tool audit retention;
+changes to tool pricing affect future reports only. No historical backfill is
+performed.

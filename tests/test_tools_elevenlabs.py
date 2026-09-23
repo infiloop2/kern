@@ -67,13 +67,14 @@ class ElevenLabsTests(unittest.TestCase):
     def test_design_preview_and_save_voice_flow(self):
         description = "A warm storyteller with a soft, expressive voice."
         preview = {"previews": [{"generated_voice_id": "preview_1", "audio_base_64": "ignored", "preview_url": "https://untrusted.test"}], "text": "An audition."}
-        with patch.object(el, "json_request", return_value=preview) as request:
+        with patch.object(el, "json_request_with_headers", return_value=(preview, {"character-cost": "42"})) as request:
             result = self.tool.execute("design_voice", {"voice_description": description}, self.api)
         self.assertEqual(result.result, {"generated_voice_ids": ["preview_1"], "text": "An audition."})
+        self.assertEqual(self.api.costs.calls[0], ("0.008400000", ""))
         assert_matches_output_schema(self, el.MANIFEST, "design_voice", result)
         self.assertEqual(request.call_args.args, ("POST", el.API_ROOT + "/v1/text-to-voice/design?output_format=mp3_44100_128"))
         self.assertEqual(request.call_args.kwargs["body"], {"voice_description": description, "model_id": "eleven_ttv_v3", "auto_generate_text": True, "stream_previews": True})
-        with patch.object(el, "json_request", return_value=preview) as request:
+        with patch.object(el, "json_request_with_headers", return_value=(preview, {"character-cost": "42"})) as request:
             self.tool.execute("design_voice", {"voice_description": description, "text": "An expressive audition. " * 8, "should_enhance": True}, self.api)
         self.assertFalse(request.call_args.kwargs["body"]["auto_generate_text"])
         self.assertTrue(request.call_args.kwargs["body"]["should_enhance"])
@@ -131,12 +132,13 @@ class ElevenLabsTests(unittest.TestCase):
             ("save_voice", {"generated_voice_id": "preview", "name": "", "voice_description": "A warm and expressive storyteller."}),
             ("save_voice", {"generated_voice_id": "preview", "name": "Narrator", "voice_description": "short"}),
         ]
-        with patch.object(el, "open_response_stream") as request, patch.object(el, "json_request") as query:
+        with patch.object(el, "open_response_stream") as request, patch.object(el, "json_request") as query, patch.object(el, "json_request_with_headers") as design:
             for action, values in cases:
                 with self.subTest(action=action, values=values):
                     self.assertIsInstance(self.tool.execute(action, values, self.api), ActionFailed)
             request.assert_not_called()
             query.assert_not_called()
+            design.assert_not_called()
 
     def test_guard_covers_scripts_prompts_search_and_nested_section_text(self):
         secret = "contact person@example.com"
@@ -154,12 +156,13 @@ class ElevenLabsTests(unittest.TestCase):
             ("save_voice", {"generated_voice_id": "preview", "name": secret, "voice_description": "A warm and expressive storyteller."}),
             ("save_voice", {"generated_voice_id": "preview", "name": "Narrator", "voice_description": secret}),
         ]
-        with patch.object(el, "open_response_stream") as request, patch.object(el, "json_request") as query:
+        with patch.object(el, "open_response_stream") as request, patch.object(el, "json_request") as query, patch.object(el, "json_request_with_headers") as design:
             for action, values in cases:
                 with self.subTest(action=action, values=values):
                     self.assertIsInstance(self.tool.execute(action, values, self.api), ActionFailed)
             request.assert_not_called()
             query.assert_not_called()
+            design.assert_not_called()
 
     def test_chunked_audio_invalid_types_and_size_bound(self):
         for raw, media in ((b"<html>error</html>", "audio/mpeg"), (MP3, "text/html"), (MP3, "audio/mpeg")):

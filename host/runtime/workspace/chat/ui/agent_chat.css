@@ -127,6 +127,7 @@ button.thread-item.selected { background: var(--surface-3); }
 }
 
 .thread-dot.running { animation: pulse 1.4s ease infinite; }
+.thread-dot.error { background: var(--danger); }
 
 .thread-meta {
   color: var(--text-dim);

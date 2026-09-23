@@ -7,7 +7,7 @@ import json
 import re
 from typing import Any
 
-from host.runtime.host_inference import json_contract, provider_http
+from host.runtime.host_inference import json_contract, provider_http, redaction
 
 ENDPOINT = "https://api.openai.com/v1/chat/completions"
 TIMEOUT_SECONDS = 20
@@ -44,7 +44,9 @@ def _request_bytes(method: str, url: str, **kwargs: Any) -> bytes:
 
 
 def _json_bytes(value: Any) -> bytes:
-    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False
+    ).encode("utf-8")
 
 
 def complete(
@@ -74,9 +76,10 @@ def complete(
                 "role": "system",
                 "content": "Return a JSON object that matches the supplied schema.",
             },
-            {"role": "user", "content": prompt},
+            {"role": "user", "content": redaction.redact_text(prompt)},
         ],
         "max_completion_tokens": MAX_OUTPUT_TOKENS,
+        "reasoning_effort": "none",
         "response_format": {
             "type": "json_schema",
             "json_schema": {"name": schema_name, "strict": True, "schema": schema},

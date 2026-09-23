@@ -26,7 +26,7 @@ MAX_MESSAGE_BYTES = 50_000
 
 
 def send_agent_message(body: Any, sender_thread_id: str | None) -> dict[str, Any]:
-    _require_sender_identity(sender_thread_id)
+    sender_thread_id = _require_sender_identity(sender_thread_id)
     if not isinstance(body, dict) or set(body) != {"thread_id", "message"}:
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "send_agent_message requires exactly thread_id and message")
     target = body["thread_id"]
@@ -40,12 +40,15 @@ def send_agent_message(body: Any, sender_thread_id: str | None) -> dict[str, Any
     if len(message) > MAX_MESSAGE_CHARS:
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "message must be at most 10000 characters")
     content = MESSAGE_HEADER.format(sender=sender_thread_id) + message
-    return deliver_message(target, {"message": content})
+    return deliver_message(
+        target, {"message": content},
+        peer_sender_thread_id=sender_thread_id,
+    )
 
 
 def spawn_agent(body: Any, sender_thread_id: str | None) -> dict[str, Any]:
     """Create one Chat thread and admit its delegated first message."""
-    _require_sender_identity(sender_thread_id)
+    sender_thread_id = _require_sender_identity(sender_thread_id)
     required = {"message", "agent_runtime", "model", "effort"}
     if not isinstance(body, dict) or set(body) != required:
         raise WorkspaceError(
@@ -66,12 +69,15 @@ def spawn_agent(body: Any, sender_thread_id: str | None) -> dict[str, Any]:
     if error is not None:
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, error)
     assert isinstance(model, str) and isinstance(effort, str)
-    response = chat.send_chat_message({
-        "input_message": MESSAGE_HEADER.format(sender=sender_thread_id) + message,
-        "agent_runtime": runtime,
-        "model": model,
-        "effort": effort,
-    })
+    response = chat.send_chat_message(
+        {
+            "input_message": MESSAGE_HEADER.format(sender=sender_thread_id) + message,
+            "agent_runtime": runtime,
+            "model": model,
+            "effort": effort,
+        },
+        peer_sender_thread_id=sender_thread_id,
+    )
     thread_id = response.get("thread_id")
     if (
         response.get("action") != "accepted"
@@ -82,12 +88,15 @@ def spawn_agent(body: Any, sender_thread_id: str | None) -> dict[str, Any]:
     return {"status": "accepted", "thread_id": thread_id}
 
 
-def _require_sender_identity(sender_thread_id: str | None) -> None:
+def _require_sender_identity(sender_thread_id: str | None) -> str:
     if sender_thread_id is None or not THREAD_ID_RE.fullmatch(sender_thread_id):
         raise WorkspaceError(HTTPStatus.CONFLICT, "agent thread identity is unavailable")
+    return sender_thread_id
 
 
-def deliver_message(thread_id: str, body: Any) -> dict[str, Any]:
+def deliver_message(
+    thread_id: str, body: Any, *, peer_sender_thread_id: str | None = None,
+) -> dict[str, Any]:
     """Send agent correspondence or a Kern notice to an eligible existing thread."""
     if not isinstance(thread_id, str) or not THREAD_ID_RE.fullmatch(thread_id):
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "thread_id must identify an existing App, Chat, or Schedule")
@@ -133,8 +142,10 @@ def deliver_message(thread_id: str, body: Any) -> dict[str, Any]:
                 raise WorkspaceError(HTTPStatus.NOT_FOUND, "chat thread not found")
             if row[0]:
                 raise WorkspaceError(HTTPStatus.CONFLICT, "archived chats cannot receive agent messages")
-        response = call_admin_api("POST", f"/v1/threads/{thread_id}/messages",
-                                  {"message": message, **settings})
+        host_request: dict[str, Any] = {"message": message, **settings}
+        if peer_sender_thread_id is not None:
+            host_request["peer_sender_thread_id"] = peer_sender_thread_id
+        response = call_admin_api("POST", f"/v1/threads/{thread_id}/messages", host_request)
         if response.get("status") != "accepted":
             raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid send status")
     return {"status": "accepted", "thread_id": thread_id}

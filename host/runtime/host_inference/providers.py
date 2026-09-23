@@ -19,7 +19,9 @@ JudgmentAdapter = Callable[..., dict[str, Any]]
 
 # Models are reviewed host implementation details. A feature names its purpose;
 # the operator never has to choose a model or coordinate model changes.
-OPENAI_MODEL_BY_PURPOSE = {"swarm_status": "gpt-5.6-luna"}
+OPENAI_MODEL_BY_PURPOSE = {
+    "swarm_task": "gpt-6-luna",
+}
 TYPESAFE_JEV_MODEL = "jev-latest"
 
 

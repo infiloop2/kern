@@ -10,6 +10,15 @@ import { renderIntegrationAccounts, setBedrockCredentialMetadata } from "./netwo
 let latestRuntimes = [];
 let latestAccounts = [];
 let latestHostInferenceProviders = [];
+let latestToolUsage = null;
+let toolUsageStale = false;
+
+async function loadToolUsage() {
+  try {
+    latestToolUsage = await api("GET", "/v1/tools/usage");
+    toolUsageStale = false;
+  } catch (_error) { toolUsageStale = true; }
+}
 
 export function providerAccounts() {
   return latestAccounts;
@@ -165,6 +174,7 @@ export async function refreshProviderAccounts() {
     api("GET", "/v1/agent-runtime/account"),
     api("GET", "/v1/agent-runtime/bedrock-credentials"),
     api("GET", "/v1/host-inference/providers").catch(() => null),
+    loadToolUsage(),
   ]);
   setBedrockCredentialMetadata(bedrockCredentials);
   if (Array.isArray(hostInference?.providers)) latestHostInferenceProviders = hostInference.providers;
@@ -181,18 +191,19 @@ export async function refreshProviderUsage() {
   const [response, hostInference] = await Promise.all([
     api("POST", "/v1/agent-runtime/refresh", {}),
     api("GET", "/v1/host-inference/providers").catch(() => null),
+    loadToolUsage(),
   ]);
   if (Array.isArray(hostInference?.providers)) latestHostInferenceProviders = hostInference.providers;
   renderProviderAccounts(response);
   await refreshHealth();
 }
 
-// The top bar exposes the two provider families as separate compact menus. One
+// The top bar exposes provider families and tool spend as compact menus. One
 // shared value makes them mutually exclusive and survives the 5-second render.
 let expandedOverviewGroup = null;
 
 export function toggleRuntimeOverview(group) {
-  if (group !== "runtimes" && group !== "host-ai") return;
+  if (!["runtimes", "host-ai", "tools"].includes(group)) return;
   expandedOverviewGroup = expandedOverviewGroup === group ? null : group;
   applyOverviewExpanded();
   // Opening runs the existing hard provider refresh. There is no second refresh
@@ -247,6 +258,8 @@ function renderRuntimeOverview() {
     ? `${running} agent turn${running === 1 ? "" : "s"} running`
     : "All agent runtimes idle";
   const hostAi = hostInferenceGroupSummary();
+  const toolSpend = latestToolUsage ? `${formatToolCost(toolCostUnits(latestToolUsage.month_to_date))} MTD` : "Unavailable";
+  const toolStatus = toolUsageStale ? " · stale" : "";
   setHtml(container, `
     <div class="runtime-overview-group" data-overview-group="runtimes">
       <button class="runtime-overview-toggle" data-action="toggle-runtime-overview" data-overview-group="runtimes" aria-expanded="${expandedOverviewGroup === "runtimes"}" aria-controls="runtime-overview-runtimes-panel" aria-label="Agent runtimes: ${esc(summaryLabel)}. Show provider status and usage">
@@ -267,6 +280,14 @@ function renderRuntimeOverview() {
       <div class="runtime-overview-panel" id="runtime-overview-host-ai-panel">
         ${hostAiBoxes}
       </div>
+    </div>
+    <div class="runtime-overview-group" data-overview-group="tools">
+      <button class="runtime-overview-toggle" data-action="toggle-runtime-overview" data-overview-group="tools" aria-expanded="${expandedOverviewGroup === "tools"}" aria-controls="runtime-overview-tools-panel" aria-label="Tools: ${esc(toolSpend + toolStatus)}. Show reported tool spend">
+        <span class="rot-icon" aria-hidden="true"><svg width="16" height="16" viewBox="0 0 20 20"><path d="m10 2 7 4v8l-7 4-7-4V6l7-4Zm-7 4 7 4 7-4M10 10v8" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg></span>
+        <span class="rot-copy"><span class="rot-label">Tools</span><span class="rot-summary">${esc(toolSpend)}</span></span>
+        <span class="rot-chevron" aria-hidden="true"><svg width="14" height="14" viewBox="0 0 20 20"><path d="m5.5 8 4.5 4.5L14.5 8" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></span>
+      </button>
+      <div class="runtime-overview-panel" id="runtime-overview-tools-panel">${toolUsagePanel()}</div>
     </div>`);
   applyOverviewExpanded();
 }
@@ -415,6 +436,18 @@ function formatHostInferenceCost(amount, currency = "$") {
   return `${currency}${formatted}`;
 }
 
+function toolCostUnits(value) {
+  const [whole, fraction = ""] = String(value).split(".");
+  return BigInt(whole) * 1000000000n + BigInt((fraction + "000000000").slice(0, 9));
+}
+
+function formatToolCost(units) {
+  if (units === 0n) return "$0.00";
+  const whole = units / 1000000000n;
+  const fraction = String(units % 1000000000n).padStart(9, "0").replace(/0+$/, "");
+  return `$${whole}${fraction ? `.${fraction}` : ""}`;
+}
+
 function hostInferenceGroupSummary() {
   const amounts = latestHostInferenceProviders
     .map(provider => Number(provider?.usage?.month_to_date))
@@ -427,7 +460,9 @@ function hostInferenceGroupSummary() {
 
 function hostInferenceSummary(providerName, label, guideId) {
   const provider = latestHostInferenceProviders.find(entry => entry.provider === providerName) || {};
-  const status = provider.enabled ? "active" : provider.configured ? "configured" : "disabled";
+  const missingKey = provider.enabled && !provider.configured;
+  const status = missingKey ? "API key not set"
+    : provider.enabled ? "active" : provider.configured ? "configured" : "disabled";
   const usage = hostInferenceUsage(provider);
   const usageHtml = hostInferenceUsageReadout(usage);
   let usageSummaryText = "no metered usage yet";
@@ -442,7 +477,7 @@ function hostInferenceSummary(providerName, label, guideId) {
   }
   const inner = `
         <span class="runtime-summary-name">
-          <span class="runtime-status-dot ${esc(status)}" aria-hidden="true"></span>
+          <span class="runtime-status-dot ${missingKey ? "missing-key" : esc(status)}" aria-hidden="true"></span>
           <span class="runtime-summary-copy">
             <span>${esc(label)}</span>
             <span class="runtime-state">${esc(status)}</span>
@@ -451,6 +486,22 @@ function hostInferenceSummary(providerName, label, guideId) {
         <span class="runtime-usage">${usageHtml}</span>`;
   return `
       <button class="runtime-summary runtime-summary-metered runtime-summary-host-inference" data-action="open-provider" data-provider="${esc(guideId)}" aria-label="${esc(`${label}: ${status}; ${usageSummaryText}. Open provider settings`)}">${inner}</button>`;
+}
+
+function toolUsagePanel() {
+  if (!latestToolUsage) return '<p class="tool-spend-note">Tool spend is unavailable. Reopen to retry.</p>';
+  const totals = tool => toolCostUnits(tool.month_to_date);
+  const tools = [...(latestToolUsage.tools || [])];
+  tools.sort((a, b) => totals(a) === totals(b) ? a.display_name.localeCompare(b.display_name) : totals(a) > totals(b) ? -1 : 1);
+  const cards = tools.map(tool => {
+    const value = formatToolCost(totals(tool));
+    const detail = !tool.enabled ? "Disabled" : totals(tool) > 0n ? "Reported spend" : "Reporting costs";
+    return `<button class="runtime-summary runtime-summary-metered tool-spend-card" data-action="open-provider" data-provider="tool:${esc(tool.tool_id)}" aria-label="${esc(`${tool.display_name}: ${value} month-to-date; ${detail}. Open integration guide`)}">
+      <span class="runtime-summary-name"><span class="runtime-summary-copy"><span>${esc(tool.display_name)}</span><span class="runtime-state">${esc(detail)}</span></span></span>
+      <span class="runtime-usage"><span class="runtime-stat runtime-stat-cost"><span class="runtime-stat-value">${esc(value)}</span><span class="runtime-stat-label">MTD</span></span></span>
+    </button>`;
+  }).join("");
+  return `<p class="tool-spend-note">Reported spend · USD · This month (UTC)${toolUsageStale ? " · Refresh failed; showing previous figures" : ""}</p>${cards}`;
 }
 
 function usageWindows(account) {

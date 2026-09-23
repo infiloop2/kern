@@ -488,7 +488,7 @@ export const HOST_INFERENCE_INTEGRATIONS = {
     apiKeyPlaceholder: "sk-...",
     featureSettings: [],
     label: "OpenAI API",
-    summary: "Connect OpenAI for Kern host features that use its API.",
+    summary: "Name agent tasks with an operator supplied OpenAI API key.",
     protections: [
       "The key stays encrypted in host state and is used only by the dedicated kern-host-inference service. Agents and agent-facing tools cannot read it or call this provider.",
       "Kern chooses the OpenAI model separately for each host feature. There is no operator-wide model setting that can silently change every feature at once.",
@@ -497,8 +497,11 @@ export const HOST_INFERENCE_INTEGRATIONS = {
       { title: "Create an API key", description: "Create a project API key at platform.openai.com. This is separate from the ChatGPT account used by Codex." },
       { title: "Save the API key", description: "On Home, open OpenAI API under Host AI inference, enter the key, and choose Save API key. Saving the key does not enable the connection." },
       { title: "Enable when ready", description: "Choose Enable separately when you are ready to let supported Kern Host AI features use this connection." },
+      { title: "Check Swarm", description: "New turns receive short task titles when this connection is enabled. Without it, Task stays unavailable." },
     ],
-    capabilities: [],
+    capabilities: [
+      { name: "Swarm task titles", description: "Names each new agent task." },
+    ],
     dataSummary: {
       items: [
         {
@@ -553,6 +556,7 @@ export const HOST_INFERENCE_INTEGRATIONS = {
     ],
     capabilities: [
       { name: "Approval risk annotations", description: "Scores likely financial commitments, sensitive data, and summary mismatches on new tool approval requests. The operator still makes every decision." },
+      { name: "Swarm human-input assessment", description: "Assesses whether the latest completed agent turn needs human input. This is advisory and never changes approvals." },
       { name: "Memory recall reranking", description: "Ranks candidate memory page descriptions before recall when TypeSafe Jev is enabled." },
     ],
     dataSummary: {

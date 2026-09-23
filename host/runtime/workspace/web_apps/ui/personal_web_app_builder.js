@@ -5,7 +5,7 @@ const MAX_WORKER_MESSAGES_PER_SECOND = 100;
 const MAX_WORKER_MESSAGES_PER_TURN = 128;
 const MAX_WORKER_MUTATIONS_PER_TURN = 16;
 const WORKER_START_TIMEOUT_MS = 15 * 1000;
-// One end-to-end deadline, including worker startup and host requests.
+// App code has one end-to-end deadline after the trusted browser broker loads.
 const WORKER_TURN_TIMEOUT_MS = 5000;
 const RUNTIME_REPORT_MAX_BYTES = 400;
 const MAX_COMPOSER_MESSAGE_BYTES = 50_000;
@@ -1102,11 +1102,16 @@ function queueGeneratedEvent(pendingEvent) {
 
 class SandboxedCapabilityWorker {
   constructor(source) {
-    this.listeners = { message: new Set(), error: new Set() };
+    this.listeners = { message: new Set(), error: new Set(), "broker-ready": new Set() };
     this.bridge = new Worker("/workspace/capability-worker-sandbox.js");
     this.bridge.addEventListener("message", event => {
       const message = event.data;
       if (!message || typeof message !== "object") return;
+      if (message.type === "capability-worker-ready") {
+        this.dispatch("broker-ready");
+        this.bridge.postMessage({ type: "create", source });
+        return;
+      }
       if (message.type === "capability-worker-message") this.dispatch("message", message.data);
       if (message.type === "capability-worker-error") this.dispatch("error", message);
     });
@@ -1114,7 +1119,6 @@ class SandboxedCapabilityWorker {
       event.preventDefault();
       this.dispatch("error", { reason: "worker-create" });
     });
-    this.bridge.postMessage({ type: "create", source });
   }
 
   addEventListener(type, listener) {
@@ -1220,9 +1224,13 @@ function armCapabilityWorker() {
       worker.terminate();
     }
   };
-  // Creating the worker may wait for the isolated sandbox iframe to finish
-  // loading. Keep that startup bounded separately from generated execution.
+  // Broker loading is browser work; App code gets its own shorter deadline.
   armed.timer = setTimeout(discard, WORKER_START_TIMEOUT_MS);
+  worker.addEventListener("broker-ready", () => {
+    if (armedWorker !== armed || armed.run) return;
+    clearTimeout(armed.timer);
+    armed.timer = setTimeout(discard, WORKER_TURN_TIMEOUT_MS);
+  });
   worker.addEventListener("error", event => {
     event.preventDefault();
     if (armed.run) armed.run.finish("error");
@@ -1292,7 +1300,7 @@ async function runCapabilityWorker(pendingEvent = null) {
     data: app.data,
     dataMode: app.data_mode || null,
     revision: app.revision,
-    state: armed ? "event" : "starting",
+    state: armed ? "event" : "broker-starting",
     event: pendingEvent,
     count: 0,
     totalMessages: 0,
@@ -1320,9 +1328,15 @@ async function runCapabilityWorker(pendingEvent = null) {
       if (current && (reason === "timeout" || reason === "error")) {
         recordRuntimeReport(this, reason, stage);
       }
-      if (current && reason === "timeout" && stage === "starting") {
+      if (current && reason === "timeout" && stage === "broker-starting") {
         showRuntimeStatus(
-          "This app could not start its isolated renderer. Refresh and try again.",
+          "This browser could not start the app sandbox in time. Refresh and try again.",
+          "error",
+          true,
+        );
+      } else if (current && reason === "timeout" && stage === "starting") {
+        showRuntimeStatus(
+          "The app worker did not initialize within 5 seconds. Refresh and try again.",
           "error",
           true,
         );
@@ -1362,7 +1376,7 @@ async function runCapabilityWorker(pendingEvent = null) {
         }
         const queued = queuedGeneratedEvent;
         queuedGeneratedEvent = null;
-        const startupFailure = stage === "starting" || stage === "worker-create";
+        const startupFailure = ["broker-starting", "starting", "worker-create"].includes(stage);
         if (queued && queued.appId === selectedAppId && !startupFailure) {
           setTimeout(() => {
             if (!workerRun && selectedAppId === queued.appId && !appWritesBlocked()) {
@@ -1381,7 +1395,10 @@ async function runCapabilityWorker(pendingEvent = null) {
     },
   };
   workerRun = run;
-  run.timer = setTimeout(() => run.finish("timeout"), WORKER_TURN_TIMEOUT_MS);
+  run.timer = setTimeout(
+    () => run.finish("timeout"),
+    armed ? WORKER_TURN_TIMEOUT_MS : WORKER_START_TIMEOUT_MS,
+  );
   if (armed) {
     clearTimeout(armed.timer);
     armed.run = run;
@@ -1393,6 +1410,13 @@ async function runCapabilityWorker(pendingEvent = null) {
   worker.addEventListener("error", event => {
     event.preventDefault();
     run.finish("error", event.reason);
+  });
+  worker.addEventListener("broker-ready", () => {
+    if (run.finished || workerRun !== run) return;
+    run.state = "starting";
+    run.startedAt = performance.now();
+    clearTimeout(run.timer);
+    run.timer = setTimeout(() => run.finish("timeout"), WORKER_TURN_TIMEOUT_MS);
   });
   worker.addEventListener("message", event => handleWorkerMessage(run, event.data));
 }
@@ -1424,7 +1448,8 @@ function describeTurn(run) {
 }
 
 const RUNTIME_FAILURE_STAGES = Object.freeze({
-  starting: "could not start its renderer",
+  "broker-starting": "could not start the browser sandbox",
+  starting: "app worker did not initialize",
   "worker-create": "could not start the browser sandbox",
   "data-load": "could not load its data",
   "load-handler": "failed inside app.onLoad",
@@ -1438,7 +1463,8 @@ function recordRuntimeReport(run, reason, stage) {
     ? `action "${String(run.event.action).replace(/[^\w-]/g, "").slice(0, 64)}"`
     : "startup";
   let outcome;
-  if (reason === "timeout" && stage === "starting") outcome = "could not start its renderer in time";
+  if (reason === "timeout" && stage === "broker-starting") outcome = "browser sandbox did not start in time";
+  else if (reason === "timeout" && stage === "starting") outcome = "app worker did not initialize in time";
   else if (reason === "timeout" && stage === "data-load") outcome = `was stopped while loading data after ${describeTurn(run)}`;
   else if (reason === "timeout") outcome = `was stopped after ${describeTurn(run)}`;
   else outcome = RUNTIME_FAILURE_STAGES[stage] || `failed (${String(stage).slice(0, 32)})`;

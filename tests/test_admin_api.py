@@ -2481,7 +2481,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(self.request("GET", "/v1/threads/thread-t1/events")[1]["events"], [])
         self.assertEqual(self.request("GET", "/v1/threads/thread-t2/events")[1]["events"], [])
 
-    def test_eleventh_concurrent_turn_per_runtime_is_rejected_with_429(self) -> None:
+    def test_fifty_first_concurrent_turn_per_runtime_is_rejected_with_429(self) -> None:
         save_policy(
             {"network_integrations": {"openai": {"enabled": True}, "claude": {"enabled": True}}},
             "2026-06-08T00:00:00Z",
@@ -2504,15 +2504,15 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
             with self.assertRaises(urllib.error.HTTPError) as error:
                 self.request(
-                    "POST", "/v1/threads/thread-t11/messages", {"message": "go"}
+                    "POST", "/v1/threads/thread-t51/messages", {"message": "go"}
                 )
             self.assertEqual(error.exception.code, 429)
             self.assertIn(
-                "already running 10 concurrent threads; retry when one finishes",
+                "already running 50 concurrent threads; retry when one finishes",
                 error.exception.read().decode(),
             )
             # The rejection rolled everything back: no thread, no events.
-            _, events = self.request("GET", "/v1/threads/thread-t11/events")
+            _, events = self.request("GET", "/v1/threads/thread-t51/events")
             self.assertEqual(events["events"], [])
 
             # Capacity is per runtime: Claude Code still has its own pool.
@@ -3159,7 +3159,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "last_used_at",
                 "status",
                 "latest_event_seq",
+                "latest_event_type",
                 "latest_message_seq",
+                "task",
             },
         )
 
@@ -3650,7 +3652,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('ADMIN_UI_DIR / "favicon.svg"', api)
         self.assertIn('ADMIN_UI_DIR / "manifest.webmanifest"', api)
         self.assertIn('ADMIN_UI_DIR / "service-worker.js"', api)
-        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 4)
+        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 5)
         self.assertNotIn('id="tab-processes"', html)
         self.assertNotIn('id="tab-host-diagnostics"', html)
         self.assertIn('data-action="open-home-view" data-view="processes"', html)
@@ -3926,6 +3928,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                     "model": "gpt-6-astra",
                     "effort": "high",
                 },
+                None,
             )
         self.assertEqual(direct_call.exception.status, HTTPStatus.BAD_REQUEST)
 

@@ -51,7 +51,8 @@ class AgentMessageTests(unittest.TestCase):
         self.assertIn('Sender thread: thread-1', body["message"])
         self.assertIn('not the operator', body["message"])
         self.assertTrue(body["message"].endswith("Please review the draft."))
-        self.assertEqual(set(body), {"message", "agent_runtime", "model", "effort"})
+        self.assertEqual(set(body), {"message", "agent_runtime", "model", "effort", "peer_sender_thread_id"})
+        self.assertEqual(body["peer_sender_thread_id"], "thread-1")
 
     def test_spawn_agent_creates_a_chat_with_delegation_and_reply_instructions(self):
         with patch.object(
@@ -80,6 +81,7 @@ class AgentMessageTests(unittest.TestCase):
         )
         self.assertIn("send_agent_message", request["input_message"])
         self.assertTrue(request["input_message"].endswith("Review the draft."))
+        self.assertEqual(send.call_args.kwargs["peer_sender_thread_id"], "thread-1")
 
     def test_spawn_agent_rejects_bad_identity_shape_message_and_configuration(self):
         cases = [
@@ -130,7 +132,8 @@ class AgentMessageTests(unittest.TestCase):
         ) as post:
             agent_messages.send_agent_message({"thread_id": "thread-1", "message": "Review complete."}, sender_thread_id="app-2")
         self.assertEqual(post.call_args.args[1], "/v1/threads/thread-1/messages")
-        self.assertEqual(set(post.call_args.args[2]), {"message"})
+        self.assertEqual(set(post.call_args.args[2]), {"message", "peer_sender_thread_id"})
+        self.assertEqual(post.call_args.args[2]["peer_sender_thread_id"], "app-2")
         self.assertIn("Sender thread: app-2", post.call_args.args[2]["message"])
 
     def test_runtime_error_is_returned_without_retry(self):

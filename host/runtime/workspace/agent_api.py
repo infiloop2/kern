@@ -34,14 +34,28 @@ from host.runtime.workspace.web_apps import backend as web_apps
 AGENT_PEER_USER = "kern-agent"
 MAX_REQUEST_BODY_BYTES = 256 * 1024
 MAX_RESPONSE_BODY_BYTES = MAX_WORKSPACE_RESPONSE_BODY_BYTES
-MAX_CONCURRENT_CALLS = 8
-MAX_CONCURRENT_CONNECTIONS = 16
+MAX_CONCURRENT_CALLS = 64
+MAX_CONCURRENT_CONNECTIONS = 128
+MAX_CONCURRENT_LARGE_RESPONSES = 8
 ALLOWED_METHODS = frozenset({"GET", "POST", "PUT", "DELETE"})
 AGENT_PATH_RE = re.compile(
     r"^/agent/[A-Za-z0-9._~/-]{0,512}(?:\?[A-Za-z0-9._~=&%+-]{0,512})?$"
 )
 _CALL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CALLS)
+_LARGE_RESPONSE_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_LARGE_RESPONSES)
 PROC_ROOT = Path("/proc")
+
+
+def _may_return_large_response(path: Any) -> bool:
+    # These routes return fixed-size identity/status objects or a single memory
+    # page (capped at 2,000 content characters). All other routes retain the
+    # 24 MiB response allowance and must reserve aggregate response capacity.
+    return not isinstance(path, str) or path.split("?", 1)[0] not in {
+        "/agent/identity",
+        "/agent/self/memory",
+        "/agent/messages",
+        "/agent/agents",
+    }
 
 
 def agent_peer_uids() -> frozenset[int]:
@@ -165,6 +179,7 @@ class AgentWorkspaceRequestHandler(UnixSocketRequestHandler):
                 {"error": "Too many concurrent Workspace calls."},
             )
             return
+        large_response_slot = False
         try:
             request = self.read_json_object_body(length)
             if request is None:
@@ -175,6 +190,14 @@ class AgentWorkspaceRequestHandler(UnixSocketRequestHandler):
                     {"error": "Request has unsupported fields."},
                 )
                 return
+            if _may_return_large_response(request.get("path")):
+                if not _LARGE_RESPONSE_SLOTS.acquire(blocking=False):
+                    self._send_json(
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                        {"error": "Too many concurrent large Workspace responses."},
+                    )
+                    return
+                large_response_slot = True
             try:
                 result = dispatch_call(
                     request.get("method"),
@@ -198,6 +221,8 @@ class AgentWorkspaceRequestHandler(UnixSocketRequestHandler):
                 return
             self._send_json(HTTPStatus.OK, result)
         finally:
+            if large_response_slot:
+                _LARGE_RESPONSE_SLOTS.release()
             _CALL_SLOTS.release()
 
 

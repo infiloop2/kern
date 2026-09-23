@@ -143,6 +143,7 @@ function toolGuide(tool) {
       codeName: true,
       description: action.description,
       approval: action.approval,
+      costDescription: action.cost_description || "",
       inputSchema: action.input_schema || {},
       inputProtections: action.input_protections || {},
       outputSchema: action.output_schema || {},
@@ -368,6 +369,7 @@ function renderCapability(capability) {
     <div class="guide-capability">
       <div class="guide-capability-head"><h4>${capability.codeName ? `<code>${esc(capability.name)}</code>` : esc(capability.name)}</h4>${approval}</div>
       <p>${esc(capability.description)}</p>
+      ${capability.codeName ? `<p class="muted guide-action-cost"><strong>Cost:</strong> ${esc(capability.costDescription || "Not tracked.")}</p>` : ""}
       ${renderActionContract(capability)}
       ${capability.linkUrl ? `<a href="${esc(capability.linkUrl)}" target="_blank" rel="noopener noreferrer">${esc(capability.linkLabel)}</a>` : ""}
     </div>`;

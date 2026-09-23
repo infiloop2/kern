@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
 import re
 import urllib.parse
 from dataclasses import dataclass
@@ -105,6 +106,7 @@ OUTPUT_SCHEMA: JSONObject = outputs.obj(
 
 MANIFEST = ToolManifest(
     tool_id="twitterapi_io",
+    reports_cost=True,
     display_name="TwitterAPI.io",
     description=(
         "Search public X posts through the independent TwitterAPI.io service. "
@@ -114,6 +116,7 @@ MANIFEST = ToolManifest(
     actions=protect_inputs((
         ActionSpec(
             id="search_tweets",
+            cost_description="$0.00015 per provider-returned post, with a one-post minimum per call. Local filtering and max_results do not reduce the charge.",
             description=(
                 "Run one bounded public-post search using X advanced-search syntax. "
                 "Accepts queries up to 512 characters, defaults to the last seven days, and "
@@ -631,6 +634,8 @@ class TwitterApiIoTool(Tool):
         try:
             request = _search_request(tool_input, api)
             response = _search(api.config["TWITTERAPI_IO_API_KEY"], request.parameters)
+            raw_posts = response.get("tweets")
+            api.costs.record(str(Decimal("0.00015") * max(1, len(raw_posts) if isinstance(raw_posts, list) else 1)))
             posts, provider_posts, filtered, truncated = _normalized_posts(
                 response,
                 max_results=request.max_results,

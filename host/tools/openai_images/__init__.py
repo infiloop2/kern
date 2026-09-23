@@ -22,6 +22,7 @@ import binascii
 from contextlib import contextmanager
 import io
 import json
+from decimal import Decimal
 import re
 import secrets
 from typing import Iterator, cast
@@ -130,6 +131,7 @@ OPENAI_IMAGE_POLICY = (
 
 
 MANIFEST = ToolManifest(
+    reports_cost=True,
     tool_id="openai_images",
     display_name="OpenAI Image Generation",
     description=(
@@ -139,7 +141,7 @@ MANIFEST = ToolManifest(
     connection="enable_only",
     actions=protect_inputs((
         ActionSpec(
-            id="generate_image",
+            id="generate_image", cost_description='Reports token-based USD when OpenAI returns sufficient usage detail. Uses standard input rates, so cached input discounts can make the bill lower. Otherwise no cost is reported.',
             description=(
                 "Generate one image with OpenAI's GPT Image models and save it under "
                 "/tool_assets in the agent workspace; the result is the durable file path, "
@@ -640,6 +642,19 @@ class OpenAIImagesTool:
             api_key = api.config["OPENAI_API_KEY"]
             headers = {"authorization": f"Bearer {api_key}"}
             response, consumed, output_format = _generate(api, headers, tool_input)
+            usage = response.get("usage")
+            if isinstance(usage, dict):
+                inputs = usage.get("input_tokens_details")
+                outputs = usage.get("output_tokens_details")
+                if isinstance(inputs, dict):
+                    image_in = inputs.get("image_tokens")
+                    text_in = inputs.get("text_tokens")
+                    image_out = outputs.get("image_tokens") if isinstance(outputs, dict) else usage.get("output_tokens")
+                    if all(isinstance(n, int) and not isinstance(n, bool) and 0 <= n <= 100_000_000
+                           for n in (image_in, text_in, image_out)):
+                        amount = (Decimal(cast(int, image_in)) * 8 + Decimal(cast(int, text_in)) * 5
+                                  + Decimal(cast(int, image_out)) * 30) / 1_000_000
+                        api.costs.record(str(amount))
             raw = _image_bytes(response, output_format)
             # Consume the staged inputs only once OpenAI has returned a usable
             # image: a failed or malformed response leaves them available for a

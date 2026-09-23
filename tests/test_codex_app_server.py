@@ -138,7 +138,8 @@ for line in sys.stdin:
     elif method == "turn/start":
         send({"id": msg["id"], "result": {"turn": {"id": "turn_1"}}})
         send({"method": "item/completed", "params": {"item": {
-            "type": "agentMessage", "text": "The task is almost done."
+            "type": "agentMessage", "phase": "final_answer",
+            "text": "First final answer."
         }}})
         send({"method": "item/started", "params": {"item": {
             "id": "message_2", "type": "agentMessage", "phase": "final_answer"
@@ -166,6 +167,67 @@ for line in sys.stdin:
         send({"method": "item/completed", "params": {"item": {
             "type": "agentMessage", "phase": "commentary",
             "text": "I'll run the tests."
+        }}})
+        send({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
+"""
+
+
+FAKE_FINAL_THEN_ACTIVITY_SERVER = r"""
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"id": msg["id"], "result": {}})
+    elif method == "thread/start":
+        send({"id": msg["id"], "result": {"thread": {"id": "thread_1"}}})
+    elif method == "turn/start":
+        send({"id": msg["id"], "result": {"turn": {"id": "turn_1"}}})
+        send({"method": "item/completed", "params": {"item": {
+            "type": "agentMessage", "phase": "final_answer", "text": "Done"
+        }}})
+        send({"method": "item/started", "params": {"item": {
+            "id": "subagent-completed-1", "type": "subAgentActivity",
+            "kind": "completed", "agentThreadId": "agent-1"
+        }}})
+        send({"method": "item/completed", "params": {"item": {
+            "id": "subagent-completed-1", "type": "subAgentActivity",
+            "kind": "completed", "agentThreadId": "agent-1"
+        }}})
+        send({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
+"""
+
+
+FAKE_FINAL_THEN_COMMAND_SERVER = r"""
+import json, sys
+
+def send(obj):
+    sys.stdout.write(json.dumps(obj) + "\n")
+    sys.stdout.flush()
+
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"id": msg["id"], "result": {}})
+    elif method == "thread/start":
+        send({"id": msg["id"], "result": {"thread": {"id": "thread_1"}}})
+    elif method == "turn/start":
+        send({"id": msg["id"], "result": {"turn": {"id": "turn_1"}}})
+        send({"method": "item/completed", "params": {"item": {
+            "type": "agentMessage", "phase": "final_answer", "text": "Done"
+        }}})
+        send({"method": "item/started", "params": {"item": {
+            "id": "command_1", "type": "commandExecution", "command": "pytest"
+        }}})
+        send({"method": "item/completed", "params": {"item": {
+            "id": "command_1", "type": "commandExecution", "command": "pytest",
+            "aggregatedOutput": "1 passed", "exitCode": 0
         }}})
         send({"method": "turn/completed", "params": {"turn": {"status": "completed"}}})
 """
@@ -1226,7 +1288,7 @@ class CodexAppServerTests(unittest.TestCase):
                     messages.append,
                 )
 
-        self.assertEqual(messages, ["The task is almost done."])
+        self.assertEqual(messages, ["First final answer."])
 
     def test_run_turn_rejects_explicit_commentary_as_final_response(self) -> None:
         messages: list[str | dict[str, object]] = []
@@ -1247,6 +1309,48 @@ class CodexAppServerTests(unittest.TestCase):
                 )
 
         self.assertEqual(messages, ["I'll run the tests."])
+
+    def test_run_turn_keeps_explicit_final_before_trailing_activity(self) -> None:
+        messages: list[str | dict[str, object]] = []
+        with CodexAppServer(
+            [sys.executable, "-u", "-c", FAKE_FINAL_THEN_ACTIVITY_SERVER]
+        ) as server:
+            thread_id, output = run_turn(
+                server,
+                "do the task",
+                None,
+                "gpt-6-sol",
+                "high",
+                messages.append,
+            )
+
+        self.assertEqual(thread_id, "thread_1")
+        self.assertEqual(output, "Done")
+        self.assertEqual(messages[0], "Done")
+        self.assertEqual(len(messages), 3)
+        self.assertTrue(all(isinstance(message, dict) for message in messages[1:]))
+
+    def test_run_turn_invalidates_explicit_final_before_later_command(self) -> None:
+        messages: list[str | dict[str, object]] = []
+        with CodexAppServer(
+            [sys.executable, "-u", "-c", FAKE_FINAL_THEN_COMMAND_SERVER]
+        ) as server:
+            with self.assertRaisesRegex(
+                CodexAppServerError,
+                "completed without a final response",
+            ):
+                run_turn(
+                    server,
+                    "do the task",
+                    None,
+                    "gpt-6-sol",
+                    "high",
+                    messages.append,
+                )
+
+        self.assertEqual(messages[0], "Done")
+        self.assertEqual(len(messages), 3)
+        self.assertTrue(all(isinstance(message, dict) for message in messages[1:]))
 
     def test_killed_turn_still_exposes_the_last_known_thread_id(self) -> None:
         # Regression test: run_turn's local thread_id is known immediately

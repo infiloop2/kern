@@ -19,9 +19,11 @@ from host.tools.results import (
     ApprovalExecuted, ApprovalResult, OpenedStreamingAsset, StreamingAsset,
 )
 from host.tools.shared.inputs import clip_text
+from host.tools.shared.cost_reporting import report_provider_usd
 from host.tools.shared.web import WebRequestError, request_bytes
 from host.tools.tool import Tool
 from .manifest import MANIFEST
+from . import pricing
 
 ORIGIN = "https://api.apify.com/v2"
 MAX_RESPONSE = 2 * 1024 * 1024
@@ -314,6 +316,8 @@ def _validate(action: str, values: dict[str, Any], api: HostAPI) -> dict[str, An
             values[key] = _string(values[key], key, maximum)
             if SECRET_RE.search(values[key]) or api.config["APIFY_API_TOKEN"] in values[key]:
                 raise ValueError("Listing text must not contain API credentials.")
+    if action == "set_monetization":
+        values = pricing.validate(values, lambda text: _guard_text(text, api))
     if action == "search_store":
         values["query"] = _string(values.get("query", ""), "query", 160, empty=True)
         _guard_text(values["query"], api)
@@ -421,7 +425,7 @@ def _failure(exc: Exception) -> ActionFailed:
             return ActionFailed("Apify rate or account limits reached. No request was retried.")
         if exc.status == 402:
             return ActionFailed("Apify requires sufficient account credit or billing setup.")
-        return ActionFailed("Apify request failed; a mutation may already have executed. Reconcile Actors/builds/runs before retrying.")
+        return ActionFailed("Apify request failed; a mutation may already have executed. Reconcile Actors/builds/runs and get_monetization for pricing writes before retrying.")
     if isinstance(exc, (ValueError, RuntimeError)):
         return ActionFailed(str(exc))
     return ActionFailed("Apify Developer request failed.")
@@ -445,6 +449,10 @@ class ApifyDeveloperTool(Tool):
             if action == "get_actor":
                 return _executed({"actor": _actor_result(_actor(api, values["actor_id"])), "metrics_scope": SCOPE}, api)
             account = _account(api)
+            if action == "get_monetization":
+                actor = _actor(api, values["actor_id"], account)
+                return _executed({"actor_id": values["actor_id"], "pricing_json": _json(pricing.history(actor)).decode("ascii"),
+                    "picture_url": _text(actor.get("pictureUrl"), 2048)}, api)
             if action == "get_account_usage":
                 usage = _object(_request(api, "GET", "/users/me/usage/monthly"))
                 limits = _object(_request(api, "GET", "/users/me/limits"))
@@ -466,7 +474,12 @@ class ApifyDeveloperTool(Tool):
                 return _executed(_page(data, values, _actor_result, SCOPE, account), api)
             if action in ("get_build", "get_run"):
                 kind = "build" if action == "get_build" else "run"
-                return _executed({kind: _job_result(_job(api, kind, values[kind + "_id"], account))}, api)
+                job_id = values[kind + "_id"]
+                job = _job(api, kind, job_id, account)
+                charge_id = f"{kind}:{job_id}"
+                if job.get("finishedAt"):
+                    report_provider_usd(api, job.get("usageTotalUsd"), charge_id=charge_id)
+                return _executed({kind: _job_result(job)}, api)
             if action in ("list_builds", "list_runs"):
                 _actor(api, values["actor_id"], account)
                 suffix = "builds" if action == "list_builds" else "runs"
@@ -520,6 +533,14 @@ class ApifyDeveloperTool(Tool):
             elif action != "create_actor":
                 actor = _actor(api, values["actor_id"], account)
                 target = values["actor_id"]
+                if action == "set_monetization":
+                    # The approval also reaches the configured risk assessor.
+                    # Include only the new record, never raw provider history.
+                    # The listing digest binds the unchanged history locally.
+                    payload["pricing_entry"] = pricing.proposal(actor, values)["pricingInfos"][-1]
+                    if len(_json(payload)) > 48 * 1024:
+                        raise ValueError("Pricing proposal exceeds the approval size limit.")
+                    payload["listing_digest"] = _digest(_listing_state(actor))
                 if action == "create_version":
                     versions = actor.get("versions", [])
                     if not isinstance(versions, list) or any(isinstance(v, dict) and v.get("versionNumber") == values["version"] for v in versions):
@@ -537,6 +558,10 @@ class ApifyDeveloperTool(Tool):
                     _release(api, values, account)
                     payload["listing_digest"] = _digest(_listing_state(actor))
             summary = f"Apify {action} on {target} in account {account}."
+            if action == "set_monetization":
+                summary += (f" Schedule PAY_PER_EVENT from {values['effective_at']}. Prices in payload are USD per SINGLE event. "
+                            f"Minimum permitted run budget ${values['minimum_run_budget_usd']}; not a minimum charge. "
+                            "Review every event and preserved history. No publication, run or payout changes.")
             if action == "create_actor":
                 summary += f" Name: {values['name']}. Private, limited permissions."
             if action == "create_version":
@@ -581,9 +606,32 @@ class ApifyDeveloperTool(Tool):
                     "build": number, "timeout": values["timeout_seconds"], "memory": values["memory_mb"],
                     "maxTotalChargeUsd": values["max_charge_usd"], "restartOnError": "false",
                     "forcePermissionLevel": "LIMITED_PERMISSIONS", "waitForFinish": 0}))
-                return ApprovalExecuted("Started Apify run " + _id(run.get("id")) + f" for Actor {actor_id}. Inspect its final status before publishing.")
+                run_id = _id(run.get("id"))
+                if run.get("finishedAt"):
+                    report_provider_usd(api, run.get("usageTotalUsd"), charge_id="run:" + run_id)
+                return ApprovalExecuted("Started Apify run " + run_id + f" for Actor {actor_id}. Inspect its final status before publishing.")
             actor_id = values["actor_id"]
             actor = _actor(api, actor_id, account)
+            if action == "set_monetization":
+                if payload.get("listing_digest") != _digest(_listing_state(actor)):
+                    raise ValueError("Actor listing or pricing changed after approval; queue a new approval.")
+                entry = _object(payload.get("pricing_entry"))
+                # Rebuild the proposal from current history and validated input;
+                # retain the reviewed creation timestamp rather than changing it.
+                body = pricing.proposal(actor, values)
+                created = entry.get("createdAt")
+                pricing.timestamp(created)
+                body["pricingInfos"][-1]["createdAt"] = created
+                if entry != body["pricingInfos"][-1]:
+                    raise ValueError("Pricing approval payload differs from the reviewed inputs.")
+                _request(api, "PUT", f"/actors/{actor_id}", body=body)
+                try:
+                    saved = _actor(api, actor_id, account)
+                    if not pricing.verified(saved, body):
+                        raise ValueError("Pricing readback differs.")
+                except Exception:
+                    return ActionFailed("Pricing write completed but readback was unavailable or different. Use get_monetization and Console to reconcile; do not repeat the write.")
+                return ApprovalExecuted(f"Verified scheduled pay-per-event pricing for Apify Actor {actor_id} from {values['effective_at']}. No publication or run started; paid billing is not verified.")
             if action == "create_version":
                 # POST is create-only; an existing version must fail at the provider as well.
                 versions = actor.get("versions", [])
@@ -599,7 +647,10 @@ class ApifyDeveloperTool(Tool):
                 if not isinstance(tag, str) or not re.fullmatch(r"kern-candidate-[a-f0-9]{15}", tag):
                     raise ValueError("Invalid candidate build tag.")
                 build = _object(_request(api, "POST", f"/actors/{actor_id}/builds", params={"version": values["version"], "tag": tag, "useCache": "false", "waitForFinish": 0}))
-                return ApprovalExecuted("Started Apify build " + _id(build.get("id")) + f" for Actor {actor_id}. Inspect its final status before running.")
+                build_id = _id(build.get("id"))
+                if build.get("finishedAt"):
+                    report_provider_usd(api, build.get("usageTotalUsd"), charge_id="build:" + build_id)
+                return ApprovalExecuted("Started Apify build " + build_id + f" for Actor {actor_id}. Inspect its final status before running.")
             if action == "set_latest_build" and actor.get("isPublic") is not False:
                 raise ValueError("Setting latest without publication requires a private Actor.")
             if action in ("set_latest_build", "publish_actor"):

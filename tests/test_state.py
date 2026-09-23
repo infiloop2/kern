@@ -247,12 +247,15 @@ class StateStorageTests(unittest.TestCase):
                 "last_used_at": "2026-06-08T00:00:01Z",
                 "status": "idle",
                 "latest_event_seq": latest_event_seq,
+                "latest_event_type": "thread.activity",
                 "latest_message_seq": latest_message_seq,
+                "task": None,
             },
         )
         # A never-used thread reads as an empty last_used_at, not None.
         self.assertEqual(summaries["thread-t2"]["last_used_at"], "")
         self.assertEqual(summaries["thread-t2"]["latest_event_seq"], 0)
+        self.assertIsNone(summaries["thread-t2"]["latest_event_type"])
         self.assertEqual(summaries["thread-t2"]["latest_message_seq"], 0)
         self.assertEqual(summaries["thread-t2"]["agent_runtime"], "claude_code")
         self.assertEqual(
@@ -260,6 +263,18 @@ class StateStorageTests(unittest.TestCase):
             (latest_event_seq, latest_message_seq),
         )
         self.assertEqual(state.latest_thread_event_seqs("thread-t2"), (0, 0))
+
+    def test_thread_summary_tracks_latest_error_until_next_event(self) -> None:
+        with state.mutation() as cur:
+            seed_thread(cur, "thread-t1", last_used_at="2026-06-08T00:00:01Z")
+            state.append_agent_event(cur, "thread.error", "thread-t1", {"error_message": "failed"})
+        self.assertEqual(state.page_thread_summaries(None, 1)[0]["latest_event_type"], "thread.error")
+
+        with state.mutation() as cur:
+            state.append_agent_event(
+                cur, "thread.message", "thread-t1", {"message": "retry", "source": "user"}
+            )
+        self.assertEqual(state.page_thread_summaries(None, 1)[0]["latest_event_type"], "thread.message")
 
     def test_thread_summary_pages_use_stable_sort_key_and_prefix_filter(self) -> None:
         with state.mutation() as cur:
@@ -1892,15 +1907,41 @@ class BedrockUsageCounterTests(unittest.TestCase):
         self.assertEqual(state.read_bedrock_usage("1970-01-01")[0]["requests"], 8)
 
 
+class HostInferenceProviderStateTests(unittest.TestCase):
+    def setUp(self) -> None:
+        pg_harness.reset_database()
+
+    def test_enablement_is_independent_of_the_saved_key(self) -> None:
+        enabled = state.configure_host_inference_provider("openai", enabled=True)
+        self.assertEqual((enabled["enabled"], enabled["configured"]), (True, False))
+        self.assertTrue(state.host_inference_provider_is_enabled("openai"))
+        # Host features see nothing until the key is saved as well.
+        self.assertIsNone(state.enabled_host_inference_provider("openai"))
+        state.configure_host_inference_provider("openai", api_key="sk-test")
+        self.assertEqual(state.enabled_host_inference_provider("openai")["api_key"], "sk-test")
+
+
 class HostInferenceUsageCounterTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
 
+    def test_only_current_models_are_accepted_by_writer_and_database(self) -> None:
+        for model in ("gpt-5.6-luna", "other"):
+            with self.subTest(model=model):
+                with self.assertRaisesRegex(ValueError, "unknown host inference usage model"):
+                    state.record_host_inference_usage("openai", model, None, None)
+                with self.assertRaises(pgclient.Error):
+                    with state.mutation() as cur:
+                        cur.execute(
+                            "INSERT INTO host_inference_usage (provider, model, day)"
+                            " VALUES ('openai', %s, CURRENT_DATE)", (model,),
+                        )
+
     def test_measured_and_priced_gaps_remain_visible(self) -> None:
         usage = {"input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 4}
-        state.record_host_inference_usage("openai", "gpt-5.6-luna", usage, 0.00002)
-        state.record_host_inference_usage("openai", "gpt-5.6-luna", usage, None)
-        state.record_host_inference_usage("openai", "gpt-5.6-luna", None, None)
+        state.record_host_inference_usage("openai", "gpt-6-luna", usage, 0.00002)
+        state.record_host_inference_usage("openai", "gpt-6-luna", usage, None)
+        state.record_host_inference_usage("openai", "gpt-6-luna", None, None)
         total = state.host_inference_usage("openai", "1970-01-01")
         self.assertEqual(total["requests"], 3)
         self.assertEqual(total["measured_requests"], 2)

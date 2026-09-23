@@ -74,7 +74,7 @@ MAX_IMAGE_BODY_BYTES = tool_assets.MAX_IMAGE_BYTES
 # Tool calls block a handler thread on third-party requests (30s timeouts in
 # most packages, minutes for a synchronous image render), so cap concurrency
 # instead of letting a runaway agent stack threads.
-MAX_CONCURRENT_CALLS = 8
+MAX_CONCURRENT_CALLS = 32
 _CALL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CALLS)
 _UPLOAD_SLOTS = threading.BoundedSemaphore(2)
 _MEDIA_SLOTS = threading.BoundedSemaphore(2)
@@ -195,6 +195,7 @@ def _list_bundled_tools(tool_input: Any) -> dict[str, Any]:
             "description": manifest.description,
             "connection": manifest.connection,
             "enabled": tool_id in enabled,
+            "reports_cost": manifest.reports_cost,
         }
         if requested is not None:
             actions: list[dict[str, Any]] = []
@@ -261,6 +262,7 @@ def _describe_tool(tool_input: Any) -> dict[str, Any]:
             "tool_id": tool_id,
             "display_name": manifest.display_name,
             "enabled": tool_id in state.enabled_tool_ids(),
+            "reports_cost": manifest.reports_cost,
             "agent_notes": manifest.agent_notes,
             **(
                 {"connected_accounts": state.tool_connections(tool_id)}
@@ -273,6 +275,7 @@ def _describe_tool(tool_input: Any) -> dict[str, Any]:
                     "description": spec.description,
                     "approval": spec.approval,
                     "input_schema": spec.input_schema,
+                    "cost_description": spec.cost_description,
                     "input_protections": {name: asdict(protection) for name, protection in spec.input_protections.items()},
                     **({"output_schema": spec.output_schema} if spec.output_schema else {}),
                 }

@@ -32,7 +32,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 from http import HTTPStatus
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from http.server import BaseHTTPRequestHandler
 import json
 import math
 import os
@@ -49,6 +49,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from host.config import AGENT_RUNTIMES, ConfigError, parse_network_controls
 from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES, PROXY_PORT
 from host.runtime.admin_api import xai_video_storage
+from host.runtime.admin_api.request_server import BoundedThreadingHTTPServer, MAX_CONCURRENT_REQUESTS
 from host.network_integrations.bedrock.manifest import SUPPORTED_REGIONS as BEDROCK_REGIONS
 from host.network_integrations.github.push_gate import pending as github_pending_push
 from host.runtime.admin_api import approval_outcomes
@@ -368,9 +369,8 @@ OAUTH_LOGIN_LOCK = threading.Lock()
 # Per-connection read timeout (request line, headers, and body) so a slow client
 # cannot hold a worker thread open indefinitely, and a cap on concurrent worker
 # threads so a flood of connections cannot exhaust host memory or threads;
-# excess connections wait in the listen backlog.
+# excess connections receive a bounded busy response.
 REQUEST_TIMEOUT_SECONDS = 30
-MAX_CONCURRENT_REQUESTS = 32
 # A login body is a tiny JSON object; cap it far below the general request limit.
 LOGIN_MAX_BODY_BYTES = 4096
 
@@ -408,6 +408,9 @@ class Handler(BaseHTTPRequestHandler):
     def _handle(self, method: str) -> None:
         try:
             path = urlparse(self.path)
+            server = getattr(self, "server", None)
+            if isinstance(server, BoundedThreadingHTTPServer):
+                server.describe_request(method, path.path)
             # Classify the request once, before static assets or auth routes.
             # The resulting immutable context owns every SSH-forward/public
             # distinction used below. Its hostname loader is not called for the
@@ -966,6 +969,7 @@ class _RouteRequest(NamedTuple):
     query: dict[str, list[str]]
     body: Any
     path_match: re.Match[str] | None
+    principal: RoutePrincipal
 
     def capture(self, group: int) -> str:
         """A capture from this route's path pattern. Only pattern routes have
@@ -1005,6 +1009,27 @@ def _route_matches(entry: _Route, method: str, path: str) -> tuple[bool, re.Matc
 
 def _workspace_proxy_route(request: _RouteRequest) -> Any:
     return workspace_proxy.route_request(request.method, request.path, request.query, request.body)
+
+
+def _thread_route_request(request: _RouteRequest) -> Any:
+    peer_sender_thread_id = None
+    if request.method == "POST" and request.path.endswith("/messages") \
+            and isinstance(request.body, dict) and "peer_sender_thread_id" in request.body:
+        if not isinstance(request.principal, WorkspacePrincipal):
+            raise ApiError(HTTPStatus.FORBIDDEN, "peer sender metadata requires the Workspace service")
+        peer_sender_thread_id = request.body["peer_sender_thread_id"]
+        if (not isinstance(peer_sender_thread_id, str)
+                or PRODUCT_THREAD_ID_RE.fullmatch(peer_sender_thread_id) is None):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid peer sender")
+    return thread_route(request.method, request.path, request.query, request.body,
+                        peer_sender_thread_id)
+
+
+def _swarm_route(request: _RouteRequest) -> dict[str, Any]:
+    search = _one(request.query, "q") or ""
+    if len(search) > 100:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "swarm search must be at most 100 characters")
+    return state.swarm_snapshot(search)
 
 
 def _agent_accounts_route(request: _RouteRequest) -> dict[str, Any]:
@@ -1168,7 +1193,7 @@ _ROUTES: tuple[_Route, ...] = (
     _Route(
         None,
         re.compile(r"/v1/threads/.*"),
-        lambda request: thread_route(request.method, request.path, request.query, request.body),
+        _thread_route_request,
     ),
     _Route(
         "GET",
@@ -1183,6 +1208,20 @@ _ROUTES: tuple[_Route, ...] = (
         operator_only=True,
         query_keys=frozenset({"view", "page"}),
         query_label="approval list",
+    ),
+    _Route(
+        "GET", "/v1/swarm",
+        _swarm_route,
+        operator_only=True,
+        query_keys=frozenset({"q"}),
+        query_label="swarm snapshot",
+    ),
+    _Route(
+        "GET", "/v1/swarm/peer-messages",
+        lambda request: state.swarm_peer_messages(),
+        operator_only=True,
+        query_keys=frozenset(),
+        query_label="swarm peer messages",
     ),
     _Route("GET", "/v1/network/policy", lambda request: network_policy.network_policy_response()),
     _Route("PUT", "/v1/network/policy", lambda request: replace_network_policy(request.body)),
@@ -1301,7 +1340,7 @@ def route(
             raise ApiError(HTTPStatus.FORBIDDEN, "Workspace service route is not allowed")
         if entry.query_keys is not None:
             _reject_query_keys(query, entry.query_keys, entry.query_label)
-        return entry.handler(_RouteRequest(method, path, query, body, path_match))
+        return entry.handler(_RouteRequest(method, path, query, body, path_match, principal))
     raise ApiError(HTTPStatus.NOT_FOUND, "route not found")
 
 
@@ -1357,17 +1396,15 @@ def replace_host_inference_provider(provider: str, body: Any) -> dict[str, Any]:
         or any(not isinstance(key, str) or not isinstance(value, bool) for key, value in features.items())
     ):
         raise ApiError(HTTPStatus.BAD_REQUEST, "features must contain exactly the provider's boolean feature settings")
-    if enabled is True and api_key is None and not current["configured"]:
-        raise ApiError(HTTPStatus.CONFLICT, "Save an API key before enabling this provider")
-    try:
-        configured = state.configure_host_inference_provider(
-            provider,
-            enabled=enabled,
-            api_key=api_key,
-            features=features,
-        )
-    except state.HostInferenceCredentialRequiredError as exc:
-        raise ApiError(HTTPStatus.CONFLICT, str(exc)) from None
+    # Enablement is independent of the key, like tool config: a provider
+    # without a saved key stays unusable because host features read it only
+    # through enabled_host_inference_provider, which requires both.
+    configured = state.configure_host_inference_provider(
+        provider,
+        enabled=enabled,
+        api_key=api_key,
+        features=features,
+    )
     return {"provider": configured}
 
 
@@ -1902,33 +1939,6 @@ def initialize_state() -> None:
                 run_number=run_number,
             )
 
-
-class BoundedThreadingHTTPServer(ThreadingHTTPServer):
-    """A threading server that caps concurrent worker threads with a semaphore
-    so a flood of connections cannot exhaust host memory or threads; excess
-    connections wait in the listen backlog until a slot frees."""
-
-    daemon_threads = True
-
-    def __init__(self, *args: Any, max_workers: int = MAX_CONCURRENT_REQUESTS, **kwargs: Any) -> None:
-        super().__init__(*args, **kwargs)
-        self._request_slots = threading.BoundedSemaphore(max_workers)
-
-    def process_request(self, request: Any, client_address: Any) -> None:
-        # Runs on the accept loop: block here when at capacity so new
-        # connections queue in the backlog instead of spawning unbounded threads.
-        self._request_slots.acquire()
-        try:
-            super().process_request(request, client_address)
-        except BaseException:
-            self._request_slots.release()
-            raise
-
-    def process_request_thread(self, request: Any, client_address: Any) -> None:
-        try:
-            super().process_request_thread(request, client_address)
-        finally:
-            self._request_slots.release()
 
 
 def main() -> int:

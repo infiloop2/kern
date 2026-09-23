@@ -49,17 +49,17 @@
 | Thread Group | Process | Purpose |
 | --- | --- | --- |
 | HTTP handler threads | admin API | One per concurrent API request. Mutations use state transactions and run slow helper calls outside the state lock. |
-| Tools socket handler threads | tools service | One per agent tool call (and per delegated operator operation), bounded by a concurrency cap; tool packages run their third-party requests on these threads. |
+| Tools socket handler threads | tools service | One per agent tool call (and per delegated operator operation), with 32 concurrent agent calls; tool packages run their third-party requests on these threads. Media uploads retain their separate two-call limit. |
 | Host-inference socket handler threads | host-inference service | One per admin or Workspace provider call, with service-wide connection/call caps, bounded payloads and adapter-specific network-inactivity timeouts. |
-| Network-introspection socket handler threads | agent-network service | One per local request, bounded by a concurrency cap; calls perform read-only policy or denial queries. |
-| Workspace agent socket handler threads | Workspace service | Peer-authenticated before allocation, with separate connection and active-call caps; calls use bounded explicit Workspace routes. |
+| Network-introspection socket handler threads | agent-network service | One per local request, with 64 active-call slots; calls perform read-only policy or denial queries. |
+| Workspace agent socket handler threads | Workspace service | Peer-authenticated before allocation, with 128 connection slots and 64 active-call slots; calls use bounded explicit Workspace routes. |
 | Maintenance thread | admin API | Periodically prunes bounded state and event history. |
 | Embedding index thread | admin API | Sends bounded missing-message batches to the local encoder and commits derived vectors between inference calls. |
 | Embedding request loop | embedding service | Handles one bounded query or passage batch at a time; systemd activates it on demand and it exits after five idle minutes. The unit runs one inference thread at nice level 10 with `CPUWeight=25`, `IOWeight=25`, `MemoryMax=1G`, and `TasksMax=64`, so indexing yields to the Workspace and host control plane under contention. |
 | Journal follower | host-diagnostics collector | Follows new trusted-unit `KERN_HOST_DIAGNOSTIC=1` records without a replay cursor. |
 | Runtime status poller | admin API/orchestrator | Rechecks provider health, including Hermes's Bedrock connection. |
-| Turn threads | admin API/orchestrator | One daemon thread per admitted turn; at most ten turns run per runtime, and a message past that cap is rejected rather than queued. Each turn spawns and closes its own runtime process. |
-| Proxy handler threads | network proxy | One per proxied connection, capped so buffered request bodies cannot exhaust memory. |
+| Turn threads | admin API/orchestrator | One daemon thread per admitted turn; at most fifty turns run per runtime, and a message past that cap is rejected rather than queued. Each turn spawns and closes its own runtime process. |
+| Proxy handler threads | network proxy | One per proxied connection, capped at 1024. Four slots bound large request bodies and WebSocket messages; 64 separate slots bound Bedrock response meters to 4 MiB each. |
 | Proxy certificate lock users | network proxy | Serialize per-host certificate generation so concurrent TLS CONNECTs do not race on cert files. |
 
 Agent runtimes are spawned through fixed sudo helpers that demote them to

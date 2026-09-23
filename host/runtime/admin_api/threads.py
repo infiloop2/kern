@@ -119,6 +119,7 @@ def thread_route(
     path: str,
     query: dict[str, list[str]],
     body: Any,
+    peer_sender_thread_id: str | None,
 ) -> Any:
     parts = path.strip("/").split("/")
     if len(parts) < 3 or not PRODUCT_THREAD_ID_RE.fullmatch(parts[2]):
@@ -129,7 +130,7 @@ def thread_route(
             raise ApiError(HTTPStatus.BAD_REQUEST, "thread detail does not accept query parameters")
         return {"thread": get_thread(thread_id)}
     if len(parts) == 4 and parts[3] == "messages" and method == "POST":
-        return send_thread_message(thread_id, body)
+        return send_thread_message(thread_id, body, peer_sender_thread_id)
     if len(parts) == 4 and parts[3] == "stop" and method == "POST":
         return stop_thread(thread_id)
     if len(parts) == 4 and parts[3] == "clear-memory" and method == "POST":
@@ -214,6 +215,7 @@ def _account_response_metadata(account: dict[str, Any], runtime_type: str) -> di
 def send_thread_message(
     thread_id: str,
     body: Any,
+    peer_sender_thread_id: str | None,
 ) -> dict[str, Any]:
     """Start or steer one turn through the ordinary thread path."""
     if PRODUCT_THREAD_ID_RE.fullmatch(thread_id) is None:
@@ -234,7 +236,7 @@ def send_thread_message(
             session_config, agent_runtime, model, effort
         )
         if not switching_session and orchestrator.steer_live_turn(
-            thread_id, agent_runtime, message
+            thread_id, agent_runtime, message, peer_sender_thread_id=peer_sender_thread_id
         ):
             turn = None
             provider_session_id = None
@@ -335,6 +337,7 @@ def send_thread_message(
                     effort,
                     message,
                     pre_message_activity=session_change_activity,
+                    peer_sender_thread_id=peer_sender_thread_id,
                 )
                 # Persist alongside admission: rejected turns leave no notices.
                 # These are display events, excluded from future history handoffs.

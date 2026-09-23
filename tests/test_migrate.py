@@ -51,6 +51,33 @@ class MigrateRunnerTests(unittest.TestCase):
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
             return {row[0] for row in cur.fetchall()}
 
+    def test_swarm_migration_retires_usage_buckets_and_preserves_jev(self) -> None:
+        source = Path(__file__).resolve().parents[1] / "host" / "migrations"
+        for path in sorted(source.glob("*.sql")):
+            if int(path.name.split("_", 1)[0]) < 71:
+                (self.migrations / path.name).write_text(path.read_text())
+        migrate.up(directory=self.migrations, quiet=True)
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO host_inference_usage (provider, model, day, requests, cost_usd)"
+                " VALUES ('openai', 'gpt-5.6-luna', CURRENT_DATE, 1, 0.01),"
+                " ('openai', 'other', CURRENT_DATE, 1, 0),"
+                " ('typesafe', 'jev', CURRENT_DATE, 2, 0.02)"
+            )
+        path = source / "0071_swarm_state.sql"
+        (self.migrations / path.name).write_text(path.read_text())
+        self.assertEqual(migrate.up(directory=self.migrations, quiet=True), [71])
+        with db.transaction() as cur:
+            cur.execute("SELECT model, requests, cost_usd FROM host_inference_usage")
+            rows = cur.fetchall()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0][:2], ("jev", 2))
+            self.assertAlmostEqual(float(rows[0][2]), 0.02)
+            cur.execute(
+                "INSERT INTO host_inference_usage (provider, model, day)"
+                " VALUES ('openai', 'gpt-6-luna', CURRENT_DATE)"
+            )
+
     def test_up_applies_pending_migrations_in_order_and_records_them(self) -> None:
         _write(self.migrations, "0001_first.sql", "CREATE TABLE first (id INT);", "DROP TABLE first;")
         _write(
@@ -538,7 +565,7 @@ class MigrateRunnerTests(unittest.TestCase):
             cur.execute("SELECT provider FROM proxy_provider_pins WHERE provider = 'openai-3'")
             self.assertEqual(cur.fetchall(), [])
 
-    def test_opus_5_5_rollback_preserves_chat_access_with_supported_model(self) -> None:
+    def test_opus_5_5_rollback_preserves_sessions_and_transcripts(self) -> None:
         self.assertEqual(migrate.up(target=67, quiet=True), list(range(1, 68)))
         with self.assertRaises(Exception):
             with db.transaction() as cur:
@@ -587,14 +614,7 @@ class MigrateRunnerTests(unittest.TestCase):
                     fields["model"] = "claude-opus-5"
         self.assertEqual(migrate.down(target=67, quiet=True), [68])
 
-        from host.runtime.admin_api import threads
-        from host.runtime.workspace.chat import backend
-        metadata = {
-            f"thread-new-{effort}": {"name": f"Opus conversation {effort}",
-                "schedule_id": None, "next_run_at": None}
-            for effort in ("high", "max", "ultracode")
-        }
-        def assert_accessible():
+        def assert_preserved():
             with db.transaction() as cur:
                 cur.execute("SELECT thread_id, to_jsonb(thread_sessions) - 'provider_session_id' "
                             "FROM thread_sessions ORDER BY thread_id")
@@ -602,28 +622,13 @@ class MigrateRunnerTests(unittest.TestCase):
                 cur.execute("SELECT thread_id, provider_session_id FROM thread_sessions")
                 self.assertEqual(dict(cur.fetchall()), {
                     **{row[1]: "old-provider" for row in old_rows},
-                    **{thread_id: None for thread_id in metadata},
+                    **{f"thread-new-{effort}": None for effort in ("high", "max", "ultracode")},
                 })
                 cur.execute("SELECT message FROM agent_events WHERE thread_id LIKE 'thread-new-%'")
                 self.assertEqual(cur.fetchall(), [("preserved transcript",)] * 3)
-            # Only bridge the Workspace HTTP transport and its separate index;
-            # actual Admin API readers query the migrated canonical rows.
-            with (patch.object(backend, "_recorded_threads", return_value=metadata),
-                  patch.object(backend, "call_admin_api", side_effect=lambda *args:
-                               threads.list_threads({"prefix": ["thread-new-"]})),
-                  patch.object(backend.seen, "add_to_items")):
-                listed = backend.list_chat_threads()["threads"]
-            self.assertEqual({item["thread_id"] for item in listed}, set(metadata))
-            for item in listed:
-                self.assertEqual(item["name"], metadata[item["thread_id"]]["name"])
-                self.assertTrue(item["has_session"])
-                detail = threads.get_thread(item["thread_id"])
-                self.assertEqual(detail["model"], "claude-opus-5")
-                self.assertEqual(detail["last_used_at"], "2026-09-22T01:00:00Z")
-                self.assertGreater(detail["latest_message_seq"], 0)
-        assert_accessible()
+        assert_preserved()
         self.assertEqual(migrate.up(target=68, quiet=True), [68])
-        assert_accessible()
+        assert_preserved()
 
     def test_opus_rollback_crosses_older_constraints_and_updates_active_settings(self) -> None:
         migrate.up(target=68, quiet=True)

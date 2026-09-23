@@ -311,7 +311,7 @@ context instead of rewriting its prefix:
 
 **Concurrency cap.** Each agent tool call blocks one handler thread on a
 third-party request, so the agent's in-flight tool calls are capped at
-`MAX_CONCURRENT_CALLS = 8` (`host/runtime/tools/api.py`). The cap is global across
+`MAX_CONCURRENT_CALLS = 32` (`host/runtime/tools/api.py`). The cap is global across
 **all** of the agent's tool calls, not per `tool_id`. Agent calls beyond the cap are rejected immediately
 with HTTP 429 — before the request body is read — rather than queueing. The
 operator delegation routes are not subject to this cap, so a busy agent can never

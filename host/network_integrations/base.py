@@ -165,6 +165,16 @@ _CORE_PROXY_DENIAL_REASONS: tuple[DenialReason, ...] = (
         "send less data per request.",
     ),
     DenialReason(
+        "request_body_capacity",
+        "The proxy is inspecting its maximum of four large request bodies. Retry the request "
+        "when another large request finishes.",
+    ),
+    DenialReason(
+        "response_meter_capacity",
+        "The proxy is already metering its maximum number of Bedrock responses. Retry the "
+        "request when another response finishes.",
+    ),
+    DenialReason(
         "websocket_upgrade_declined",
         "The upstream did not accept the WebSocket handshake with 101 Switching Protocols, so "
         "the proxy closed the connection instead of treating an ordinary HTTP response as an "
@@ -181,6 +191,16 @@ _CORE_PROXY_DENIAL_REASONS: tuple[DenialReason, ...] = (
         "A WebSocket message on this guarded domain could not be safely inspected (unsupported "
         "framing, extension, or size), so the connection was closed. Reconnect without "
         "extensions and keep messages under the inspection limit.",
+    ),
+    DenialReason(
+        "websocket_body_capacity",
+        "The proxy is inspecting its maximum of four large request bodies or WebSocket messages. "
+        "Reconnect and retry the message after another large transfer finishes.",
+    ),
+    DenialReason(
+        "websocket_body_timeout",
+        "A large WebSocket message did not finish within 30 seconds, so its inspection buffer "
+        "was released. Reconnect and send the complete message promptly.",
     ),
 )
 

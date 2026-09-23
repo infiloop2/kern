@@ -11,6 +11,7 @@ from typing import Any, cast
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.host_api import HostAPI
+from host.tools.shared.cost_reporting import report_priced_units
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import protect_inputs, guarded_input, validated_input, ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
@@ -70,6 +71,7 @@ DETAIL_OUTPUT_SCHEMA: JSONObject = outputs.obj(
 )
 
 MANIFEST = ToolManifest(
+    reports_cost=True,
     tool_id="instagram_discovery",
     display_name="Instagram Discovery",
     description=(
@@ -79,7 +81,7 @@ MANIFEST = ToolManifest(
     connection="enable_only",
     actions=protect_inputs((
         ActionSpec(
-            id="search_reels",
+            id="search_reels", cost_description='One ScrapeCreators request. Uses the published $47/25,000-credit pack rate for returned charged credits; free or larger packs may cost less.',
             description=(
                 "Search Google-indexed public Instagram Reels by keyword through ScrapeCreators and return "
                 "normalized captions, creator names, dates, engagement metrics, media URLs, and audio ids. "
@@ -106,7 +108,7 @@ MANIFEST = ToolManifest(
             output_schema=LIST_OUTPUT_SCHEMA,
         ),
         ActionSpec(
-            id="get_trending_reels",
+            id="get_trending_reels", cost_description='One ScrapeCreators request. Uses the published $47/25,000-credit pack rate for returned charged credits; free or larger packs may cost less.',
             description=(
                 "Return unique public Reels from Instagram's public instagram.com/reels discovery page through "
                 "ScrapeCreators, with captions, creators, dates, engagement metrics, media URLs, and audio ids. "
@@ -129,7 +131,7 @@ MANIFEST = ToolManifest(
             output_schema=LIST_OUTPUT_SCHEMA,
         ),
         ActionSpec(
-            id="search_hashtag",
+            id="search_hashtag", cost_description='One ScrapeCreators request. Uses the published $47/25,000-credit pack rate for returned charged credits; free or larger packs may cost less.',
             description=(
                 "Search Google-indexed public Instagram posts for one hashtag through ScrapeCreators. By default "
                 "returns Reels only; set reels_only=false to include public image and carousel posts. Returns "
@@ -157,7 +159,7 @@ MANIFEST = ToolManifest(
             output_schema=LIST_OUTPUT_SCHEMA,
         ),
         ActionSpec(
-            id="get_reels_by_audio",
+            id="get_reels_by_audio", cost_description='One ScrapeCreators request. Uses the published $47/25,000-credit pack rate for returned charged credits; free or larger packs may cost less.',
             description=(
                 "List public Instagram Reels associated with one numeric audio id, returning normalized captions, "
                 "creators, dates, engagement metrics, media URLs, and audio metadata. Get an audio_id from another "
@@ -183,7 +185,7 @@ MANIFEST = ToolManifest(
             output_schema=LIST_OUTPUT_SCHEMA,
         ),
         ActionSpec(
-            id="get_reel_details",
+            id="get_reel_details", cost_description='One ScrapeCreators request. Uses the published $47/25,000-credit pack rate for returned charged credits; free or larger packs may cost less.',
             description=(
                 "Read current public metadata for one known instagram.com Reel URL through ScrapeCreators, including "
                 "caption, creator, timestamp, engagement counts, media URLs, duration, and audio id when available. "
@@ -626,7 +628,7 @@ def _details_media(response: JSONObject) -> object:
     return {}
 
 
-def _provider_request(api_key: str, path: str, params: Mapping[str, str]) -> JSONObject:
+def _provider_request(api: HostAPI, api_key: str, path: str, params: Mapping[str, str]) -> JSONObject:
     query = urllib.parse.urlencode(params)
     url = f"{API_ORIGIN}{path}{'?' + query if query else ''}"
     response = json_request(
@@ -638,6 +640,7 @@ def _provider_request(api_key: str, path: str, params: Mapping[str, str]) -> JSO
     )
     if response.get("success") is False:
         raise RuntimeError("ScrapeCreators rejected the Instagram request.")
+    report_priced_units(api, response.get("credits_used", response.get("credits_charged")), "0.00188")
     return response
 
 
@@ -686,9 +689,9 @@ class InstagramDiscoveryTool(Tool):
                 date_posted = _date_window(tool_input.get("date_posted"))
                 if date_posted:
                     params["date_posted"] = date_posted
-                return _list_result(_provider_request(api_key, SEARCH_REELS_PATH, params), limit=limit, label="Keyword search")
+                return _list_result(_provider_request(api, api_key, SEARCH_REELS_PATH, params), limit=limit, label="Keyword search")
             if action == "get_trending_reels":
-                return _list_result(_provider_request(api_key, TRENDING_REELS_PATH, {}), limit=limit, label="Trending Reels")
+                return _list_result(_provider_request(api, api_key, TRENDING_REELS_PATH, {}), limit=limit, label="Trending Reels")
             if action == "search_hashtag":
                 reels_only = tool_input.get("reels_only", True)
                 if not isinstance(reels_only, bool):
@@ -700,7 +703,7 @@ class InstagramDiscoveryTool(Tool):
                     params["date_posted"] = date_posted
                 if cursor:
                     params["cursor"] = cursor
-                response = _provider_request(api_key, HASHTAG_PATH, params)
+                response = _provider_request(api, api_key, HASHTAG_PATH, params)
                 try:
                     cursor = _hashtag_cursor(_response_cursor(response))
                 except ValueError:
@@ -713,7 +716,7 @@ class InstagramDiscoveryTool(Tool):
                 cursor = _audio_cursor(tool_input.get("cursor"), api)
                 if cursor:
                     params["cursor"] = cursor
-                response = _provider_request(api_key, AUDIO_REELS_PATH, params)
+                response = _provider_request(api, api_key, AUDIO_REELS_PATH, params)
                 try:
                     cursor = _audio_cursor(_response_cursor(response), api)
                 except ValueError:
@@ -723,6 +726,7 @@ class InstagramDiscoveryTool(Tool):
                 )
             if action == "get_reel_details":
                 response = _provider_request(
+                    api,
                     api_key,
                     REEL_DETAILS_PATH,
                     {"url": _reel_url(tool_input.get("url")), "trim": "true", "download_media": "false"},

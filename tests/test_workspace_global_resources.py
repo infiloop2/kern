@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pg_harness
 
-from host.runtime.core import db
+from host.runtime.core import db, state
 from host.runtime.workspace import agent_api, getting_started, memory, schedules
 from host.runtime.workspace.chat import backend as chat
 from host.runtime.workspace.host_api import WorkspaceError
@@ -2058,6 +2058,11 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 (schedule["thread_id"],),
             )
 
+        with db.transaction() as cur:
+            state.save_thread_session(cur, "codex", schedule["thread_id"], None, state.utc_now(),
+                                      SESSION["model"], SESSION["effort"])
+            state.reset_swarm_ai(cur, schedule["thread_id"], 1)
+
         self.assertEqual(
             schedules.prune_deleted(datetime(2026, 4, 2, tzinfo=timezone.utc)),
             1,
@@ -2071,6 +2076,8 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 " WHERE item_kind = 'chat' AND item_id = %s",
                 (schedule["thread_id"],),
             )
+            self.assertIsNone(cur.fetchone())
+            cur.execute("SELECT 1 FROM swarm_agent_ai WHERE thread_id = %s", (schedule["thread_id"],))
             self.assertIsNone(cur.fetchone())
         self.assertNotIn(
             schedule["thread_id"],

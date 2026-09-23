@@ -15,15 +15,15 @@ from typing import Any
 from host.runtime.core import host_errors, state
 
 
-# Prices reviewed 2026-09-20. Store calculated cost on every response so a
+# Prices reviewed 2026-09-22. Store calculated cost on every response so a
 # future catalog edit changes only future calls.
-# https://developers.openai.com/api/docs/models/gpt-5.6-luna
+# https://developers.openai.com/api/docs/models/gpt-6-luna
 # https://typesafe.ai/ (Jev.Cost: $42 per billion input tokens)
-_OPENAI_GPT_56_LUNA_RE = re.compile(r"^gpt-5\.6-luna(?:-[0-9]{4}-[0-9]{2}-[0-9]{2})?$")
+_OPENAI_LUNA_RE = re.compile(r"^gpt-6-luna(?:-[0-9]{4}-[0-9]{2}-[0-9]{2})?$")
 _TYPESAFE_JEV_RE = re.compile(r"^jev-(?:latest|[1-9][0-9]*\.[0-9]+\.[0-9]+)$")
-_OPENAI_INPUT_PER_TOKEN = 0.20 / 1_000_000
-_OPENAI_CACHED_INPUT_PER_TOKEN = 0.02 / 1_000_000
-_OPENAI_OUTPUT_PER_TOKEN = 1.20 / 1_000_000
+_OPENAI_INPUT_PER_TOKEN = 0.10 / 1_000_000
+_OPENAI_CACHED_INPUT_PER_TOKEN = 0.01 / 1_000_000
+_OPENAI_OUTPUT_PER_TOKEN = 0.50 / 1_000_000
 _TYPESAFE_INPUT_PER_TOKEN = 42.0 / 1_000_000_000
 MAX_RESPONSE_TOKENS = 10_000_000
 _WRITE_SLOTS = threading.BoundedSemaphore(16)
@@ -118,11 +118,15 @@ def record_openai_response(_requested_model: str, response: Any | None) -> None:
     # Bill against the model that actually served the response. The request
     # name can be an alias that OpenAI routes to a dated model revision.
     response_model = response.get("model") if isinstance(response, dict) else None
-    model = (
-        "gpt-5.6-luna"
-        if isinstance(response_model, str) and _OPENAI_GPT_56_LUNA_RE.fullmatch(response_model)
-        else "other"
-    )
+    match = _OPENAI_LUNA_RE.fullmatch(response_model) if isinstance(response_model, str) else None
+    if match is None:
+        host_errors.report_warning(
+            "host_inference.usage",
+            ValueError("OpenAI response model is missing or unsupported; usage was not recorded"),
+            context={"provider": "openai"},
+            kind="unexpected_behavior",
+        )
+        return
     raw = response.get("usage") if isinstance(response, dict) else None
     measured: dict[str, int] | None = None
     if isinstance(raw, dict):
@@ -158,23 +162,26 @@ def record_openai_response(_requested_model: str, response: Any | None) -> None:
                 "output_tokens": output_tokens,
             }
     cost: float | None = None
-    if measured is not None and model == "gpt-5.6-luna":
+    if measured is not None:
         uncached = measured["input_tokens"] - measured["cached_input_tokens"]
         cost = (
             uncached * _OPENAI_INPUT_PER_TOKEN
             + measured["cached_input_tokens"] * _OPENAI_CACHED_INPUT_PER_TOKEN
             + measured["output_tokens"] * _OPENAI_OUTPUT_PER_TOKEN
         )
-    _schedule("openai", model, measured, cost)
+    _schedule("openai", "gpt-6-luna", measured, cost)
 
 
 def record_typesafe_response(_requested_model: str, response: Any | None) -> None:
     response_model = response.get("model") if isinstance(response, dict) else None
-    model = (
-        "jev"
-        if isinstance(response_model, str) and _TYPESAFE_JEV_RE.fullmatch(response_model)
-        else "other"
-    )
+    if not isinstance(response_model, str) or not _TYPESAFE_JEV_RE.fullmatch(response_model):
+        host_errors.report_warning(
+            "host_inference.usage",
+            ValueError("TypeSafe response model is missing or unsupported; usage was not recorded"),
+            context={"provider": "typesafe"},
+            kind="unexpected_behavior",
+        )
+        return
     raw = response.get("usage") if isinstance(response, dict) else None
     measured: dict[str, int] | None = None
     if isinstance(raw, dict):
@@ -190,7 +197,7 @@ def record_typesafe_response(_requested_model: str, response: Any | None) -> Non
     # retained for usage visibility but do not contribute to the estimate.
     cost = (
         measured["input_tokens"] * _TYPESAFE_INPUT_PER_TOKEN
-        if measured is not None and model == "jev"
+        if measured is not None
         else None
     )
-    _schedule("typesafe", model, measured, cost)
+    _schedule("typesafe", "jev", measured, cost)

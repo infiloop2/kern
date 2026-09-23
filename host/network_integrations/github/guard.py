@@ -65,9 +65,17 @@ GITHUB_ACTIONS_BLOB_LOG_PATH_RE = re.compile(
     rf"(/workflow-job-run-)(?:{GITHUB_ACTIONS_BLOB_UUID_PATTERN})"
     r"(/logs/job/job-logs\.txt)$"
 )
-# Preserve all 36 bytes when masking each UUID so G1 still measures the length
-# of the path that will actually be forwarded upstream.
+GITHUB_ACTIONS_BLOB_ARTIFACT_PATH_RE = re.compile(
+    rf"^(/actions-results/)(?:{GITHUB_ACTIONS_BLOB_UUID_PATTERN})"
+    rf"(/workflow-job-run-)(?:{GITHUB_ACTIONS_BLOB_UUID_PATTERN})"
+    r"(/artifacts/)[0-9a-f]{64}(\.zip)$"
+)
+GITHUB_ACTIONS_BLOB_ARTIFACT_DISPOSITION_RE = re.compile(
+    r'^attachment; filename="agent-admin-result-[1-9][0-9]{0,8}\.zip"$'
+)
+# Preserve identifier lengths so G1 still measures the forwarded path length.
 GITHUB_ACTIONS_BLOB_NEUTRAL_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+GITHUB_ACTIONS_BLOB_NEUTRAL_ARTIFACT_ID = "artifact" * 8
 ROUTES = {
     "github.com": (("GET", "HEAD", "POST"), ()),
     "api.github.com": (("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"), ()),
@@ -93,15 +101,26 @@ def _is_github_actions_blob_host(host: str) -> bool:
 
 def _neutralized_github_actions_blob_path(path: str) -> str:
     match = GITHUB_ACTIONS_BLOB_LOG_PATH_RE.fullmatch(path)
-    if match is None:
-        return path
-    return (
-        match.group(1)
-        + GITHUB_ACTIONS_BLOB_NEUTRAL_UUID
-        + match.group(2)
-        + GITHUB_ACTIONS_BLOB_NEUTRAL_UUID
-        + match.group(3)
-    )
+    if match is not None:
+        return (
+            match.group(1)
+            + GITHUB_ACTIONS_BLOB_NEUTRAL_UUID
+            + match.group(2)
+            + GITHUB_ACTIONS_BLOB_NEUTRAL_UUID
+            + match.group(3)
+        )
+    match = GITHUB_ACTIONS_BLOB_ARTIFACT_PATH_RE.fullmatch(path)
+    if match is not None:
+        return (
+            match.group(1)
+            + GITHUB_ACTIONS_BLOB_NEUTRAL_UUID
+            + match.group(2)
+            + GITHUB_ACTIONS_BLOB_NEUTRAL_UUID
+            + match.group(3)
+            + GITHUB_ACTIONS_BLOB_NEUTRAL_ARTIFACT_ID
+            + match.group(4)
+        )
+    return path
 
 
 def _route(host: str) -> tuple[tuple[str, ...], tuple[str, ...]] | None:
@@ -220,13 +239,18 @@ def _github_actions_blob_request_denied(
     inspect the decoded signature with only generic machine-token checks
     disabled, require Azure's exact Base64 HMAC-SHA256 signature shape, then
     substitute a neutral value before applying the unchanged full-query guard.
-    All non-``sig`` query keys and values retain the standard checks.
+    Non-``sig`` query keys and values retain the standard checks except for
+    the validated artifact disposition filename described below.
 
-    The run and job UUIDs in Actions' fixed job-log path are neutralized the
-    same way, because a digit-heavy one is otherwise an unreadable log. The
-    replacement has the same length as the UUID, so the structural length
-    guard still measures the URL that will be forwarded. UUIDs and digit runs
-    anywhere else in the path retain the unchanged checks.
+    The run and job UUIDs in Actions' fixed job-log and artifact paths are
+    neutralized the same way, because a digit-heavy one is otherwise
+    unreadable. The artifact path's provider-generated 64-hex ZIP id also
+    matches the generic raw-key rule, so only that exact path component is
+    neutralized. Replacements preserve length for the structural guard; all
+    other path components retain the unchanged checks. On the fixed artifact
+    path, validate the signed response-disposition as an ASCII ZIP basename
+    with the agent-admin result basename and short run attempt. Every other query field
+    retains the standard guard.
     """
     try:
         pairs = parse_qsl(
@@ -242,9 +266,19 @@ def _github_actions_blob_request_denied(
     ]
     if len(signatures) != 1 or not signatures[0]:
         return "network_policy_denied"
+    artifact_path = GITHUB_ACTIONS_BLOB_ARTIFACT_PATH_RE.fullmatch(path) is not None
+    if artifact_path and sum(key.lower() == "rscd" for key, _value in pairs) > 1:
+        return "network_policy_denied"
     sanitized: list[tuple[str, str]] = []
     for key, value in pairs:
         if key.lower() != "sig":
+            if key.lower() == "rscd" and artifact_path:
+                if GITHUB_ACTIONS_BLOB_ARTIFACT_DISPOSITION_RE.fullmatch(value) is None:
+                    return "network_policy_denied"
+                # The disposition's one space splits the decoded URL into
+                # tokens, making the remaining signed query look like an
+                # overlong unbroken token to G3.
+                value = value.replace("; filename=", ";_filename=", 1)
             sanitized.append((key, value))
             continue
         denial = find_denial(value, allow_machine_tokens=True)

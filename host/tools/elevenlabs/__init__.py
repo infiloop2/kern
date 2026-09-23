@@ -14,11 +14,12 @@ import secrets
 from typing import Iterator, cast
 
 from host.tools.host_api import ApprovalRecord, HostAPI
+from host.tools.shared.cost_reporting import report_priced_units
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult, ApprovalResult, OpenedStreamingAsset, StreamingAsset
 from host.tools.shared.inputs import clip
 from host.tools.shared.web import (
-    WebRequestError, encode_query, json_request, open_response_stream,
+    WebRequestError, encode_query, json_request, json_request_with_headers, open_response_stream,
     transport_or_unmapped_provider_error,
 )
 from .manifest import MANIFEST
@@ -133,7 +134,7 @@ def _is_mp3(raw: bytes) -> bool:
     return raw.startswith(b"ID3") or (len(raw) >= 2 and raw[0] == 255 and raw[1] & 0xE0 == 0xE0)
 
 
-def _save_generation(path: str, body: JSONObject | None, headers: dict[str, str]) -> StreamingAsset:
+def _save_generation(path: str, body: JSONObject | None, headers: dict[str, str], api: HostAPI) -> StreamingAsset:
     # ElevenLabs can return chunked audio without Content-Length. Read it once
     # under a fixed bound, then hand the existing bridge an exact byte count.
     output_format = "auto" if path == "/v1/music" else "mp3_44100_128"
@@ -146,6 +147,8 @@ def _save_generation(path: str, body: JSONObject | None, headers: dict[str, str]
         media_type = response_headers.get("content-type", "").split(";", 1)[0].strip().lower()
         if media_type not in {"audio/mpeg", "application/octet-stream"}:
             raise ValueError("ElevenLabs returned an unsupported audio media type.")
+        if body is not None:
+            report_priced_units(api, response_headers.get("character-cost"), "0.0002")
         raw = source.read(MAX_AUDIO_BYTES + 1)
     if not 12 <= len(raw) <= MAX_AUDIO_BYTES or not _is_mp3(raw):
         raise ValueError("ElevenLabs returned invalid or oversized MP3 audio.")
@@ -177,7 +180,8 @@ def _design_voice(values: JSONObject, api: HostAPI, headers: dict[str, str]) -> 
         body["text"] = script
     if "should_enhance" in values:
         body["should_enhance"] = _boolean(values["should_enhance"])
-    response = json_request("POST", API_ROOT + "/v1/text-to-voice/design?output_format=mp3_44100_128", headers=headers, body=body, timeout=TIMEOUT, max_bytes=65536, failure_message="ElevenLabs voice design failed.", invalid_response_message="ElevenLabs returned an invalid voice design response.")
+    response, response_headers = json_request_with_headers("POST", API_ROOT + "/v1/text-to-voice/design?output_format=mp3_44100_128", headers=headers, body=body, timeout=TIMEOUT, max_bytes=65536, failure_message="ElevenLabs voice design failed.", invalid_response_message="ElevenLabs returned an invalid voice design response.")
+    report_priced_units(api, response_headers.get("character-cost"), "0.0002")
     previews = response.get("previews")
     if not isinstance(previews, list) or not 1 <= len(previews) <= 10:
         raise ValueError("ElevenLabs returned an invalid voice preview list.")
@@ -257,11 +261,11 @@ class ElevenLabsTool:
                 return _design_voice(tool_input, api, headers)
             if action == "preview_voice":
                 preview_id = _id(tool_input.get("generated_voice_id"))
-                return _save_generation(f"/v1/text-to-voice/{preview_id}/stream", None, headers)
+                return _save_generation(f"/v1/text-to-voice/{preview_id}/stream", None, headers, api)
             if action == "save_voice":
                 return _save_voice(tool_input, api, headers)
             path, body = _generation(action, tool_input, api)
-            return _save_generation(path, body, headers)
+            return _save_generation(path, body, headers, api)
         except KeyError:
             return ActionFailed("Set the ElevenLabs API key in Integrations.")
         except WebRequestError as exc:

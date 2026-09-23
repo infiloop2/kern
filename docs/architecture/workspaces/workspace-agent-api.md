@@ -17,6 +17,9 @@ caps connections and active calls, bounds request and response bodies, permits
 only `GET`, `POST`, `PUT`, and `DELETE`, and accepts paths only below
 `/agent/`. The agent cannot reach the service's browser TCP listener, admin API
 socket, or PostgreSQL role.
+The socket admits 64 active calls, with a separate eight-call cap for routes
+that can return the full 24 MiB response. Identity, self-memory, and agent
+message routes return bounded small objects and use the general call cap.
 
 Conversation history has two read-only routes used by the typed MCP tools:
 

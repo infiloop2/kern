@@ -16,12 +16,14 @@ from unittest.mock import MagicMock, patch
 from host.runtime.admin_api import service as admin_api
 from host.runtime.core.state import host_inference as host_inference_state
 from host.runtime.host_inference import (
+    approval_risk,
     api,
     client,
     json_contract,
     openai,
     provider_http,
     providers,
+    redaction,
     typesafe,
     usage,
 )
@@ -39,6 +41,59 @@ SCHEMA = {
 }
 
 
+class InferenceRedactionTests(unittest.TestCase):
+    def test_redacts_long_numbered_tokens_without_an_english_word_list(self) -> None:
+        self.assertEqual(
+            redaction.redact_text("abcdefghij abcdefghijk development 12345678901"),
+            "abcdefghij abcdefghijk development <redacted>",
+        )
+        self.assertEqual(redaction.redact_text("order-Q7x8Y9z0A1b2"), "<redacted>")
+        self.assertEqual(redaction.redact_text("XYZ-PASS=jbsdb749y3hb"), "XYZ-PASS=<redacted>")
+        self.assertEqual(redaction.redact_text("api key=short"), "api key=<redacted>")
+        self.assertNotIn("hunter2", redaction.redact_text('{"password": "hunter2"}'))
+        self.assertEqual(
+            redaction.redact_text('{"password": "correct horse battery staple"}'),
+            '{"password": "<redacted>"}',
+        )
+        self.assertEqual(
+            redaction.redact_text("password: correct horse battery staple"),
+            "password: <redacted>",
+        )
+        self.assertEqual(
+            redaction.redact_text("Authorization: Basic dXNlcjpwYXNz"),
+            "Authorization: <redacted>",
+        )
+        for field in ("DATABASE_PASSWORD", "AWS_SECRET_ACCESS_KEY", "private_key", "credential"):
+            with self.subTest(field=field):
+                self.assertEqual(redaction.redact_text(f"{field}=development"), f"{field}=<redacted>")
+
+    def test_redacts_short_values_under_credential_keys(self) -> None:
+        self.assertEqual(
+            redaction.redact_content({"payload": {
+                "password": "hunter2", "access_token": "development",
+                "accessToken": "development", "clientSecret": "development",
+                "title": "development",
+            }}),
+            {"payload": {
+                "password": "<redacted>", "access_token": "<redacted>",
+                "accessToken": "<redacted>", "clientSecret": "<redacted>",
+                "title": "development",
+            }},
+        )
+
+    def test_retains_values_when_redacted_object_keys_collide(self) -> None:
+        self.assertEqual(
+            redaction.redact_content({"user.12345678901": "first", "user.12345678902": "second"}),
+            {"user.<redacted>": ["first", "second"]},
+        )
+
+    def test_redacts_long_numeric_json_values(self) -> None:
+        self.assertEqual(
+            redaction.redact_content({"customer_id": 1234567890123456, "count": 42, "enabled": True}),
+            {"customer_id": "<redacted>", "count": 42, "enabled": True},
+        )
+
+
 class OpenAITextAdapterTests(unittest.TestCase):
     def test_sends_one_bounded_fixed_endpoint_request_and_validates_result(self) -> None:
         seen = {}
@@ -54,9 +109,9 @@ class OpenAITextAdapterTests(unittest.TestCase):
 
         result = openai.complete(
             api_key="sk-test-secret",
-            model="gpt-5.6-luna",
+            model="gpt-6-luna",
             prompt="Summarize the completed work.",
-            schema_name="swarm_status",
+            schema_name="swarm_task",
             schema=SCHEMA,
             transport=transport,
         )
@@ -65,9 +120,31 @@ class OpenAITextAdapterTests(unittest.TestCase):
         self.assertEqual(seen["timeout"], openai.TIMEOUT_SECONDS)
         self.assertEqual(seen["max_bytes"], openai.MAX_RESPONSE_BYTES)
         request = json.loads(seen["data"])
+        self.assertEqual(request["model"], "gpt-6-luna")
+        self.assertEqual(request["reasoning_effort"], "none")
         self.assertEqual(request["response_format"]["json_schema"]["schema"], SCHEMA)
         self.assertTrue(request["response_format"]["json_schema"]["strict"])
         self.assertNotIn("sk-test-secret", seen["data"].decode())
+
+    def test_redacts_machine_tokens_and_credentials_before_openai_transport(self) -> None:
+        sent = {}
+        prompt = "Review the completed deployment abcdefghijk Q7x8Y9z0A1b2 and sk-proj-short. sk-test-secret"
+
+        def transport(_method, _url, **kwargs):
+            sent.update(json.loads(kwargs["data"]))
+            return b'{"choices":[{"message":{"content":"{\\"status_line\\":\\"Done\\",\\"needs_operator\\":false}"}}]}'
+
+        openai.complete(
+            api_key="sk-test-secret", model="gpt-5.6-luna", prompt=prompt,
+            schema_name="status", schema=SCHEMA, transport=transport,
+        )
+        outgoing = sent["messages"][1]["content"]
+        self.assertIn("completed", outgoing)
+        self.assertEqual(outgoing.count("<redacted>"), 3)
+        self.assertIn("abcdefghijk", outgoing)
+        for secret in ("Q7x8Y9z0A1b2", "sk-proj-short", "sk-test-secret"):
+            self.assertNotIn(secret, outgoing)
+        self.assertEqual(prompt.split()[-1], "sk-test-secret")
 
     def test_rejects_malformed_or_schema_mismatched_responses(self) -> None:
         responses = [
@@ -80,7 +157,7 @@ class OpenAITextAdapterTests(unittest.TestCase):
             with self.subTest(response=response[:40]), self.assertRaises(openai.InferenceResponseError):
                 openai.complete(
                     api_key="sk-test",
-                    model="gpt-5.6-luna",
+                    model="gpt-6-luna",
                     prompt="x",
                     schema_name="status",
                     schema=SCHEMA,
@@ -98,13 +175,29 @@ class OpenAITextAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "prompt"):
             openai.complete(
                 api_key="sk-test",
-                model="gpt-5.6-luna",
+                model="gpt-6-luna",
                 prompt="x" * (openai.MAX_PROMPT_BYTES + 1),
                 schema_name="status",
                 schema=SCHEMA,
                 transport=transport,
             )
         self.assertFalse(called)
+
+    def test_utf8_prompt_does_not_expand_inside_the_request_envelope(self) -> None:
+        prompt = "😀" * (openai.MAX_PROMPT_BYTES // 4)
+        seen = {}
+
+        def transport(_method, _url, **kwargs):
+            seen.update(kwargs)
+            return b'{"choices":[{"message":{"content":"{\\"status_line\\":\\"ok\\",\\"needs_operator\\":false}"}}]}'
+
+        openai.complete(
+            api_key="sk-test", model="gpt-6-luna", prompt=prompt,
+            schema_name="status", schema=SCHEMA, transport=transport,
+        )
+        self.assertLess(len(seen["data"]), openai.MAX_REQUEST_BYTES)
+        self.assertIn("😀".encode("utf-8"), seen["data"])
+        self.assertNotIn(b"\\ud83d", seen["data"])
 
     def test_rejects_schema_keywords_the_local_validator_does_not_enforce(self) -> None:
         schema = {
@@ -116,7 +209,7 @@ class OpenAITextAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unsupported keyword minimum"):
             openai.complete(
                 api_key="sk-test",
-                model="gpt-5.6-luna",
+                model="gpt-6-luna",
                 prompt="x",
                 schema_name="status",
                 schema=schema,
@@ -135,7 +228,7 @@ class OpenAITextAdapterTests(unittest.TestCase):
         response = b'{"choices":[{"message":{"content":"{\\"value\\":true}"}}]}'
         with self.assertRaises(openai.InferenceResponseError):
             openai.complete(
-                api_key="sk-test", model="gpt-5.6-luna", prompt="x",
+                api_key="sk-test", model="gpt-6-luna", prompt="x",
                 schema_name="status", schema=schema,
                 transport=lambda *_args, **_kwargs: response,
             )
@@ -202,7 +295,7 @@ class HostInferenceUsageTests(unittest.TestCase):
     def test_adapters_forward_usage_even_when_feature_content_is_invalid(self) -> None:
         recorded = []
         response = {
-            "model": "gpt-5.6-luna-2026-09-01",
+            "model": "gpt-6-luna-2026-09-01",
             "usage": {
                 "prompt_tokens": 100,
                 "completion_tokens": 10,
@@ -212,48 +305,39 @@ class HostInferenceUsageTests(unittest.TestCase):
         }
         with self.assertRaises(openai.InferenceResponseError):
             openai.complete(
-                api_key="sk-test", model="gpt-5.6-luna", prompt="x",
+                api_key="sk-test", model="gpt-6-luna", prompt="x",
                 schema_name="status", schema=SCHEMA,
                 transport=lambda *_args, **_kwargs: json.dumps(response).encode(),
                 usage_recorder=lambda model, payload: recorded.append((model, payload)),
             )
-        self.assertEqual(recorded, [("gpt-5.6-luna", response)])
+        self.assertEqual(recorded, [("gpt-6-luna", response)])
 
-    def test_openai_usage_prices_luna_cached_and_uncached_tokens(self) -> None:
-        response = {
-            "model": "gpt-5.6-luna-2026-09-01",
-            "usage": {
-                "prompt_tokens": 100,
-                "completion_tokens": 10,
-                "prompt_tokens_details": {"cached_tokens": 20},
-            }
-        }
-        with patch.object(usage, "_schedule") as record:
-            usage.record_openai_response("gpt-5.6-luna", response)
-        provider, model, measured, cost = record.call_args.args
-        self.assertEqual((provider, model), ("openai", "gpt-5.6-luna"))
-        self.assertEqual(measured, {
-            "input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 10,
-        })
-        self.assertAlmostEqual(cost, 0.0000284)
+    def test_gpt6_luna_prices_alias_and_snapshot_at_its_own_rate(self) -> None:
+        for model in ("gpt-6-luna", "gpt-6-luna-2026-09-22"):
+            with self.subTest(model=model), patch.object(usage, "_schedule") as record:
+                usage.record_openai_response("gpt-6-luna", {
+                    "model": model, "usage": {"prompt_tokens": 100, "completion_tokens": 10,
+                                             "prompt_tokens_details": {"cached_tokens": 20}},
+                })
+                self.assertEqual(record.call_args.args[:2], ("openai", "gpt-6-luna"))
+                self.assertAlmostEqual(record.call_args.args[3], 0.0000132)
 
-    def test_unknown_openai_model_keeps_tokens_but_is_not_priced(self) -> None:
-        response = {
-            "model": "future-model",
-            "usage": {"prompt_tokens": 12, "completion_tokens": 3},
-        }
-        with patch.object(usage, "_schedule") as record:
-            usage.record_openai_response("gpt-5.6-luna", response)
-        self.assertEqual(record.call_args.args[:2], ("openai", "other"))
-        self.assertEqual(record.call_args.args[2]["input_tokens"], 12)
-        self.assertIsNone(record.call_args.args[3])
+    def test_unsupported_openai_models_are_diagnosed_without_usage_rows(self) -> None:
+        for model in (None, "", "gpt-5.6-luna", "gpt-5.6-luna-2026-09-01", "future-model"):
+            with (self.subTest(model=model), patch.object(usage, "_schedule") as record,
+                  patch.object(usage.host_errors, "report_warning") as diagnostic):
+                usage.record_openai_response("gpt-6-luna", {
+                    "model": model, "usage": {"prompt_tokens": 12, "completion_tokens": 3},
+                })
+                record.assert_not_called()
+                diagnostic.assert_called_once()
 
     def test_malformed_cached_token_details_are_not_priced_as_uncached(self) -> None:
         for field in ("prompt_tokens_details", "input_tokens_details"):
             for malformed in (None, [], "missing", {}, {"other": 0}):
                 with self.subTest(field=field, malformed=malformed):
                     response = {
-                        "model": "gpt-5.6-luna",
+                        "model": "gpt-6-luna",
                         "usage": {
                             "prompt_tokens": 10,
                             "completion_tokens": 2,
@@ -261,8 +345,8 @@ class HostInferenceUsageTests(unittest.TestCase):
                         }
                     }
                     with patch.object(usage, "_schedule") as record:
-                        usage.record_openai_response("gpt-5.6-luna", response)
-                    record.assert_called_once_with("openai", "gpt-5.6-luna", None, None)
+                        usage.record_openai_response("gpt-6-luna", response)
+                    record.assert_called_once_with("openai", "gpt-6-luna", None, None)
 
     def test_typesafe_usage_uses_published_input_rate(self) -> None:
         response = {
@@ -277,16 +361,15 @@ class HostInferenceUsageTests(unittest.TestCase):
         })
         self.assertAlmostEqual(record.call_args.args[3], 0.000042)
 
-    def test_unknown_typesafe_model_keeps_tokens_but_is_not_priced(self) -> None:
-        response = {
-            "model": "jev-2.0.0-preview",
-            "usage": {"input_tokens": 1_000, "output_tokens": 4},
-        }
-        with patch.object(usage, "_schedule") as record:
-            usage.record_typesafe_response("jev-latest", response)
-        self.assertEqual(record.call_args.args[:2], ("typesafe", "other"))
-        self.assertEqual(record.call_args.args[2]["input_tokens"], 1_000)
-        self.assertIsNone(record.call_args.args[3])
+    def test_unsupported_typesafe_models_are_diagnosed_without_usage_rows(self) -> None:
+        for model in (None, "", "jev-2.0.0-preview"):
+            with (self.subTest(model=model), patch.object(usage, "_schedule") as record,
+                  patch.object(usage.host_errors, "report_warning") as diagnostic):
+                usage.record_typesafe_response("jev-latest", {
+                    "model": model, "usage": {"input_tokens": 1_000, "output_tokens": 4},
+                })
+                record.assert_not_called()
+                diagnostic.assert_called_once()
 
     def test_usage_write_is_submitted_off_the_inference_response_path(self) -> None:
         submit = MagicMock()
@@ -330,19 +413,47 @@ class HostInferenceUsageTests(unittest.TestCase):
 
 
 class TypeSafeJevAdapterTests(unittest.TestCase):
-    def test_sends_one_bounded_fixed_endpoint_request(self) -> None:
+    def test_sends_host_defined_approval_questions_unchanged(self) -> None:
         seen = {}
 
+        def transport(_method, _url, **kwargs):
+            seen.update(json.loads(kwargs["data"]))
+            return json.dumps({
+                "model": "jev-latest",
+                "answers": {
+                    question_id: {"type": "noul", "noul": 0.5}
+                    for question_id in approval_risk.APPROVAL_QUESTIONS
+                },
+            }).encode()
+
+        typesafe.judge(
+            api_key="jev-secret", model="jev-latest", state={"summary": "Review it"},
+            questions=approval_risk.APPROVAL_QUESTIONS, transport=transport,
+        )
+        self.assertEqual(seen["model"], "jev-latest")
+        self.assertEqual(seen["questions"], approval_risk.APPROVAL_QUESTIONS)
+
+    def test_rejects_unsupported_question_types_before_egress(self) -> None:
+        def no_transport(*_args, **_kwargs):
+            self.fail("provider transport must not run")
+
+        with self.assertRaisesRegex(ValueError, "noul instructions"):
+            typesafe.judge(
+                api_key="jev-secret", model="jev-latest", state={},
+                questions={"risk": {"type": "choice", "instructions": "Assess risk"}},
+                transport=no_transport,
+            )
+
+    def test_sends_one_bounded_fixed_endpoint_request(self) -> None:
+        seen = {}
         def transport(method, url, **kwargs):
             seen.update(method=method, url=url, **kwargs)
             return json.dumps({
                 "model": "jev-latest",
                 "answers": {
                     "risk": {
-                        "type": "choice",
-                        "choice": "low",
-                        "probabilities": {"low": 0.8, "high": 0.2},
-                        "confidence": 0.8,
+                        "type": "noul",
+                        "noul": 0.8,
                     }
                 },
             }).encode()
@@ -353,21 +464,63 @@ class TypeSafeJevAdapterTests(unittest.TestCase):
             state={"action": "read"},
             questions={
                 "risk": {
-                    "type": "choice",
+                    "type": "noul",
                     "instructions": "Classify risk.",
-                    "criteria": {"low": None, "high": None},
                 }
             },
             timeout_seconds=1.2,
             transport=transport,
         )
-        self.assertEqual(result["answers"]["risk"]["choice"], "low")
+        self.assertEqual(result["answers"]["risk"]["noul"], 0.8)
         self.assertEqual((seen["method"], seen["url"]), ("POST", typesafe.ENDPOINT))
         self.assertEqual(seen["timeout"], 1.2)
         self.assertNotIn("jev-secret", seen["data"].decode())
+        self.assertEqual(list(json.loads(seen["data"])["questions"]), ["risk"])
 
-    def test_preserves_complete_state_and_rejects_oversize_without_clipping(self) -> None:
-        body_text = "x" * (64 * 1024)
+    def test_redacts_nested_state_and_question_text_before_jev_transport(self) -> None:
+        seen = {}
+        state = {"payload": {
+            "machine_id_123": "Review abcdefghijk and clientSecret=short",
+            "other_id_456": "Keep the detail",
+        }}
+        question_id = "flag"
+
+        def transport(_method, _url, **kwargs):
+            seen.update(json.loads(kwargs["data"]))
+            return b'{"model":"jev-latest","answers":{"flag":{"type":"noul","noul":0.5}}}'
+
+        result = typesafe.judge(
+            api_key="jev-secret", model="jev-latest", state=state,
+            questions={question_id: {"type": "noul", "instructions": "Review Q7x8Y9z0A1b2"}},
+            transport=transport,
+        )
+        self.assertEqual(
+            seen["state"]["payload"]["<redacted>"],
+            ["Review abcdefghijk and clientSecret=<redacted>", "Keep the detail"],
+        )
+        self.assertEqual(seen["questions"]["flag"]["instructions"], "Review <redacted>")
+        self.assertNotIn("Q7x8Y9z0A1b2", json.dumps(seen))
+        self.assertEqual(result["answers"][question_id]["noul"], 0.5)
+        self.assertEqual(state["payload"]["machine_id_123"], "Review abcdefghijk and clientSecret=short")
+
+    def test_preserves_question_definition_for_credential_word_id(self) -> None:
+        seen = {}
+
+        def transport(_method, _url, **kwargs):
+            seen.update(json.loads(kwargs["data"]))
+            return b'{"model":"jev-latest","answers":{"token_risk":{"type":"noul","noul":0.5}}}'
+
+        typesafe.judge(
+            api_key="jev-secret", model="jev-latest", state={},
+            questions={"token_risk": {"type": "noul", "instructions": "Assess Q7x8Y9z0A1b2"}},
+            transport=transport,
+        )
+        self.assertEqual(seen["questions"], {
+            "token_risk": {"type": "noul", "instructions": "Assess <redacted>"},
+        })
+
+    def test_preserves_natural_state_and_rejects_oversize_without_clipping(self) -> None:
+        body_text = "hello " * 10_000
         seen = {}
 
         def transport(_method, _url, **kwargs):
@@ -397,7 +550,7 @@ class TypeSafeJevAdapterTests(unittest.TestCase):
             typesafe.judge(
                 api_key="jev-secret",
                 model="jev-latest",
-                state={"payload": "x" * typesafe.MAX_REQUEST_BYTES},
+                state={"payload": "hello " * (typesafe.MAX_REQUEST_BYTES // 6 + 1)},
                 questions={"flag": {"type": "noul", "instructions": "Is it risky?"}},
                 transport=should_not_call,
             )
@@ -435,7 +588,7 @@ class ConcreteProviderTests(unittest.TestCase):
         with patch.object(providers.state, "enabled_host_inference_provider", return_value=None):
             self.assertIsNone(
                 providers.openai_text_completion(
-                    "prompt", SCHEMA, "status", purpose="swarm_status", adapter=adapter
+                    "prompt", SCHEMA, "status", purpose="swarm_task", adapter=adapter
                 )
             )
         adapter.assert_not_called()
@@ -448,12 +601,12 @@ class ConcreteProviderTests(unittest.TestCase):
             return_value={"provider": "openai", "api_key": "sk-secret", "features": {}},
         ):
             result = providers.openai_text_completion(
-                "prompt", SCHEMA, "status", purpose="swarm_status", adapter=adapter
+                "prompt", SCHEMA, "status", purpose="swarm_task", adapter=adapter
             )
         self.assertEqual(result["status_line"], "done")
         self.assertEqual(
             adapter.call_args.kwargs["model"],
-            providers.OPENAI_MODEL_BY_PURPOSE["swarm_status"],
+            "gpt-6-luna",
         )
 
     def test_typesafe_judgment_uses_concrete_adapter(self) -> None:
@@ -465,7 +618,7 @@ class ConcreteProviderTests(unittest.TestCase):
         ):
             result = providers.typesafe_jev_judgment(
                 {"action": "read"},
-                {"risk": {"type": "choice"}},
+                {"risk": {"type": "noul", "instructions": "Assess risk"}},
                 timeout_seconds=1.2,
                 adapter=adapter,
             )
@@ -485,19 +638,19 @@ class HostInferenceBoundaryTests(unittest.TestCase):
                     "prompt": "p",
                     "schema": SCHEMA,
                     "schema_name": "status",
-                    "purpose": "swarm_status",
+                    "purpose": "swarm_task",
                 },
             )
         self.assertEqual(result, {"result": {"ok": True}})
         complete.assert_called_once_with(
-            "p", SCHEMA, "status", purpose="swarm_status"
+            "p", SCHEMA, "status", purpose="swarm_task"
         )
         with self.assertRaisesRegex(ValueError, "invalid TypeSafe"):
             api.dispatch(
                 "/typesafe/jev-judgment",
                 {
                     "state": {},
-                    "questions": {"risk": {"type": "score"}},
+                    "questions": {"risk": {"type": "noul", "instructions": "Assess risk"}},
                     "timeout_seconds": 2.1,
                 },
             )
@@ -545,7 +698,7 @@ class HostInferenceBoundaryTests(unittest.TestCase):
                                 "prompt": "p",
                                 "schema": SCHEMA,
                                 "schema_name": "status",
-                                "purpose": "swarm_status",
+                                "purpose": "swarm_task",
                             }
                         ),
                     )
@@ -608,7 +761,7 @@ class HostInferenceBoundaryTests(unittest.TestCase):
         connection.getresponse.return_value = response
         with patch.object(client, "_HostInferenceConnection", return_value=connection) as connect:
             result = client.typesafe_jev_judgment(
-                {"x": 1}, {"risk": {"type": "score"}}, timeout_seconds=1.2
+                {"x": 1}, {"risk": {"type": "noul", "instructions": "Assess risk"}}, timeout_seconds=1.2
             )
         self.assertEqual(result["model"], "jev-latest")
         connect.assert_called_once_with(1.2)
@@ -619,7 +772,7 @@ class HostInferenceBoundaryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "between 0.1 and 2.0"):
             client.typesafe_jev_judgment(
-                {"x": 1}, {"risk": {"type": "score"}}, timeout_seconds=2.1
+                {"x": 1}, {"risk": {"type": "noul", "instructions": "Assess risk"}}, timeout_seconds=2.1
             )
 
     def test_client_reports_recursive_serialization_as_an_explicit_error(self) -> None:
@@ -632,7 +785,7 @@ class HostInferenceBoundaryTests(unittest.TestCase):
                 client.HostInferenceError, "could not be encoded"
             ):
                 client.typesafe_jev_judgment(
-                    {"value": 1}, {"risk": {"type": "score"}}
+                    {"value": 1}, {"risk": {"type": "noul", "instructions": "Assess risk"}}
                 )
         connect.assert_not_called()
         warning.assert_called_once()
@@ -650,7 +803,7 @@ class HostInferenceBoundaryTests(unittest.TestCase):
                 client.HostInferenceError, "no usable result"
             ):
                 client.openai_text_completion(
-                    "prompt", {"type": "object"}, "answer", purpose="swarm_status"
+                    "prompt", {"type": "object"}, "answer", purpose="swarm_task"
                 )
         warning.assert_not_called()
         connection.close.assert_called_once()
@@ -679,20 +832,24 @@ class HostInferenceBoundaryTests(unittest.TestCase):
             ),
             self.assertRaisesRegex(admin_api.ApiError, "unsupported fields"),
         ):
-            admin_api.replace_host_inference_provider("openai", {"model": "gpt-5.6-luna"})
+            admin_api.replace_host_inference_provider("openai", {"model": "gpt-6-luna"})
 
-    def test_enabling_requires_a_saved_key(self) -> None:
+    def test_enabling_does_not_require_a_saved_key(self) -> None:
         with (
             patch.object(
                 admin_api.state,
                 "host_inference_provider_metadata",
                 return_value={"configured": False, "enabled": False, "features": {}},
             ),
-            patch.object(admin_api.state, "configure_host_inference_provider") as save,
-            self.assertRaisesRegex(admin_api.ApiError, "Save an API key"),
+            patch.object(
+                admin_api.state,
+                "configure_host_inference_provider",
+                return_value={"configured": False, "enabled": True},
+            ) as save,
         ):
-            admin_api.replace_host_inference_provider("openai", {"enabled": True})
-        save.assert_not_called()
+            response = admin_api.replace_host_inference_provider("openai", {"enabled": True})
+        save.assert_called_once_with("openai", enabled=True, api_key=None, features=None)
+        self.assertEqual(response["provider"], {"configured": False, "enabled": True})
 
     def test_provider_feature_settings_are_closed_boolean_metadata(self) -> None:
         current = {

@@ -29,11 +29,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import json
 from pathlib import Path
-import select
+import selectors
 import socket
 import ssl
 import subprocess
 import threading
+import time
 from typing import Any
 import urllib.parse
 
@@ -54,7 +55,13 @@ PORT = PROXY_PORT
 BUFFER_SIZE = 65536
 MAX_HEADER_BYTES = 64 * 1024
 MAX_BODY_BYTES = 128 * 1024 * 1024  # bodies are buffered in memory for inspection
-MAX_CONNECTIONS = 64  # cap concurrent handlers so buffered bodies cannot OOM the proxy
+# Eight runtime pools can admit 400 turns. Leave room for simultaneous tool and
+# provider requests; large buffered bodies have their own, tighter budget.
+MAX_CONNECTIONS = 1024
+LARGE_BODY_THRESHOLD = 256 * 1024
+MAX_LARGE_BODIES = 4
+MAX_METERED_RESPONSES = 64  # 64 * 4 MiB per meter; above one runtime's 50-turn pool
+LARGE_MESSAGE_TIMEOUT = 30.0
 MAX_GENERATED_CERTS = 512  # cap the durable per-host certificate cache on the admin volume
 IDLE_TIMEOUT = 310.0
 CLAUDE_ATTESTATION_TIMEOUT = 10.0
@@ -84,6 +91,8 @@ def _policy_load_denial() -> tuple[NetworkControls | None, str | None]:
 
 CERT_LOCK = threading.Lock()
 CONNECTION_SLOTS = threading.BoundedSemaphore(MAX_CONNECTIONS)
+LARGE_BODY_SLOTS = threading.BoundedSemaphore(MAX_LARGE_BODIES)
+METERED_RESPONSE_SLOTS = threading.BoundedSemaphore(MAX_METERED_RESPONSES)
 
 
 def _is_public_ip(ip: str) -> bool:
@@ -294,6 +303,8 @@ class ProxyHandler(BaseHTTPRequestHandler):
         upstream and forward. The forced ``Connection: close`` keeps the
         connection to a single policy-checked request."""
         upstream_tls = None
+        large_body_slot = False
+        metered_response_slot = False
         try:
             client_tls.settimeout(IDLE_TIMEOUT)
             reader = SocketReader(client_tls)
@@ -318,6 +329,29 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 target_denial = "request_target_invalid"
             is_websocket = any(key.lower() == "upgrade" and value.lower() == "websocket" for key, value in headers)
             protocol = "wss" if is_websocket else "https"
+            # Small provider prompts can proceed at full connection capacity.
+            # Reserve one of four large-body slots before buffering a chunked,
+            # compressed, or large fixed-length request. Never wait while
+            # holding a connection slot: many waiters could starve small
+            # provider requests even though they need no large-body budget.
+            header_map = {key.lower(): value for key, value in headers}
+            try:
+                body_length = int(header_map.get("content-length", "0") or "0")
+            except ValueError:
+                body_length = 0  # read_body reports the malformed header
+            content_encoding = header_map.get("content-encoding", "").strip().lower()
+            if ("chunked" in header_map.get("transfer-encoding", "").lower()
+                    or body_length > LARGE_BODY_THRESHOLD
+                    or content_encoding not in {"", "identity"}):
+                if not LARGE_BODY_SLOTS.acquire(blocking=False):
+                    capacity_reason = "request_body_capacity"
+                    append_network_event(protocol, method, host, port, path, query, False, capacity_reason)
+                    client_tls.sendall(
+                        b"HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nRetry-After: 1\r\nContent-Length: "
+                        + str(len(capacity_reason)).encode() + b"\r\n\r\n" + capacity_reason.encode()
+                    )
+                    return
+                large_body_slot = True
             body, body_deny = read_body(reader, headers)
             policy, policy_error = _policy_load_denial()
             guard_denial = (
@@ -357,6 +391,17 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 )
                 if gate_denial is not None:
                     denial = gate_denial
+            meter = None
+            if denial is None and gate_response is None:
+                # Bedrock's passive meter buffers a bounded response. Reserve
+                # its aggregate budget before logging an allowed decision or
+                # opening upstream; otherwise the request is retryable.
+                meter = integrations.response_meter(policy, method, host, path, query, headers, body)
+                if meter is not None:
+                    if METERED_RESPONSE_SLOTS.acquire(blocking=False):
+                        metered_response_slot = True
+                    else:
+                        denial = "response_meter_capacity"
             # Ordinary HTTP is decided entirely by the request guards. A
             # WebSocket is not allowed until the upstream confirms the
             # handshake with 101, so defer its successful event until then.
@@ -369,19 +414,15 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 return
             if denial is not None:
                 message = denial.encode()
+                busy = denial == "response_meter_capacity"
                 client_tls.sendall(
-                    b"HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: "
+                    (b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\n" if busy else b"HTTP/1.1 403 Forbidden\r\n")
+                    + b"Connection: close\r\nContent-Length: "
                     + str(len(message)).encode()
                     + b"\r\n\r\n"
                     + message
                 )
                 return
-            # The owning integration may passively observe the upstream
-            # response of an allowed request (Bedrock token-usage metering);
-            # the relayed bytes are never modified. Selected from the
-            # as-received headers, before the rewrite below replaces the
-            # routing identity that attributes the request to its runtime.
-            meter = integrations.response_meter(policy, method, host, path, query, headers, body)
             # After the allow decision, the owning integration may rewrite
             # headers: on GitHub domains the proxy authenticates the request
             # itself (agent Authorization stripped, the working token
@@ -401,6 +442,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
                 body,
                 websocket=is_websocket,
             )
+            body = b""  # the request no longer needs its buffered copy
+            if large_body_slot:
+                LARGE_BODY_SLOTS.release()
+                large_body_slot = False
             if not is_websocket:
                 if response_rewrite is not None:
                     forward_rewritten_response(upstream_tls, client_tls, response_rewrite)
@@ -444,6 +489,10 @@ class ProxyHandler(BaseHTTPRequestHandler):
         except OSError:
             pass
         finally:
+            if metered_response_slot:
+                METERED_RESPONSE_SLOTS.release()
+            if large_body_slot:
+                LARGE_BODY_SLOTS.release()
             if upstream_tls is not None:
                 upstream_tls.close()
             client_tls.close()
@@ -756,13 +805,46 @@ class WebSocketClientGuard:
         self._message = bytearray()
         self._frames: list[bytes] = []  # raw frames of the in-progress message
         self._fragmented = False
+        self._large_body_slot = False
+        self._large_message_ready_to_release = False
+        self._large_message_deadline: float | None = None
+
+    def close(self) -> None:
+        if self._large_body_slot:
+            LARGE_BODY_SLOTS.release()
+            self._large_body_slot = False
+            self._large_message_deadline = None
+        self._large_message_ready_to_release = False
+
+    def forwarded(self) -> None:
+        """Release a completed large message after its frames leave memory."""
+        if self._large_message_ready_to_release:
+            self.close()
+
+    def remaining_timeout(self) -> float:
+        if self._large_message_deadline is None:
+            return IDLE_TIMEOUT
+        return min(IDLE_TIMEOUT, max(0.0, self._large_message_deadline - time.monotonic()))
+
+    def large_message_timed_out(self) -> bool:
+        return self._large_message_deadline is not None and time.monotonic() >= self._large_message_deadline
 
     def feed(self, data: bytes) -> bytes:
         """Consume client bytes; return the frames cleared for forwarding.
         Raises WebSocketDenied when a message violates policy or the stream
         cannot be safely inspected."""
+        if self.large_message_timed_out():
+            self.close()
+            raise WebSocketDenied("websocket_body_timeout")
         self._buffer.extend(data)
         cleared = bytearray()
+        try:
+            return self._feed_frames(cleared)
+        except BaseException:
+            self.close()
+            raise
+
+    def _feed_frames(self, cleared: bytearray) -> bytes:
         while (frame := self._next_frame()) is not None:
             raw, fin, opcode, payload = frame
             if opcode in (0x8, 0x9, 0xA):  # close/ping/pong pass through
@@ -788,6 +870,11 @@ class WebSocketClientGuard:
                 cleared += b"".join(self._frames)
                 self._frames.clear()
                 self._message.clear()
+                if self._large_body_slot:
+                    # Leave trailing frames buffered until the caller forwards
+                    # these bytes; its sendall can block under backpressure.
+                    self._large_message_ready_to_release = True
+                    return bytes(cleared)
         return bytes(cleared)
 
     def _next_frame(self) -> tuple[bytes, bool, int, bytes] | None:
@@ -798,9 +885,17 @@ class WebSocketClientGuard:
             raise WebSocketDenied("websocket_uninspectable")
         fin = bool(buffer[0] & 0x80)
         opcode = buffer[0] & 0x0F
+        if opcode not in (0x0, 0x1, 0x2, 0x8, 0x9, 0xA):
+            raise WebSocketDenied("websocket_uninspectable")
+        if opcode >= 0x8 and not fin:
+            raise WebSocketDenied("websocket_uninspectable")
         if not buffer[1] & 0x80:
             raise WebSocketDenied("websocket_uninspectable")
         length = buffer[1] & 0x7F
+        # Control frames cannot use extended lengths. Reject on the two-byte
+        # header, before a peer can make us buffer an unbounded payload.
+        if opcode >= 0x8 and length > 125:
+            raise WebSocketDenied("websocket_uninspectable")
         offset = 2
         if length == 126:
             if len(buffer) < 4:
@@ -812,6 +907,12 @@ class WebSocketClientGuard:
             length, offset = int.from_bytes(buffer[2:10], "big"), 10
         if length > MAX_BODY_BYTES:
             raise WebSocketDenied("websocket_uninspectable")
+        buffered_payload = max(0, min(length, len(buffer) - offset - 4))
+        if opcode in (0x0, 0x1, 0x2) and len(self._message) + buffered_payload > LARGE_BODY_THRESHOLD and not self._large_body_slot:
+            if not LARGE_BODY_SLOTS.acquire(blocking=False):
+                raise WebSocketDenied("websocket_body_capacity")
+            self._large_body_slot = True
+            self._large_message_deadline = time.monotonic() + LARGE_MESSAGE_TIMEOUT
         total = offset + 4 + length
         if len(buffer) < total:
             return None
@@ -825,6 +926,24 @@ class WebSocketClientGuard:
 def _websocket_close_frame(status_code: int, reason: str) -> bytes:
     payload = status_code.to_bytes(2, "big") + reason.encode()[:120]
     return bytes([0x88, len(payload)]) + payload
+
+
+def _send_websocket_with_deadline(target: socket.socket, data: bytes, guard: WebSocketClientGuard) -> None:
+    if not guard._large_body_slot:
+        target.sendall(data)
+        return
+    previous_timeout = target.gettimeout()
+    try:
+        # A blocked write in either direction must not extend a held
+        # large-body permit beyond the message's deadline.
+        target.settimeout(max(0.001, guard.remaining_timeout()))
+        target.sendall(data)
+    except TimeoutError as exc:
+        if guard.large_message_timed_out():
+            raise WebSocketDenied("websocket_body_timeout") from exc
+        raise
+    finally:
+        target.settimeout(previous_timeout)
 
 
 def tunnel_websocket(
@@ -846,35 +965,52 @@ def tunnel_websocket(
     logged, answered with a 1008 close frame, and ends the connection.
     Upstream→client frames pass through untouched."""
     guard = WebSocketClientGuard(integrations.ws_message_guard(policy, host))
+
+    def forward_client(data: bytes) -> None:
+        cleared = guard.feed(data)
+        while cleared:
+            _send_websocket_with_deadline(upstream, cleared, guard)
+            guard.forwarded()
+            cleared = guard.feed(b"")
+
     try:
         if initial_upstream_bytes:
             client.sendall(initial_upstream_bytes)
         if initial_client_bytes:
-            cleared = guard.feed(initial_client_bytes)
-            if cleared:
-                upstream.sendall(cleared)
-        sockets = [client, upstream]
-        while True:
-            readable, _, errors = select.select(sockets, [], sockets, IDLE_TIMEOUT)
-            if errors or not readable:
-                return
-            for source in readable:
-                data = source.recv(BUFFER_SIZE)
-                if not data:
+            forward_client(initial_client_bytes)
+        # epoll/kqueue based selectors accept file descriptors above FD_SETSIZE,
+        # unlike select.select, as the proxy's larger handler pool requires.
+        with selectors.DefaultSelector() as selector:
+            selector.register(client, selectors.EVENT_READ)
+            selector.register(upstream, selectors.EVENT_READ)
+            while True:
+                if guard.large_message_timed_out():
+                    raise WebSocketDenied("websocket_body_timeout")
+                events = selector.select(guard.remaining_timeout())
+                if not events:
+                    if guard.large_message_timed_out():
+                        raise WebSocketDenied("websocket_body_timeout")
                     return
-                if source is client:
-                    cleared = guard.feed(data)
-                    if cleared:
-                        upstream.sendall(cleared)
-                else:
-                    client.sendall(data)
+                for key, _events in events:
+                    source = client if key.fileobj is client else upstream
+                    data = source.recv(BUFFER_SIZE)
+                    if not data:
+                        return
+                    if source is client:
+                        forward_client(data)
+                    else:
+                        _send_websocket_with_deadline(client, data, guard)
     except WebSocketDenied as denied:
+        # A slow client can block the close-frame write. Return any large-body
+        # permit before attempting that best-effort notification.
+        guard.close()
         append_network_event(protocol, "MESSAGE", host, port, path, "", False, denied.code)
         try:
             client.sendall(_websocket_close_frame(1008, denied.code))
         except OSError:
             pass
     finally:
+        guard.close()
         upstream.close()
         client.close()
 
@@ -883,6 +1019,9 @@ class DropAtCapacityServer(ThreadingHTTPServer):
     """Cap concurrent connections. Each handler may buffer up to MAX_BODY_BYTES
     for inspection, so without a cap the untrusted agent could open many large
     POSTs at once and OOM the proxy — its only sanctioned network path."""
+
+    daemon_threads = True
+    request_queue_size = MAX_CONNECTIONS
 
     def process_request(self, request, client_address):
         if not CONNECTION_SLOTS.acquire(blocking=False):

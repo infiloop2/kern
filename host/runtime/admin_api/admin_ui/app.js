@@ -7,6 +7,7 @@ import { refreshAnalytics } from "./analytics.js";
 
 import {
   api, apiUpload, login as apiLogin, logout as apiLogout, setUnauthorizedHandler,
+  setAvailabilityHandler, isOverloadCoolingDown, workspaceHtml,
 } from "./api.js";
 import { $, notice, runtimeLabel } from "./helpers.js";
 import {
@@ -51,6 +52,7 @@ import {
   isIPhoneStandalone, scheduleIPhoneInstallCoach, showIPhoneInstallGuide,
 } from "./install.js";
 import { refreshApprovals, pollApprovalBadge, pollApprovals, changeApprovalView, changeApprovalPage, decideApproval, decideVisibleApprovals } from "./approvals.js";
+import { refreshSwarm, setSwarmFilter, setSwarmVisible } from "./swarm.js";
 import { createWorkspaceLastSeen } from "./workspace_last_seen.js";
 import { createWorkspaceReorder } from "./workspace_reorder.js";
 
@@ -100,8 +102,8 @@ let operatorScrolledSincePanelOpen = false;
 for (const event of ["wheel", "touchmove", "keydown"]) {
   window.addEventListener(event, () => { operatorScrolledSincePanelOpen = true; }, { passive: true });
 }
-const staticTabs = ["analytics", "home", "approvals", "processes", "agent-log", "files", "network", "net-log", "tool-log", "host-diagnostics"];
-const homeDetailTabs = new Set(staticTabs.filter(name => !["home", "approvals", "analytics"].includes(name)));
+const staticTabs = ["analytics", "home", "swarm", "approvals", "processes", "agent-log", "files", "network", "net-log", "tool-log", "host-diagnostics"];
+const homeDetailTabs = new Set(staticTabs.filter(name => !["home", "swarm", "approvals", "analytics"].includes(name)));
 const MOBILE_NAV_QUERY = "(max-width: 860px)";
 let mobileNavOpen = false;
 let uploadPickerOpen = false;
@@ -119,6 +121,7 @@ let workspaceNavigationActionSequence = 0;
 const workspacePendingMutations = new Set();
 // Login preload and an immediate navigation click share the same mount.
 const workspaceMounts = new Map();
+const workspaceScriptLoads = new Map();
 let workspaceInitialization = null;
 window.KernWorkspaceRoots = {};
 
@@ -205,9 +208,10 @@ async function login() {
 async function logout() {
   try {
     await apiLogout();
-  } catch (_) {
-    // The session cookie is HttpOnly, so a reload cannot clear it on its own;
-    // still reload to return to the login screen even if the call failed.
+  } catch (error) {
+    // A failed request leaves the HttpOnly session cookie in place.
+    notice(error.message || "Could not log out. Please try again.", "error");
+    return;
   }
   location.reload();
 }
@@ -449,6 +453,7 @@ function showLogin() {
   setMobileNavOpen(false);
   hideIPhoneInstallUi();
   releaseWorkspaceInputFocus();
+  setSwarmVisible(false);
   document.body.classList.remove("viewport-panel-open", "workspace-input-focused");
   $("login").hidden = false;
   $("app").hidden = true;
@@ -486,7 +491,8 @@ function showTab(name, workspaceActionSequence = null) {
   $("panel-workspace-global").hidden = name !== "workspace-global";
   renderWorkspaceNavigation();
   setMobileNavOpen(false, closeDrawer);
-  const opensAtTop = viewportPanelOpen || name === "approvals" || name === "home" || name === "analytics" || homeDetailTabs.has(name);
+  setSwarmVisible(name === "swarm");
+  const opensAtTop = viewportPanelOpen || name === "approvals" || name === "swarm" || name === "home" || name === "analytics" || homeDetailTabs.has(name);
   const openSequence = ++panelOpenSequence;
   if (opensAtTop) {
     operatorScrolledSincePanelOpen = false;
@@ -514,12 +520,14 @@ function showTab(name, workspaceActionSequence = null) {
 
 function homeRouteUrl(view = "home", guideId = "") {
   if (view === "approvals") return "#approvals";
+  if (view === "swarm") return "#swarm";
   if (view === "network" && guideId) return `#home/integrations/${encodeURIComponent(guideId)}`;
   return view === "home" ? "#home" : `#home/${encodeURIComponent(view)}`;
 }
 
 function homeRouteFromLocation() {
   if (location.hash === "#approvals") return { view: "approvals", guideId: "" };
+  if (location.hash === "#swarm") return { view: "swarm", guideId: "" };
   const integrationMatch = location.hash.match(/^#home\/integrations\/(.+)$/);
   if (integrationMatch) {
     try {
@@ -644,6 +652,7 @@ function openPasskeyGuidance() {
 // approvals carry no inputs and also refresh on the tick.
 const tabRefreshers = {
   analytics: { enter: [refreshAnalytics], tick: [] },
+  swarm: { enter: [refreshSwarm], tick: [refreshSwarm] },
   approvals: { enter: [refreshApprovals], tick: [pollApprovals] },
   "home": { enter: [refreshConnectionGuide], tick: [] },
   "agent-log": {
@@ -674,20 +683,38 @@ async function refreshVisibleTab(name) {
   for (const refresh of tabRefreshers[name]?.enter || []) await refresh();
 }
 
+let tickRunning = false;
+const refreshing = new Set();
+setAvailabilityHandler(message => {
+  const status = $("overload-status");
+  status.textContent = message;
+  status.hidden = !message;
+});
+
 async function tick() {
-  await refreshOrSkip(refreshHealth);
-  await refreshOrSkip(refreshProviderAccounts);
-  await refreshOrSkip(refreshWorkspaceNavigation);
-  await refreshOrSkip(() => refreshGettingStarted());
-  for (const refresh of tabRefreshers[activeTab]?.tick || []) await refreshOrSkip(refresh);
+  if (tickRunning || isOverloadCoolingDown()) return;
+  tickRunning = true;
+  try {
+    await refreshOrSkip(refreshHealth);
+    await refreshOrSkip(refreshProviderAccounts);
+    await refreshOrSkip(refreshWorkspaceNavigation);
+    await refreshOrSkip(() => refreshGettingStarted());
+    for (const refresh of tabRefreshers[activeTab]?.tick || []) await refreshOrSkip(refresh);
+  } finally {
+    tickRunning = false;
+  }
 }
 
 async function refreshOrSkip(work) {
+  if (isOverloadCoolingDown() || refreshing.has(work)) return;
+  refreshing.add(work);
   try {
     await work();
   } catch (_error) {
-    // Keep one failed dashboard section from preventing later sections, such
-    // as the audit logs, from fetching their own backend state.
+    // Keep the last rendered state. The shared API layer pauses polling on
+    // overload; unrelated section errors still allow other refreshes.
+  } finally {
+    refreshing.delete(work);
   }
 }
 
@@ -699,7 +726,11 @@ async function start() {
   clearLegacyPasswordCookie();
   try {
     await api("GET", "/v1/health");
-  } catch (_) {
+  } catch (error) {
+    if (error.code === "host_unavailable") {
+      setTimeout(start, 5000);
+      return;
+    }
     showLogin();
     return;
   }
@@ -745,7 +776,7 @@ function showApp() {
       // request fails before the asynchronous restore can begin.
       navigateWorkspaceRoute(workspaceRoute.resource, workspaceRoute.itemId, true);
       showTab("home");
-      void workspaceReady
+      void Promise.resolve()
         .then(() => {
           const currentRoute = workspaceRouteFromLocation();
           if (
@@ -763,6 +794,8 @@ function showApp() {
       const route = history.state?.kernHomeRoute;
       if (route === "approvals") {
         showTab("approvals");
+      } else if (route === "swarm") {
+        showTab("swarm");
       } else if (route && route !== "home" && homeDetailTabs.has(route)) {
         openHomeView(route, history.state.guideId || "", false);
       } else {
@@ -833,6 +866,12 @@ async function mountWorkspaces() {
   await mountWorkspace("global", "panel-workspace-global", "/workspace/global.html");
 }
 
+function mountWorkspaceFor(resource) {
+  if (resource === "chat") return mountWorkspace("chat", "panel-workspace-chat", "/workspace/chat.html");
+  if (resource === "web-apps") return mountWorkspace("web-apps", "panel-workspace-web-apps", "/workspace/web-apps.html");
+  return mountWorkspace("global", "panel-workspace-global", "/workspace/global.html");
+}
+
 function initializeWorkspaces() {
   if (!workspaceInitialization) {
     workspaceInitialization = mountWorkspaces().catch(error => {
@@ -856,22 +895,34 @@ async function mountWorkspace(name, panelId, htmlPath) {
     mounting = performWorkspaceMount(name, panelId, htmlPath);
     workspaceMounts.set(name, mounting);
   }
-  await mounting;
+  try {
+    await mounting;
+  } catch (error) {
+    if (workspaceMounts.get(name) === mounting) workspaceMounts.delete(name);
+    throw error;
+  }
 }
 
 async function performWorkspaceMount(name, panelId, htmlPath) {
-  const response = await fetch(htmlPath, { credentials: "same-origin" });
-  if (!response.ok) throw new Error(`Could not load workspace ${name}`);
-  const parsed = new DOMParser().parseFromString(await response.text(), "text/html");
+  const parsed = new DOMParser().parseFromString(await workspaceHtml(htmlPath), "text/html");
   const root = parsed.body.firstElementChild;
   if (!root) throw new Error(`workspace ${name} UI is empty`);
   const shadow = $(panelId).shadowRoot || $(panelId).attachShadow({ mode: "open" });
-  addWorkspaceStyle(shadow, "/admin_ui.css");
-  addWorkspaceStyle(shadow, "/workspace/rich_text.css");
-  addWorkspaceStyle(shadow, "/workspace/composer.css");
+  shadow.replaceChildren();
   const assetName = name === "chat" ? "chat" : name === "web-apps" ? "web-apps" : "global";
-  addWorkspaceStyle(shadow, `/workspace/${assetName}.css`);
+  const stylesReady = Promise.all([
+    addWorkspaceStyle(shadow, "/admin_ui.css"),
+    addWorkspaceStyle(shadow, "/workspace/rich_text.css"),
+    addWorkspaceStyle(shadow, "/workspace/composer.css"),
+    addWorkspaceStyle(shadow, `/workspace/${assetName}.css`),
+  ]);
   shadow.append(root);
+  try {
+    await stylesReady;
+  } catch (error) {
+    shadow.replaceChildren();
+    throw error;
+  }
   window.KernWorkspaceRoots[name] = shadow;
   if (!window.KernRichText) {
     await loadWorkspaceScript("/workspace/rich_text.js");
@@ -880,20 +931,47 @@ async function performWorkspaceMount(name, panelId, htmlPath) {
 }
 
 function addWorkspaceStyle(root, href) {
-  const link = document.createElement("link");
-  link.rel = "stylesheet";
-  link.href = href;
-  root.append(link);
+  return new Promise((resolve, reject) => {
+    const link = document.createElement("link");
+    link.rel = "stylesheet";
+    link.href = href;
+    const timeout = setTimeout(() => finish(new Error(`Timed out loading ${href}`)), 30000);
+    function finish(error) {
+      clearTimeout(timeout);
+      link.removeEventListener("load", onLoad);
+      link.removeEventListener("error", onError);
+      if (error) {
+        link.remove();
+        reject(error);
+      } else resolve();
+    }
+    function onLoad() {
+      finish(link.sheet ? null : new Error(`Could not load ${href}`));
+    }
+    function onError() {
+      finish(new Error(`Could not load ${href}`));
+    }
+    link.addEventListener("load", onLoad);
+    link.addEventListener("error", onError);
+    root.append(link);
+  });
 }
 
 function loadWorkspaceScript(src) {
-  return new Promise((resolve, reject) => {
+  let loading = workspaceScriptLoads.get(src);
+  if (loading) return loading;
+  loading = new Promise((resolve, reject) => {
     const script = document.createElement("script");
     script.src = src;
     script.addEventListener("load", resolve, { once: true });
     script.addEventListener("error", () => reject(new Error(`Could not load ${src}`)), { once: true });
     document.body.append(script);
   });
+  workspaceScriptLoads.set(src, loading);
+  void loading.catch(() => {
+    if (workspaceScriptLoads.get(src) === loading) workspaceScriptLoads.delete(src);
+  });
+  return loading;
 }
 
 async function refreshWorkspaceNavigation() {
@@ -965,7 +1043,7 @@ async function openWorkspaceGlobal(resource, itemId = null, updateHistory = true
     return true;
   }
   const actionSequence = ++workspaceNavigationActionSequence;
-  await initializeWorkspaces();
+  await mountWorkspaceFor("global");
   if (actionSequence !== workspaceNavigationActionSequence) return;
   if (!showTab("workspace-global", actionSequence)) return;
   if (updateHistory) navigateWorkspaceRoute(resource, itemId);
@@ -990,10 +1068,11 @@ function renderWorkspaceRows(containerId, items, action, archived) {
     button.disabled = pending;
     const primary = document.createElement("span");
     primary.className = "workspace-nav-primary";
-    if (item.status === "running") {
+    if (item.status === "running" || (kind === "chat" && item.latest_event_type === "thread.error")) {
       const dot = document.createElement("span");
-      dot.className = "workspace-nav-running";
-      dot.setAttribute("aria-label", "Agent running");
+      const running = item.status === "running";
+      dot.className = running ? "workspace-nav-running" : "workspace-nav-error";
+      dot.setAttribute("aria-label", running ? "Agent running" : "Agent error");
       primary.append(dot);
     }
     const label = document.createElement("span");
@@ -1012,6 +1091,13 @@ function renderWorkspaceRows(containerId, items, action, archived) {
       primary.append(dot);
     }
     button.append(primary);
+    const task = typeof item.task === "string" ? item.task.trim() : "";
+    if (task) {
+      const taskLine = document.createElement("span");
+      taskLine.className = "workspace-nav-task";
+      taskLine.textContent = task;
+      button.append(taskLine);
+    }
     const session = kind === "chat" ? item : item.agent_settings || item.session || {};
     const settings = [runtimeLabel(session.agent_runtime), session.model, session.effort]
       .filter(Boolean)
@@ -1022,7 +1108,7 @@ function renderWorkspaceRows(containerId, items, action, archived) {
       meta.textContent = settings;
       button.append(meta);
     }
-    const detail = settings ? `${item.name || itemId}\n${settings}` : item.name || itemId;
+    const detail = [item.name || itemId, task, settings].filter(Boolean).join("\n");
     button.title = hasChanges ? `${detail}\nNew activity` : detail;
     row.append(button);
     if (archived) {
@@ -1072,7 +1158,7 @@ async function findChatNavItem(threadId) {
 
 async function openWorkspaceNewChat(updateHistory = true, prompt = "") {
   const actionSequence = ++workspaceNavigationActionSequence;
-  await initializeWorkspaces();
+  await mountWorkspaceFor("chat");
   if (actionSequence !== workspaceNavigationActionSequence) return false;
   chatNavArchived = false;
   if (!showTab("workspace-chat", actionSequence)) return false;
@@ -1085,7 +1171,7 @@ async function openWorkspaceNewChat(updateHistory = true, prompt = "") {
 async function openWorkspaceChat(threadId, updateHistory = true) {
   if (workspacePendingMutations.has(`chat:${threadId}`)) return;
   const actionSequence = ++workspaceNavigationActionSequence;
-  await initializeWorkspaces();
+  await mountWorkspaceFor("chat");
   if (actionSequence !== workspaceNavigationActionSequence) return;
   const found = await findChatNavItem(threadId);
   if (actionSequence !== workspaceNavigationActionSequence) return;
@@ -1129,7 +1215,7 @@ async function findWebAppNavItem(appId) {
 async function openWorkspaceWebApp(appId, updateHistory = true) {
   if (workspacePendingMutations.has(`web-apps:${appId}`)) return;
   const actionSequence = ++workspaceNavigationActionSequence;
-  await initializeWorkspaces();
+  await mountWorkspaceFor("web-apps");
   if (actionSequence !== workspaceNavigationActionSequence) return;
   const found = await findWebAppNavItem(appId);
   if (actionSequence !== workspaceNavigationActionSequence) return;
@@ -1154,7 +1240,7 @@ async function openWorkspaceWebApp(appId, updateHistory = true) {
 
 async function openWorkspaceAppLibrary(updateHistory = true) {
   const actionSequence = ++workspaceNavigationActionSequence;
-  await initializeWorkspaces();
+  await mountWorkspaceFor("web-apps");
   if (actionSequence !== workspaceNavigationActionSequence) return false;
   webAppsNavArchived = false;
   if (!showTab("workspace-web-apps", actionSequence)) return false;
@@ -1242,7 +1328,7 @@ document.addEventListener("click", event => {
     },
     "new-web-app": async () => {
       const actionSequence = ++workspaceNavigationActionSequence;
-      await mountWorkspaces();
+      await mountWorkspaceFor("web-apps");
       if (actionSequence !== workspaceNavigationActionSequence) return;
       webAppsNavArchived = false;
       if (!showTab("workspace-web-apps", actionSequence)) return;
@@ -1277,8 +1363,14 @@ document.addEventListener("click", event => {
     "show-tab": () => {
       if (button.dataset.tab === "home") return backToHome();
       if (button.dataset.tab === "approvals") recordHomeRoute("approvals");
+      if (button.dataset.tab === "swarm") {
+        recordHomeRoute("swarm");
+        history.replaceState({ ...history.state, swarmReturn: true }, "");
+      }
       showTab(button.dataset.tab);
     },
+    "close-swarm": () => closeSwarm(),
+    "swarm-filter": () => setSwarmFilter(button.dataset.swarmFilter),
     "open-home-view": () => openHomeView(button.dataset.view),
     "open-home-integration": () => openHomeIntegration(button.dataset.guide),
     "home-back": () => backToHome(),
@@ -1344,9 +1436,15 @@ document.addEventListener("click", event => {
   }
 });
 
+function closeSwarm() {
+  if (history.state?.swarmReturn) history.back();
+  else backToHome();
+}
+
 setUnauthorizedHandler(showLogin);
 document.addEventListener("keydown", event => {
   if (event.key !== "Escape") return;
+  if (activeTab === "swarm") { closeSwarm(); return; }
   if (!$("ios-install-overlay").hidden) closeIPhoneInstallGuide();
   collapseRuntimeOverview();
   if (mobileNavOpen) setMobileNavOpen(false, true);
@@ -1372,6 +1470,8 @@ window.addEventListener("popstate", event => {
   const route = event.state?.kernHomeRoute;
   if (route === "approvals") {
     showTab("approvals");
+  } else if (route === "swarm") {
+    showTab("swarm");
   } else if (route && route !== "home" && homeDetailTabs.has(route)) {
     openHomeView(route, event.state.guideId || "", false);
   } else {

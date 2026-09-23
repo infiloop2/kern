@@ -166,6 +166,18 @@ class BedrockResponseMeterTests(unittest.TestCase):
                 meter.finish()
         record.assert_called_once_with("deepseek.v3.2", None, 0.0)
 
+    def test_compressed_response_cannot_expand_past_meter_budget(self) -> None:
+        meter = usage.BedrockResponseMeter("deepseek.v3.2")
+        response = http_response(gzip.compress(b"x" * 1000), extra_headers=b"Content-Encoding: gzip\r\n")
+        with (
+            patch.object(usage, "MAX_METERED_RESPONSE_BYTES", 256),
+            patch.object(usage, "record_bedrock_usage") as record,
+        ):
+            self.assertLess(len(response), 256)
+            meter.feed(response)
+            meter.finish()
+        record.assert_called_once_with("deepseek.v3.2", None, 0.0)
+
     def test_a_recording_failure_never_escapes_finish(self) -> None:
         meter = usage.BedrockResponseMeter("deepseek.v3.2")
         with patch.object(usage, "record_bedrock_usage", side_effect=RuntimeError("db down")):

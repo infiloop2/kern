@@ -102,7 +102,7 @@ generates and persists a minimal Web App.
 
 The live concurrency scenario uses three Codex and three Claude turns as a
 bounded integration check. Provider-neutral orchestrator tests prove the full
-ten-turn cap for Codex, Claude Code, Grok, and Hermes without adding paid provider
+fifty-turn cap for Codex, Claude Code, Grok, and Hermes without adding paid provider
 turns merely to repeat the admission invariant.
 
 All agent turns use the least expensive exposed options: Codex uses

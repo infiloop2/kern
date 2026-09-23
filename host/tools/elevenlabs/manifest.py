@@ -37,7 +37,7 @@ CHUNK = schema({
 
 ACTIONS = (
     ActionSpec(
-        id="list_voices", description="List or search ElevenLabs default voices and voices saved in your account.",
+        id="list_voices", cost_description='Reads voices without generating paid media. No cost is reported.', description="List or search ElevenLabs default voices and voices saved in your account.",
         data_policy="Search text and pagination options are sent directly to ElevenLabs using the configured API key. No audio is generated or published.",
         input_schema=schema({"search": text("Optional search term, up to 200 characters."), "page_size": integer("Maximum requested voices, 1 to 100; default 20. The first provider page may also include default voices."), "next_page_token": text("Pagination token returned by the previous call, up to 512 characters.")}),
         output_schema=schema({
@@ -50,7 +50,7 @@ ACTIONS = (
         }, ["voices", "has_more", "next_page_token"]),
     ),
     ActionSpec(
-        id="design_voice", description="Design original voices from a description and return candidates to audition.",
+        id="design_voice", cost_description='Voice design uses account credits. Uses $0.0002 per returned credit, based on the published Starter plan; plan pricing varies. Reports nothing without charged usage.', description="Design original voices from a description and return candidates to audition.",
         data_policy="The voice description, optional preview script and design controls go directly to ElevenLabs and use account credits. ElevenLabs generates preview candidates; no voice is added to your account until save_voice is called.",
         input_schema=schema({
             "voice_description": text("Describe the voice, accent, age, tone and character in 20 to 1000 characters."),
@@ -64,12 +64,12 @@ ACTIONS = (
         }, ["generated_voice_ids", "text"]),
     ),
     ActionSpec(
-        id="preview_voice", description="Save an existing designed voice preview as an MP3 for listening.",
+        id="preview_voice", cost_description='Retrieves an existing preview; no new generation cost is reported.', description="Save an existing designed voice preview as an MP3 for listening.",
         data_policy="The generated voice ID is sent to ElevenLabs to retrieve its existing preview. The MP3 is saved privately into Files. No new voice is created or published.",
         input_schema=schema({"generated_voice_id": text("Candidate ID returned by design_voice; no URL accepted.")}, ["generated_voice_id"]), returns_asset=True,
     ),
     ActionSpec(
-        id="save_voice", description="Add a selected designed voice to your ElevenLabs account for future speech generation.",
+        id="save_voice", cost_description='Saves an existing voice design; no new generation cost is reported.', description="Add a selected designed voice to your ElevenLabs account for future speech generation.",
         data_policy="The selected candidate ID, name and description go directly to ElevenLabs. The voice is stored in your account and uses a voice slot according to your plan. This does not share the voice publicly.",
         input_schema=schema({
             "generated_voice_id": text("Candidate ID returned by design_voice."),
@@ -79,7 +79,7 @@ ACTIONS = (
         output_schema=schema({"voice_id": text("Saved voice ID to use with generate_speech.")}, ["voice_id"]),
     ),
     ActionSpec(
-        id="generate_speech", description="Generate narration and automatically save the MP3 under /tool_assets. Eleven v3 supports expressive script tags such as [whispers]. Audition delivery before making a full narration.",
+        id="generate_speech", cost_description='Speech generation uses account credits. Uses $0.0002 per returned credit, based on the published Starter plan; plan pricing varies. Reports nothing without charged usage.', description="Generate narration and automatically save the MP3 under /tool_assets. Eleven v3 supports expressive script tags such as [whispers]. Audition delivery before making a full narration.",
         data_policy="Script, voice ID, model and delivery controls go directly to ElevenLabs and use account credits. The generated audio is saved privately into the agent workspace; no publication or separate download approval occurs.",
         input_schema=schema({
             "text": text("Exact script, up to 1000 characters and the host's UTF-8 parameter limit. Inline audio tags are supported by eleven_v3."),
@@ -92,7 +92,7 @@ ACTIONS = (
         }, ["text", "voice_id"]), returns_asset=True,
     ),
     ActionSpec(
-        id="generate_music", description="Compose music with Music 2.5 from a prompt or timed sections.",
+        id="generate_music", cost_description='Music generation uses account credits. Uses $0.0002 per returned credit, based on the published Starter plan; plan pricing varies. Reports nothing without charged usage.', description="Compose music with Music 2.5 from a prompt or timed sections.",
         data_policy="The prompt or section directions, timing and generation controls go directly to ElevenLabs and use account credits. The generated MP3 is saved privately. Kern does not request storage for later song editing.",
         input_schema=schema({
             "prompt": text("Music description, up to 1000 characters. Supply either prompt or sections."),
@@ -102,7 +102,7 @@ ACTIONS = (
         }), returns_asset=True,
     ),
     ActionSpec(
-        id="generate_sound_effect", description="Generate a sound effect or seamless ambience loop with Eleven Sound Effects v2 and automatically save the MP3.",
+        id="generate_sound_effect", cost_description='Sound effect generation uses account credits. Uses $0.0002 per returned credit, based on the published Starter plan; plan pricing varies. Reports nothing without charged usage.', description="Generate a sound effect or seamless ambience loop with Eleven Sound Effects v2 and automatically save the MP3.",
         data_policy="The sound description, duration, loop flag and prompt influence go directly to ElevenLabs and use account credits. The resulting audio is saved privately into the agent workspace.",
         input_schema=schema({
             "text": text("Describe the sound, up to 1000 characters."),
@@ -114,6 +114,7 @@ ACTIONS = (
 )
 
 MANIFEST = ToolManifest(
+    reports_cost=True,
     tool_id="elevenlabs", display_name="ElevenLabs", connection="enable_only",
     description="Generate expressive speech, music and sound effects.",
     actions=protect_inputs(ACTIONS, {

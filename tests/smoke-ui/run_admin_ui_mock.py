@@ -142,7 +142,7 @@ RUNTIME_LABELS = {
     "grok-2": "Grok 2",
     "hermes": "Hermes",
 }
-TURN_LIMIT_PER_RUNTIME = 10
+TURN_LIMIT_PER_RUNTIME = 50
 
 # Timed progression script for running turns: (fraction of duration, message).
 PROGRESS_SCRIPT = [
@@ -321,14 +321,16 @@ class MockState:
         self.next_tool_event_seq += 1
 
     def public_thread(self, thread: dict[str, Any]) -> dict[str, Any]:
-        latest_event_seq = max(
+        latest_event = max(
             (
-                int(event["seq"])
+                event
                 for event in self.agent_events
                 if event.get("thread_id") == thread["thread_id"]
             ),
-            default=0,
+            key=lambda event: int(event["seq"]),
+            default=None,
         )
+        latest_event_seq = int(latest_event["seq"]) if latest_event else 0
         latest_message_seq = max(
             (
                 int(event["seq"])
@@ -346,7 +348,9 @@ class MockState:
             "last_used_at": thread["last_used_at"],
             "status": "running" if thread.get("_running") else "idle",
             "latest_event_seq": latest_event_seq,
+            "latest_event_type": latest_event["event_type"] if latest_event else None,
             "latest_message_seq": latest_message_seq,
+            "task": thread.get("task"),
         }
 
     def runtime_status(self, runtime: str) -> str:
@@ -861,6 +865,10 @@ def seed_state() -> None:
             # it is stopped or its runtime deactivates and fails it.
             thread["_running"] = True
 
+    # One long title exercises the sidebar ellipsis without clipping stored text.
+    STATE.threads["thread-1"]["task"] = (
+        "Document the theming setup and open a pull request with the implementation and test evidence"
+    )
     # More than one host page ensures the browser session log follows the
     # thread-list keyset cursor instead of silently hiding older sessions.
     for index in range(101):
@@ -1297,7 +1305,38 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+def swarm_snapshot() -> dict[str, Any]:
+    agents = []
+    for index in range(100):
+        kind = "app" if index < 30 else "schedule" if index < 55 else "chat"
+        prefix = "thread" if kind == "chat" else kind
+        name = ["Release notes", "Billing desk", "Launch copy", "Deploy watcher"][index] if index < 4 else f"{kind.title()} agent {index + 1}"
+        agents.append({
+            "thread_id": f"{prefix}-{index + 1}", "kind": kind, "name": name,
+            "purpose": "Keep the project moving" if kind != "chat" else "",
+            "agent_runtime": "codex", "model": "gpt-5.6-terra",
+            "state": "busy" if index < 8 else "failed" if 13 <= index < 16 else "idle",
+            "task": ["Prepare the next release", "Review customer invoices", "Draft launch copy", "Check deployment health"][index % 4],
+            "needs_human": None if index < 8 or index == 99 else index < 13,
+            "next_run_at": ago(-90) if kind == "schedule" else None,
+        })
+    return {
+        "generated_at": STATE.now(), "agents": agents,
+    }
+
+
+def swarm_peer_messages() -> dict[str, Any]:
+    return {"messages": [{
+            "seq": 81, "sender_thread_id": "app-1", "target_thread_id": "app-2",
+            "timestamp": ago(0.2),
+        }]}
+
+
 def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dict[str, Any]:
+    if method == "GET" and path == "/v1/swarm":
+        return swarm_snapshot()
+    if method == "GET" and path == "/v1/swarm/peer-messages":
+        return swarm_peer_messages()
     if method == "GET" and path == "/v1/analytics":
         from analytics_smokes import fixture
         return fixture()
@@ -1417,8 +1456,6 @@ def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dic
             provider = STATE.host_inference_providers[provider_id]
             if isinstance(body.get("api_key"), str) and body["api_key"]:
                 provider["configured"] = True
-            if body.get("enabled") is True and not provider["configured"]:
-                raise ApiError(HTTPStatus.CONFLICT, "Save an API key before enabling this provider")
             if isinstance(body.get("enabled"), bool):
                 provider["enabled"] = body["enabled"]
             if isinstance(body.get("features"), dict):
@@ -1463,6 +1500,14 @@ def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dic
         return agent_processes()
     if method == "GET" and path == "/v1/tools":
         return list_tools()
+    if method == "GET" and path == "/v1/tools/usage":
+        return {"month_to_date": "1.20515",
+                "tools": [{"tool_id": name, "display_name": label, "enabled": True,
+                           "month_to_date": amount}
+                          for name, label, amount in [
+                              ("runway", "Runway", "1.2"),
+                              ("twitterapi_io", "TwitterAPI.io", "0.00015"),
+                              ("twitter", "X", "0.005")]]}
     tool_config_match = TOOL_CONFIG_RE.fullmatch(path)
     if method == "PUT" and tool_config_match:
         return put_tool_config(tool_config_match.group(1), body)
@@ -1503,6 +1548,7 @@ def list_tools() -> dict[str, Any]:
                 "description": manifest.description,
                 "connection": manifest.connection,
                 "enabled": tool_id in STATE.tool_enabled,
+                "reports_cost": manifest.reports_cost,
                 "actions": [
                     {
                         "id": spec.id,
@@ -1513,6 +1559,7 @@ def list_tools() -> dict[str, Any]:
                         "input_protections": {name: asdict(protection) for name, protection in spec.input_protections.items()},
                         "output_schema": spec.output_schema,
                         "returns_asset": spec.returns_asset,
+                        "cost_description": spec.cost_description,
                     }
                     for spec in manifest.actions
                 ],
@@ -2937,6 +2984,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
         "representative usage; the UI smoke needs the default empty state.",
     )
     parser.add_argument(
+        "--workspace-smoke",
+        action="store_true",
+        help="Activate the mock agent runtimes normally connected by the core UI smoke.",
+    )
+    parser.add_argument(
         "--public-https",
         action="store_true",
         help=(
@@ -2994,6 +3046,19 @@ def seed_demo_state() -> None:
     STATE.bedrock_region = "us-east-1"
 
 
+def seed_workspace_smoke_state() -> None:
+    """Let the Workspace smoke run without relying on the core UI journey."""
+    STATE.policy["network_integrations"].update({
+        "openai": {"enabled": True},
+        "claude": {"enabled": True},
+        "xai": {"enabled": True},
+    })
+    STATE.logged_in.update({
+        "codex": True, "codex-2": True, "codex-3": True,
+        "claude_code": True, "grok": True, "grok-2": True,
+    })
+
+
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     # App smoke modules are loaded lazily on their first API request. Demo
@@ -3003,6 +3068,8 @@ def main(argv: list[str] | None = None) -> int:
     seed_state()
     if args.demo:
         seed_demo_state()
+    if args.workspace_smoke:
+        seed_workspace_smoke_state()
     STATE.public_https_preview = args.public_https
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     actual_host, actual_port = server.server_address

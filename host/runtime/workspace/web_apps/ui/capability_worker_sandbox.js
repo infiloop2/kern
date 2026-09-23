@@ -45,3 +45,6 @@ function terminateGeneratedWorker() {
   generatedWorker.terminate();
   generatedWorker = null;
 }
+
+// Tell the parent when the trusted broker has loaded, before it sends App code.
+globalThis.postMessage({ type: "capability-worker-ready" });

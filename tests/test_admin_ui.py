@@ -122,7 +122,8 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("mounting = performWorkspaceMount(name, panelId, htmlPath);", app)
         self.assertIn("window.KernWorkspaceRoots[name] = shadow;", app)
         self.assertNotIn("window.KernWorkspaceRoots[name] = root;", app)
-        self.assertIn('addWorkspaceStyle(shadow, "/workspace/composer.css");', app)
+        self.assertIn('addWorkspaceStyle(shadow, "/workspace/composer.css"),', app)
+        self.assertIn('await stylesReady;', app)
         # Each shadow host and root must be allowed to shrink below its
         # intrinsic content height. Otherwise a long conversation expands the
         # whole mounted surface instead of scrolling inside its own pane.
@@ -1046,7 +1047,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn(f'<img class="login-mark" width="44" height="44" src="{favicon_src}" alt="">', html)
         # Home owns integration and diagnostic navigation. Memory remains a
         # first-class destination; Schedules is the titled section below Apps.
-        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 4)
+        self.assertEqual(html.count('<svg width="19" height="19" viewBox="0 0 20 20"'), 5)
         self.assertIn('/favicon.svg', html)
         self.assertIn('/favicon.ico', html)
         self.assertIn('/admin_ui.css', html)
@@ -1264,6 +1265,7 @@ class AdminUiStaticTests(unittest.TestCase):
                     "message_bytes": [str(message_bytes)],
                 },
                 None,
+                None,
             )
 
         page.assert_called_once_with("thread-1", 2, 5, before=None)
@@ -1287,6 +1289,7 @@ class AdminUiStaticTests(unittest.TestCase):
                     "/v1/threads/thread-1/events",
                     {"before": ["42"], "limit": ["5"]},
                     None,
+                    None,
                 ),
                 {"events": []},
             )
@@ -1297,6 +1300,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/thread-1/events",
                 {"since": ["2"], "before": ["42"]},
+                None,
                 None,
             )
         self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
@@ -1320,6 +1324,7 @@ class AdminUiStaticTests(unittest.TestCase):
                         ],
                     },
                     None,
+                    None,
                 ),
                 {"events": []},
             )
@@ -1341,6 +1346,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/thread-1/events",
                 {"event_type": ["turn.started"]},
+                None,
                 None,
             )
         self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
@@ -1370,6 +1376,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/thread-1/events",
                 {"limit": ["1"], "message_bytes": [str(message_bytes)]},
+                None,
                 None,
             )
 
@@ -1410,6 +1417,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "/v1/threads/thread-1/events",
                 {"limit": ["6"], "message_bytes": [str(message_bytes)]},
                 None,
+                None,
             )
 
         self.assertEqual(len(response["events"]), 6)
@@ -1437,6 +1445,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/thread-1/events",
                 {"limit": ["8"], "message_bytes": [str(message_bytes)]},
+                None,
                 None,
             )
 
@@ -1466,6 +1475,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/thread-1/events",
                 {"limit": ["8"], "message_bytes": [str(message_bytes)]},
+                None,
                 None,
             )
 
@@ -2799,7 +2809,9 @@ class AdminUiStaticTests(unittest.TestCase):
                         "POST", path, {}, body, principal=principal
                     )
                     self.assertEqual(response, {"status": "accepted"})
-                    thread_route.assert_called_once_with("POST", path, {}, body)
+                    thread_route.assert_called_once_with(
+                        "POST", path, {}, body, None,
+                    )
 
     def test_every_thread_route_rejects_an_unprefixed_id(self) -> None:
         for method, path in (
@@ -2812,7 +2824,7 @@ class AdminUiStaticTests(unittest.TestCase):
             with self.subTest(method=method, path=path), self.assertRaises(
                 admin_api.ApiError
             ) as rejected:
-                admin_api.thread_route(method, path, {}, None)
+                admin_api.thread_route(method, path, {}, None, None)
             self.assertEqual(rejected.exception.status, HTTPStatus.NOT_FOUND)
 
     def test_http_service_cannot_mint_auth_cookies_or_sessions(self) -> None:

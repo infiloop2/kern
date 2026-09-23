@@ -15,7 +15,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        suite: [unit, browser]
+        suite: [unit, browser-core, browser-workspaces]
     permissions:
       contents: read
       packages: read
@@ -70,12 +70,19 @@ jobs:
           .github/ci/run-in-sandbox.sh kern-ci:sandbox \
             'python3 -m unittest discover -s tests -v'
 
-      - name: Run admin UI smoke in no-network sandbox
-        if: matrix.suite == 'browser'
+      - name: Run admin UI core smoke in no-network sandbox
+        if: matrix.suite == 'browser-core'
         shell: bash
         run: |
           .github/ci/run-in-sandbox.sh kern-ci:sandbox \
-            'python3 tests/smoke-ui/admin_ui_smoke.py --port 3100 --webkit'
+            'python3 tests/smoke-ui/admin_ui_smoke.py --port 3100 --scope core'
+
+      - name: Run admin UI workspace and WebKit smoke in no-network sandbox
+        if: matrix.suite == 'browser-workspaces'
+        shell: bash
+        run: |
+          .github/ci/run-in-sandbox.sh kern-ci:sandbox \
+            'python3 tests/smoke-ui/admin_ui_smoke.py --port 3100 --scope workspaces --webkit'
 
   test:
     # Preserve the branch-protection check name. Skipped, cancelled, and failed

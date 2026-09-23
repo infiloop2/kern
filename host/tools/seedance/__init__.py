@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import re
 import urllib.parse
+from decimal import Decimal
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.json_types import JSONObject, JSONValue
@@ -40,6 +41,7 @@ from host.tools.results import (
 )
 from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.shared import outputs
+from host.tools.shared.cost_reporting import report_provider_usd
 from host.tools.shared.inputs import ToolInputValidationError, provider_fetched_https_url
 from host.tools.shared.media import open_downloaded_video
 from host.tools.shared.web import (
@@ -165,6 +167,7 @@ GET_TASK_OUTPUT_SCHEMA: JSONObject = outputs.obj(
 
 
 MANIFEST = ToolManifest(
+    reports_cost=True,
     tool_id="seedance",
     display_name="Seedance Video Generation",
     description=(
@@ -174,7 +177,7 @@ MANIFEST = ToolManifest(
     connection="enable_only",
     actions=protect_inputs((
         ActionSpec(
-            id="generate_video",
+            id="generate_video", cost_description='Reports a cost estimate when the task is accepted, using submitted duration, resolution, and published token pricing. Native audio doubles the estimate because its extra token usage is not known at launch. The estimate stays recorded if the final bill differs or the task fails.',
             description=(
                 "Start an async Seedance 2.5 video generation task from a text prompt and an "
                 "optional first-frame reference image from a public URL. Returns a task_id to "
@@ -213,7 +216,7 @@ MANIFEST = ToolManifest(
             output_schema=GENERATE_VIDEO_OUTPUT_SCHEMA,
         ),
         ActionSpec(
-            id="get_task",
+            id="get_task", cost_description='Polling has no separate charge. If no cost was recorded when the task started, reports final billed tokens once per task ID, including billed failures.',
             description=(
                 "Poll a task_id returned by generate_video. Pending tasks have no output, while "
                 "success returns a temporary video_url valid about 24 hours, plus the tokens the "
@@ -231,7 +234,7 @@ MANIFEST = ToolManifest(
             output_schema=GET_TASK_OUTPUT_SCHEMA,
         ),
         ActionSpec(
-            id="save_video",
+            id="save_video", cost_description='Downloading has no separate charge. If no earlier cost exists, reports final billed tokens once per task ID.',
             description=(
                 "Save a completed Seedance video under /tool_assets in the agent workspace "
                 "before its ModelArk URL expires. The agent-side bridge creates the filename "
@@ -711,8 +714,19 @@ def _get_task(task_id: str, headers: dict[str, str]) -> JSONObject:
     )
 
 
-def _save_video(task_id: str, headers: dict[str, str]) -> ActionResult:
+def _report_task_cost(api: HostAPI, task_id: str, response: JSONObject) -> None:
+    status = _task_status(response)
+    if (status != TERMINAL_SUCCESS and status not in TERMINAL_FAILURES):
+        return
+    tokens = _billed_tokens(response)
+    if tokens is not None:
+        report_provider_usd(api, Decimal(tokens) * Decimal("10.70") / 1_000_000,
+                                       charge_id=f"task:{task_id}")
+
+
+def _save_video(task_id: str, headers: dict[str, str], api: HostAPI) -> ActionResult:
     response = _get_task(task_id, headers)
+    _report_task_cost(api, task_id, response)
     status = _task_status(response)
     if status in TERMINAL_FAILURES:
         # Telling the caller to poll would be telling it to wait for a video that
@@ -761,7 +775,18 @@ class SeedanceTool:
                     invalid_response_message="ModelArk API returned an invalid response.",
                 )
                 task_id = response.get("id")
-                if not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id):
+                valid_task_id = isinstance(task_id, str) and bool(TASK_ID_RE.fullmatch(task_id))
+                # ModelArk's $10.70/M tokens × 24 fps × the largest documented
+                # frame area / 1024: 720p 1504×640, 480p 864×480. Native
+                # audio consumes extra tokens, but ModelArk does not publish
+                # their launch-time count. Double the estimate for audio,
+                # following its published 1.5 Pro audio/silent price ratio.
+                # https://docs.byteplus.com/docs/ModelArk/1099320
+                usd_per_second = Decimal("0.241392") if body["resolution"] == "720p" else Decimal("0.104004")
+                audio_factor = 2 if body["generate_audio"] else 1
+                report_provider_usd(api, Decimal(str(body["duration"])) * usd_per_second * audio_factor,
+                                    charge_id=f"task:{task_id}" if valid_task_id else "")
+                if not valid_task_id:
                     return ActionFailed("ModelArk API returned no task id.")
                 return ActionExecuted(
                     {
@@ -777,11 +802,13 @@ class SeedanceTool:
                 if extra:
                     raise ToolInputValidationError("Seedance get_task only supports task_id.")
                 task_id = _task_id(tool_input)
-                return ActionExecuted(_task_result(_get_task(task_id, headers), task_id))
+                response = _get_task(task_id, headers)
+                _report_task_cost(api, task_id, response)
+                return ActionExecuted(_task_result(response, task_id))
             if action == "save_video":
                 if set(tool_input) != {"task_id"}:
                     raise ToolInputValidationError("Seedance save_video requires exactly one string task_id.")
-                return _save_video(_task_id(tool_input), headers)
+                return _save_video(_task_id(tool_input), headers, api)
             return ActionFailed("Unsupported Seedance action.")
         except ToolInputValidationError as exc:
             return ActionFailed(exc.message)

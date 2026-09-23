@@ -14,10 +14,6 @@ from host.runtime.core.state._base import mutation, utc_now
 PROVIDER_RE = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 
 
-class HostInferenceCredentialRequiredError(ValueError):
-    """The provider cannot be enabled without its stored credential."""
-
-
 def _provider(provider: str) -> str:
     if not isinstance(provider, str) or PROVIDER_RE.fullmatch(provider) is None:
         raise ValueError("unknown host inference provider")
@@ -65,7 +61,7 @@ def configure_host_inference_provider(
     encrypted = secretbox.encrypt(api_key) if api_key is not None else None
     with mutation() as cur:
         cur.execute(
-            "SELECT enabled, api_key_encrypted, features FROM host_inference_providers "
+            "SELECT enabled, features FROM host_inference_providers "
             "WHERE provider = %s FOR UPDATE",
             (provider,),
         )
@@ -73,11 +69,7 @@ def configure_host_inference_provider(
         if stored is None:
             raise RuntimeError("host inference provider row is missing")
         next_enabled = bool(stored[0]) if enabled is None else enabled
-        next_features = dict(stored[2]) if features is None and isinstance(stored[2], dict) else (features or {})
-        if next_enabled and encrypted is None and stored[1] is None:
-            raise HostInferenceCredentialRequiredError(
-                "Save an API key before enabling this provider"
-            )
+        next_features = dict(stored[1]) if features is None and isinstance(stored[1], dict) else (features or {})
         if encrypted is None:
             cur.execute(
                 "UPDATE host_inference_providers SET enabled = %s, features = %s, "
@@ -159,7 +151,7 @@ def record_host_inference_usage(
     provider = _provider(provider)
     if provider not in {"openai", "typesafe"}:
         raise ValueError("unknown host inference usage provider")
-    if model not in {"gpt-5.6-luna", "jev", "other"}:
+    if model not in {"gpt-6-luna", "jev"}:
         raise ValueError("unknown host inference usage model")
     counters = {field: 0 for field in _USAGE_FIELDS}
     if usage is not None:

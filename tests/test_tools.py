@@ -168,8 +168,21 @@ class MemoryAssets:
     def delete(self, asset_id: str) -> None:
         self.records.pop(asset_id, None)
 
+class MemoryCosts:
+    def __init__(self):
+        self.records = {}
+        self.calls = []
+
+    def record(self, amount_usd, *, charge_id=""):
+        self.calls.append((amount_usd, charge_id))
+        key = charge_id or str(len(self.calls))
+        if key not in self.records:
+            self.records[key] = {"amount_usd": amount_usd}
+
+
 @dataclass(frozen=True)
 class FakeHostAPI:
+    costs: MemoryCosts = field(default_factory=MemoryCosts)
     credentials: MemoryCredentials = field(default_factory=MemoryCredentials)
     secrets: MemoryCredentials = field(default_factory=MemoryCredentials)
     config: dict[str, str] = field(default_factory=default_config)

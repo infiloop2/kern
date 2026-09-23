@@ -72,12 +72,14 @@ metadata without querying the independent usage counter:
 `measured_requests` counts responses with a valid provider usage object, and
 `priced_requests` counts responses whose fixed model had a reviewed price at
 request time. A gap is preserved so the estimate never silently treats
-unknown usage or an unknown model price as zero. Cost is stored when the
-response arrives and is not recomputed after a later price change. If the
-writer itself is saturated or unavailable, Kern records a Host diagnostic.
+unknown usage as zero. Only GPT-6 Luna and Jev usage is retained; responses
+with missing or unsupported model names are skipped with a Host diagnostic.
+Cost reflects the price at request time. If the writer is saturated or
+unavailable, Kern records a Host diagnostic.
 
 `PUT` accepts the closed object `enabled`, optional write-only `api_key`, and
-the provider's exact `features` object. `DELETE` disables the provider and
+the provider's exact `features` object. Enablement and the key are independent:
+a provider enabled without a saved key stays unused until the key is saved. `DELETE` disables the provider and
 removes its key; retained usage remains visible for the current month. These
 routes do not expose an agent-facing inference action.
 
@@ -609,7 +611,7 @@ client-chosen id (`thread_id`) and a session configuration (`agent_runtime`,
 separate create call. The public model has no
 turn resource or turn lifecycle: a thread is simply `idle` or `running`, and
 its history is one chronological stream. Work on the same thread is
-serialized; work on different threads runs in parallel, up to 10 per runtime.
+serialized; work on different threads runs in parallel, up to 50 per runtime.
 Codex resumes the thread's provider conversation by id on a fresh app-server;
 Claude Code and Hermes resume by their recorded provider session ids. An idle
 thread may replace all three configuration fields atomically on its next
@@ -638,8 +640,8 @@ Thread endpoints:
 | Method | Path | Request | Response | Behavior |
 | --- | --- | --- | --- | --- |
 | `POST` | `/v1/threads/{thread_id}/messages` | Send message request | Send message response | Durably admits an idle thread's initial message or synchronously delivers a running thread's steer, creating the thread on its first message. Rejected with `409`/`429` when it cannot be accepted; there is no queue. |
-| `GET` | `/v1/threads?before=<cursor>&limit=<n>&prefix=<text>` | query parameters optional | Thread list response | Lists one newest-first page of threads with their session configuration and live status. `prefix` is an optional filter/query optimization and conveys no ownership or authorization. |
-| `GET` | `/v1/threads/{thread_id}` | none | `{"thread": {...}}` | Returns one thread (the same shape as a thread list entry). `404` when no thread row exists. Accepts no query parameters. |
+| `GET` | `/v1/threads?before=<cursor>&limit=<n>&prefix=<text>` | query parameters optional | Thread list response | Lists one newest-first page of threads with their session configuration, live status, and nullable current `task` title. `prefix` is an optional filter/query optimization and conveys no ownership or authorization. |
+| `GET` | `/v1/threads/{thread_id}` | none | `{"thread": {...}}` | Returns one thread's session and event sequence fields; the list-only `task` title is omitted. `404` when no thread row exists. Accepts no query parameters. |
 | `POST` | `/v1/threads/{thread_id}/stop` | none | `{"status": "accepted"}` | Stops the thread's running work: the thread returns durably to `idle`, a `thread.stopped` event is appended, and process interruption is requested. `404` for an unknown thread; `409` (`the thread has no running work`) when the thread is idle. The thread survives and a later message resumes the conversation, but sends receive a retryable `409` until the old process has fully shut down. |
 | `POST` | `/v1/threads/{thread_id}/clear-memory` | none | `{"status": "cleared"}` | Clears the thread's working memory: the provider session mapping is dropped so the next run opens a new provider conversation, a `thread.memory_cleared` event is appended, and that event's seq becomes the thread's handoff floor so the next run is not handed the cleared context. Nothing is deleted — retained events stay readable here and in conversation history, while Chat hides events older than the latest clear boundary. `404` for an unknown thread; `409` (`working memory can be cleared only while the thread is idle`) while a turn is running. A thread stopped moments earlier reads as idle while its process is still closing, and clearing then returns the retryable `409` `the thread is still finishing; retry shortly` until that worker is gone — the fence that stops it restoring the session just cleared. Retry that one rather than treating it as a failure; the Workspace proxy does this for Chat. |
 | `GET` | `/v1/threads/{thread_id}/events?since=<seq>&limit=<n>&message_bytes=<b>` | query parameters optional | Event list response | One chronological page of the thread's event stream. See [Events](#events). |
@@ -770,7 +772,7 @@ caller retries):
 | `409` | Hermes has no mid-run input channel. | `Hermes cannot accept another message while running; wait for it to finish` |
 | `409` | A message tries to change configuration while work is running. | `thread runtime, model, and effort can change only while the thread is idle` |
 | `409` | The thread's current session configuration left the option matrix and the message does not replace it. | `this thread runs a session configuration that is no longer offered; select a currently offered model to continue` |
-| `429` | The runtime is at its concurrency cap. Each runtime owns an independent pool of 10 concurrent threads, so one busy runtime cannot take capacity from its peers. | `<Runtime> runtime is already running 10 concurrent threads; retry when one finishes` |
+| `429` | The runtime is at its admission cap. Each runtime owns an independent pool of 50 concurrent threads. Host memory, process, proxy, and tool capacity are shared and may still limit actual throughput. | `<Runtime> runtime is already running 50 concurrent threads; retry when one finishes` |
 | `502` | A provider that already declared itself running rejects a synchronous message. The host records `thread.error`, finalizes the run, and begins cleanup rather than treating this as startup. | `<Runtime> rejected the message: <provider detail>` |
 
 Thread list response:
@@ -831,6 +833,41 @@ and systemd-scope cleanup. A send during that short cleanup receives the
 retryable FINISHING conflict above. If the scope cannot be proven gone, Kern
 records `thread.error` and deliberately retains the fence; this indicates host
 process-management failure and should be recovered with a host restart.
+
+### Swarm
+
+`GET /v1/swarm` requires an operator session. Optional `q` searches names,
+purposes, and task titles across the full agent catalog (up to 100 characters).
+
+The response contains:
+
+- `generated_at`: snapshot timestamp.
+- `agents`: up to 250 matching non-archived Chats and Apps and non-deleted
+  model schedules, prioritizing running agents and then recent use. Bash
+  schedules are excluded.
+- `has_more`: whether more agents match; narrow `q` to find older agents.
+
+Each agent has `thread_id`, `kind` (`app`, `chat`, `schedule`), `name`,
+`purpose`, `agent_runtime`, `model`, nullable `next_run_at`, and:
+
+- `state`: `busy` while the session is running; otherwise `failed` when its
+  latest event is `thread.error`, or `idle`. This follows the thread error-badge
+  rule; a running session takes precedence over an earlier error.
+- `task`: a nullable GPT-6 Luna title, at most 100 characters, for the current turn.
+- `needs_human`: a nullable Jev judgment about the latest completed turn.
+  `null` means unassessed/unavailable. It is advisory and independent of failure;
+  pending approvals alone do not imply a human blocker.
+
+App/schedule `purpose` is manually maintained and separate from `task`.
+A new turn clears `task` and `needs_human`; clearing working memory also clears
+these annotations. Missing or disabled inference leaves them unavailable.
+
+`GET /v1/swarm/peer-messages` is a separate operator-only call with no query
+parameters. The response has `messages`, the newest 50 peer deliveries.
+Each record has `seq` (its original event ID), `sender_thread_id`,
+`target_thread_id`, and `timestamp`. It contains no message text or summary.
+Ordinary operator messages do not appear here. The scene requests the last
+30 seconds by timestamp and deduplicates by `seq` before animating dialog icons.
 
 ### Events
 
@@ -1643,7 +1680,8 @@ tool. Each tool object has:
 | `display_name`, `description` | Operator-facing name and one-line summary from the manifest. |
 | `connection` | `oauth` (operator third-party auth), `mcp_oauth` (hosted MCP OAuth with one fixed `default` connection), `enable_only` (deployment key only), or `whatsapp_linked_device` (WhatsApp QR linking). |
 | `enabled` | Whether the operator has enabled the tool for agent calls. |
-| `actions[]` | Each action's stable `id`, `description`, per-action `data_policy`, `approval` (`direct` or `operator`), `input_schema`, `input_protections`, `output_schema`, and `returns_asset`. `input_protections` maps each direct input name to `{kind, description, allow_identifiers, allow_machine_tokens, identifiers_condition}`; kind is `validated` (with a concise description) or `parameter_guard` (with the two boolean exception flags). `identifiers_condition` is null or `decimal` (the identifier exception applies only to all-digit values). It describes existing checks and does not configure execution. Approval actions return an empty map. Both schemas name every field and close every object (`additionalProperties: false`). `output_schema` is empty `{}` exactly for the actions that return no JSON result: an approval-gated one, which returns a user-visible message, and a `returns_asset` one, whose whole result is a file streamed into the agent workspace. A field the provider may not supply is declared as a `oneOf` union with `{"type": "null"}`. |
+| `reports_cost` | Tool-level boolean indicating whether tool code reports USD charges. False means untracked, not zero-priced. |
+| `actions[]` | Each action's stable `id`, `description`, per-action `data_policy`, `approval` (`direct` or `operator`), `input_schema`, `input_protections`, `output_schema`, `returns_asset`, and `cost_description` (string explaining that action's charges). `input_protections` maps each direct input name to `{kind, description, allow_identifiers, allow_machine_tokens, identifiers_condition}`; kind is `validated` (with a concise description) or `parameter_guard` (with the two boolean exception flags). `identifiers_condition` is null or `decimal` (the identifier exception applies only to all-digit values). It describes existing checks and does not configure execution. Approval actions return an empty map. Both schemas name every field and close every object (`additionalProperties: false`). `output_schema` is empty `{}` exactly for the actions that return no JSON result: an approval-gated one, which returns a user-visible message, and a `returns_asset` one, whose whole result is a file streamed into the agent workspace. A field the provider may not supply is declared as a `oneOf` union with `{"type": "null"}`. |
 | `config[]` | This tool's declared config keys with `description` and `set`. All config is secret and scoped per tool; values are never returned (see `PUT /v1/tools/{tool_id}/config`). |
 | `protections[]` | Short operator-facing safeguards rendered on the focused Home integration page. |
 | `setup_steps[]` | Ordered provider-side and Kern setup steps. A step may include a provider documentation link and a local audited screenshot with alt text; `show_callback`/`show_config` render this host's OAuth callback URI or the tool's config keys inside that step. |
@@ -1807,3 +1845,23 @@ membership, not whether an agent is running. Both counter objects use `input_tok
 number of turns contributing to each bucket. Fewer measured turns than
 `turns` means a partial total. The report contains no prompts or responses.
 See [token analytics](../architecture/token-analytics.md).
+
+
+### `GET /v1/tools/usage`
+
+Requires the authenticated operator session. No request body or query
+parameters. Returns tool-reported USD charges for the current UTC calendar
+month. Amounts are decimal dollar strings.
+
+| Field | Type | Meaning |
+| --- | --- | --- |
+| `month_to_date` | decimal string | Sum of reported amounts. |
+| `tools` | array | Visible bundled tools, each with `tool_id`, `display_name`, `enabled`, and `month_to_date` (decimal string). |
+
+The overall total includes all recorded charges. Tool cards cover bundled integrations.
+The response includes tools with nonzero month-to-date spend and enabled tools
+that declare cost reporting.
+The endpoint sums UTC-day counters updated when a new charge row is inserted.
+Charge rows and daily counters retain action attribution for future reports.
+Repeated charge IDs do not change the original amount, attribution, or month.
+This endpoint does not contact providers or recalculate historical prices.
