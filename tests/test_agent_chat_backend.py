@@ -640,7 +640,9 @@ class AgentChatBackendTests(unittest.TestCase):
                     "effort": "high",
                     "last_used_at": "2026-07-17T10:00:00Z",
                     "latest_event_seq": 12,
+                    "latest_event_type": "thread.error",
                     "latest_message_seq": 10,
+                    "task": "Prepare customer launch",
                     "status": "running",
                 },
                 {
@@ -683,7 +685,9 @@ class AgentChatBackendTests(unittest.TestCase):
         self.assertEqual(first["status"], "running")
         self.assertEqual(first["name"], "Customer launch")
         self.assertEqual(first["latest_event_seq"], 12)
+        self.assertEqual(first["latest_event_type"], "thread.error")
         self.assertEqual(first["latest_message_seq"], 10)
+        self.assertEqual(first["task"], "Prepare customer launch")
         self.assertFalse(first["archived"])
         self.assertEqual(response["threads"][1]["status"], "idle")
         add_seen.assert_called_once_with("chat", response["threads"], "thread_id")

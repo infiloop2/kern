@@ -120,7 +120,26 @@ client pipelined behind the handshake is dropped rather than forwarded as
 requests no guard inspected. Request bodies are buffered for
 inspection — chunked bodies are decoded and re-sent with an explicit
 `Content-Length` — and bodies over 128 MiB are rejected so the policy always
-sees the complete body. A request that repeats a single-valued header
+sees the complete body.
+The proxy accepts up to 1024 connections, with an explicit 4096-descriptor
+and 2048-task service limit. At most four requests or WebSocket messages over
+256 KiB may buffer at once; smaller provider prompts can use the remaining
+connections without multiplying the 128 MiB body cap by 1024. Chunked and
+compressed requests reserve a large-body slot even when their wire size is
+small. Excess large requests receive 429 immediately, and excess large
+WebSocket messages close with a retryable capacity reason; neither waits while
+holding a proxy connection slot. A large WebSocket frame reserves a slot only
+after more than 256 KiB has actually arrived, and must finish within 30 seconds
+once reserved. The tunnel uses an OS selector that supports the proxy's full
+file descriptor range.
+
+Bedrock response metering has a separate 64-stream budget. Each meter retains
+at most 4 MiB of response data, so its aggregate retained bytes stay below
+256 MiB. Excess metered requests receive 429 before an upstream connection is
+opened; responses over 4 MiB still relay normally but are recorded without
+token counts.
+
+A request that repeats a single-valued header
 (`Content-Type`, `Content-Encoding`, `Content-Length`, `Transfer-Encoding`, or
 `Authorization`) is denied: the guards read one value while every instance is
 forwarded, so two instances would let the upstream act on a meaning the guards

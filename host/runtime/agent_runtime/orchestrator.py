@@ -66,6 +66,7 @@ import time
 from typing import Any, Callable
 
 from host.config import AGENT_RUNTIMES
+from host.runtime import swarm_annotations
 from host.runtime.core import host_errors, network_policy, state
 from host.runtime.agent_runtime import (
     agent_activity,
@@ -121,10 +122,10 @@ from host.runtime.core.state import (
     utc_now,
 )
 
-# Every runtime owns an independent ten-turn pool, so one busy runtime
+# Every runtime owns an independent fifty-turn pool, so one busy runtime
 # cannot take capacity from its peers. A message that would exceed the cap is
 # rejected at admission; callers retry.
-TURN_LIMIT_PER_RUNTIME = 10
+TURN_LIMIT_PER_RUNTIME = 50
 EXECUTION_START_TIMEOUT_SECONDS = 10.0
 RUNTIME_RECHECK_SECONDS = 300  # re-verify an active agent login this often (it can expire)
 RUNTIME_PENDING_RECHECK_SECONDS = 5  # poll more often while loading / awaiting login
@@ -184,6 +185,7 @@ class _Turn:
     # Durable storage-only scope for this execution. It is attached to thread
     # events so reused provider activity ids cannot collide across processes.
     run_number: int
+    current_message: str = ""
     phase: ExecutionPhase = ExecutionPhase.STARTING
     # The runtime adapter is published before it starts. Its own lifecycle
     # lock makes ``interrupt`` safe before, during, or after process spawn.
@@ -673,6 +675,7 @@ def admit_turn(
     message: str,
     *,
     pre_message_activity: dict[str, Any] | None = None,
+    peer_sender_thread_id: str | None = None,
 ) -> _Turn:
     """Admit one new turn inside the caller's mutation.
 
@@ -704,7 +707,7 @@ def admit_turn(
                 f"{label} runtime is already running {TURN_LIMIT_PER_RUNTIME} concurrent threads; retry when one finishes",
             )
         run_number = state.start_thread_run(cur, thread_id)
-        turn = _Turn(runtime_type, thread_id, model, effort, run_number)
+        turn = _Turn(runtime_type, thread_id, model, effort, run_number, message)
         if runtime_type != "script":
             state.start_turn_usage(cur, thread_id, run_number, runtime_type, model)
         # Other admissions cannot interleave because the mutation lock is
@@ -718,17 +721,24 @@ def admit_turn(
             {"activity": pre_message_activity},
             run_number=run_number,
         )
-    state.append_agent_event(
+    message_seq = state.append_agent_event(
         cur,
         "thread.message",
         thread_id,
         {"message": message, "source": "user"},
         run_number=run_number,
     )
+    if runtime_type != "script":
+        state.reset_swarm_ai(cur, thread_id, run_number)
+        if peer_sender_thread_id is not None:
+            state.record_swarm_peer_delivery(cur, message_seq, peer_sender_thread_id, thread_id)
     return turn
 
 
-def steer_live_turn(thread_id: str, runtime_type: str, message: str) -> bool:
+def steer_live_turn(
+    thread_id: str, runtime_type: str, message: str,
+    *, peer_sender_thread_id: str | None = None,
+) -> bool:
     """Synchronously steer a live turn, returning False when it is idle.
 
     Provider acknowledgement happens before the durable user event. A database
@@ -790,13 +800,15 @@ def steer_live_turn(thread_id: str, runtime_type: str, message: str) -> bool:
             else:
                 with state.mutation() as cur:
                     state.touch_thread_session(cur, thread_id, utc_now())
-                    state.append_agent_event(
+                    message_seq = state.append_agent_event(
                         cur,
                         "thread.message",
                         thread_id,
                         {"message": message, "source": "user"},
                         run_number=turn.run_number,
                     )
+                    if peer_sender_thread_id is not None:
+                        state.record_swarm_peer_delivery(cur, message_seq, peer_sender_thread_id, thread_id)
     if server_to_interrupt is not None:
         _interrupt_turn(server_to_interrupt)
     if failure is not None:
@@ -859,12 +871,18 @@ def _provider_ready(turn: _Turn) -> bool:
         return True
 
 
-def launch_turn(turn: _Turn, input_message: str, provider_session_id: str | None) -> None:
+def launch_turn(
+    turn: _Turn, prepared_turn_message: str, provider_session_id: str | None,
+) -> None:
     """Run an admitted turn on its own thread. Called after the admitting
     mutation commits, so its user message and durable running state exist
     before the worker starts."""
+    if turn.runtime_type != "script":
+        swarm_annotations.enqueue_task(
+            turn.thread_id, turn.run_number, prepared_turn_message, turn.current_message,
+        )
     worker = threading.Thread(
-        target=_run_turn, args=(turn, input_message, provider_session_id), daemon=True
+        target=_run_turn, args=(turn, prepared_turn_message, provider_session_id), daemon=True
     )
     try:
         worker.start()
@@ -1084,6 +1102,8 @@ def stop_thread_turn(thread_id: str) -> bool:
             run_number=turn.run_number,
         )
         after_commit.append(partial(_mark_finishing, turn))
+        if turn.runtime_type != "script":
+            after_commit.append(partial(swarm_annotations.enqueue_needs_human, thread_id, turn.run_number))
         server = turn.server
     if server is not None:
         _interrupt_turn(server)
@@ -1159,6 +1179,8 @@ def _record_turn_finished(
         )
     state.finish_thread_run(cur, turn.thread_id, turn.run_number)
     after_commit.append(partial(_mark_finishing, turn, accepted_session_id))
+    if turn.runtime_type != "script":
+        after_commit.append(partial(swarm_annotations.enqueue_needs_human, turn.thread_id, turn.run_number))
 
 
 def _finish_turn(

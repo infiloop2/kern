@@ -340,8 +340,8 @@ class TaskRecallTests(unittest.TestCase):
             return {
                 "model": "jev-latest",
                 "answers": {
-                    page_id: {"type": "noul", "noul": score}
-                    for page_id, score in probabilities.items()
+                    f"q{index}": {"type": "noul", "noul": probabilities[page["page_id"]]}
+                    for index, page in enumerate(candidates)
                 },
             }
 
@@ -362,6 +362,11 @@ class TaskRecallTests(unittest.TestCase):
             set(captured["state"]),
             {"task_query", "candidates"},
         )
+        self.assertEqual(
+            [candidate["id"] for candidate in captured["state"]["candidates"]],
+            list(captured["questions"]),
+        )
+        self.assertNotIn("page_id", json.dumps(captured["state"]))
         self.assertNotIn("private content", json.dumps(captured["state"]))
         self.assertEqual(len(details), 7)
         self.assertEqual(details[0], "Jev response model: jev-latest.")
@@ -393,7 +398,7 @@ class TaskRecallTests(unittest.TestCase):
             }
 
         answers = {
-            f"guide-{index}": {"type": "noul", "noul": index / 10}
+            f"q{index}": {"type": "noul", "noul": index / 10}
             for index in range(6)
         }
         with (

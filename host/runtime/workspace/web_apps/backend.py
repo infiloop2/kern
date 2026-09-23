@@ -512,6 +512,7 @@ def _web_app_summary(
         "last_used_at": last_used_at,
         "latest_event_seq": latest_event_seq,
         "latest_message_seq": latest_message_seq,
+        "task": host_summary.get("task") if host_summary else None,
         "session": session,
         "agent_settings": _agent_settings_from_values(row[7], row[8], row[9]),
         "status": status,

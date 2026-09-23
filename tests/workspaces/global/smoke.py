@@ -585,7 +585,12 @@ def desktop_smoke(page: Any) -> None:
     expect(chat.locator("#archive-thread")).to_be_hidden()
     chat.get_by_role("button", name="Rename scheduled agent", exact=True).click()
     chat.locator("#rename-thread-input").fill("Daily release review")
-    chat.locator("#rename-thread-save").click()
+    with page.expect_response(
+        lambda response: response.request.method == "PUT"
+        and "/v1/workspace/chat/threads/schedule-1/name" in response.url
+    ) as rename_response:
+        chat.locator("#rename-thread-save").click()
+    assert rename_response.value.status == 200, rename_response.value.text()
     expect(chat.locator("#thread-title")).to_have_text("Daily release review")
     expect(page.locator("#scheduled-agents-nav-items")).to_contain_text(
         "Daily release review"

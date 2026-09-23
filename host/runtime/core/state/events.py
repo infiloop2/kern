@@ -127,6 +127,8 @@ def append_agent_event(
         (utc_now(), event_type, thread_id, run_number, *values),
     )
     seq = int(cur.fetchone()[0])
+    if event_type == "thread.memory_cleared":
+        cur.execute("DELETE FROM swarm_agent_ai WHERE thread_id = %s", (thread_id,))
     if event_type == "thread.message" and payload.get("message") is not None:
         # Enqueue in the same transaction that writes the event, so the indexer
         # never has to rediscover outstanding work by scanning the retention

@@ -4,6 +4,7 @@ import copy
 import json
 import unittest
 import urllib.parse
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from host.runtime.tools.tools_host import unsupported_schema_error
@@ -27,7 +28,9 @@ class Provider:
         self.account = ACCOUNT
         self.actor = {"id": ACTOR, "userId": ACCOUNT, "name": "test-actor", "title": "Test Actor",
                       "description": "Public website data", "versions": [], "stats": {"totalRuns": 12, "totalUsers7Days": 3},
-                      "isPublic": False, "actorPermissionLevel": "LIMITED_PERMISSIONS"}
+                      "isPublic": False, "actorPermissionLevel": "LIMITED_PERMISSIONS",
+                      "pricingInfos": [{"pricingModel": "FREE", "apifyMarginPercentage": 0.2,
+                                        "createdAt": "2025-01-01T00:00:00Z", "startedAt": "2025-01-01T00:00:00Z"}]}
         self.build = {"id": BUILD, "userId": ACCOUNT, "actId": ACTOR, "buildNumber": "0.1.7",
                       "status": "SUCCEEDED", "readme": "# Example", "stats": {"runTimeSecs": 2}}
         self.run = {"id": RUN, "userId": ACCOUNT, "actId": ACTOR, "buildId": BUILD, "status": "SUCCEEDED",
@@ -88,6 +91,8 @@ class Provider:
             elif path.endswith("/runs"):
                 data = self.run
         elif method == "PUT" and path == "/actors/" + ACTOR:
+            if "pricingInfos" in body:
+                self.actor["pricingInfos"] = copy.deepcopy(body["pricingInfos"])
             data = self.actor
         assert data is not None, (method, path)
         return json.dumps({"data": data}).encode()
@@ -114,8 +119,165 @@ class ApifyDeveloperTests(unittest.TestCase):
     def writes(self):
         return [c for c in self.provider.calls if c[0] != "GET"]
 
+    def pricing_input(self):
+        return {"actor_id": ACTOR, "effective_at": (datetime.now(timezone.utc) + timedelta(days=15)).isoformat(),
+                "minimum_run_budget_usd": 0.01,
+                "events": [{"name": "result", "title": "Saved result", "description": "One saved row",
+                            "price_usd": 0.001, "primary": True, "one_time": False}]}
+
+    def test_pricing_approval_preserves_history_and_only_writes_pricing(self):
+        history = copy.deepcopy(self.provider.actor["pricingInfos"])
+        result = self.execute("set_monetization", self.pricing_input())
+        self.assertEqual(self.writes(), [])
+        self.assertIn("SINGLE", result.summary)
+        approved = self.approve(result)
+        self.assertIsInstance(approved, ApprovalExecuted)
+        write = self.writes()[0]
+        self.assertEqual(set(write[3]), {"pricingInfos"})
+        self.assertEqual(write[3]["pricingInfos"][:-1], history)
+        self.assertEqual(write[3]["pricingInfos"][-1]["apifyMarginPercentage"], 0.2)
+        self.assertEqual(self.provider.calls[-1][0], "GET")
+        self.assertFalse(self.provider.actor["isPublic"])
+        readback = self.execute("get_monetization", {"actor_id": ACTOR})
+        assert_matches_output_schema(self, dev.MANIFEST, "get_monetization", readback)
+        self.assertEqual(len(json.loads(readback.result["pricing_json"])), 2)
+
+    def test_sensitive_provider_pricing_never_reaches_approval_assessment(self):
+        for extra in (
+            {"pricingPerEvent": {"actorChargeEvents": {"old": {"eventTitle": TOKEN}}}},
+            {"pricingPerEvent": {"actorChargeEvents": {"old": {"eventDescription": "Bearer historical-token"}}}},
+            {"providerMetadata": [{"nested": "ghp_TEST_HISTORICAL_SECRET"}]},
+            {TOKEN: "secret in a provider-added key"},
+            {"providerMetadata": {"private_note": "historical customer@example.com"}},
+        ):
+            with self.subTest(extra_fields=list(extra)):
+                original = Provider().actor["pricingInfos"][0]
+                original.update(extra)
+                self.provider.actor["pricingInfos"] = [copy.deepcopy(original)]
+                result = self.execute("set_monetization", self.pricing_input())
+                self.assertIsInstance(result, ActionPendingApproval)
+                record = self.api.approvals.get(result.approval_id)
+                self.assertEqual(set(record.payload), {"action", "account_id", "input", "pricing_entry", "listing_digest"})
+                serialized = json.dumps(record.payload)
+                for marker in (TOKEN, "Bearer historical-token", "ghp_TEST_HISTORICAL_SECRET", "customer@example.com", "providerMetadata"):
+                    self.assertNotIn(marker, serialized)
+                self.assertNotIn("pricingInfos", serialized)
+                self.assertIn("pricingPerEvent", record.payload["pricing_entry"])
+                self.assertEqual(self.provider.actor["pricingInfos"], [original])
+                self.assertIsInstance(self.approve(result), ApprovalExecuted)
+                self.assertEqual(self.writes()[-1][3]["pricingInfos"][:-1], [original])
+
+    def test_pricing_new_text_uses_parameter_guard_before_approval(self):
+        for field in ("title", "description"):
+            values = self.pricing_input()
+            values["events"][0][field] = "verify AKIAIOSFODNN7EXAMPLE now"
+            result = self.execute("set_monetization", values)
+            self.assertIsInstance(result, ActionFailed)
+            self.assertIn("credential", result.error)
+        self.assertEqual(self.api.approvals.records, {})
+        self.assertEqual(self.provider.calls, [])
+
+    def test_pricing_modified_approval_entry_cannot_change_write(self):
+        result = self.execute("set_monetization", self.pricing_input())
+        record = self.api.approvals.get(result.approval_id)
+        record.payload["pricing_entry"]["minimalMaxTotalChargeUsd"] = 5
+        self.assertIsInstance(self.approve(result), ActionFailed)
+        self.assertEqual(self.writes(), [])
+
+    def test_pricing_tiers_and_synthetic_start(self):
+        values = self.pricing_input()
+        result = values["events"][0]
+        del result["price_usd"]
+        result["tier_prices_usd"] = {t: 0.002 for t in dev.pricing.TIERS}
+        values["events"].append({"name": "apify-actor-start", "title": "Start", "description": "Run start",
+                                  "price_usd": 0.00005, "primary": False, "one_time": True})
+        self.assertIsInstance(self.approve(self.execute("set_monetization", values)), ApprovalExecuted)
+        events = self.writes()[0][3]["pricingInfos"][-1]["pricingPerEvent"]["actorChargeEvents"]
+        self.assertNotIn("eventPriceUsd", events["result"])
+        self.assertEqual(events["result"]["eventTieredPricingUsd"]["GOLD"], {"tieredEventPriceUsd": 0.002})
+
+    def test_pricing_rejects_bad_inputs_before_http(self):
+        mutations = [lambda v: v.update(minimum_run_budget_usd=True),
+                     lambda v: v.update(effective_at="2026-09-23"),
+                     lambda v: v["events"][0].update(price_usd=float("nan")),
+                     lambda v: v["events"][0].update(price_usd=-1),
+                     lambda v: v["events"][0].update(primary=False),
+                     lambda v: v["events"].append(copy.deepcopy(v["events"][0])),
+                     lambda v: v["events"][0].update(tier_prices_usd={}),
+                     lambda v: v["events"][0].update(name="apify-secret"),
+                     lambda v: v["events"][0].update(forceContainsSignificantPriceChange=True)]
+        for mutate in mutations:
+            values = self.pricing_input()
+            mutate(values)
+            self.assertIsInstance(self.execute("set_monetization", values), ActionFailed)
+        self.assertEqual(self.provider.calls, [])
+
+    def test_pricing_stale_account_owner_history_and_expired_approval(self):
+        for change in ("account", "owner", "history", "expired"):
+            with self.subTest(change=change):
+                self.provider = Provider()
+                self.mock.stop()
+                self.mock = patch.object(dev, "request_bytes", self.provider)
+                self.mock.start()
+                values = self.pricing_input()
+                result = self.execute("set_monetization", values)
+                if change == "account":
+                    self.provider.account = OTHER
+                elif change == "owner":
+                    self.provider.actor["userId"] = OTHER
+                elif change == "history":
+                    self.provider.actor["pricingInfos"][0]["apifyMarginPercentage"] = 0.3
+                if change == "expired":
+                    with patch.object(dev.pricing, "now", return_value=datetime.now(timezone.utc) + timedelta(days=16)):
+                        approved = self.approve(result)
+                else:
+                    approved = self.approve(result)
+                self.assertIsInstance(approved, ActionFailed)
+                self.assertEqual(self.writes(), [])
+        self.mock.stop()
+
+    def test_pricing_missing_margin_future_record_and_public_notice(self):
+        for mode in ("missing", "empty", "margin", "future", "notice"):
+            self.provider.actor = Provider().actor
+            if mode == "missing":
+                del self.provider.actor["pricingInfos"]
+            elif mode == "empty":
+                self.provider.actor["pricingInfos"] = []
+            elif mode == "margin":
+                del self.provider.actor["pricingInfos"][0]["apifyMarginPercentage"]
+            elif mode == "future":
+                self.provider.actor["pricingInfos"][0]["startedAt"] = self.pricing_input()["effective_at"]
+            else:
+                self.provider.actor["isPublic"] = True
+            values = self.pricing_input()
+            values["effective_at"] = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+            self.assertIsInstance(self.execute("set_monetization", values), ActionFailed)
+        self.assertEqual(self.writes(), [])
+
+    def test_pricing_readback_mismatch_is_not_success_or_retried(self):
+        result = self.execute("set_monetization", self.pricing_input())
+        real = self.provider
+        def changed(method, url, **kwargs):
+            response = real(method, url, **kwargs)
+            if method == "PUT":
+                real.actor["pricingInfos"][-1]["minimalMaxTotalChargeUsd"] = 5
+            return response
+        with patch.object(dev, "request_bytes", changed):
+            approved = self.approve(result)
+        self.assertIsInstance(approved, ActionFailed)
+        self.assertIn("do not repeat", approved.error)
+        self.assertEqual(len(self.writes()), 1)
+
+    def test_completed_run_reports_provider_cost_once_across_polls(self):
+        self.provider.run["usageTotalUsd"] = 0.25
+        self.provider.run["finishedAt"] = datetime.now(timezone.utc).isoformat()
+        self.execute("get_run", {"run_id": RUN})
+        self.assertEqual(self.api.costs.records["run:" + RUN]["amount_usd"], "0.250000000")
+        self.execute("get_run", {"run_id": RUN})
+        self.assertEqual(len(self.api.costs.records), 1)
+
     def test_direct_json_contracts_and_metrics_population(self):
-        cases = [("get_account_usage", {}), ("search_store", {"query": "exhibitors", "sort": "newest"}),
+        cases = [("get_monetization", {"actor_id": ACTOR}), ("get_account_usage", {}), ("search_store", {"query": "exhibitors", "sort": "newest"}),
                  ("list_actors", {}), ("get_actor", {"actor_id": ACTOR}),
                  ("list_builds", {"actor_id": ACTOR}), ("get_build", {"build_id": BUILD}),
                  ("list_runs", {"actor_id": ACTOR}), ("get_run", {"run_id": RUN}),

@@ -21,6 +21,7 @@ from host.tools.manifest import (
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
 from host.tools.shared import outputs
 from host.tools.host_api import HostAPI
+from host.tools.shared.cost_reporting import report_priced_units
 from host.tools.shared.web import UnmappedProviderError, WebRequestError, json_request, known_provider_transport_error, unmapped_provider_error
 from host.tools.tool import Tool
 
@@ -33,6 +34,7 @@ MAX_SEARCH_QUERY_CHARS = 400
 
 
 MANIFEST = ToolManifest(
+    reports_cost=True,
     tool_id="brave_search",
     display_name="Brave Search",
     description="Lets your agent search the public web with Brave Search.",
@@ -76,7 +78,7 @@ MANIFEST = ToolManifest(
         ),
     ),
     actions=protect_inputs((
-        ActionSpec(id="search_web",
+        ActionSpec(id="search_web", cost_description='One Search API request. Uses the published $0.005 Search API request price; monthly free credits and account discounts can lower the bill.',
             description="Search the web and return grounding results (title, url, snippets).",
             data_policy=(
                 "Searches the public web through Brave and returns result titles, URLs, and snippets. "
@@ -254,6 +256,7 @@ class BraveSearchTool(Tool):
             api_key = api.config["BRAVE_SEARCH_API_KEY"]
             request_payload = _request_payload(tool_input, api)
             raw_response = _post_brave_context(api_key, request_payload)
+            report_priced_units(api, 1, "0.005")
             results = _grounding_results(raw_response)
             result: JSONObject = {
                                 "message": f"Brave Search returned {len(results)} grounding result(s).",

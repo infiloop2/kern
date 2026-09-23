@@ -1028,10 +1028,22 @@ def stylesheet_fallback_smoke(page: Any) -> None:
 
 
 def worker_startup_smoke(page: Any) -> None:
-    """A real generated App starts through the isolated worker bridge."""
+    """A slow browser broker still starts; the generated App stays sandboxed."""
     from playwright.sync_api import expect
 
     leaked: list[str] = []
+    slow_broker_requests = 0
+
+    def delay_first_broker(route: Any) -> None:
+        nonlocal slow_broker_requests
+        slow_broker_requests += 1
+        if slow_broker_requests == 1:
+            # Longer than the App's five-second execution limit. Browser
+            # startup should have its own deadline before App code starts.
+            time.sleep(6)
+        route.continue_()
+
+    page.route("**/workspace/capability-worker-sandbox.js", delay_first_broker)
     page.on(
         "request",
         lambda request: leaked.append(request.url)
@@ -1069,6 +1081,8 @@ def worker_startup_smoke(page: Any) -> None:
     expect(frame.locator("#runtime-status")).not_to_contain_text(
         "could not start", timeout=5_000
     )
+    if slow_broker_requests < 1:
+        raise AssertionError("worker-startup canary did not delay the broker")
     if leaked:
         raise AssertionError(f"generated worker escaped its networkless CSP: {leaked}")
     file_links_smoke(page)

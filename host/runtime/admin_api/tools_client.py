@@ -104,6 +104,8 @@ TOOL_CONFIG_PATH_RE = re.compile(r"^/v1/tools/([a-z0-9_]{1,64})/config$")
 def tools_route(method: str, path: str, body: Any) -> Any:
     if path == "/v1/tools" and method == "GET":
         return list_tools()
+    if path == "/v1/tools/usage" and method == "GET":
+        return tool_usage()
     config_match = TOOL_CONFIG_PATH_RE.fullmatch(path)
     if config_match and method == "PUT":
         return put_tool_config(config_match.group(1), body)
@@ -139,6 +141,22 @@ def _bundled_tool(tool_id: str) -> Any:
     return tool
 
 
+def tool_usage() -> dict[str, Any]:
+    usage = state.tool_cost_usage()
+    enabled = state.enabled_tool_ids()
+    spend_by_tool = {row["tool_id"]: row for row in usage.pop("tools")}
+    tools: list[dict[str, Any]] = []
+    for tool in tools_host.BUNDLED_TOOLS.values():
+        tool_id = tool.manifest.tool_id
+        amount = spend_by_tool.get(tool_id, {}).get("month_to_date", "0")
+        is_enabled = tool_id in enabled
+        if amount != "0" or (is_enabled and tool.manifest.reports_cost):
+            tools.append({"tool_id": tool_id, "display_name": tool.manifest.display_name,
+                          "enabled": is_enabled, "month_to_date": amount})
+    usage["tools"] = tools
+    return usage
+
+
 def _tool_entry(tool: Any, enabled_ids: set[str], configured_keys: set[str]) -> dict[str, Any]:
     manifest = tool.manifest
     entry: dict[str, Any] = {
@@ -146,6 +164,7 @@ def _tool_entry(tool: Any, enabled_ids: set[str], configured_keys: set[str]) -> 
         "display_name": manifest.display_name,
         "description": manifest.description,
         "connection": manifest.connection,
+        "reports_cost": manifest.reports_cost,
         "enabled": manifest.tool_id in enabled_ids,
         "actions": [
             {
@@ -157,6 +176,7 @@ def _tool_entry(tool: Any, enabled_ids: set[str], configured_keys: set[str]) -> 
                 "input_protections": {name: asdict(protection) for name, protection in spec.input_protections.items()},
                 "output_schema": spec.output_schema,
                 "returns_asset": spec.returns_asset,
+                "cost_description": spec.cost_description,
             }
             for spec in manifest.actions
         ],

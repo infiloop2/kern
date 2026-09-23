@@ -68,8 +68,11 @@ EXPECTED_HOME_INTEGRATION_IDS = STATIC_HOME_INTEGRATION_IDS | {
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     port = args.port or free_port()
+    server_command = [sys.executable, str(SERVER), "--port", str(port)]
+    if args.scope == "workspaces":
+        server_command.append("--workspace-smoke")
     server = subprocess.Popen(
-        [sys.executable, str(SERVER), "--port", str(port)],
+        server_command,
         cwd=REPO_ROOT,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
@@ -100,11 +103,11 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument(
         "--webkit",
         action="store_true",
-        help="Also run the generated Web App worker-startup regression in Playwright WebKit.",
+        help="Also run the focused generated Web App worker-startup canary in Playwright WebKit.",
     )
     parser.add_argument(
         "--scope",
-        choices=("all", "core", "workspaces"),
+        choices=("all", "core", "workspaces", "overload"),
         default="all",
         help="Smoke only the host UI core, only workspaces, or both.",
     )
@@ -163,7 +166,20 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 f"or set {CHROMIUM_EXECUTABLE_ENV} to an existing Chromium/Chrome executable."
             ) from exc
         try:
+            if scope in {"all", "core", "overload"}:
+                import overload_smokes
+                overload_context = browser.new_context(service_workers="block")
+                overload_smokes.run(overload_context.new_page(), url, log_in)
+                overload_context.close()
             if scope in {"all", "core"}:
+                import swarm_smokes
+                for mobile in (False, True):
+                    swarm_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    swarm_smokes.run(swarm_context.new_page(), url, log_in, mobile=mobile)
+                    swarm_context.close()
                 import file_preview_smokes
                 files_context = browser.new_context(service_workers="block")
                 file_preview_smokes.run(files_context.new_page(), url, log_in)
@@ -233,6 +249,7 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 # the fixture transition so this independent journey cannot
                 # consume that transition first.
                 import host_inference_usage_smokes
+                import tool_cost_usage_smokes
                 for mobile in (False, True):
                     usage_context = browser.new_context(
                         viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
@@ -246,6 +263,8 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                     host_inference_usage_smokes.run(
                         usage_page, url, log_in, mobile=mobile,
                     )
+                    usage_context.clear_cookies()
+                    tool_cost_usage_smokes.run(usage_page, url, log_in, mobile=mobile)
                     usage_context.close()
 
             if scope in {"all", "workspaces"}:
@@ -324,12 +343,11 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
         finally:
             browser.close()
         if webkit and scope in {"all", "workspaces"}:
-            run_webkit_workspace_smoke(playwright, url, headed=headed)
+            run_webkit_worker_startup_canary(playwright, url, headed=headed)
 
 
-def run_webkit_workspace_smoke(playwright, url: str, *, headed: bool) -> None:
-    import file_preview_smokes
-
+def run_webkit_worker_startup_canary(playwright, url: str, *, headed: bool) -> None:
+    """Keep the engine-specific regression narrow; Chromium owns broad UI coverage."""
     try:
         browser = playwright.webkit.launch(headless=not headed)
     except Exception as exc:
@@ -338,36 +356,12 @@ def run_webkit_workspace_smoke(playwright, url: str, *, headed: bool) -> None:
             "  python3 -m playwright install webkit"
         ) from exc
     try:
-        import dictation_smokes
-        voice_context = browser.new_context(service_workers="block")
-        voice_page = voice_context.new_page()
-        report_page_errors(voice_page, "WebKit dictation recovery")
-        dictation_smokes.run(voice_page, url, log_in)
-        voice_context.close()
-        files_context = browser.new_context(service_workers="block")
-        file_preview_smokes.run(files_context.new_page(), url, log_in)
-        files_context.close()
         workspace = browser.new_context()
         workspace_page = workspace.new_page()
-        report_page_errors(workspace_page, "WebKit generated Web App")
+        report_page_errors(workspace_page, "WebKit worker-startup canary")
         log_in(workspace_page, url)
         workspace_smokes.web_app_worker_startup_smoke(workspace_page)
         workspace.close()
-        budget_workspace = browser.new_context()
-        budget_page = budget_workspace.new_page()
-        report_page_errors(budget_page, "WebKit generated Web App turn budget")
-        log_in(budget_page, url)
-        workspace_smokes.web_app_turn_budget_smoke(budget_page)
-        budget_workspace.close()
-        import app_chat_review_smokes
-        for short_transcript in (False, True):
-            app_chat_context = browser.new_context(viewport=IPHONE_VIEWPORT, service_workers="block")
-            app_chat_review_smokes.run(app_chat_context.new_page(), url, log_in, short_transcript=short_transcript)
-            app_chat_context.close()
-        import analytics_smokes
-        analytics_context = browser.new_context(service_workers="block")
-        analytics_smokes.run(analytics_context.new_page(), url, log_in)
-        analytics_context.close()
     finally:
         browser.close()
 
@@ -776,12 +770,15 @@ def upwork_smoke(page, url: str) -> None:
             try:
                 row.get_by_role("button", name="Connect account", exact=True).click()
                 expect(row.locator("[data-tool-message]")).to_have_text(
-                    f"Server returned an invalid JSON response (HTTP {status})."
+                    "Kern is busy or temporarily unavailable. Refreshes will resume shortly."
+                    if status == 502 else f"Server returned an invalid JSON response (HTTP {status})."
                 )
                 assert page.url == original_url, "failed connect navigated away"
                 assert_no_horizontal_overflow(page, "Upwork connection error")
             finally:
                 page.unroute(connect_route)
+            if status == 502:
+                expect(page.locator("#overload-status")).to_be_hidden(timeout=15000)
 
         message = "Upwork Connect is currently only available through localhost. Open Kern through an SSH tunnel and try Connect again."
         page.route(connect_route, lambda route: route.fulfill(
@@ -890,8 +887,8 @@ def desktop_smoke(page, url: str) -> None:
     expect(headings.nth(0)).to_have_text("Chat")
     expect(headings.nth(1)).to_have_text("Apps")
     expect(headings.nth(2)).to_have_text("Scheduled agents")
-    # Home, Approvals, Memory, and Analytics are tabs; Schedules is a section heading.
-    expect(page.locator("#sidebar .tab-button")).to_have_count(4)
+    # Home, Swarm, Approvals, Memory, and Analytics are tabs; Schedules is a section heading.
+    expect(page.locator("#sidebar .tab-button")).to_have_count(5)
     expect(
         page.locator("#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']")
     ).to_be_visible()
@@ -919,6 +916,29 @@ def desktop_smoke(page, url: str) -> None:
     thread_one_nav = page.locator(
         "#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']"
     )
+    task_line = thread_one_nav.locator(".workspace-nav-task")
+    expect(task_line).to_have_text(
+        "Document the theming setup and open a pull request with the implementation and test evidence"
+    )
+    task_style = task_line.evaluate("""element => ({
+      overflowed: element.scrollWidth > element.clientWidth,
+      ellipsis: getComputedStyle(element).textOverflow,
+    })""")
+    if task_style != {"overflowed": True, "ellipsis": "ellipsis"}:
+        raise AssertionError(f"sidebar task did not truncate: {task_style}")
+    name_line = thread_one_nav.locator(".workspace-nav-label")
+    original_name = name_line.inner_text()
+    name_line.evaluate("element => { element.textContent = 'A very long agent name '.repeat(12); }")
+    name_style = name_line.evaluate("""element => ({
+      overflowed: element.scrollWidth > element.clientWidth,
+      ellipsis: getComputedStyle(element).textOverflow,
+    })""")
+    if name_style != {"overflowed": True, "ellipsis": "ellipsis"}:
+        raise AssertionError(f"sidebar name did not truncate: {name_style}")
+    expect(task_line).to_be_visible()
+    name_line.evaluate("(element, name) => { element.textContent = name; }", original_name)
+    expect(thread_one_nav).to_have_attribute("title", re.compile(r"Document the theming setup.*New activity$", re.S))
+    expect(page.locator("#chat-nav-items [data-item-id='thread-2'] .workspace-nav-task")).to_have_count(0)
     expect(thread_one_nav.locator(".workspace-nav-unseen")).to_be_visible()
     expect(thread_one_nav).to_have_attribute("title", re.compile(r"New activity$"))
     thread_one_nav.click()
@@ -936,7 +956,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#panel-home")).to_be_visible()
     runtime_toggle = page.locator('[data-overview-group="runtimes"] .runtime-overview-toggle')
     host_ai_toggle = page.locator('[data-overview-group="host-ai"] .runtime-overview-toggle')
-    expect(page.locator(".runtime-overview-toggle")).to_have_count(2)
+    expect(page.locator(".runtime-overview-toggle")).to_have_count(3)
     expect(runtime_toggle).to_be_visible()
     expect(host_ai_toggle).to_be_visible()
     expect(runtime_toggle).to_contain_text("Agent runtimes")
@@ -961,7 +981,7 @@ def desktop_smoke(page, url: str) -> None:
     # statuses stand alone. Hermes retains its real metered usage, but there
     # are no empty quota rings, unavailable notes, or stat placeholders.
     expect(page.locator("#runtime-overview .usage-ring")).to_have_count(0)
-    expect(page.locator("#runtime-overview .runtime-usage")).to_have_count(3)
+    expect(page.locator('#runtime-overview .runtime-overview-group:not([data-overview-group="tools"]) .runtime-usage')).to_have_count(3)
     expect(page.locator("#runtime-overview .runtime-summary-bedrock .runtime-usage")).to_have_count(1)
     expect(page.locator("#runtime-overview")).not_to_contain_text("--")
     expect(page.locator("#runtime-overview .runtime-summary-host-inference")).to_have_count(2)
@@ -1177,12 +1197,17 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#integration-detail-title")).to_have_text("OpenAI API")
     expect(page.locator(".integration-row[data-integration='host_openai']")).to_be_visible()
     expect(page.locator("#host-inference-model-openai")).to_have_count(0)
+    openai_key_label = page.locator("label[for='host-inference-key-openai']")
+    expect(openai_key_label).to_contain_text("not set")
     page.locator("#host-inference-key-openai").fill("sk-mock-host-key")
     page.get_by_role("button", name="Save API key").click()
     expect(page.locator('[data-integration-message="host_openai"]')).to_contain_text("saved")
+    # A saved key reads like a saved tool secret: a set chip and masked placeholder.
+    expect(openai_key_label.locator(".status")).to_have_text("set")
+    expect(page.locator("#host-inference-key-openai")).to_have_attribute("placeholder", "••••••••")
     page.get_by_role("button", name="Enable", exact=True).click()
     expect(page.locator('[data-integration-message="host_openai"]')).to_contain_text("enabled")
-    expect(page.locator("[data-guide-section='host_openai']")).not_to_contain_text("Structured host text")
+    expect(page.locator("[data-guide-section='host_openai']")).to_contain_text("Swarm task titles")
     expect(page.locator("[data-guide-section='host_openai']")).to_contain_text("OpenAI privacy settings still apply")
     page.locator("#panel-network .home-back").click()
     expect(page.locator("#panel-home")).to_be_visible()
@@ -1193,6 +1218,15 @@ def desktop_smoke(page, url: str) -> None:
 
     open_home_integration(page, "host_typesafe")
     expect(page.locator("#integration-detail-title")).to_have_text("TypeSafe Jev")
+    # Like tools, enablement does not wait for the key.
+    typesafe_row = page.locator(".integration-row[data-integration='host_typesafe']")
+    typesafe_row.get_by_role("button", name="Enable", exact=True).click()
+    expect(page.locator('[data-integration-message="host_typesafe"]')).to_contain_text(
+        "Save the TypeSafe API key"
+    )
+    expect(typesafe_row.locator(".status-chips")).to_contain_text("API key not set")
+    typesafe_row.get_by_role("button", name="Disable", exact=True).click()
+    expect(page.locator('[data-integration-message="host_typesafe"]')).to_contain_text("disabled")
     expect(page.locator("#host-inference-model-typesafe")).to_have_count(0)
     expect(page.locator("[data-guide-section='host_typesafe']")).to_contain_text("POST /v1/systemone")
     expect(page.locator("[data-guide-section='host_typesafe']")).to_contain_text(
@@ -1974,12 +2008,12 @@ def tools_smoke(page, url: str) -> None:
     config_input = page.locator("#tool-config-brave_search-BRAVE_SEARCH_API_KEY")
     config_status = brave_row.locator(".config-key .status")
     config_input.fill("mock-brave-key")
-    brave_row.get_by_role("button", name="Save").click()
+    brave_row.locator("[data-action='save-tool-config'][data-key='BRAVE_SEARCH_API_KEY']").click()
     expect(config_status).to_have_text("set")
     expect(config_input).to_have_value("")
     expect(config_input).to_have_attribute("placeholder", "••••••••")
     config_input.fill("")
-    brave_row.get_by_role("button", name="Save").click()
+    brave_row.locator("[data-action='save-tool-config'][data-key='BRAVE_SEARCH_API_KEY']").click()
     expect(config_status).to_have_text("not set")
     expect(config_input).to_have_attribute("placeholder", "Not configured")
 
@@ -1991,13 +2025,13 @@ def tools_smoke(page, url: str) -> None:
 
 
 def narrow_desktop_smoke(page, url: str) -> None:
-    """A narrow desktop uses the same two compact provider menus as a phone."""
+    """A narrow desktop uses the same three compact usage menus as a phone."""
     from playwright.sync_api import expect
 
     log_in(page, url)
     runtime_toggle = page.locator('[data-overview-group="runtimes"] .runtime-overview-toggle')
     host_ai_toggle = page.locator('[data-overview-group="host-ai"] .runtime-overview-toggle')
-    expect(page.locator(".runtime-overview-toggle")).to_have_count(2)
+    expect(page.locator(".runtime-overview-toggle")).to_have_count(3)
     expect(runtime_toggle).to_be_visible()
     expect(host_ai_toggle).to_be_visible()
     expect(page.locator("#runtime-overview .runtime-summary").first).to_be_hidden()
@@ -2080,11 +2114,11 @@ def mobile_smoke(page, url: str) -> None:
     expect(install_dialog).to_be_visible()
     install_dialog.get_by_role("button", name="Got it").click()
     expect(install_coach).to_be_hidden()
-    # Phone and desktop share two compact provider menus. Their cards remain a
-    # floating layer, so opening either does not resize the workspace below.
+    # Phone and desktop share three compact usage menus. Their cards remain a
+    # floating layer, so opening one does not resize the workspace below.
     runtime_toggle = page.locator('[data-overview-group="runtimes"] .runtime-overview-toggle')
     host_ai_toggle = page.locator('[data-overview-group="host-ai"] .runtime-overview-toggle')
-    expect(page.locator(".runtime-overview-toggle")).to_have_count(2)
+    expect(page.locator(".runtime-overview-toggle")).to_have_count(3)
     expect(runtime_toggle).to_be_visible()
     expect(host_ai_toggle).to_be_visible()
     expect(runtime_toggle).to_contain_text("Agent runtimes")
@@ -2112,13 +2146,30 @@ def mobile_smoke(page, url: str) -> None:
     expect(hermes_box).to_be_visible()
     expect(page.locator("#runtime-overview .runtime-summary-bedrock")).to_have_count(1)
     expect(page.locator("#runtime-overview .runtime-summary-host-inference")).to_have_count(2)
-    expect(page.locator("#runtime-overview .runtime-stat-cost")).to_have_count(3)
+    expect(page.locator('#runtime-overview .runtime-overview-group:not([data-overview-group="tools"]) .runtime-stat-cost')).to_have_count(3)
     assert_runtime_usage_type(page, minimum_number_px=10)
     panel_widths = runtime_panel.evaluate(
         "element => ({client: element.clientWidth, scroll: element.scrollWidth})"
     )
     if panel_widths["scroll"] > panel_widths["client"]:
         raise AssertionError(f"mobile runtime panel overflows horizontally: {panel_widths}")
+    # Long provider names and three-part usage readouts must occupy separate
+    # space, even when every item is technically inside the overlay width.
+    for runtime in ("claude_code", "hermes"):
+        spacing = runtime_panel.locator(f".runtime-summary[data-runtime='{runtime}']").evaluate("""card => {
+            const title = card.querySelector('.runtime-summary-copy > span:first-child');
+            const usage = card.querySelector('.runtime-usage');
+            const text = document.createRange();
+            text.selectNodeContents(title);
+            return {
+                titleRight: text.getBoundingClientRect().right,
+                usageLeft: usage.getBoundingClientRect().left,
+                usageRight: usage.getBoundingClientRect().right,
+                cardRight: card.getBoundingClientRect().right,
+            };
+        }""")
+        if spacing["titleRight"] >= spacing["usageLeft"] or spacing["usageRight"] > spacing["cardRight"]:
+            raise AssertionError(f"{runtime} runtime label and usage overlap on a phone: {spacing}")
     summary_heights = page.locator("#runtime-overview .runtime-summary").evaluate_all(
         "elements => elements.map(element => element.getBoundingClientRect().height)"
     )

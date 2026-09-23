@@ -27,6 +27,7 @@ from typing import Any, Iterator, Mapping, cast
 from host.param_guard import OutboundGuardService
 from host.runtime.core import host_errors, state
 from host.runtime.tools import approval_assessment, assets as tool_assets
+from host.runtime.tools.costs import HostCosts
 import host.tools
 from host.tools import (
     ActionExecuted,
@@ -437,6 +438,7 @@ class HostToolAPI:
     approvals: HostApprovals
     assets: HostAssets
     outbound: OutboundGuardService
+    costs: HostCosts
 
 
 class _ToolConfigView(dict[str, str]):
@@ -475,6 +477,8 @@ def host_api_for(
     origin_thread_id: str | None,
     *,
     asset_store: tool_assets.ToolAssetStore | None = None,
+    action_id: str = "",
+    approval_id: str | None = None,
 ) -> HostToolAPI:
     manifest = tool.manifest
     if manifest.connection not in {"oauth", "mcp_oauth"} and connection != NO_CONNECTION:
@@ -491,6 +495,9 @@ def host_api_for(
             asset_store or _DEFAULT_ASSET_STORE,
         ),
         outbound=_OUTBOUND_GUARD,
+        costs=HostCosts(manifest.tool_id, connection.connection_id, action_id,
+                        manifest.reports_cost,
+                        origin_thread_id, approval_id),
     )
 
 
@@ -640,7 +647,7 @@ def execute_action(
         result = tool.execute(
             action,
             audit_arguments,
-            host_api_for(tool, connection, asset_store=asset_store, origin_thread_id=origin_thread_id),
+            host_api_for(tool, connection, asset_store=asset_store, origin_thread_id=origin_thread_id, action_id=action),
         )
     except (
         ApprovalBackpressureError,
@@ -726,7 +733,7 @@ def _execute_approved(
                 "The account selected for this approval is no longer connected. "
                 "Queue the action again."
             )
-        api = host_api_for(tool, connection, origin_thread_id=record.get("origin_thread_id"), asset_store=asset_store)
+        api = host_api_for(tool, connection, origin_thread_id=record.get("origin_thread_id"), asset_store=asset_store, action_id=action, approval_id=approval_id)
         with api.assets._approved_execution(public_hostname):
             result: Any = tool.execute_approved(_approval_record(record), api)
     except (

@@ -183,6 +183,16 @@ class Outbound(Protocol):
         ...
 
 
+class Costs(Protocol):
+    """Tool-owned USD charges, persisted by the host with call attribution.
+
+    A stable charge_id deduplicates across calls within this tool.
+    Omit it for one charge per execution. Only report a known dollar amount.
+    """
+
+    def record(self, amount_usd: str, *, charge_id: str = "") -> None: ...
+
+
 class HostAPI(Protocol):
     """The bundle handed to every tool call, scoped to one tool."""
 
@@ -203,3 +213,6 @@ class HostAPI(Protocol):
 
     @property
     def outbound(self) -> Outbound: ...
+
+    @property
+    def costs(self) -> Costs: ...

@@ -8,6 +8,7 @@ from typing import cast
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.host_api import HostAPI
+from host.tools.shared.cost_reporting import report_priced_units
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import protect_inputs, guarded_input, validated_input, ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionResult
@@ -45,6 +46,7 @@ RESULT_SCHEMA: JSONObject = outputs.obj(
 )
 
 MANIFEST = ToolManifest(
+    reports_cost=True,
     tool_id="linkedin_discovery",
     display_name="LinkedIn Discovery",
     description=(
@@ -54,7 +56,7 @@ MANIFEST = ToolManifest(
     connection="enable_only",
     actions=protect_inputs((
         ActionSpec(
-            id="search_posts",
+            id="search_posts", cost_description='One Serper search credit. Uses the published $1/1,000-credit pack rate; free or larger packs may cost less.',
             description=(
                 "Search Google-indexed public LinkedIn post pages for a topic and return bounded titles, "
                 "LinkedIn URLs, dates, sources, and search snippets. This is discovery and snippet reading, "
@@ -283,6 +285,7 @@ class LinkedInDiscoveryTool(Tool):
             limit = _bounded_int(tool_input.get("limit"), name="limit", default=MAX_RESULTS, minimum=1, maximum=MAX_RESULTS)
             page = _bounded_int(tool_input.get("page"), name="page", default=1, minimum=1, maximum=MAX_PAGE)
             response = _search(api.config["SERPERAPI_API_KEY"], query, page)
+            report_priced_units(api, 1, "0.001")
             results = _organic_results(response, limit=limit)
             return ActionExecuted(
                 {

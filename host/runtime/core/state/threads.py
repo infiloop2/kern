@@ -55,44 +55,56 @@ def page_thread_summaries(
         clauses.append("(COALESCE(last_used_at, ''), thread_id) < (%s, %s)")
         params.extend(before)
     where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+
     with db.transaction() as cur:
         cur.execute(
             "SELECT thread_id, agent_runtime, model, effort, last_used_at, run_status,"
             " COALESCE((SELECT seq FROM agent_events"
             " WHERE agent_events.thread_id = thread_sessions.thread_id"
             " ORDER BY seq DESC LIMIT 1), 0),"
+            " (SELECT event_type FROM agent_events"
+            " WHERE agent_events.thread_id = thread_sessions.thread_id"
+            " ORDER BY seq DESC LIMIT 1),"
             " COALESCE((SELECT seq FROM agent_events"
             " WHERE agent_events.thread_id = thread_sessions.thread_id"
             " AND (event_type = 'thread.message'"
             " OR (event_type = 'thread.error'"
             " AND thread_sessions.thread_id ~ '^schedule-[1-9][0-9]*$'))"
-            " ORDER BY seq DESC LIMIT 1), 0)"
+            " ORDER BY seq DESC LIMIT 1), 0),"
+            " (SELECT task FROM swarm_agent_ai"
+            " WHERE swarm_agent_ai.thread_id = thread_sessions.thread_id"
+            " AND swarm_agent_ai.run_number = thread_sessions.run_number)"
             f" FROM thread_sessions{where}"
             " ORDER BY COALESCE(last_used_at, '') DESC, thread_id DESC LIMIT %s",
             (*params, limit),
         )
-        return [
-            {
-                "thread_id": str(thread_id),
-                "agent_runtime": agent_runtime,
-                "model": model,
-                "effort": effort,
-                "last_used_at": last_used_at or "",
-                "status": str(run_status),
-                "latest_event_seq": int(latest_event_seq),
-                "latest_message_seq": int(latest_message_seq),
-            }
-            for (
-                thread_id,
-                agent_runtime,
-                model,
-                effort,
-                last_used_at,
-                run_status,
-                latest_event_seq,
-                latest_message_seq,
-            ) in cur.fetchall()
-        ]
+        rows = cur.fetchall()
+    return [
+        {
+            "thread_id": str(thread_id),
+            "agent_runtime": agent_runtime,
+            "model": model,
+            "effort": effort,
+            "last_used_at": last_used_at or "",
+            "status": str(run_status),
+            "latest_event_seq": int(latest_event_seq),
+            "latest_event_type": latest_event_type,
+            "latest_message_seq": int(latest_message_seq),
+            "task": task,
+        }
+        for (
+            thread_id,
+            agent_runtime,
+            model,
+            effort,
+            last_used_at,
+            run_status,
+            latest_event_seq,
+            latest_event_type,
+            latest_message_seq,
+            task,
+        ) in rows
+    ]
 
 
 def schedule_thread_is_owned(thread_id: str) -> bool:

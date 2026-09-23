@@ -238,10 +238,13 @@ function renderHostInferenceIntegrations() {
             <h2>${esc(guide.label)}</h2>
             <div class="integration-subtitle">${esc(guide.summary)}</div>
           </div>
-          <span class="status-chips">${badge(provider.enabled ? "enabled" : provider.configured ? "configured" : "disabled")}</span>
+          <span class="status-chips">
+            ${badge(provider.enabled ? "enabled" : "disabled")}
+            ${provider.enabled && !provider.configured ? `<span class="status">API key not set</span>` : ""}
+          </span>
           <span class="integration-actions">
             <span class="seg">
-              <button data-action="enable-host-inference-provider" data-provider="${esc(provider.provider)}"${provider.enabled || !provider.configured ? " disabled" : ""}>Enable</button>
+              <button data-action="enable-host-inference-provider" data-provider="${esc(provider.provider)}"${provider.enabled ? " disabled" : ""}>Enable</button>
               <button data-action="disable-host-inference-provider" data-provider="${esc(provider.provider)}"${provider.enabled ? "" : " disabled"}>Disable</button>
             </span>
           </span>
@@ -257,8 +260,9 @@ function renderHostInferenceIntegrations() {
             </div>
             <p class="muted">The API key is encrypted in host state. Agents cannot read it or use this connection.</p>
             <div class="field">
-              <label class="field-label" for="host-inference-key-${esc(provider.provider)}">${esc(guide.apiKeyLabel || "API key")}</label>
-              <input id="host-inference-key-${esc(provider.provider)}" type="password" autocomplete="off" placeholder="${esc(provider.configured ? "Leave blank to keep the saved key" : guide.apiKeyPlaceholder || "API key")}">
+              <label class="field-label" for="host-inference-key-${esc(provider.provider)}">${esc(guide.apiKeyLabel || "API key")} ${provider.configured ? `<span class="status active">set</span>` : `<span class="status">not set</span>`}</label>
+              ${provider.configured ? `<span class="muted">Enter a new key to replace the saved one.</span>` : ""}
+              <input id="host-inference-key-${esc(provider.provider)}" type="password" autocomplete="off" placeholder="${esc(provider.configured ? CONFIGURED_VALUE_PLACEHOLDER : guide.apiKeyPlaceholder || "API key")}">
             </div>
             <div class="actions">
               <button class="primary sm" data-action="save-host-inference-provider" data-provider="${esc(provider.provider)}">Save API key</button>
@@ -316,7 +320,8 @@ export async function setHostInferenceProviderEnabled(provider, enabled) {
     const response = await api("PUT", `/v1/host-inference/providers/${provider}`, body);
     hostInferenceProviders.set(provider, response.provider);
     renderNetworkControls();
-    policyMessage(guideId, `${guide.label} ${enabled ? "enabled" : "disabled"}.`);
+    const needsKey = enabled && !response.provider?.configured;
+    policyMessage(guideId, `${guide.label} ${enabled ? "enabled" : "disabled"}.${needsKey ? ` Save the ${guide.apiKeyLabel || "API key"} to start using it.` : ""}`);
   } catch (error) {
     policyMessage(guideId, error.message, true);
   }

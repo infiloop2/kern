@@ -48,11 +48,13 @@ class AgenticWebAppContractTests(unittest.TestCase):
                 "last_used_at": "2026-08-18T10:02:00Z",
                 "latest_event_seq": 42,
                 "latest_message_seq": 40,
+                "task": "Publish release notes",
             },
         )
 
         self.assertEqual(summary["latest_event_seq"], 42)
         self.assertEqual(summary["latest_message_seq"], 40)
+        self.assertEqual(summary["task"], "Publish release notes")
         self.assertEqual(
             summary["agent_settings"],
             {"agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high"},
@@ -283,6 +285,9 @@ class AgenticWebAppContractTests(unittest.TestCase):
         builder = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
         index = (APP_DIR / "ui" / "index.html").read_text()
         self.assertIn('new Worker("/workspace/capability-worker-sandbox.js")', builder)
+        self.assertIn('globalThis.postMessage({ type: "capability-worker-ready" })', source)
+        self.assertIn('"broker-ready": new Set()', builder)
+        self.assertIn('if (message.type === "capability-worker-ready")', builder)
         self.assertIn('this.bridge.postMessage({ type: "create", source })', builder)
         self.assertIn(
             "`data:application/javascript;charset=utf-8,${encodeURIComponent(message.source)}`",
@@ -365,6 +370,10 @@ class AgenticWebAppContractTests(unittest.TestCase):
     def test_worker_deadline_includes_host_waits_and_explains_failures(self) -> None:
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
         self.assertIn("const WORKER_TURN_TIMEOUT_MS = 5000", source)
+        self.assertIn('state: armed ? "event" : "broker-starting"', source)
+        self.assertIn('armed ? WORKER_TURN_TIMEOUT_MS : WORKER_START_TIMEOUT_MS', source)
+        self.assertIn('worker.addEventListener("broker-ready", () => {', source)
+        self.assertIn('run.startedAt = performance.now();', source)
         self.assertIn('run.timer = setTimeout(() => run.finish("timeout"), WORKER_TURN_TIMEOUT_MS)', source)
         self.assertNotIn("pauseTurnClock", source)
         self.assertNotIn("LIVENESS_PROBE", source)
@@ -375,7 +384,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         # An interaction during a running turn is kept, not dropped, and it
         # still runs after an action-level failure.
         self.assertIn("function queueGeneratedEvent(pendingEvent)", source)
-        self.assertIn('const startupFailure = stage === "starting" || stage === "worker-create";', source)
+        self.assertIn('const startupFailure = ["broker-starting", "starting", "worker-create"].includes(stage);', source)
         self.assertIn("if (queued && queued.appId === selectedAppId && !startupFailure)", source)
         self.assertEqual(source.count("queueGeneratedEvent({"), 3)
         self.assertNotIn("if (workerRun) {\n    showRuntimeStatus(\"Finishing the previous app action\");", source)

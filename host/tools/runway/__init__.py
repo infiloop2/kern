@@ -18,7 +18,7 @@ from host.tools.results import (
     StreamingAsset,
 )
 from host.tools.host_api import ApprovalRecord, HostAPI
-from host.tools.runway import options
+from host.tools.runway import options, costs
 from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError
 from host.tools.shared.media import open_downloaded_audio, open_downloaded_video
@@ -182,12 +182,14 @@ GET_TASK_OUTPUT_SCHEMA: JSONObject = outputs.obj(
 
 MANIFEST = ToolManifest(
     tool_id="runway",
+    reports_cost=True,
     display_name="Runway Media Generation",
     description="Connect Runway and let your agent generate images, speech, and short videos, and edit videos.",
     connection="enable_only",
     actions=protect_inputs((
         ActionSpec(
             id="generate_video",
+            cost_description='Reports the calculated generation charge when Runway accepts the task, at $0.01 per credit using model, duration, resolution and format pricing. Unknown media duration or an explicit Seedance audio setting produces no report. Later provider refunds are not reconciled.',
             description=(
                 "Start an async Runway video generation task from a text prompt and optional "
                 "media from public URLs, existing Runway uploads, or the agent workspace. Supports keyframes and model-specific references. Returns a "
@@ -219,6 +221,7 @@ MANIFEST = ToolManifest(
         ),
         ActionSpec(
             id="edit_video",
+            cost_description='Uses paid Runway credits. Cost reporting is not available because the input video duration is unavailable.',
             description=(
                 "Start an async Runway video-editing task (Aleph 2): restyle or modify an "
                 "existing video from a public HTTPS URL or the agent workspace. Returns a "
@@ -243,6 +246,7 @@ MANIFEST = ToolManifest(
         ),
         ActionSpec(
             id="generate_image",
+            cost_description='Reports the calculated image charge when Runway accepts the task, at $0.01 per credit based on the selected quality. Later provider refunds are not reconciled.',
             description=(
                 "Start an async GPT Image 2.5 text-to-image task through Runway and return a "
                 "task_id. Poll get_task with output_kind=image for the temporary image URL. "
@@ -264,6 +268,7 @@ MANIFEST = ToolManifest(
         ),
         ActionSpec(
             id="generate_speech",
+            cost_description='Reports the calculated speech charge when Runway accepts the task, at $0.01 per credit based on the selected model and prompt length. Later provider refunds are not reconciled.',
             description=(
                 "Start an async ElevenLabs text-to-speech task through Runway. Select eleven_v3 "
                 "for expressive audio tags and optional stability, style, and speed controls. "
@@ -289,6 +294,7 @@ MANIFEST = ToolManifest(
         ),
         ActionSpec(
             id="get_task",
+            cost_description='No separate poll or download charge.',
             description="Poll a task_id returned by any Runway generation action. Set output_kind to the originating action's media type; pending tasks have no output, while success returns a temporary video, image, or audio URL valid about 24-48 hours.",
             data_policy=RUNWAY_POLL_POLICY,
             input_schema={
@@ -304,6 +310,7 @@ MANIFEST = ToolManifest(
         ),
         ActionSpec(
             id="save_video",
+            cost_description='No separate poll or download charge.',
             description=(
                 "Save a completed Runway video under /tool_assets in the agent workspace. "
                 "The agent-side bridge creates the filename and returns the durable path."
@@ -321,6 +328,7 @@ MANIFEST = ToolManifest(
         ),
         ActionSpec(
             id="save_audio",
+            cost_description='No separate poll or download charge.',
             description=(
                 "Save completed Runway MP3 speech under /tool_assets in the agent workspace. "
                 "The agent-side bridge creates the filename and returns the durable path."
@@ -860,7 +868,7 @@ def _failure_from_status(exc: WebRequestError) -> str:
     return message
 
 
-def _save_media(task_id: str, headers: dict[str, str], *, kind: str) -> ActionResult:
+def _save_media(task_id: str, headers: dict[str, str], api: HostAPI, *, kind: str) -> ActionResult:
     if not TASK_ID_RE.fullmatch(task_id):
         raise ToolInputValidationError("Runway tool_input.task_id is invalid.")
     response = json_request(
@@ -898,7 +906,7 @@ class RunwayTool:
         return None
 
     def _create_task(
-        self, endpoint: str, body: JSONObject, headers: dict[str, str], model: str, output_kind: str
+        self, endpoint: str, body: JSONObject, headers: dict[str, str], model: str, output_kind: str, api: HostAPI
     ) -> ActionResult:
         response = json_request(
             "POST",
@@ -909,12 +917,14 @@ class RunwayTool:
             invalid_response_message="Runway API returned an invalid response.",
         )
         task_id = response.get("id")
-        if not isinstance(task_id, str) or not TASK_ID_RE.fullmatch(task_id):
+        valid_task_id = task_id if isinstance(task_id, str) and TASK_ID_RE.fullmatch(task_id) else None
+        costs.submitted(api, valid_task_id, body)
+        if valid_task_id is None:
             return ActionFailed("Runway API returned no task id.")
         return ActionExecuted(
             {
                                 "message": f"Runway task created. Poll get_task with output_kind={output_kind} until it succeeds.",
-                "task_id": task_id,
+                "task_id": valid_task_id,
                 "task_status": "PENDING",
                 "model": model,
                 "output_kind": output_kind,
@@ -937,7 +947,7 @@ class RunwayTool:
                 uploaded = {asset_id: _upload_staged_asset(asset_id, headers, api, kind=kind)
                             for asset_id, kind in uploads.items()}
                 body = cast(JSONObject, options.replace_assets(body, uploaded))
-                result = self._create_task(endpoint, body, headers, cast(str, body["model"]), "video")
+                result = self._create_task(endpoint, body, headers, cast(str, body["model"]), "video", api)
                 if isinstance(result, ActionExecuted):
                     for asset_id in uploads:
                         api.assets.delete(asset_id)
@@ -948,15 +958,15 @@ class RunwayTool:
                         f"Runway {action} requires exactly one string task_id."
                     )
                 return _save_media(
-                    cast(str, tool_input["task_id"]), headers,
+                    cast(str, tool_input["task_id"]), headers, api,
                     kind="audio" if action == "save_audio" else "video",
                 )
             if action == "generate_image":
                 body = _image_request(api, tool_input)
-                return self._create_task(TEXT_TO_IMAGE_ENDPOINT, body, headers, cast(str, body["model"]), "image")
+                return self._create_task(TEXT_TO_IMAGE_ENDPOINT, body, headers, cast(str, body["model"]), "image", api)
             if action == "generate_speech":
                 body = _speech_request(api, tool_input)
-                return self._create_task(TEXT_TO_SPEECH_ENDPOINT, body, headers, cast(str, body["model"]), "audio")
+                return self._create_task(TEXT_TO_SPEECH_ENDPOINT, body, headers, cast(str, body["model"]), "audio", api)
             if action == "get_task":
                 extra = set(tool_input) - {"task_id", "output_kind"}
                 if extra:

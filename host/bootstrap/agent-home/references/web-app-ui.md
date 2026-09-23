@@ -43,9 +43,11 @@ worker memory.
 
 ## Responsiveness
 
-A turn (onLoad or one action) has a five-second total deadline, including
-worker startup and all host requests. Each `app.read`, `app.query`, `app.set`,
-`app.delete` or `app.append` is a browser round trip. Reduce round trips and
+A turn (onLoad or one action) has a five-second total deadline after the
+browser sandbox starts, including generated worker startup and all host
+requests. The browser sandbox has a separate 15-second startup limit. Each
+`app.read`, `app.query`, `app.set`, `app.delete` or `app.append` is a browser
+round trip. Reduce round trips and
 run independent reads concurrently to finish comfortably within the deadline.
 
 - Render first from data already in hand; fetch a tab's rows only when it is

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import base64
+import fcntl
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import contextmanager, ExitStack
 import json
 import hashlib
 import os
 from pathlib import Path
+import resource
 import socket
 import ssl
 import subprocess
@@ -91,6 +93,297 @@ class UpstreamHandler(BaseHTTPRequestHandler):
 
     def log_message(self, fmt: str, *args: object) -> None:
         return
+
+
+class ProxyCapacityTests(unittest.TestCase):
+    def test_proxy_has_room_for_all_admitted_runtime_pools(self) -> None:
+        from host.runtime.agent_runtime.orchestrator import TURN_LIMIT_PER_RUNTIME
+        from host.session_options import RUNTIMES
+
+        self.assertGreater(
+            network_proxy.MAX_CONNECTIONS,
+            len(RUNTIMES) * TURN_LIMIT_PER_RUNTIME,
+        )
+
+    def test_large_request_releases_buffer_slot_on_denial(self) -> None:
+        client = MagicMock()
+        slots = MagicMock()
+        with (
+            patch.object(network_proxy, "SocketReader"),
+            patch.object(network_proxy, "read_request_head", return_value=(
+                "POST", "/upload", [("Host", "example.com"), ("Content-Length", str(network_proxy.LARGE_BODY_THRESHOLD + 1))],
+            )),
+            patch.object(network_proxy, "read_body", return_value=(b"", "request_body_too_large")),
+            patch.object(network_proxy, "_policy_load_denial", return_value=(None, None)),
+            patch.object(network_proxy, "append_network_event"),
+            patch.object(network_proxy, "LARGE_BODY_SLOTS", slots),
+        ):
+            network_proxy.ProxyHandler._serve_tls_request(MagicMock(), "example.com", 443, client)
+        slots.acquire.assert_called_once_with(blocking=False)
+        slots.release.assert_called_once_with()
+
+    def test_large_request_at_capacity_does_not_read_or_wait(self) -> None:
+        client = MagicMock()
+        slots = MagicMock()
+        slots.acquire.return_value = False
+        with (
+            patch.object(network_proxy, "SocketReader"),
+            patch.object(network_proxy, "read_request_head", return_value=(
+                "POST", "/upload", [("Host", "example.com"), ("Transfer-Encoding", "chunked")],
+            )),
+            patch.object(network_proxy, "read_body") as read_body,
+            patch.object(network_proxy, "append_network_event") as append_event,
+            patch.object(network_proxy, "LARGE_BODY_SLOTS", slots),
+        ):
+            network_proxy.ProxyHandler._serve_tls_request(MagicMock(), "example.com", 443, client)
+        slots.acquire.assert_called_once_with(blocking=False)
+        slots.release.assert_not_called()
+        read_body.assert_not_called()
+        append_event.assert_called_once_with(
+            "https", "POST", "example.com", 443, "/upload", "", False, "request_body_capacity"
+        )
+        self.assertIn(b"429 Too Many Requests", client.sendall.call_args.args[0])
+
+    def test_compressed_small_wire_body_uses_large_buffer_slot(self) -> None:
+        slots = MagicMock()
+        with (
+            patch.object(network_proxy, "SocketReader"),
+            patch.object(network_proxy, "read_request_head", return_value=(
+                "POST", "/upload", [("Host", "example.com"), ("Content-Length", "1"), ("Content-Encoding", "gzip")],
+            )),
+            patch.object(network_proxy, "read_body", return_value=(b"x", "request_body_malformed")),
+            patch.object(network_proxy, "_policy_load_denial", return_value=(None, None)),
+            patch.object(network_proxy, "append_network_event"),
+            patch.object(network_proxy, "LARGE_BODY_SLOTS", slots),
+        ):
+            network_proxy.ProxyHandler._serve_tls_request(MagicMock(), "example.com", 443, MagicMock())
+        slots.acquire.assert_called_once_with(blocking=False)
+        slots.release.assert_called_once_with()
+
+    def test_large_request_releases_buffer_slot_before_response_stream(self) -> None:
+        body = b"x" * (network_proxy.LARGE_BODY_THRESHOLD + 1)
+        headers = [("Host", "example.com"), ("Content-Length", str(len(body)))]
+        slots = MagicMock()
+        meter_slots = MagicMock()
+        context = MagicMock()
+        with (
+            patch.object(network_proxy, "SocketReader"),
+            patch.object(network_proxy, "read_request_head", return_value=("POST", "/upload", headers)),
+            patch.object(network_proxy, "read_body", return_value=(body, None)),
+            patch.object(network_proxy, "_policy_load_denial", return_value=(MagicMock(), None)),
+            patch.object(network_proxy, "request_denial_reason", return_value=None),
+            patch.object(network_proxy, "duplicate_header_denial", return_value=None),
+            patch.object(network_proxy, "host_header_denial", return_value=None),
+            patch.object(network_proxy, "append_network_event"),
+            patch.object(network_proxy.integrations, "gate_response", return_value=(None, None)),
+            patch.object(network_proxy.integrations, "response_meter", return_value=MagicMock()),
+            patch.object(network_proxy.integrations, "rewrite_request_headers", return_value=headers),
+            patch.object(network_proxy.integrations, "prepare_request", return_value=(headers, body)),
+            patch.object(network_proxy.integrations, "prepare_response", return_value=None),
+            patch.object(network_proxy, "connect_public"),
+            patch.object(network_proxy.ssl, "create_default_context", return_value=context),
+            patch.object(network_proxy, "send_http_request"),
+            patch.object(network_proxy, "forward_until_close", side_effect=lambda *_: (
+                slots.release.assert_called_once_with(), meter_slots.release.assert_not_called()
+            )),
+            patch.object(network_proxy, "LARGE_BODY_SLOTS", slots),
+            patch.object(network_proxy, "METERED_RESPONSE_SLOTS", meter_slots),
+        ):
+            network_proxy.ProxyHandler._serve_tls_request(MagicMock(), "example.com", 443, MagicMock())
+        slots.acquire.assert_called_once_with(blocking=False)
+        slots.release.assert_called_once_with()
+        meter_slots.acquire.assert_called_once_with(blocking=False)
+        meter_slots.release.assert_called_once_with()
+
+    def test_meter_capacity_rejects_before_upstream_connect(self) -> None:
+        client = MagicMock()
+        meter_slots = MagicMock()
+        meter_slots.acquire.return_value = False
+        with (
+            patch.object(network_proxy, "SocketReader"),
+            patch.object(network_proxy, "read_request_head", return_value=("POST", "/model", [("Host", "example.com")])),
+            patch.object(network_proxy, "read_body", return_value=(b"", None)),
+            patch.object(network_proxy, "_policy_load_denial", return_value=(MagicMock(), None)),
+            patch.object(network_proxy, "request_denial_reason", return_value=None),
+            patch.object(network_proxy, "duplicate_header_denial", return_value=None),
+            patch.object(network_proxy, "host_header_denial", return_value=None),
+            patch.object(network_proxy, "append_network_event") as append_event,
+            patch.object(network_proxy.integrations, "gate_response", return_value=(None, None)),
+            patch.object(network_proxy.integrations, "response_meter", return_value=MagicMock()),
+            patch.object(network_proxy, "connect_public") as connect_public,
+            patch.object(network_proxy, "METERED_RESPONSE_SLOTS", meter_slots),
+        ):
+            network_proxy.ProxyHandler._serve_tls_request(MagicMock(), "example.com", 443, client)
+        meter_slots.acquire.assert_called_once_with(blocking=False)
+        meter_slots.release.assert_not_called()
+        connect_public.assert_not_called()
+        append_event.assert_called_once_with("https", "POST", "example.com", 443, "/model", "", False, "response_meter_capacity")
+        self.assertIn(b"429 Too Many Requests", client.sendall.call_args.args[0])
+
+    def test_large_websocket_message_releases_buffer_slot(self) -> None:
+        frame = masked_frame(b"123456")
+        slots = MagicMock()
+        with (
+            patch.object(network_proxy, "LARGE_BODY_THRESHOLD", 4),
+            patch.object(network_proxy, "LARGE_BODY_SLOTS", slots),
+        ):
+            guard = network_proxy.WebSocketClientGuard(lambda _message: None)
+            self.assertEqual(guard.feed(frame[:6]), b"")
+            slots.acquire.assert_not_called()  # a declared length alone reserves nothing
+            self.assertEqual(guard.feed(frame[6:-1]), b"")
+            slots.acquire.assert_called_once_with(blocking=False)
+            self.assertEqual(guard.feed(frame[-1:]), frame)
+            slots.release.assert_not_called()  # upstream may still be blocked
+            guard.forwarded()
+            slots.release.assert_called_once_with()
+            guard.close()
+            slots.release.assert_called_once_with()
+
+    def test_large_websocket_message_keeps_trailing_frames_until_forwarded(self) -> None:
+        first = masked_frame(b"123456")
+        second = masked_frame(b"ok")
+        slots = MagicMock()
+        with (
+            patch.object(network_proxy, "LARGE_BODY_THRESHOLD", 4),
+            patch.object(network_proxy, "LARGE_BODY_SLOTS", slots),
+        ):
+            guard = network_proxy.WebSocketClientGuard(lambda _message: None)
+            self.assertEqual(guard.feed(first + second), first)
+            slots.release.assert_not_called()
+            guard.forwarded()
+            self.assertEqual(guard.feed(b""), second)
+        slots.release.assert_called_once_with()
+
+    def test_websocket_write_observes_large_message_deadline(self) -> None:
+        client = MagicMock()
+        client.gettimeout.return_value = network_proxy.IDLE_TIMEOUT
+        guard = network_proxy.WebSocketClientGuard(lambda _message: None)
+        frame = masked_frame(b"123456")
+        with patch.object(network_proxy, "LARGE_BODY_THRESHOLD", 4):
+            guard.feed(frame[:-1])
+
+        def blocked_write(_data: bytes) -> None:
+            self.assertLessEqual(client.settimeout.call_args.args[0], network_proxy.LARGE_MESSAGE_TIMEOUT)
+            guard._large_message_deadline = network_proxy.time.monotonic() - 1
+            raise TimeoutError("blocked client")
+
+        client.sendall.side_effect = blocked_write
+        with self.assertRaises(network_proxy.WebSocketDenied) as caught:
+            network_proxy._send_websocket_with_deadline(client, b"upstream", guard)
+        self.assertEqual(caught.exception.code, "websocket_body_timeout")
+        client.settimeout.assert_any_call(network_proxy.IDLE_TIMEOUT)
+        guard.close()
+
+    def test_websocket_timeout_releases_slot_before_close_write(self) -> None:
+        client, upstream, slots = MagicMock(), MagicMock(), MagicMock()
+        frame = masked_frame(b"123456")
+
+        def check_close_write(_frame: bytes) -> None:
+            slots.release.assert_called_once_with()
+
+        client.sendall.side_effect = check_close_write
+        with (
+            patch.object(network_proxy, "LARGE_BODY_THRESHOLD", 4),
+            patch.object(network_proxy, "LARGE_BODY_SLOTS", slots),
+            patch.object(network_proxy.WebSocketClientGuard, "large_message_timed_out", side_effect=[False, True]),
+            patch.object(network_proxy.selectors, "DefaultSelector"),
+            patch.object(network_proxy.integrations, "ws_message_guard", return_value=lambda _message: None),
+            patch.object(network_proxy, "append_network_event"),
+        ):
+            network_proxy.tunnel_websocket(
+                client, upstream, MagicMock(), "wss", "example.com", 443, "/ws",
+                initial_client_bytes=frame[:-1],
+            )
+        slots.acquire.assert_called_once_with(blocking=False)
+        slots.release.assert_called_once_with()
+
+    def test_incomplete_large_websocket_message_releases_slot_at_deadline(self) -> None:
+        frame = masked_frame(b"123456")
+        slots = MagicMock()
+        with (
+            patch.object(network_proxy, "LARGE_BODY_THRESHOLD", 4),
+            patch.object(network_proxy, "LARGE_BODY_SLOTS", slots),
+        ):
+            guard = network_proxy.WebSocketClientGuard(lambda _message: None)
+            self.assertEqual(guard.feed(frame[:-1]), b"")
+            slots.acquire.assert_called_once_with(blocking=False)
+            guard._large_message_deadline = network_proxy.time.monotonic() - 1
+            with self.assertRaises(network_proxy.WebSocketDenied) as caught:
+                guard.feed(frame[-1:])
+        self.assertEqual(caught.exception.code, "websocket_body_timeout")
+        slots.release.assert_called_once_with()
+
+    def test_websocket_tunnel_accepts_file_descriptors_above_select_limit(self) -> None:
+        if resource.getrlimit(resource.RLIMIT_NOFILE)[0] <= 2050:
+            self.skipTest("process file-descriptor limit is below 2051")
+        client, proxy_client = socket.socketpair()
+        proxy_upstream, upstream = socket.socketpair()
+        self.addCleanup(client.close)
+        self.addCleanup(upstream.close)
+        high_client = socket.socket(fileno=fcntl.fcntl(proxy_client.fileno(), fcntl.F_DUPFD, 2048))
+        high_upstream = socket.socket(fileno=fcntl.fcntl(proxy_upstream.fileno(), fcntl.F_DUPFD, 2048))
+        self.addCleanup(high_client.close)
+        self.addCleanup(high_upstream.close)
+        proxy_client.close()
+        proxy_upstream.close()
+        client.settimeout(5)
+        upstream.settimeout(5)
+        frame = masked_frame(b"ok")
+        with patch.object(network_proxy.integrations, "ws_message_guard", return_value=lambda _message: None):
+            thread = threading.Thread(
+                target=network_proxy.tunnel_websocket,
+                args=(high_client, high_upstream, MagicMock(), "wss", "example.com", 443, "/ws"),
+                daemon=True,
+            )
+            thread.start()
+            client.sendall(frame)
+            self.assertEqual(upstream.recv(1024), frame)
+            client.close()
+            thread.join(timeout=5)
+        self.assertFalse(thread.is_alive())
+
+    def test_websocket_ping_does_not_reserve_large_message_slot(self) -> None:
+        slots = MagicMock()
+        first = masked_frame(b"1234", opcode=0x1, fin=False)
+        ping = masked_frame(b"x", opcode=0x9)
+        last = masked_frame(b"", opcode=0x0, fin=True)
+        with (
+            patch.object(network_proxy, "LARGE_BODY_THRESHOLD", 4),
+            patch.object(network_proxy, "LARGE_BODY_SLOTS", slots),
+        ):
+            guard = network_proxy.WebSocketClientGuard(lambda _message: None)
+            self.assertEqual(guard.feed(first + ping), ping)
+            self.assertEqual(guard.feed(last), first + last)
+        slots.acquire.assert_not_called()
+
+    def test_invalid_control_frames_are_rejected_from_header(self) -> None:
+        # A control frame with an extended payload length must be denied before
+        # its payload can consume memory, even when only the header has arrived.
+        invalid_headers = (
+            b"\x89\xfe",  # ping with extended length
+            b"\x09\x80",  # fragmented ping
+            b"\x83\x80",  # reserved data opcode
+        )
+        for header in invalid_headers:
+            with self.subTest(header=header):
+                guard = network_proxy.WebSocketClientGuard(lambda _message: None)
+                with self.assertRaises(network_proxy.WebSocketDenied) as caught:
+                    guard.feed(header)
+                self.assertEqual(caught.exception.code, "websocket_uninspectable")
+
+    def test_large_websocket_message_at_capacity_is_rejected(self) -> None:
+        slots = MagicMock()
+        slots.acquire.return_value = False
+        with (
+            patch.object(network_proxy, "LARGE_BODY_THRESHOLD", 4),
+            patch.object(network_proxy, "LARGE_BODY_SLOTS", slots),
+        ):
+            guard = network_proxy.WebSocketClientGuard(lambda _message: None)
+            with self.assertRaises(network_proxy.WebSocketDenied) as caught:
+                guard.feed(masked_frame(b"12345"))
+        self.assertEqual(caught.exception.code, "websocket_body_capacity")
+        slots.acquire.assert_called_once_with(blocking=False)
+        slots.release.assert_not_called()
 
 
 class NetworkProxyTests(unittest.TestCase):
@@ -758,6 +1051,7 @@ class NetworkProxyTests(unittest.TestCase):
         # proxy silently drop every connection.
         self.assertTrue(slots.acquire(blocking=False))
 
+
     @contextmanager
     def map_upstream(self, port_from: int, upstream_port: int, tls: bool = False):
         """Redirect the proxy's upstream dials for 127.0.0.1:<port_from> to the
@@ -1343,6 +1637,7 @@ class WebSocketGuardTests(unittest.TestCase):
         ping = masked_frame(b"", opcode=0x9)
         cleared = guard.feed(masked_frame(b"{", opcode=0x1, fin=False) + ping)
         self.assertEqual(cleared, ping)
+
 
     def test_unmasked_and_extension_frames_are_denied(self) -> None:
         with self.assertRaises(network_proxy.WebSocketDenied):

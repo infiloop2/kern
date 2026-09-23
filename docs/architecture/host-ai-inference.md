@@ -28,8 +28,8 @@ actually needs:
 - `openai_text_completion(...)` sends a bounded prompt and strict JSON schema.
   The caller names a feature purpose, and reviewed host code chooses the OpenAI
   model for that purpose.
-- `typesafe_jev_judgment(...)` sends bounded state and typed Jev questions and
-  validates the returned probability shapes.
+- `typesafe_jev_judgment(...)` sends bounded state and yes/no Jev questions and
+  validates the returned probabilities.
 
 This makes differences between providers explicit. Adding another provider
 does not silently make it interchangeable with either existing contract.
@@ -48,13 +48,20 @@ Only the admin-owned API writes configuration.
 ## Failure behavior
 
 Each request limits the input size, response size, number of simultaneous
-calls, and network inactivity time. Provider adapters use the standard HTTPS
-client with normal certificate and hostname verification and do not retry.
+calls, and network inactivity time. Before provider egress, the adapters replace
+credential-shaped values with `<redacted>`. They also replace runs of at least
+11 letters, digits, underscores, or hyphens that contain a digit. This applies to
+GPT prompts and Jev state content. The original local input is not changed.
+Values whose object keys collide after redaction are retained together;
+credential-field values are redacted in full. Jev question ids and OpenAI
+response-schema fields are set by host code.
+OpenAI response-schema keys remain intact. Provider adapters use the standard
+HTTPS client with normal certificate and hostname verification and do not retry.
 For OpenAI, each host feature declares the exact JSON fields, value types, and
 limits it accepts, and Kern checks the returned JSON locally before using it.
 Jev answers are checked against the exact typed questions. Approval annotation
-sends the complete current approval state or does not call Jev at all; it does
-not clip or infer fields from tool payloads. A legitimate call
+sends the current approval state after egress redaction or does not call Jev at
+all; it does not clip or infer fields from tool payloads. A legitimate call
 that exceeds a limit, times out, receives a provider error, or returns an
 invalid result records a bounded Host diagnostic and raises a
 `HostInferenceError` to the calling feature, with no usable result. Successful
@@ -63,7 +70,7 @@ handle that error by preserving their last good state or using a deterministic
 fallback.
 
 When TypeSafe Jev is enabled, memory recall sends the task query and up to 20
-candidate page ids and descriptions. Jev ranks those candidates and Kern loads
-the top five page contents locally. Page contents are never sent to Jev. If Jev
-is disabled or does not return a valid answer, recall keeps its existing
+candidate descriptions with short local ids. Jev ranks those candidates, and
+Kern loads the top five page contents locally. Page contents are never sent to
+Jev. If Jev is disabled or does not return a valid answer, recall keeps its existing
 deterministic order.

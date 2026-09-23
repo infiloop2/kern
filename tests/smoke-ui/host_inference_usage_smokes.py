@@ -14,7 +14,7 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(cards).to_have_count(2)
     toggle = page.locator('[data-overview-group="host-ai"] .runtime-overview-toggle')
     runtime_toggle = page.locator('[data-overview-group="runtimes"] .runtime-overview-toggle')
-    expect(page.locator(".runtime-overview-toggle")).to_have_count(2)
+    expect(page.locator(".runtime-overview-toggle")).to_have_count(3)
     expect(toggle).to_be_visible()
     expect(runtime_toggle).to_be_visible()
     expect(cards.first).to_be_hidden()

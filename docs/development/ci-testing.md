@@ -81,11 +81,14 @@ code; pull request runs require an explicit repository-admin request. The live
 AWS stage workflows run separately and only after a repository admin starts
 them.
 
-Unit/database tests (including compilation and type checks) and the complete
-Chromium/WebKit mock smoke run concurrently on separate GitHub runners. Each
-sandbox still has its own writable workspace and temporary database. The
-required **Run all host tests** check succeeds only when both suites succeed;
-a skipped or cancelled suite cannot satisfy it. Both suites run on PRs and main.
+Unit/database tests (including compilation and type checks), the Chromium core
+smoke, and the Workspace smoke run concurrently on separate GitHub runners.
+The Workspace job also runs the focused WebKit canary for generated Web App
+worker startup. Each sandbox has its own writable workspace and temporary
+database. The required **Run all host tests** check succeeds only when all
+three suites succeed; a skipped or cancelled suite cannot satisfy it. All
+three suites run on PRs and main. Running the browser scopes in parallel
+reduces elapsed CI time while using an additional runner and image setup.
 
 ### Reusing the CI image
 
@@ -146,7 +149,7 @@ toggle between the upgrade-available and latest-version states.
 
 To run type checks or the automated browser smoke locally, install the
 development-only test dependencies once. If no cached browser builds are
-available, install Chromium and WebKit too:
+available, install Chromium and, when using `--webkit`, WebKit too:
 
 ```bash
 python3 -m pip install -r .github/ci/requirements.txt
@@ -160,9 +163,10 @@ python3 tests/smoke-ui/admin_ui_smoke.py --port 3100 --webkit
 ```
 
 The smoke starts the mock server, exercises the core flows in Chromium, and
-runs the generated Web App worker-startup regression in WebKit. The Chromium
-coverage includes
-operator flows across thread/session views, network and GitHub controls, files,
+runs one generated Web App worker-startup canary in WebKit. That canary covers
+login, App creation, slow sandbox loading, the isolated worker bridge, the
+first render, networkless CSP, and generated-App file links. The Chromium
+coverage includes operator flows across thread/session views, network and GitHub controls, files,
 processes, bundled tools and approvals, audit logs, and workspaces
 at desktop and mobile dimensions. CI installs Playwright, Chromium, and WebKit
 during the Docker image build, then runs this smoke through
@@ -170,3 +174,26 @@ during the Docker image build, then runs this smoke through
 a preinstalled Playwright browser cache, the smoke reuses the newest cached
 Chromium automatically. To use a specific browser binary, set
 `PLAYWRIGHT_CHROMIUM_EXECUTABLE=/path/to/chrome`.
+
+### Choosing browser coverage
+
+Put deterministic logic, API contracts, validation, and state transitions in
+unit tests. Add a Chromium smoke only when the behavior depends on a rendered
+browser interaction, browser security boundary, layout, or navigation. Prefer
+a focused journey over extending an unrelated end-to-end path, and synchronize
+on observable state or requests rather than fixed sleeps.
+
+Chromium owns broad browser coverage. Do not copy a Chromium journey into the
+WebKit canary merely for cross-browser coverage. Expand WebKit only for a
+confirmed WebKit-specific production regression or an engine-sensitive browser
+primitive that Chromium cannot represent. Keep such coverage to the smallest
+reproduction, with deterministic local fixtures and condition-based waits. A
+new broad feature journey belongs in Chromium unless its change explains why
+WebKit is materially different.
+
+Before committing a WebKit change, run its focused path repeatedly. A timeout
+increase or retry is not a reliability fix: remove races between the action and
+the observed request/state, and make failures identify the condition that did
+not settle. The WebKit canary is intentionally not a claim of complete Safari
+or iOS coverage; device-only behavior still needs the appropriate live or
+manual check.

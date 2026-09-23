@@ -104,6 +104,10 @@ buckets. The login body is capped at 4 KiB
 and validated as exactly `{"password": <string ≤256 bytes>}`. The server also
 caps concurrent worker threads and sets a per-connection read timeout so a
 connection flood or slow client cannot exhaust host threads.
+The operator listener has 512 worker slots and a matching accept backlog;
+the Workspace admin socket has its own 512 connection slots. Both share an
+8192-descriptor process limit and a 4096-task systemd limit, including turn
+supervision threads.
 
 The same process also serves the workspace Unix socket on a daemon thread, so
 both listeners draw on one fd table. That server is bounded too, but it rejects
@@ -207,7 +211,7 @@ and show up in the same agent slice.
   immediately; a message for a thread with a live turn is synchronously
   delivered into that turn as a steer and recorded after provider
   acknowledgement. Turns on one thread are serialized by the live-turn fence;
-  turns on different threads run in parallel, up to ten per runtime (each
+  turns on different threads run in parallel, up to fifty per runtime (each
   runtime owns an independent pool, and a message that would exceed the cap
   is rejected with `429` rather than queued).
 - Each turn gets its own runtime process, spawned through the sudo

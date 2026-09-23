@@ -925,13 +925,24 @@ def run_turn(
     command_output_emit_count: dict[str, int] = {}
     command_output_capped: set[str] = set()
     last_message = ""
+    last_message_phase: str | None = None
     current_agent_phase: str | None = None
 
-    def invalidate_final_response() -> None:
-        nonlocal current_agent_phase, current_parts, last_message
+    def invalidate_final_response(*, preserve_explicit_final: bool = False) -> None:
+        nonlocal current_agent_phase, current_parts, last_message, last_message_phase
         current_agent_phase = None
         current_parts = []
+        if preserve_explicit_final and last_message_phase == "final_answer":
+            return
         last_message = ""
+        last_message_phase = None
+
+    def is_trailing_subagent_completion(item: dict[str, Any]) -> bool:
+        return (
+            last_message_phase == "final_answer"
+            and item.get("type") == "subAgentActivity"
+            and item.get("kind") == "completed"
+        )
 
     def emit_command_output(item_id: str, now: float) -> None:
         parts = command_output_parts.get(item_id) or []
@@ -1017,10 +1028,17 @@ def run_turn(
                     emit_command_output(item_id, now)
         elif method == "item/started":
             item = params.get("item", {})
-            invalidate_final_response()
             if not isinstance(item, dict):
+                invalidate_final_response()
                 continue
-            if item.get("type") == "agentMessage":
+            is_agent_message = item.get("type") == "agentMessage"
+            # Codex may flush a terminal sub-agent notification after its
+            # explicit final answer. That item reports already-finished work;
+            # every other later activity still invalidates the response.
+            invalidate_final_response(
+                preserve_explicit_final=is_trailing_subagent_completion(item)
+            )
+            if is_agent_message:
                 phase = item.get("phase")
                 current_agent_phase = phase if isinstance(phase, str) else None
             rich_activity = _codex_item_activity(item, "started", server.runtime_type)
@@ -1041,12 +1059,15 @@ def run_turn(
                 if not isinstance(phase, str):
                     phase = current_agent_phase
                 last_message = "" if phase == "commentary" else message_text
+                last_message_phase = phase if last_message else None
                 current_agent_phase = None
                 current_parts = []
                 if message_text:
                     on_message(message_text)
             else:
-                invalidate_final_response()
+                invalidate_final_response(
+                    preserve_explicit_final=is_trailing_subagent_completion(item)
+                )
                 item_id = str(item.get("id") or "")
                 streamed_output = (
                     item_id in command_output_emit_count
@@ -1080,6 +1101,7 @@ def run_turn(
                     on_message(pending_message)
                     if current_agent_phase != "commentary":
                         last_message = pending_message
+                        last_message_phase = current_agent_phase
                 server.clear_active_turn()
                 if not last_message:
                     raise CodexAppServerError(

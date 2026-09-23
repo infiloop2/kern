@@ -199,6 +199,11 @@ EXEMPT_FIELDS = {
     ("apify_developer", "list_actors", "limit"): TYPED,
     ("apify_developer", "list_actors", "offset"): TYPED,
     ("apify_developer", "get_actor", "actor_id"): TYPED,
+    ("apify_developer", "get_monetization", "actor_id"): TYPED,
+    ("apify_developer", "set_monetization", "actor_id"): APPROVAL_GATED,
+    ("apify_developer", "set_monetization", "effective_at"): APPROVAL_GATED,
+    ("apify_developer", "set_monetization", "minimum_run_budget_usd"): APPROVAL_GATED,
+    ("apify_developer", "set_monetization", "events"): APPROVAL_GATED,
     ("apify_developer", "list_builds", "actor_id"): TYPED,
     ("apify_developer", "list_builds", "limit"): TYPED,
     ("apify_developer", "list_builds", "offset"): TYPED,
@@ -1109,6 +1114,108 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
         )
         self.assertIsNone(
             deny(config, "HEAD", host, "/actions-results/job/logs.zip", sas_query, [], b"")
+        )
+        artifact_path = (
+            "/actions-results/4f9841da-8399-4637-ae0d-6d00ffb7c316"
+            "/workflow-job-run-3ff561e6-7b9b-5c33-a2b5-e93806060046"
+            f"/artifacts/{'a1' * 32}.zip"
+        )
+        run_named_artifact_query = (
+            sas_query
+            + '&rscd=attachment%3B+filename%3D%22agent-admin-result-1.zip%22'
+        )
+        full_artifact_query = (
+            run_named_artifact_query
+            + "&rsct=application%2Fzip"
+            + "&ske=2026-09-22T23%3A10%3A32Z"
+            + "&skoid=ca7593d4-ee42-46cd-af88-8b886a2f84eb"
+            + "&sks=b&skt=2026-09-22T19%3A10%3A32Z"
+            + "&sktid=398a6654-997b-47e9-b12b-9515b896b4de"
+            + "&skv=2025-11-05"
+        )
+        # GitHub's 64-hex artifact ZIP id looks like a raw key to G9. Only
+        # this fixed provider path may neutralize it and its two run UUIDs.
+        self.assertIsNone(
+            deny(config, "GET", host, artifact_path, run_named_artifact_query, [], b"")
+        )
+        self.assertIsNone(
+            deny(config, "HEAD", host, artifact_path, run_named_artifact_query, [], b"")
+        )
+        self.assertIsNone(
+            deny(config, "GET", host, artifact_path, full_artifact_query, [], b"")
+        )
+        opaque_filename_query = (
+            sas_query
+            + '&rscd=attachment%3B+filename%3D%22'
+            + "a1" * 32
+            + ".zip%22"
+        )
+        self.assertEqual(
+            deny(config, "GET", host, artifact_path, opaque_filename_query, [], b""),
+            "network_policy_denied",
+        )
+        for guarded_filename in (
+            "test results.zip",
+            "ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789.zip",
+            "agent-admin-result-35780005634-1.zip",
+            "agent-admin-result-1234567890.zip",
+            "agent-admin-result.zip",
+        ):
+            with self.subTest(guarded_filename=guarded_filename):
+                query = (
+                    sas_query
+                    + f'&rscd=attachment%3B+filename%3D%22{guarded_filename}%22'
+                )
+                self.assertEqual(
+                    deny(config, "GET", host, artifact_path, query, [], b""),
+                    "network_policy_denied",
+                )
+        for invalid_disposition in (
+            'rscd=attachment%3B+filename%3D%22..%2Fsecret.zip%22',
+            'rscd=attachment%3B+filename%3D%22result.txt%22',
+            (
+                'rscd=attachment%3B+filename%3D%22result.zip%22'
+                '&rscd=attachment%3B+filename%3D%22other.zip%22'
+            ),
+        ):
+            with self.subTest(invalid_disposition=invalid_disposition):
+                self.assertEqual(
+                    deny(
+                        config, "GET", host, artifact_path,
+                        f"{sas_query}&{invalid_disposition}", [], b"",
+                    ),
+                    "network_policy_denied",
+                )
+        for invalid_delegation in (
+            "skoid=ca7593d4-ee42-46cd-af88-123456789012",
+            "sktid=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789",
+        ):
+            with self.subTest(invalid_delegation=invalid_delegation):
+                self.assertEqual(
+                    deny(config, "GET", host, artifact_path, f"{sas_query}&{invalid_delegation}", [], b""),
+                    "request_param_pii_denied" if invalid_delegation.startswith("skoid=") else "request_param_secret_denied",
+                )
+        self.assertEqual(
+            deny(
+                config, "GET", host, "/actions-results/job/logs.zip",
+                sas_query + '&rscd=attachment%3B+filename%3D%22agent-admin-result-35780005634-1.zip%22',
+                [], b"",
+            ),
+            "request_param_pii_denied",
+        )
+        for denied_path in (
+            artifact_path.replace("/artifacts/", "/other/"),
+            artifact_path.removesuffix(".zip") + ".txt",
+            artifact_path + "/extra",
+        ):
+            with self.subTest(denied_path=denied_path):
+                self.assertEqual(
+                    deny(config, "GET", host, denied_path, sas_query, [], b""),
+                    "request_param_secret_denied",
+                )
+        self.assertEqual(
+            deny(config, "GET", host, artifact_path, f"{sas_query}&token=secretvalue1234567890", [], b""),
+            "request_param_secret_denied",
         )
         self.assertEqual(
             deny(config, "POST", host, "/actions-results/job/logs.zip", sas_query, [], b""),

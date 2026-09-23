@@ -28,7 +28,7 @@ from host.runtime.core.state import record_bedrock_usage
 # the largest catalog turn (~164k output tokens) is under 2 MiB even with
 # event framing; past this cap the request is recorded unmetered rather than
 # holding an unbounded copy of the relay.
-MAX_METERED_RESPONSE_BYTES = 32 * 1024 * 1024
+MAX_METERED_RESPONSE_BYTES = 4 * 1024 * 1024
 
 _STATUS_RE = re.compile(rb"^HTTP/1\.[01] (\d{3}) ")
 
@@ -143,8 +143,19 @@ def _decoded_body(headers: dict[str, str], body: bytes) -> bytes | None:
         return body
     if encoding in ("gzip", "deflate"):
         try:
-            # wbits=47 auto-detects the gzip and zlib wrappers.
-            return zlib.decompress(body, wbits=47)
+            # The wire response is capped by the meter, but compressed bytes
+            # can expand far beyond that cap. Bound decoded bytes too.
+            decoder = zlib.decompressobj(wbits=47)  # gzip or zlib wrapper
+            decoded = bytearray()
+            for offset in range(0, len(body), 64 * 1024):
+                chunk = body[offset : offset + 64 * 1024]
+                while chunk:
+                    decoded.extend(decoder.decompress(chunk, MAX_METERED_RESPONSE_BYTES - len(decoded) + 1))
+                    if len(decoded) > MAX_METERED_RESPONSE_BYTES:
+                        return None
+                    chunk = decoder.unconsumed_tail
+            decoded.extend(decoder.flush(MAX_METERED_RESPONSE_BYTES - len(decoded) + 1))
+            return bytes(decoded) if len(decoded) <= MAX_METERED_RESPONSE_BYTES and decoder.eof else None
         except zlib.error:
             return None
     return None

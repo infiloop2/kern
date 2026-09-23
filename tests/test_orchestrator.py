@@ -270,12 +270,15 @@ class OrchestratorTests(unittest.TestCase):
         orchestrator.launch_turn(turn, message, provider_session_id)
         return turn
 
-    def send_message(self, thread_id: str, message: str, runtime: str = "codex") -> dict[str, object]:
+    def send_message(
+        self, thread_id: str, message: str, runtime: str = "codex",
+        *, peer_sender_thread_id: str | None = None,
+    ) -> dict[str, object]:
         body: dict[str, object] = {"message": message}
         if state.thread_session_config(thread_id) is None:
             model, effort = DEFAULT_SESSION[runtime]
             body |= {"agent_runtime": runtime, "model": model, "effort": effort}
-        return service.send_thread_message(thread_id, body)
+        return service.send_thread_message(thread_id, body, peer_sender_thread_id)
 
     def wait_for(self, condition, message: str = "condition") -> None:
         deadline = time.monotonic() + 10
@@ -339,6 +342,50 @@ class OrchestratorTests(unittest.TestCase):
             cur.execute("SELECT input_tokens, cached_input_tokens, output_tokens FROM turn_usage WHERE thread_id = %s", ("thread-t1",))
             self.assertEqual(cur.fetchall(), [(20, 40, 10)])
         self.assertTrue(any(e["event_type"] == "thread.error" for e in thread_events("thread-t1")))
+
+    def test_swarm_annotations_follow_admission_launch_and_finish(self) -> None:
+        from host.runtime.workspace.agent_messages import MESSAGE_HEADER
+        from host.runtime.admin_api import threads as thread_routes
+        message = MESSAGE_HEADER.format(sender="thread-2") + "Review the release"
+        with (patch.object(orchestrator.swarm_annotations, "enqueue_task") as task,
+              patch.object(orchestrator.swarm_annotations, "enqueue_needs_human") as needs,
+              patch.object(thread_routes, "_recalled_memory_pages", return_value=(
+                  [{"page_id": "release-notes", "content": "Use the release checklist."}], "Recall complete.",
+              )),
+              patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub())):
+            self.send_message("thread-1", message, peer_sender_thread_id="thread-2")
+            self.wait_until_idle("thread-1")
+        run = state.thread_session_config("thread-1")["run_number"]
+        self.assertEqual(task.call_args.args[:2], ("thread-1", run))
+        self.assertIn("Kern host context", task.call_args.args[2])
+        self.assertIn("Use the release checklist.", task.call_args.args[2])
+        self.assertIn("Review the release", task.call_args.args[2])
+        needs.assert_called_once_with("thread-1", run)
+        with db.transaction() as cur:
+            cur.execute("SELECT run_number, task, needs_human FROM swarm_agent_ai WHERE thread_id = 'thread-1'")
+            self.assertEqual(cur.fetchone(), (run, None, None))
+        latest = state.swarm_peer_messages()["messages"][0]
+        self.assertEqual((latest["sender_thread_id"], latest["target_thread_id"]), ("thread-2", "thread-1"))
+
+    def test_pasted_peer_header_does_not_create_correspondence(self) -> None:
+        from host.runtime.workspace.agent_messages import MESSAGE_HEADER
+        pasted = MESSAGE_HEADER.format(sender="thread-2") + "Review the release"
+        with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
+            self.send_message("thread-1", pasted)
+            self.wait_until_idle("thread-1")
+        self.assertEqual(state.swarm_peer_messages()["messages"], [])
+
+    def test_trusted_peer_steer_records_correspondence(self) -> None:
+        from host.runtime.workspace.agent_messages import MESSAGE_HEADER
+        self.register_live_turn("codex", "thread-chat", FakeServer())
+        wrapped = MESSAGE_HEADER.format(sender="thread-2") + "Can you check the release?"
+        self.assertTrue(orchestrator.steer_live_turn(
+            "thread-chat", "codex", wrapped, peer_sender_thread_id="thread-2",
+        ))
+        message = state.swarm_peer_messages()["messages"][0]
+        self.assertEqual((message["sender_thread_id"], message["target_thread_id"]),
+                         ("thread-2", "thread-chat"))
+        self.assertEqual(set(message), {"seq", "sender_thread_id", "target_thread_id", "timestamp"})
 
     def test_message_to_idle_thread_runs_and_records_the_message(self) -> None:
         observed_config: list[tuple[str, str]] = []
@@ -493,14 +540,14 @@ class OrchestratorTests(unittest.TestCase):
         self.assertTrue(orchestrator.stop_thread_turn("thread-chat"))
         orchestrator._close_turn(turn, server)
 
-    def test_eleventh_concurrent_turn_per_runtime_is_rejected_with_429(self) -> None:
-        self.assertEqual(orchestrator.TURN_LIMIT_PER_RUNTIME, 10)
+    def test_fifty_first_concurrent_turn_per_runtime_is_rejected_with_429(self) -> None:
+        self.assertEqual(orchestrator.TURN_LIMIT_PER_RUNTIME, 50)
         release = threading.Event()
         started: list[str] = []
 
         def fake_run_turn(server, input_message, provider_session_id, model, effort, on_message):
             started.append(input_message)
-            if not release.wait(timeout=10):
+            if not release.wait(timeout=30):
                 raise AssertionError("never released")
             return f"codex-{input_message}", "done"
 
@@ -514,13 +561,13 @@ class OrchestratorTests(unittest.TestCase):
                     self.assertEqual(self.send_message(thread_id, thread_id)["status"], "accepted")
                 self.wait_for(
                     lambda: len(started) == orchestrator.TURN_LIMIT_PER_RUNTIME,
-                    "all ten turns to start",
+                    "all fifty turns to start",
                 )
 
                 with self.assertRaises(ApiError) as caught:
-                    self.send_message("thread-t11", "one too many")
+                    self.send_message("thread-t51", "one too many")
                 self.assertEqual(caught.exception.status.value, 429)
-                self.assertIn("already running 10 concurrent threads", caught.exception.message)
+                self.assertIn("already running 50 concurrent threads", caught.exception.message)
                 # A message for a live thread is a steer, never capacity-bound.
                 self.assertEqual(self.send_message("thread-t1", "still steerable")["status"], "accepted")
 
@@ -528,8 +575,8 @@ class OrchestratorTests(unittest.TestCase):
                 for thread_id in thread_ids:
                     self.wait_until_idle(thread_id)
                 # Capacity freed: the rejected thread now starts.
-                self.assertEqual(self.send_message("thread-t11", "retry")["status"], "accepted")
-                self.wait_until_idle("thread-t11")
+                self.assertEqual(self.send_message("thread-t51", "retry")["status"], "accepted")
+                self.wait_until_idle("thread-t51")
         finally:
             release.set()
 
@@ -1120,9 +1167,10 @@ class OrchestratorTests(unittest.TestCase):
                     "model": "claude-fable-5-1",
                     "effort": "ultracode",
                 },
+                None,
             )
             self.wait_until_idle("thread-chat")
-            service.send_thread_message("thread-chat", {"message": "again"})
+            service.send_thread_message("thread-chat", {"message": "again"}, None)
             self.wait_until_idle("thread-chat")
 
         self.assertEqual(seen, [None, "claude-session-1"])
@@ -1155,9 +1203,10 @@ class OrchestratorTests(unittest.TestCase):
                     "model": "grok-4.6",
                     "effort": "xhigh",
                 },
+                None,
             )
             self.wait_until_idle("thread-grok")
-            service.send_thread_message("thread-grok", {"message": "again"})
+            service.send_thread_message("thread-grok", {"message": "again"}, None)
             self.wait_until_idle("thread-grok")
 
         self.assertEqual(seen, [None, "grok-session-1"])
@@ -1210,12 +1259,12 @@ class OrchestratorTests(unittest.TestCase):
             return "replacement-session", "done"
 
         with patch.object(orchestrator.grok_agent, "run_turn", fake_run_turn):
-            service.send_thread_message("thread-stale-grok", {"message": "first retry"})
+            service.send_thread_message("thread-stale-grok", {"message": "first retry"}, None)
             self.wait_until_idle("thread-stale-grok")
             self.assertIsNone(
                 state.thread_session_config("thread-stale-grok")["provider_session_id"]
             )
-            service.send_thread_message("thread-stale-grok", {"message": "second retry"})
+            service.send_thread_message("thread-stale-grok", {"message": "second retry"}, None)
             self.wait_until_idle("thread-stale-grok")
 
         self.assertEqual(attempts, ["deleted-session", None])
@@ -1257,7 +1306,7 @@ class OrchestratorTests(unittest.TestCase):
             patch.object(orchestrator.codex_app_server, "CodexAppServer", StartingServer),
             patch.object(orchestrator.codex_app_server, "run_turn", fake_run_turn),
         ):
-            service.send_thread_message(thread_id, {"message": "continue the work"})
+            service.send_thread_message(thread_id, {"message": "continue the work"}, None)
             self.wait_until_idle(thread_id)
             self.assertEqual(len(attempts), 1)
             self.assertEqual(attempts[0][1], "deleted-session")
@@ -1266,7 +1315,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(len(errors), 1)
             self.assertIn("send the message again", errors[0]["payload"]["error_message"])
 
-            service.send_thread_message(thread_id, {"message": "retry now"})
+            service.send_thread_message(thread_id, {"message": "retry now"}, None)
             self.wait_until_idle(thread_id)
 
         self.assertEqual(len(attempts), 2)
@@ -1327,6 +1376,7 @@ class OrchestratorTests(unittest.TestCase):
             response = service.send_thread_message(
                 "thread-stale-claude",
                 {"message": "continue the work"},
+                None,
             )
             self.assertEqual(response["status"], "accepted")
             self.wait_until_idle("thread-stale-claude")
@@ -1344,6 +1394,7 @@ class OrchestratorTests(unittest.TestCase):
             retry = service.send_thread_message(
                 "thread-stale-claude",
                 {"message": "retry now"},
+                None,
             )
             self.assertEqual(retry["status"], "accepted")
             self.wait_until_idle("thread-stale-claude")
@@ -1375,7 +1426,7 @@ class OrchestratorTests(unittest.TestCase):
             results["first_finish"] = finish_turn("claude-session-1", "done")
             results["second_finish"] = finish_turn("claude-session-1", "done")
             try:
-                service.send_thread_message("thread-chat", {"message": "too late"})
+                service.send_thread_message("thread-chat", {"message": "too late"}, None)
                 results["post_finish"] = "accepted"
             except ApiError as exc:
                 results["post_finish"] = (exc.status.value, exc.message)

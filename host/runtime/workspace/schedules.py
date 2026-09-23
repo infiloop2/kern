@@ -583,6 +583,9 @@ def prune_deleted(now: datetime | None = None) -> int:
             " WHERE workspace_seen.item_kind = 'chat'"
             " AND workspace_seen.item_id = pruned.thread_id"
             " RETURNING workspace_seen.item_id"
+            "), cleared_swarm_ai AS ("
+            " DELETE FROM swarm_agent_ai USING pruned"
+            " WHERE swarm_agent_ai.thread_id = pruned.thread_id"
             ") SELECT COUNT(*) FROM pruned",
             (cutoff,),
         )

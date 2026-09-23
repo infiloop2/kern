@@ -8,7 +8,7 @@ import math
 import re
 from typing import Any
 
-from host.runtime.host_inference import provider_http
+from host.runtime.host_inference import provider_http, redaction
 
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
@@ -60,70 +60,23 @@ def _validate_questions(questions: Any) -> dict[str, dict[str, Any]]:
             raise ValueError("judgment question id is invalid")
         if not isinstance(question, dict):
             raise ValueError("judgment question must be an object")
-        kind = question.get("type")
-        instructions = question.get("instructions")
-        if kind not in {"noul", "choice", "score"} or not isinstance(instructions, str) or not instructions:
-            raise ValueError("judgment question type or instructions are invalid")
-        allowed = {"type", "instructions", "criteria"}
-        if set(question) - allowed:
-            raise ValueError("judgment question contains unsupported fields")
-        criteria = question.get("criteria")
-        if kind == "choice":
-            if not isinstance(criteria, dict) or not 2 <= len(criteria) <= 255:
-                raise ValueError("choice criteria must contain 2 to 255 options")
-            if any(not isinstance(key, str) or not key or value is not None and not isinstance(value, str)
-                   for key, value in criteria.items()):
-                raise ValueError("choice criteria are invalid")
-        elif kind == "score":
-            if not isinstance(criteria, list) or not 2 <= len(criteria) <= 10 or any(
-                not isinstance(level, str) or not level for level in criteria
-            ):
-                raise ValueError("score criteria must contain 2 to 10 text levels")
-        elif criteria is not None:
-            if not isinstance(criteria, dict) or set(criteria) != {"true", "false"} or any(
-                not isinstance(criteria[key], str) or not criteria[key] for key in ("true", "false")
-            ):
-                raise ValueError("noul criteria must describe true and false")
+        if (
+            set(question) != {"type", "instructions"}
+            or question["type"] != "noul"
+            or not isinstance(question["instructions"], str)
+            or not question["instructions"]
+        ):
+            raise ValueError("judgment question must contain noul instructions")
         validated[question_id] = question
     return validated
 
 
-def _valid_distribution(value: Any, expected: set[str]) -> bool:
+def _valid_answer(answer: Any) -> bool:
     return (
-        isinstance(value, dict)
-        and set(value) == expected
-        and all(_valid_probability(item) for item in value.values())
-        and math.isclose(sum(float(item) for item in value.values()), 1.0, abs_tol=0.02)
-    )
-
-
-def _validate_answer(answer: Any, question: dict[str, Any]) -> bool:
-    if not isinstance(answer, dict) or answer.get("type") != question["type"]:
-        return False
-    if question["type"] == "noul":
-        return set(answer) == {"type", "noul"} and _valid_probability(answer.get("noul"))
-    confidence = answer.get("confidence")
-    if not _valid_probability(confidence):
-        return False
-    if question["type"] == "choice":
-        options = set(question["criteria"])
-        return (
-            set(answer) == {"type", "choice", "probabilities", "confidence"}
-            and answer.get("choice") in options
-            and _valid_distribution(answer.get("probabilities"), options)
-        )
-    level_keys = {str(index) for index in range(len(question["criteria"]))}
-    legend = answer.get("legend")
-    score = answer.get("score")
-    return (
-        set(answer) == {"type", "score", "score", "legend", "probabilities", "confidence"}
-        and isinstance(score, (int, float))
-        and not isinstance(score, bool)
-        and math.isfinite(score)
-        and 0 <= score <= len(level_keys) - 1
-        and isinstance(legend, dict)
-        and legend == {str(index): level for index, level in enumerate(question["criteria"])}
-        and _valid_distribution(answer.get("probabilities"), level_keys)
+        isinstance(answer, dict)
+        and set(answer) == {"type", "noul"}
+        and answer["type"] == "noul"
+        and _valid_probability(answer["noul"])
     )
 
 
@@ -145,7 +98,18 @@ def judge(
     if not isinstance(timeout_seconds, (int, float)) or not 0 < timeout_seconds <= DEFAULT_TIMEOUT_SECONDS:
         raise ValueError("judgment timeout is invalid")
     questions = _validate_questions(questions)
-    body = {"model": model, "state": state, "questions": questions}
+    safe_questions = {
+        question_id: {
+            "type": "noul",
+            "instructions": redaction.redact_text(question["instructions"]),
+        }
+        for question_id, question in questions.items()
+    }
+    body = {
+        "model": model,
+        "state": redaction.redact_content(state),
+        "questions": safe_questions,
+    }
     encoded = _json_bytes(body)
     if len(encoded) > MAX_REQUEST_BYTES:
         raise ValueError("TypeSafe judgment request is too large")
@@ -175,8 +139,8 @@ def judge(
         not isinstance(response_model, str)
         or RESPONSE_MODEL_RE.fullmatch(response_model) is None
         or not isinstance(answers, dict)
-        or set(answers) != set(questions)
-        or any(not _validate_answer(answers[key], question) for key, question in questions.items())
+        or set(answers) != set(safe_questions)
+        or any(not _valid_answer(answer) for answer in answers.values())
     ):
         raise JudgmentResponseError("TypeSafe response did not match the requested questions")
     return {"model": response_model, "answers": answers}

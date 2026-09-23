@@ -312,13 +312,13 @@ def _add_jev_relevance_scores(
     for page in summaries:
         page.pop("jev_score", None)
     candidates = [
-        {"page_id": page["page_id"], "description": page["description"]}
-        for page in summaries[:CANDIDATE_LIMIT]
+        {"id": f"q{index}", "description": page["description"]}
+        for index, page in enumerate(summaries[:CANDIDATE_LIMIT])
     ]
     if not candidates:
         return
     questions = {
-        candidate["page_id"]: {
+        candidate["id"]: {
             "type": "noul",
             "instructions": "Would an agent doing this task need to read this memory page before acting?",
         }
@@ -346,7 +346,7 @@ def _add_jev_relevance_scores(
         details.append("Jev scores unavailable; existing recall order used.")
         return
     probabilities: dict[str, float] = {}
-    for page_id, answer in answers.items():
+    for question_id, answer in answers.items():
         probability = answer.get("noul") if isinstance(answer, dict) else None
         if (
             not isinstance(answer, dict)
@@ -358,15 +358,15 @@ def _add_jev_relevance_scores(
         ):
             details.append("Jev scores unavailable; existing recall order used.")
             return
-        probabilities[page_id] = float(probability)
-    for page in summaries:
-        page["jev_score"] = probabilities[page["page_id"]]
+        probabilities[question_id] = float(probability)
+    for index, page in enumerate(summaries[:CANDIDATE_LIMIT]):
+        page["jev_score"] = probabilities[f"q{index}"]
     details.append(f"Jev response model: {model}.")
     details.extend(
         "Jev response "
         f"{page['page_id']}: memory relevance "
         f"{float(page.get('memory_relevance_score', 0.0)):.6f}; "
-        f"Jev score {probabilities[page['page_id']]:.3f}."
+        f"Jev score {page['jev_score']:.3f}."
         for page in summaries
     )
 

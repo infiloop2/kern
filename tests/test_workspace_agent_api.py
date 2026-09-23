@@ -290,6 +290,53 @@ class AgentWorkspaceSocketTests(unittest.TestCase):
                 agent_api._CALL_SLOTS.release()
         self.assertEqual(status, 429)
 
+    def test_large_response_cap_rejects_before_dispatch_and_preserves_small_calls(self) -> None:
+        socket_path = self.start_server()
+        for _ in range(agent_api.MAX_CONCURRENT_LARGE_RESPONSES):
+            self.assertTrue(agent_api._LARGE_RESPONSE_SLOTS.acquire(blocking=False))
+        try:
+            with patch.object(web_apps, "route_agent") as route:
+                status, _body = self.http(
+                    socket_path,
+                    "POST",
+                    "/call",
+                    {"method": "GET", "path": "/agent/apps/app-2/state/data"},
+                )
+                self.assertEqual(status, 429)
+                route.assert_not_called()
+            with patch.object(agent_api, "_peer_thread_id", return_value="thread-1"):
+                status, body = self.http(
+                    socket_path,
+                    "POST",
+                    "/call",
+                    {"method": "GET", "path": "/agent/identity"},
+                )
+                self.assertEqual(status, 200)
+                self.assertEqual(body["body"], {"thread_id": "thread-1"})
+        finally:
+            for _ in range(agent_api.MAX_CONCURRENT_LARGE_RESPONSES):
+                agent_api._LARGE_RESPONSE_SLOTS.release()
+
+    def test_large_response_slot_is_released_after_dispatch_failure(self) -> None:
+        socket_path = self.start_server()
+        with patch.object(web_apps, "route_agent", side_effect=RuntimeError("failure")):
+            status, _body = self.http(
+                socket_path,
+                "POST",
+                "/call",
+                {"method": "GET", "path": "/agent/apps"},
+            )
+        self.assertEqual(status, 502)
+        acquired = 0
+        try:
+            for _ in range(agent_api.MAX_CONCURRENT_LARGE_RESPONSES):
+                self.assertTrue(agent_api._LARGE_RESPONSE_SLOTS.acquire(blocking=False))
+                acquired += 1
+            self.assertFalse(agent_api._LARGE_RESPONSE_SLOTS.acquire(blocking=False))
+        finally:
+            for _ in range(acquired):
+                agent_api._LARGE_RESPONSE_SLOTS.release()
+
 
 class McpShimTests(unittest.TestCase):
     def start_server(self) -> str:

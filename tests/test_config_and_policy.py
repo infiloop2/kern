@@ -375,7 +375,15 @@ class ConfigTests(unittest.TestCase):
         self.assertTrue(
             request_allowed(controls, "GET", actions_blob, job_log_path, signed_query)
         )
-        # Only the run and job UUIDs in the fixed log path are neutralized. A
+        artifact_path = (
+            "/actions-results/4f9841da-8399-4637-ae0d-6d00ffb7c316"
+            "/workflow-job-run-3ff561e6-7b9b-5c33-a2b5-e93806060046"
+            f"/artifacts/{'a1' * 32}.zip"
+        )
+        self.assertTrue(
+            request_allowed(controls, "GET", actions_blob, artifact_path, signed_query)
+        )
+        # Only the fixed log and artifact paths neutralize provider ids. A
         # UUID elsewhere, a bare digit run, or a malformed UUID still denies.
         for denied_path in (
             "/unrelated/call-aaaaaaaa-aaaa-aaaa-aaaa-a4155552671a.txt",

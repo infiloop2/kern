@@ -13,6 +13,8 @@ import json
 import math
 import re
 import urllib.parse
+from datetime import date, datetime, timezone
+from decimal import Decimal
 from typing import cast
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
@@ -163,6 +165,7 @@ def _url_array_schema(description: str) -> JSONObject:
 
 
 MANIFEST = ToolManifest(
+    reports_cost=True,
     tool_id="h3max",
     display_name="H3 Max Video Generation",
     description=(
@@ -172,13 +175,13 @@ MANIFEST = ToolManifest(
     connection="enable_only",
     actions=protect_inputs((
         ActionSpec(
-            id="generate_video",
+            id="generate_video", cost_description='Reports the published per-second charge for text and keyframe generation when fal accepts the task. Multimodal reference charges depend on unknown input sizes and are not reported.',
             description=(
                 "Start an async H3 Max generation. With no media it uses text-to-video; image_url "
                 "selects image-to-video and optional end_image_url adds a last keyframe; any "
                 "reference_*_urls list selects reference-to-video. Returns a task_id to poll. "
-                "Clips include synchronized audio, run 5-15 seconds, and currently cost $0.05/s "
-                "at 480P or $0.08/s at 768P, plus reference-input charges above fal's allowance."
+                "Clips include synchronized audio, run 5-15 seconds, and are billed per second "
+                "of output. Reference inputs can add charges above fal's allowance."
             ),
             data_policy=GENERATE_POLICY,
             input_schema={
@@ -212,7 +215,7 @@ MANIFEST = ToolManifest(
                     "resolution": {
                         "type": "string",
                         "enum": list(RESOLUTIONS),
-                        "description": "Native output resolution: 768P (default, $0.08/s) or 480P ($0.05/s).",
+                        "description": "Native output resolution: 768P (default) or 480P; rates vary by route and promotion.",
                     },
                     "aspect_ratio": {
                         "type": "string",
@@ -241,7 +244,7 @@ MANIFEST = ToolManifest(
             output_schema=GENERATE_OUTPUT_SCHEMA,
         ),
         ActionSpec(
-            id="get_task",
+            id="get_task", cost_description='Polls an existing task; no separate cost is reported.',
             description=(
                 "Poll a task_id returned by generate_video. A successful task returns a public fal CDN "
                 "video_url that expires within 24 hours; save it promptly if it should persist."
@@ -261,7 +264,7 @@ MANIFEST = ToolManifest(
             output_schema=GET_TASK_OUTPUT_SCHEMA,
         ),
         ActionSpec(
-            id="save_video",
+            id="save_video", cost_description='Downloads an existing result; no separate cost is reported.',
             description=(
                 "Save a completed H3 Max video under /tool_assets before its public fal CDN URL expires. "
                 "The agent-side bridge creates the filename and returns the durable path."
@@ -874,6 +877,16 @@ class H3MaxTool:
                     invalid_response_message="fal returned an invalid queue submission response.",
                 )
                 request_id = response.get("request_id")
+                # Reference inputs add charges that cannot be calculated from URLs.
+                if mode != "reference":
+                    promotional_text = mode == "text" and datetime.now(timezone.utc).date() <= date(2026, 9, 30)
+                    rates = {"480P": "0.025", "768P": "0.04"} if promotional_text else {"480P": "0.05", "768P": "0.08"}
+                    rate = rates.get(cast(str, body.get("resolution")))
+                    duration = body.get("duration")
+                    if rate and isinstance(duration, int) and not isinstance(duration, bool):
+                        charge_id = (f"task:{mode}_{request_id}" if isinstance(request_id, str)
+                                     and REQUEST_ID_RE.fullmatch(request_id) else "")
+                        api.costs.record(str(Decimal(rate) * duration), charge_id=charge_id)
                 if not isinstance(request_id, str) or not REQUEST_ID_RE.fullmatch(request_id):
                     return ActionFailed("fal returned no valid H3 Max request id.")
                 task_id = f"{mode}_{request_id}"

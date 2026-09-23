@@ -283,6 +283,7 @@ def _pre_session_schedule_summary(
         "status": "idle",
         "last_used_at": metadata["created_at"],
         "latest_event_seq": 0,
+        "latest_event_type": None,
         "latest_message_seq": 0,
     }
 
@@ -379,7 +380,9 @@ def _chat_thread_summary(
         "archived": archived,
         "last_used_at": str(summary.get("last_used_at") or ""),
         "latest_event_seq": max(0, int(summary.get("latest_event_seq") or 0)),
+        "latest_event_type": summary.get("latest_event_type"),
         "latest_message_seq": max(0, int(summary.get("latest_message_seq") or 0)),
+        "task": summary.get("task"),
         "status": status,
         "schedule_id": metadata["schedule_id"],
         "next_run_at": metadata["next_run_at"],
@@ -449,7 +452,9 @@ def list_chat_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict
     return {"events": events}
 
 
-def send_chat_message(body: Any) -> dict[str, Any]:
+def send_chat_message(
+    body: Any, *, peer_sender_thread_id: str | None = None,
+) -> dict[str, Any]:
     """Send one message into the thread's agent session. The browser never
     chooses between starting work and directing work already in progress.
     Serializing sends prevents double submissions; safe-to-retry startup and
@@ -483,6 +488,8 @@ def send_chat_message(body: Any) -> dict[str, Any]:
                     "Bash schedule transcripts are read-only",
                 )
             host_request.update(schedule_config)
+        if peer_sender_thread_id is not None:
+            host_request["peer_sender_thread_id"] = peer_sender_thread_id
         response = _send_with_busy_retry(thread_id, host_request)
         status = response.get("status")
         if status != "accepted":

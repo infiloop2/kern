@@ -402,9 +402,13 @@ function renderThreads() {
   }
   $("threads").innerHTML = threads.map(thread => {
     const active = thread.status === "running";
+    const failed = !active && thread.latest_event_type === "thread.error";
+    const dot = active
+      ? `<span class="thread-dot running" role="img" aria-label="Agent running"></span>`
+      : failed ? `<span class="thread-dot error" role="img" aria-label="Agent error"></span>` : "";
     return `
     <button class="thread-item${thread.thread_id === selectedThreadId ? " selected" : ""}" data-thread-id="${escAttr(thread.thread_id)}" data-name="${escAttr(thread.name)}" data-runtime="${escAttr(thread.agent_runtime)}" data-model="${escAttr(thread.model)}" data-effort="${escAttr(thread.effort)}" data-status="${escAttr(thread.status || "idle")}" data-archived="${thread.archived ? "true" : "false"}" data-schedule-id="${escAttr(thread.schedule_id ?? "")}" data-has-session="${thread.has_session ? "true" : "false"}">
-      <span class="thread-name"><span>${esc(thread.name)}</span>${active ? `<span class="thread-dot running"></span>` : ""}</span>
+      <span class="thread-name"><span>${esc(thread.name)}</span>${dot}</span>
       <span class="thread-meta">${esc(runtimeLabel(thread.agent_runtime))} &middot; ${esc(modelLabel(thread.agent_runtime, thread.model))}</span>
       <span class="thread-meta">${esc(relativeTime(thread.last_used_at))}</span>
     </button>`;
@@ -1014,7 +1018,6 @@ async function loadOlderThreadEvents() {
     || pageState.oldestSeq === null
   ) return;
   const threadId = selectedThreadId;
-  const refreshSequence = selectedRefreshSequence;
   const before = pageState.oldestSeq;
   loadingOlderThreadEvents = true;
   renderHistoryLoader();
@@ -1023,7 +1026,9 @@ async function loadOlderThreadEvents() {
       "GET",
       threadEventPath(threadId, pageState, "before", before),
     );
-    if (threadId !== selectedThreadId || refreshSequence !== selectedRefreshSequence) return;
+    // A background refresh may run while this page loads. It must not cancel
+    // backward paging; only a thread/view reset makes this page obsolete.
+    if (threadId !== selectedThreadId || pageState !== activeThreadEventPage()) return;
     const events = response.events || [];
     const older = events.filter(event => event.seq < before);
     const scroller = $("chat-scroll");

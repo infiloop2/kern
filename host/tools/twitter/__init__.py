@@ -26,6 +26,7 @@ from host.tools.tool import (
     OAuthStartConnectParams,
     OAuthStartConnectResult,
 )
+from host.tools.twitter import costs
 from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI, StoredCredential
 from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field, schema as _schema
@@ -194,6 +195,7 @@ LOOKUP_USER_OUTPUT_SCHEMA: JSONObject = outputs.obj(
 
 MANIFEST = ToolManifest(
     tool_id="twitter",
+    reports_cost=True,
     display_name="X (Twitter)",
     description=(
         "Connect one or more X accounts and let your agent search and read X posts, trends, and "
@@ -203,6 +205,7 @@ MANIFEST = ToolManifest(
     connection="oauth",
     actions=protect_inputs((
         ActionSpec(id="search_tweets",
+            cost_description='$0.005 per post and $0.010 per expanded user. Repeated resources are counted once per app per UTC day.',
             description="Search public X posts from the last seven days with X query syntax and return post text, author, timestamp, and metrics. Pass start_time or since_id on recurring searches so already-read posts are not billed again. Use get_trends to discover trend names first; reads are billed per post returned.",
             data_policy=X_READ_POLICY,
             input_schema=_schema(
@@ -217,12 +220,14 @@ MANIFEST = ToolManifest(
             output_schema=SEARCH_TWEETS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="read_tweet",
+            cost_description='$0.005 per post and $0.010 per expanded user. Repeated resources are counted once per app per UTC day.',
             description="Read one public X post by numeric post id and return its text, author, timestamp, and metrics. This does not read a thread or timeline.",
             data_policy=X_READ_POLICY,
             input_schema=_schema({"tweet_id": {"type": "string", "description": "Numeric X post id from a URL or another X action result."}}, ["tweet_id"]),
             output_schema=READ_TWEET_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="user_tweets",
+            cost_description='$0.005 per post, or $0.001 for verified app-owner reads configured with X_APP_OWNER_USER_ID. Username resolution adds a $0.010 user read. Daily resource deduplication applies.',
             description="Read one public user's recent posts and return text, timestamps, and metrics. Provide exactly one username or numeric user_id; this is that user's timeline, not the connected account's home feed.",
             data_policy=X_READ_POLICY,
             input_schema=_schema(
@@ -235,6 +240,7 @@ MANIFEST = ToolManifest(
             output_schema=USER_TWEETS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="get_trends",
+            cost_description='$0.010 per successful request, regardless of the number of trends.',
             description="Read public trending topic names and optional post counts for one geographic WOEID, worldwide by default. This returns topics, not posts; follow with search_tweets to find and rank posts about a trend.",
             data_policy=(
                 "Read-only. Sends only the requested location id to the X API using the "
@@ -251,12 +257,14 @@ MANIFEST = ToolManifest(
             output_schema=GET_TRENDS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="get_personalized_trends",
+            cost_description='$0.010 per successful request, regardless of the number of trends.',
             description="Read the connected account's personalized For You trend names, categories, counts, and start times. Requires X Premium and returns topics, not posts; follow with search_tweets for matching public posts.",
             data_policy=X_PERSONALIZED_TRENDS_POLICY,
             input_schema={"type": "object", "properties": {}, "additionalProperties": False},
             output_schema=GET_PERSONALIZED_TRENDS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="lookup_user",
+            cost_description='$0.010 per user, counted once per app per UTC day.',
             description="Resolve one public X user to their permanent numeric id, handle, display name, and public follower/following/post counts. Provide exactly one username or user_id. This reads a profile, not its posts; use user_tweets for those.",
             data_policy=(
                 "Read-only. Sends only the supplied username or user id to the X API "
@@ -275,6 +283,7 @@ MANIFEST = ToolManifest(
         ),
         ActionSpec(
             id="post_tweet",
+            cost_description='Preparation and approval execution can incur user/post read charges even if the post is not sent. Confirmed posting costs $0.015, or $0.200 with a URL. Costs with unverifiable reply discounts are not reported.',
             description=(
                 "Queue approval to publish exactly one standalone post, reply, or quote post as "
                 "the selected connected account. Set neither target id for a standalone post, or "
@@ -320,6 +329,7 @@ MANIFEST = ToolManifest(
         },
     }),
     config=(
+        ConfigRequirement(key="X_APP_OWNER_USER_ID", description="Optional numeric X user id of the developer app owner, to apply $0.001 owned-read pricing. Leave unset for standard rates."),
         ConfigRequirement(key="X_OAUTH_CLIENT_ID", description="X developer app OAuth 2.0 client id."),
         ConfigRequirement(key="X_OAUTH_CLIENT_SECRET", description="X developer app OAuth 2.0 client secret (confidential client)."),
         ConfigRequirement(key="X_BEARER_TOKEN", description="X developer app Bearer Token (app-only auth; used by trends lookups, which do not accept user-context tokens)."),
@@ -436,7 +446,7 @@ def _is_invalid_grant(body: bytes) -> bool:
     return b"invalid_grant" in body or b"invalid_request" in body
 
 
-def _fetch_me(access_token: str) -> ConnectionAccount:
+def _fetch_me(access_token: str, api: HostAPI | None = None) -> ConnectionAccount:
     try:
         response = json_request(
             "GET",
@@ -447,6 +457,8 @@ def _fetch_me(access_token: str) -> ConnectionAccount:
         )
     except WebRequestError as exc:
         raise _mapped_web_error(exc, "profile lookup") from exc
+    if api is not None:
+        costs.record_response(api, response, "user")
     data = response.get("data")
     if not isinstance(data, dict):
         raise RuntimeError("X profile lookup returned an invalid response.")
@@ -647,7 +659,7 @@ class XCredentialStore(OAuth2CredentialStore):
 
     def refresh_identity(self, api: HostAPI, access_token: str) -> ConnectionAccount:
         existing = self.load_connected(api)
-        identity = _fetch_me(access_token)
+        identity = _fetch_me(access_token, api)
         if existing["account"]["id"] != identity["id"]:
             clear_if_still_loaded(api, existing)
             raise IntegrationReconnectRequired(X_RECONNECT_MESSAGE)
@@ -749,6 +761,7 @@ def _search_tweets(access_token: str, tool_input: JSONObject, api: HostAPI) -> J
         query_params["since_id"] = _valid_tweet_id(since_id, field="since_id")
     params = encode_query(query_params)
     response = _api_get(access_token, f"/tweets/search/recent?{params}", what="search")
+    costs.record_response(api, response, "post")
     usernames = _usernames_by_id(response)
     data = response.get("data")
     tweets = [
@@ -762,13 +775,14 @@ def _search_tweets(access_token: str, tool_input: JSONObject, api: HostAPI) -> J
     }
 
 
-def _read_tweet(access_token: str, tool_input: JSONObject) -> JSONObject:
+def _read_tweet(access_token: str, tool_input: JSONObject, api: HostAPI) -> JSONObject:
     extra = set(tool_input) - {"tweet_id"}
     if extra:
         raise ToolInputValidationError("X read tool input only supports tweet_id.")
     tweet_id = _valid_tweet_id(tool_input.get("tweet_id"), field="tweet_id")
     params = encode_query({"tweet.fields": TWEET_FIELDS, "expansions": "author_id", "user.fields": "username"})
     response = _api_get(access_token, f"/tweets/{tweet_id}?{params}", what="post lookup")
+    costs.record_response(api, response, "post")
     data = response.get("data")
     if not isinstance(data, dict):
         return {"message": "X post was not found.", "tweet": None}
@@ -778,7 +792,7 @@ def _read_tweet(access_token: str, tool_input: JSONObject) -> JSONObject:
     }
 
 
-def _user_tweets(access_token: str, tool_input: JSONObject) -> JSONObject:
+def _user_tweets(access_token: str, tool_input: JSONObject, api: HostAPI) -> JSONObject:
     extra = set(tool_input) - {"username", "user_id", "max_results"}
     if extra:
         raise ToolInputValidationError("X user posts tool input only supports username, user_id, and max_results.")
@@ -796,6 +810,7 @@ def _user_tweets(access_token: str, tool_input: JSONObject) -> JSONObject:
             raise ToolInputValidationError("X tool_input.username must be a valid X handle.")
         handle = username.strip().lstrip("@")
         response = _api_get(access_token, f"/users/by/username/{handle}", what="user lookup")
+        costs.record_response(api, response, "user")
         data = response.get("data")
         resolved = data.get("id") if isinstance(data, dict) else None
         if not isinstance(resolved, str) or not TWEET_ID_RE.fullmatch(resolved):
@@ -805,6 +820,7 @@ def _user_tweets(access_token: str, tool_input: JSONObject) -> JSONObject:
     max_results = int_field(tool_input, "max_results", provider="X", default=10, low=5, high=100)
     params = encode_query({"max_results": str(max_results), "tweet.fields": TWEET_FIELDS})
     response = _api_get(access_token, f"/users/{resolved_id}/tweets?{params}", what="user posts")
+    costs.record_response(api, response, "post", owned=costs.owned_reads(api, resolved_id))
     data = response.get("data")
     tweets: list[JSONValue] = []
     for tweet in (data if isinstance(data, list) else [])[:max_results]:
@@ -851,6 +867,7 @@ def _get_trends(api: HostAPI, tool_input: JSONObject) -> JSONObject:
             raise provider_warning("X", "trends", exc, message) from exc
         raise _mapped_web_error(exc, "trends") from exc
     data = response.get("data")
+    api.costs.record("0.010")
     trends: list[JSONValue] = []
     for trend in (data if isinstance(data, list) else [])[:max_trends]:
         if isinstance(trend, dict):
@@ -869,12 +886,13 @@ def _get_trends(api: HostAPI, tool_input: JSONObject) -> JSONObject:
     }
 
 
-def _personalized_trends(access_token: str, tool_input: JSONObject) -> JSONObject:
+def _personalized_trends(access_token: str, tool_input: JSONObject, api: HostAPI) -> JSONObject:
     if tool_input:
         raise ToolInputValidationError("X personalized trends take no tool input.")
     params = encode_query({"personalized_trend.fields": "trend_name,category,post_count,trending_since"})
     response = _api_get(access_token, f"/users/personalized_trends?{params}", what="personalized trends")
     data = response.get("data")
+    api.costs.record("0.010")
     trends: list[JSONValue] = []
     for trend in (data if isinstance(data, list) else [])[:50]:
         if isinstance(trend, dict):
@@ -899,7 +917,7 @@ def _valid_tweet_id(value: JSONValue | None, *, field: str) -> str:
     return value.strip()
 
 
-def _lookup_user(access_token: str, tool_input: JSONObject) -> JSONObject:
+def _lookup_user(access_token: str, tool_input: JSONObject, api: HostAPI) -> JSONObject:
     extra = set(tool_input) - {"username", "user_id"}
     if extra:
         raise ToolInputValidationError("X lookup_user tool input only supports username and user_id.")
@@ -933,6 +951,7 @@ def _lookup_user(access_token: str, tool_input: JSONObject) -> JSONObject:
         )
     else:
         raise ToolInputValidationError("X user lookup input is invalid.")
+    costs.record_response(api, response, "user")
     data = response.get("data")
     if not isinstance(data, dict):
         raise ToolInputValidationError("The X user was not found.")
@@ -995,7 +1014,7 @@ def _post_proposal(tool_input: JSONObject) -> JSONObject:
     return proposal
 
 
-def _target_tweet_preview(access_token: str, tweet_id: str) -> JSONObject:
+def _target_tweet_preview(access_token: str, tweet_id: str, api: HostAPI) -> JSONObject:
     """Load the reply/quote target for the approval and later revalidation."""
     params = encode_query(
         {
@@ -1005,6 +1024,7 @@ def _target_tweet_preview(access_token: str, tweet_id: str) -> JSONObject:
         }
     )
     response = _api_get(access_token, f"/tweets/{tweet_id}?{params}", what="post lookup")
+    costs.record_response(api, response, "post")
     data = response.get("data")
     if not isinstance(data, dict):
         raise ToolInputValidationError("The referenced X post was not found.")
@@ -1063,15 +1083,15 @@ class XTool:
             if action == "search_tweets":
                 return ActionExecuted(_search_tweets(X_CREDENTIALS.access_token(api), tool_input, api))
             if action == "read_tweet":
-                return ActionExecuted(_read_tweet(X_CREDENTIALS.access_token(api), tool_input))
+                return ActionExecuted(_read_tweet(X_CREDENTIALS.access_token(api), tool_input, api))
             if action == "user_tweets":
-                return ActionExecuted(_user_tweets(X_CREDENTIALS.access_token(api), tool_input))
+                return ActionExecuted(_user_tweets(X_CREDENTIALS.access_token(api), tool_input, api))
             if action == "get_trends":
                 return ActionExecuted(_get_trends(api, tool_input))
             if action == "get_personalized_trends":
-                return ActionExecuted(_personalized_trends(X_CREDENTIALS.access_token(api), tool_input))
+                return ActionExecuted(_personalized_trends(X_CREDENTIALS.access_token(api), tool_input, api))
             if action == "lookup_user":
-                return ActionExecuted(_lookup_user(X_CREDENTIALS.access_token(api), tool_input))
+                return ActionExecuted(_lookup_user(X_CREDENTIALS.access_token(api), tool_input, api))
             if action == "post_tweet":
                 proposal = _post_proposal(tool_input)
                 access_token = X_CREDENTIALS.access_token(
@@ -1083,7 +1103,7 @@ class XTool:
                 target_id = proposal.get("in_reply_to_tweet_id") or proposal.get("quote_tweet_id")
                 target: JSONObject | None = None
                 if isinstance(target_id, str):
-                    target = _target_tweet_preview(access_token, target_id)
+                    target = _target_tweet_preview(access_token, target_id, api)
                 payload: JSONObject = {
                     "action": action,
                     "tool_id": MANIFEST.tool_id,
@@ -1135,7 +1155,7 @@ class XTool:
                 if approved_target.get("id") != proposal_target:
                     return ActionFailed("X approval target is invalid. Please queue a new approval.")
                 current_target = _target_tweet_preview(
-                    access_token, str(approved_target.get("id") or "")
+                    access_token, str(approved_target.get("id") or ""), api
                 )
                 if current_target.get("id") != approved_target.get("id"):
                     return ActionFailed(
@@ -1161,10 +1181,17 @@ class XTool:
                 raise _mapped_web_error(exc, "post") from exc
             data = response.get("data")
             posted_id = data.get("id") if isinstance(data, dict) else None
-            if not isinstance(posted_id, str) or not TWEET_ID_RE.fullmatch(posted_id):
+            valid_posted_id = posted_id if isinstance(posted_id, str) and TWEET_ID_RE.fullmatch(posted_id) else None
+            amount = costs.post_amount(proposal_object, cast(JSONObject, data) if isinstance(data, dict) else {})
+            if amount is not None:
+                if valid_posted_id is None:
+                    api.costs.record(amount)
+                else:
+                    api.costs.record(amount, charge_id=f"post:{valid_posted_id}")
+            if valid_posted_id is None:
                 return ActionFailed("X did not confirm the new post.")
             return ApprovalExecuted(
-                f"Posted to X as {current_account['label']} (post id {posted_id})."
+                f"Posted to X as {current_account['label']} (post id {valid_posted_id})."
             )
         except ToolInputValidationError as exc:
             return ActionFailed(exc.message)

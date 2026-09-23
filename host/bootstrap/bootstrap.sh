@@ -1566,6 +1566,8 @@ StartLimitIntervalSec=0
 [Service]
 User=kern-proxy
 UMask=0077
+LimitNOFILE=4096
+TasksMax=2048
 Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.network_proxy.service
 ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-network-proxy
@@ -1593,6 +1595,8 @@ User=kern-tools
 UMask=0077
 RuntimeDirectory=kern-tools
 RuntimeDirectoryMode=0755
+LimitNOFILE=2048
+TasksMax=1024
 Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.tools.service
 ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-tools
@@ -1650,6 +1654,8 @@ User=kern-agent-network
 UMask=0077
 RuntimeDirectory=kern-agent-network
 RuntimeDirectoryMode=0755
+LimitNOFILE=2048
+TasksMax=1024
 Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.agent_network.service
 ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-agent-network
@@ -1680,6 +1686,9 @@ RuntimeDirectoryMode=0755
 # process's fd table with the operator TCP listener, so the descriptor limit
 # must not be the first resource a connection flood exhausts.
 LimitNOFILE=8192
+# Eight full turn pools can own roughly 1,600 runtime worker/reader threads;
+# leave room for 512 operator handlers and service background threads.
+TasksMax=4096
 Environment=PYTHONPATH=/opt/kern-host
 Environment=HOME=/mnt/kern-admin/admin-home
 WorkingDirectory=/mnt/kern-admin/admin-home
@@ -1819,6 +1828,8 @@ Slice=kern_workspace.slice
 UMask=0077
 RuntimeDirectory=kern-workspace
 RuntimeDirectoryMode=0755
+# Browser handlers can hold a TCP socket while opening an admin Unix socket.
+LimitNOFILE=4096
 Environment=PYTHONPATH=/opt/kern-host
 WorkingDirectory=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.workspace.service

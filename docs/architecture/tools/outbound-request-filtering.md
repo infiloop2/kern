@@ -225,6 +225,13 @@ third-party destinations:
 - GitHub read-path query values (search `q=` and filters) via
   `allow_machine_tokens=True`, because revision ids, blob shas, and cursors
   are legitimately long and machine-shaped;
+- GitHub Actions signed Azure Blob artifact ZIP downloads on the recognized
+  `productionresultssa0..19.blob.core.windows.net` hosts: only the fixed
+  `/actions-results/<run UUID>/workflow-job-run-<job UUID>/artifacts/<64-hex>.zip`
+  path neutralizes the provider-generated identifiers. For this path only,
+  `rscd` must name `agent-admin-result-<short run attempt>.zip`; its separator
+  space is neutralized for the full-URL scan so it does not create a false
+  overlong token after URL decoding. Other query content keeps the normal guard;
 - connected-account mailbox queries (Gmail `search_messages`, `list_drafts`)
   via `allow_identifiers=True`: secret/credential shapes and encoded payloads
   denied; personal identifiers (including one-time codes) allowed as search

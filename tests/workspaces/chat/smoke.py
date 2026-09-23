@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+from threading import Lock
 from typing import Any, Callable
 
 from host.session_options import public_session_options
@@ -35,6 +36,7 @@ AGENT_CHAT_THREADS: dict[str, dict[str, Any]] = {
 }
 SEEN_MESSAGE_SEQS: dict[str, int] = {}
 SEEN_INITIALIZED = False
+SEEN_LOCK = Lock()
 
 
 DEMO_MODE = False
@@ -79,11 +81,12 @@ def route_workspace_api(
         if isinstance(requested, bool) or not isinstance(requested, int) or requested < 0:
             raise api_error(HTTPStatus.BAD_REQUEST, "invalid message_seq")
         detail = host_api("GET", f"/v1/threads/{thread_id}", {}, None)["thread"]
-        stored = max(
-            SEEN_MESSAGE_SEQS.get(thread_id, 0),
-            min(requested, int(detail.get("latest_message_seq") or 0)),
-        )
-        SEEN_MESSAGE_SEQS[thread_id] = stored
+        with SEEN_LOCK:
+            stored = max(
+                SEEN_MESSAGE_SEQS.get(thread_id, 0),
+                min(requested, int(detail.get("latest_message_seq") or 0)),
+            )
+            SEEN_MESSAGE_SEQS[thread_id] = stored
         return {"seen": {"message_seq": stored, "revision": 0}}
     match = re.fullmatch(r"threads/([^/]+)/events", relative)
     if method == "GET" and match:
@@ -205,6 +208,17 @@ def desktop_smoke(page: Any) -> None:
     expect(thread_nav.locator(".workspace-nav-meta")).to_have_text(
         "Codex · gpt-6-astra · high"
     )
+    expect(website_nav.locator(".workspace-nav-error[aria-label='Agent error']")).to_have_count(1)
+    expect(thread_nav.locator(".workspace-nav-error")).to_have_count(0)
+    expect(page.locator(
+        "#chat-nav-items [data-action='open-chat'][data-item-id='thread-3'] .workspace-nav-error"
+    )).to_have_count(0)
+    expect(page.locator(
+        "#chat-nav-items [data-action='open-chat'][data-item-id='thread-2'] .workspace-nav-running"
+    )).to_have_count(1)
+    expect(frame.locator(
+        f".thread-item[data-thread-id='{WEBSITE_THREAD_ID}'] .thread-dot.error[aria-label='Agent error']"
+    )).to_have_count(1)
 
     _open_host_thread(page, WEBSITE_THREAD_ID)
     expect(frame.locator(".thread-title")).to_have_text("website-redesign")
@@ -442,9 +456,12 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#new-task-effort")).not_to_contain_text("Ultra")
     frame.locator("#new-task-effort").select_option("max")
     frame.get_by_role("button", name="Send").click()
-    expect(frame.locator("#status")).to_contain_text("Service Unavailable")
+    expect(frame.locator("#status")).to_contain_text("Kern is busy or temporarily unavailable")
     expect(frame.locator(".thread-title")).to_have_text("New thread")
+    expect(frame.locator("#new-task")).to_have_value("agent workspace smoke task")
     assert len(upload_requests) == 2, "the first Send must stop after the second attachment fails"
+    expect(page.locator("#overload-status")).to_be_hidden(timeout=15000)
+    assert len(upload_requests) == 2, "recovery must not replay an upload or send"
     frame.get_by_role("button", name="Send").click()
     expect(frame.locator("#status")).to_be_hidden()
     expect(frame.locator(".thread-title")).to_have_text(re.compile(r"^thread-[0-9]+$"))
@@ -583,7 +600,8 @@ def mobile_smoke(page: Any) -> None:
     _assert_frame_no_horizontal_overflow(frame, "Chat workspace")
     _assert_single_scroll(page, frame, "Chat workspace (mobile)")
     _assert_initial_tail(frame)
-    _load_older_history(frame, expected_turns=5)
+    _assert_older_history_survives_refresh(page, frame)
+    _load_older_history(page, frame, expected_turns=5)
     _assert_full_message_stream(frame)
     _assert_mobile_chat_scrolling(page, frame)
     _assert_thread_switch_opens_latest(page, frame)
@@ -703,9 +721,47 @@ def _assert_initial_tail(frame: Any) -> None:
         raise AssertionError(f"opening a thread did not land at the newest preloaded history: {metrics}")
 
 
-def _load_older_history(frame: Any, *, expected_turns: int) -> None:
-    """Exercise backward pagination until the seeded thread is fully loaded."""
+def _assert_older_history_survives_refresh(page: Any, frame: Any) -> None:
+    """A periodic refresh must not discard an in-flight backward page."""
     from playwright.sync_api import expect
+
+    loader = frame.locator("#history-loader")
+    button = frame.locator("#load-earlier")
+    expect(button).to_be_enabled()
+    before = loader.get_attribute("data-oldest-seq")
+    page.evaluate("""() => {
+      const original = window.KernHost.api;
+      const race = { original, release: null, intercepted: false };
+      window.__olderPageRace = race;
+      window.KernHost.api = (method, path, body) => {
+        if (method === 'GET' && path.includes('/events?')
+            && path.includes('before=') && !race.intercepted) {
+          race.intercepted = true;
+          return new Promise((resolve, reject) => {
+            race.release = () => original(method, path, body).then(resolve, reject);
+          });
+        }
+        return original(method, path, body);
+      };
+    }""")
+    button.click()
+    page.wait_for_function("() => typeof window.__olderPageRace?.release === 'function'")
+    page.evaluate("""async () => {
+      const race = window.__olderPageRace;
+      try {
+        await window.KernChat.refresh();
+        await race.release();
+      } finally {
+        window.KernHost.api = race.original;
+        delete window.__olderPageRace;
+      }
+    }""")
+    expect(loader).not_to_have_attribute("data-oldest-seq", before)
+
+
+def _load_older_history(page: Any, frame: Any, *, expected_turns: int) -> None:
+    """Exercise backward pagination until the seeded thread is fully loaded."""
+    from playwright.sync_api import TimeoutError as PlaywrightTimeoutError, expect
 
     button = frame.locator("#load-earlier")
     loader = frame.locator("#history-loader")
@@ -714,43 +770,42 @@ def _load_older_history(frame: Any, *, expected_turns: int) -> None:
     # preload exhausted history, rather than merely not having started yet.
     expect(loader).to_have_attribute("data-oldest-seq", re.compile(r"\d+"))
     for _ in range(100):
-        if not button.is_visible():
+        # Automatic loading can be in flight as the scroll position settles.
+        # Wait for it to finish, then capture the cursor and click atomically.
+        ready = page.wait_for_function("""() => {
+          const root = document.querySelector('#panel-workspace-chat')?.shadowRoot;
+          const loader = root?.querySelector('#history-loader');
+          const button = root?.querySelector('#load-earlier');
+          if (!loader || !button) return false;
+          if (loader.hidden) return {done: true};
+          return !button.disabled && loader.dataset.oldestSeq
+            ? {before: loader.dataset.oldestSeq} : false;
+        }""").json_value()
+        if ready.get("done"):
             break
-        button.evaluate(
-            """element => {
-              const loader = element.closest("#history-loader");
-              let before = null;
-              return new Promise((resolve, reject) => {
-                const finished = () => loader.hidden || (
-                  before !== null && loader.dataset.oldestSeq !== before && !element.disabled
-                );
-                const finish = () => {
-                  // Auto-loading on scroll may have disabled the button before
-                  // this callback. Start only when it can accept a click, and
-                  // capture that cursor atomically with the click.
-                  if (!loader.hidden && !element.disabled && before === null) {
-                    before = loader.dataset.oldestSeq;
-                    element.click();
-                  }
-                  if (!finished()) return;
-                  clearTimeout(timer);
-                  observer.disconnect();
-                  resolve();
-                };
-                const observer = new MutationObserver(finish);
-                const timer = setTimeout(() => {
-                  observer.disconnect();
-                  reject(new Error("older history cursor did not advance"));
-                }, 5000);
-                observer.observe(loader, {
-                  attributes: true,
-                  subtree: true,
-                  attributeFilter: ["hidden", "data-oldest-seq", "disabled"],
-                });
-                finish();
-              });
-            }"""
-        )
+        before = ready["before"]
+        clicked = button.evaluate("""(button, before) => {
+          const loader = button.closest('#history-loader');
+          if (loader.hidden || button.disabled || loader.dataset.oldestSeq !== before) return false;
+          button.click();
+          return true;
+        }""", before)
+        if not clicked:
+            continue
+        try:
+            page.wait_for_function("""before => {
+              const root = document.querySelector('#panel-workspace-chat')?.shadowRoot;
+              const loader = root?.querySelector('#history-loader');
+              const button = root?.querySelector('#load-earlier');
+              if (!loader || !button) return false;
+              return loader.hidden || (loader.dataset.oldestSeq !== before && !button.disabled);
+            }""", arg=before, timeout=15000)
+        except PlaywrightTimeoutError as exc:
+            status = frame.locator("#status").inner_text()
+            raise AssertionError(
+                f"older history did not advance from cursor {before}; "
+                f"now {loader.get_attribute('data-oldest-seq')}; status: {status}"
+            ) from exc
     expect(button).to_be_hidden()
     # count() is a point-in-time sample and the history pane is patched entry
     # by entry, so wait for the last expected entry to exist before counting.
@@ -1332,17 +1387,27 @@ def _list_threads(
                 "has_session": has_session,
             })
     global SEEN_INITIALIZED
-    if not SEEN_INITIALIZED:
+    # Navigation fetches active, archived, and scheduled lists concurrently.
+    # The first chat request seeds every chat thread from the host summary,
+    # regardless of which archive view happened to finish first.
+    with SEEN_LOCK:
+        if scheduled:
+            for thread in threads:
+                SEEN_MESSAGE_SEQS.setdefault(
+                    thread["thread_id"], int(thread.get("latest_message_seq") or 0)
+                )
+        if not SEEN_INITIALIZED and not scheduled:
+            for summary in summaries:
+                thread_id = summary["thread_id"]
+                if thread_id in AGENT_CHAT_THREADS:
+                    SEEN_MESSAGE_SEQS[thread_id] = int(
+                        summary.get("latest_message_seq") or 0
+                    )
+            # One seeded thread stays unread for the host-shell flow.
+            SEEN_MESSAGE_SEQS["thread-1"] = 0
+            SEEN_INITIALIZED = True
         for thread in threads:
-            SEEN_MESSAGE_SEQS[thread["thread_id"]] = int(
-                thread.get("latest_message_seq") or 0
-            )
-        # Leave one seeded thread behind its current message so the host-shell
-        # smoke can exercise the durable unread and mark-seen flow.
-        SEEN_MESSAGE_SEQS["thread-1"] = 0
-        SEEN_INITIALIZED = True
-    for thread in threads:
-        thread["seen_message_seq"] = SEEN_MESSAGE_SEQS.get(thread["thread_id"], 0)
+            thread["seen_message_seq"] = SEEN_MESSAGE_SEQS.get(thread["thread_id"], 0)
     return sorted(threads, key=lambda item: item["last_used_at"], reverse=True)
 
 

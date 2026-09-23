@@ -139,6 +139,7 @@ class ActionSpec:
     # there is no JSON result to describe.
     returns_asset: bool = False
     input_protections: dict[str, InputProtection] = field(default_factory=dict)
+    cost_description: str = ""
 
 
 def protect_inputs(actions: tuple[ActionSpec, ...], declarations: dict[str, dict[str, InputProtection]]) -> tuple[ActionSpec, ...]:
@@ -247,6 +248,7 @@ class ToolManifest:
     # lifecycle follows enablement. The host invokes only the small ToolService
     # contract and does not know which provider or child process implements it.
     service: str = ""
+    reports_cost: bool = False
     config: tuple[ConfigRequirement, ...] = ()
     # Short, concrete safeguards for the summary popover and full guide.
     protections: tuple[str, ...] = ()
@@ -285,6 +287,8 @@ class ToolManifest:
             raise ValueError(
                 f"ToolManifest.service is required for {self.tool_id}'s WhatsApp linked-device flow."
             )
+        if not isinstance(self.reports_cost, bool):
+            raise ValueError("ToolManifest.reports_cost must be a boolean.")
         seen_actions: set[str] = set()
         for spec in self.actions:
             if not ACTION_ID_RE.fullmatch(spec.id):
@@ -294,6 +298,10 @@ class ToolManifest:
                 )
             if spec.id in seen_actions:
                 raise ValueError(f"Duplicate ActionSpec.id in {self.tool_id}: {spec.id}")
+            if not isinstance(spec.cost_description, str):
+                raise ValueError("Action cost metadata is invalid.")
+            if self.reports_cost and not spec.cost_description.strip():
+                raise ValueError("Cost-reporting tools must describe every action's charges.")
             if not spec.data_policy.strip():
                 raise ValueError(f"ActionSpec.data_policy must be non-empty for {self.tool_id}:{spec.id}.")
             if spec.approval not in ("direct", "operator"):

@@ -8,6 +8,7 @@ from typing import cast
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.host_api import HostAPI
+from host.tools.shared.cost_reporting import report_priced_units
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
     ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink,
@@ -92,20 +93,21 @@ COST_NOTE = " One provider request per call, normally one ScrapeCreators credit 
 POLICY = "Runs directly without approval. Sends the indicated public lookup parameters and the configured ScrapeCreators API key to api.scrapecreators.com. No Reddit login, password, cookie or private account data is used. Returned Reddit text enters model context as untrusted data."
 
 MANIFEST = ToolManifest(
+    reports_cost=True,
     tool_id="reddit_scrapecreators", display_name="Reddit ScrapeCreators",
     description="Search public Reddit posts across Reddit or within one subreddit, browse communities, and read post text and comments through the unofficial ScrapeCreators API. Read only; no Reddit account required.",
     connection="enable_only",
     actions=protect_inputs((
-        ActionSpec(id="search_posts", description="Search public Reddit posts by query. Optionally restrict to one subreddit using the provider's dedicated subreddit search. Subreddit search may omit post text; use read_post." + COST_NOTE,
+        ActionSpec(id="search_posts", cost_description='One ScrapeCreators request. Uses the published $47/25,000-credit pack rate for returned charged credits; free or larger packs may cost less.', description="Search public Reddit posts by query. Optionally restrict to one subreddit using the provider's dedicated subreddit search. Subreddit search may omit post text; use read_post." + COST_NOTE,
             data_policy="Sends query, optional subreddit, sort, timeframe and pagination cursor. " + POLICY,
             input_schema=schema({"query": {"type": "string", "description": "Public search terms, 1-512 characters; passes the host parameter guard."}, "subreddit": SUBREDDIT_INPUT, "sort": {"type": "string", "enum": [*SORTS], "description": "Search ordering; default relevance. comments orders by comment count."}, "timeframe": {"type": "string", "enum": [*TIMES], "description": "Provider time filter; default all."}, "cursor": CURSOR_INPUT, "limit": LIMIT_INPUT}, ["query"]), output_schema=LIST_SCHEMA),
-        ActionSpec(id="get_subreddit_posts", description="Read one page of public posts from a named subreddit, sorted hot, new, top, best or rising." + COST_NOTE,
+        ActionSpec(id="get_subreddit_posts", cost_description='One ScrapeCreators request. Uses the published $47/25,000-credit pack rate for returned charged credits; free or larger packs may cost less.', description="Read one page of public posts from a named subreddit, sorted hot, new, top, best or rising." + COST_NOTE,
             data_policy="Sends subreddit, sort, timeframe and pagination cursor. " + POLICY,
             input_schema=schema({"subreddit": SUBREDDIT_INPUT, "sort": {"type": "string", "enum": ["hot", "new", "top", "best", "rising"], "description": "Subreddit ordering; default hot."}, "timeframe": {"type": "string", "enum": [*TIMES], "description": "Provider time filter; default all."}, "cursor": CURSOR_INPUT, "limit": LIMIT_INPUT}, ["subreddit"]), output_schema=LIST_SCHEMA),
-        ActionSpec(id="read_post", description="Read the text and metadata of one public Reddit post. Does not fetch comments. Missing text is null; any clipping is flagged." + COST_NOTE,
+        ActionSpec(id="read_post", cost_description='One ScrapeCreators request. Uses the published $47/25,000-credit pack rate for returned charged credits; free or larger packs may cost less.', description="Read the text and metadata of one public Reddit post. Does not fetch comments. Missing text is null; any clipping is flagged." + COST_NOTE,
             data_policy="Sends a canonical public Reddit URL built only from the validated post id. " + POLICY,
             input_schema=schema({"post_id": POST_ID_INPUT}, ["post_id"]), output_schema=DETAIL_SCHEMA),
-        ActionSpec(id="read_comments", description="Read one page of comments and post metadata, preserving reply parents and continuation cursors. Follow each returned continuation in a separate call. Does not promise every comment; post text may require read_post." + COST_NOTE,
+        ActionSpec(id="read_comments", cost_description='One ScrapeCreators request. Uses the published $47/25,000-credit pack rate for returned charged credits; free or larger packs may cost less.', description="Read one page of comments and post metadata, preserving reply parents and continuation cursors. Follow each returned continuation in a separate call. Does not promise every comment; post text may require read_post." + COST_NOTE,
             data_policy="Sends a canonical public Reddit post URL and optionally one pagination cursor. " + POLICY,
             input_schema=schema({"post_id": POST_ID_INPUT, "cursor": CURSOR_INPUT, "limit": LIMIT_INPUT}, ["post_id"]), output_schema=COMMENTS_SCHEMA),
     ), {
@@ -367,6 +369,7 @@ class RedditScrapeCreatorsTool(Tool):
             response = json_request("GET", ORIGIN + path + "?" + urllib.parse.urlencode(params), headers={"x-api-key": key}, timeout=30, max_bytes=4 * 1024 * 1024, failure_message="ScrapeCreators Reddit request failed.", invalid_response_message="ScrapeCreators returned invalid Reddit JSON.")
             if response.get("success") is not True:
                 raise RuntimeError("ScrapeCreators did not report a successful Reddit read; no results were accepted.")
+            report_priced_units(api, response.get("credits_charged"), "0.00188")
             page = _Page(response, api)
             if action in {"search_posts", "get_subreddit_posts"}:
                 result = page.listing(response, limit, sub, cursor_key)

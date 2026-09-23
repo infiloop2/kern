@@ -12,6 +12,7 @@ from typing import Any, cast
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.host_api import HostAPI
+from host.tools.shared.cost_reporting import report_priced_units
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
     protect_inputs,
@@ -160,6 +161,7 @@ DETAIL_OUTPUT_SCHEMA: JSONObject = outputs.obj(
 )
 
 MANIFEST = ToolManifest(
+    reports_cost=True,
     tool_id="apify",
     display_name="Apify Business Data",
     description=(
@@ -169,7 +171,7 @@ MANIFEST = ToolManifest(
     connection="enable_only",
     actions=protect_inputs((
         ActionSpec(
-            id="search_businesses",
+            id="search_businesses", cost_description='Runs a paid Apify Actor. Uses the published $0.004 basic place rate for returned places; Actor start, add-ons, and discounts are excluded.',
             description=(
                 "Search one public-business category in one named area and return at most 20 normalized "
                 "business summaries with place ids, public contact details, ratings, counts, categories, "
@@ -201,7 +203,7 @@ MANIFEST = ToolManifest(
             output_schema=SEARCH_OUTPUT_SCHEMA,
         ),
         ActionSpec(
-            id="get_business_details",
+            id="get_business_details", cost_description='Runs a paid Apify Actor. The synchronous dataset response has no run cost or event counts, so no USD amount is reported.',
             description=(
                 "Retrieve one known Google Maps place by place_id with its listing details, opening hours, service "
                 "attributes, up to 5 reviews without reviewer identities, and up to 8 image references with source "
@@ -776,6 +778,7 @@ class ApifyTool(Tool):
             if action == "search_businesses":
                 actor_input, limit = _search_input(tool_input, api)
                 items = _run_actor(api_token, actor_input, max_items=limit, max_charge=SEARCH_MAX_CHARGE_USD)
+                report_priced_units(api, len(items), "0.004")
                 businesses = [_summary(item) for item in items[:limit]]
                 businesses = [item for item in businesses if item.get("place_id")]
                 businesses = _bounded_businesses(businesses)
