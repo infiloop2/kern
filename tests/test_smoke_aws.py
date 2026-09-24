@@ -134,6 +134,20 @@ class AwsSmokeTeardownTests(unittest.TestCase):
         self.assertIn('for user in ("kern-operator", "kern-admin", "cloudflared"):', source)
         self.assertIn('for user in ("kern-tools", "kern-proxy"):', source)
 
+    def test_tcp_cleanup_smoke_requires_old_failure_and_new_success(self) -> None:
+        smoke = AwsSmoke()
+        with patch.object(smoke, "_ssh_code", side_effect=[
+            "admin TCP cleanup: old-rule stall reproduced",
+            "admin TCP cleanup: reconnect and UID boundary passed",
+        ]) as ssh:
+            smoke._check_admin_tcp_cleanup()
+        self.assertEqual(ssh.call_count, 2)
+        for call in ssh.call_args_list:
+            self.assertIn("sudo timeout 30 unshare --net python3", call.args[0])
+        with patch.object(smoke, "_ssh_code", return_value="unshare: not permitted"):
+            with self.assertRaisesRegex(AssertionError, "unshare: not permitted"):
+                smoke._check_admin_tcp_cleanup()
+
     def test_fresh_smoke_pins_current_deployed_agent_guidance(self) -> None:
         smoke = AwsSmoke()
         smoke.total = 0

@@ -9,8 +9,8 @@ def run(page, url, log_in):
     page.clock.install()
     app_top = page.locator('#app').evaluate('(element) => element.getBoundingClientRect().top')
 
-    # Two independent slow reads warrant one status message. A successful
-    # completion clears it, and its header popover never adds a layout row.
+    # Slow background reads leave the host-wide status hidden. Repeated failures
+    # across separate areas below show the popover without adding a layout row.
     page.evaluate('''() => {
       const originalFetch = window.fetch.bind(window);
       const held = [];
@@ -25,7 +25,7 @@ def run(page, url, log_in):
         : String(path).startsWith('/v1/mixed-')
           ? Promise.resolve(new Response('<h1>Busy</h1>', {status: 503}))
           : originalFetch(path, options);
-      window.__slowReads = [window.KernHost.api('GET', '/v1/slow-a')];
+      window.__slowReads = ['a', 'b'].map(name => window.KernHost.api('GET', '/v1/slow-' + name));
     }''')
     page.clock.run_for(10001)
     expect(page.locator('#overload-status')).to_be_hidden()
@@ -34,27 +34,24 @@ def run(page, url, log_in):
         window.KernHost.api('GET', '/v1/mixed-' + name).catch(() => {})));
     }''')
     expect(page.locator('#overload-status')).to_be_hidden()
-    page.evaluate("window.__slowReads.push(window.KernHost.api('GET', '/v1/slow-b'))")
-    page.clock.run_for(10001)
-    expect(page.locator('#overload-status')).to_be_visible()
-    assert page.locator('#overload-status').evaluate('(element) => element.parentElement.tagName') == 'HEADER'
-    assert page.locator('#overload-status').evaluate('(element) => getComputedStyle(element).position') == 'absolute'
-    assert abs(page.locator('#app').evaluate('(element) => element.getBoundingClientRect().top') - app_top) < 1
     page.evaluate('''async () => {
       window.__releaseSlowReads();
       await Promise.all(window.__slowReads);
     }''')
     expect(page.locator('#overload-status')).to_be_hidden()
-    page.clock.run_for(16000)
+    page.clock.run_for(61000)
 
     attempts = []
     mode = 'generic'
 
     def health(route):
         if mode == 'generic' and not any(route.request.url.endswith('/v1/' + name) for name in (
-            'failure-a', 'failure-b', 'failure-c', 'failure-action'
+            'workspace/failure-a', 'workspace/failure-b', 'workspace/failure-c',
+            'approvals/failure-d', 'workspace/failure-e', 'tools/failure-f', 'failure-action'
         )):
-            route.continue_()
+            # Background refreshes must not clear this controlled failure run.
+            route.fulfill(status=503, content_type='application/json',
+                          body='{"error":{"message":"Section temporarily unavailable"}}')
             return
         attempts.append(route.request.method)
         if mode == 'generic':
@@ -66,23 +63,36 @@ def run(page, url, log_in):
 
     page.route('**/v1/**', health)
     result = page.evaluate('''async () => {
-      try { await window.KernHost.api("GET", "/v1/failure-a"); }
+      try { await window.KernHost.api("GET", "/v1/workspace/failure-a"); }
       catch (error) { return {code: error.code, status: error.status, message: error.message}; }
     }''')
     assert result['code'] == 'host_unavailable' and result['status'] == 503, result
     assert 'JSON' not in result['message'], result
     expect(page.locator('#overload-status')).to_be_hidden()
-    page.evaluate('window.KernHost.api("GET", "/v1/failure-b").catch(() => {})')
+    page.evaluate('window.KernHost.api("GET", "/v1/workspace/failure-b").catch(() => {})')
     expect(page.locator('#overload-status')).to_be_hidden()
-    page.evaluate('window.KernHost.api("GET", "/v1/failure-c").catch(() => {})')
+    page.evaluate('window.KernHost.api("GET", "/v1/workspace/failure-c").catch(() => {})')
+    expect(page.locator('#overload-status')).to_be_hidden()
+    page.evaluate('window.KernHost.api("GET", "/v1/approvals/failure-d").catch(() => {})')
+    expect(page.locator('#overload-status')).to_be_hidden()
+    page.evaluate('window.KernHost.api("GET", "/v1/workspace/failure-e").catch(() => {})')
+    expect(page.locator('#overload-status')).to_be_hidden()
+    page.evaluate('window.KernHost.api("GET", "/v1/tools/failure-f").catch(() => {})')
     expect(page.locator('#overload-status')).to_be_visible()
+    assert page.locator('#overload-status').evaluate('(element) => element.parentElement.tagName') == 'HEADER'
+    assert page.locator('#overload-status').evaluate('(element) => getComputedStyle(element).position') == 'absolute'
+    assert abs(page.locator('#app').evaluate('(element) => element.getBoundingClientRect().top') - app_top) < 1
     expect(page.locator('#app')).to_be_visible()
     expect(page.locator('#login')).to_be_hidden()
     before = len(attempts)
     page.evaluate('async () => { try { await window.KernHost.api("POST", "/v1/failure-action", {test: true}); } catch (_) {} }')
     assert attempts[before:].count('POST') == 1, attempts
+    page.clock.run_for(59000)
+    expect(page.locator('#overload-status')).to_be_visible()
+    page.clock.run_for(2000)
+    expect(page.locator('#overload-status')).to_be_hidden()
     mode = 'ok'
-    page.clock.run_for(16000)
+    page.evaluate('window.KernHost.api("GET", "/v1/health").catch(() => {})')
     expect(page.locator('#overload-status')).to_be_hidden(timeout=10000)
     expect(page.locator('#app')).to_be_visible()
 

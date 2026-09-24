@@ -41,6 +41,8 @@ export function setUnauthorizedHandler(handler) {
 }
 
 // Shared by Home and Workspace callers. A failed action is never replayed.
+// A severe host notice requires explicit host_busy or repeated failures across
+// separate areas; slow or failing background reads in one area stay local.
 let unavailableUntil = 0;
 let unavailableDelay = 0;
 let unavailableGeneration = 0;
@@ -49,13 +51,13 @@ let availabilityHandler = () => {};
 let displayedAvailability = "";
 let nextRequestId = 0;
 const requestProblems = new Map();
+const requestGenerations = new WeakMap();
 let problemExpiryTimer = null;
 const BUSY_MESSAGE = "Kern is having trouble responding.";
 const BUSY_ACTION_MESSAGE = "Kern is busy. Please try again.";
 const REQUEST_ERROR_MESSAGE = "This request could not be completed. Please try again.";
-const SLOW_READ_MS = 10000;
-const PROBLEM_WINDOW_MS = 15000;
-const READ_DEADLINE_MS = 30000;
+const PROBLEM_WINDOW_MS = 60000;
+const READ_DEADLINE_MS = 20000;
 
 export function setAvailabilityHandler(handler) { availabilityHandler = handler; }
 export function isOverloadCoolingDown() { return Date.now() < unavailableUntil; }
@@ -78,31 +80,43 @@ function updateAvailability() {
   if (problemExpiryTimer !== null) clearTimeout(problemExpiryTimer);
   let nextExpiry = Infinity;
   for (const [id, problem] of requestProblems) {
-    if (problem.kind !== "failure") continue;
     const expiresAt = problem.at + PROBLEM_WINDOW_MS;
     if (expiresAt <= now) requestProblems.delete(id);
     else nextExpiry = Math.min(nextExpiry, expiresAt);
   }
   if (unavailableUntil > now) nextExpiry = Math.min(nextExpiry, unavailableUntil);
   problemExpiryTimer = nextExpiry === Infinity ? null : setTimeout(updateAvailability, nextExpiry - now);
-  let slowCount = 0;
-  let failureCount = 0;
-  for (const problem of requestProblems.values()) {
-    if (problem.kind === "slow") slowCount += 1;
-    else failureCount += 1;
+  const affectedAreas = new Set([...requestProblems.values()].map(problem => problem.area));
+  showAvailability(isOverloadCoolingDown() || (requestProblems.size >= 5 && affectedAreas.size >= 3) ? BUSY_MESSAGE : "");
+}
+
+function failureArea(path) {
+  const parts = path.split("?", 1)[0].split("/").filter(Boolean);
+  return parts[0] === "v1" ? parts[1] || "v1" : parts[0] || "other";
+}
+
+function noteProblem(requestId, path) {
+  requestProblems.set(requestId, { at: Date.now(), area: failureArea(path) });
+  updateAvailability();
+}
+
+function clearRecoveredProblems(requestId) {
+  let cleared = false;
+  for (const failedId of requestProblems.keys()) {
+    if (failedId >= requestId) continue;
+    requestProblems.delete(failedId);
+    cleared = true;
   }
-  showAvailability(isOverloadCoolingDown() || slowCount >= 2 || failureCount >= 3 ? BUSY_MESSAGE : "");
+  if (cleared) updateAvailability();
 }
 
-function noteProblem(requestId, kind) {
-  requestProblems.set(requestId, { kind, at: Date.now() });
-  updateAvailability();
-}
-
-function clearSlowProblem(requestId) {
-  if (requestProblems.get(requestId)?.kind !== "slow") return;
-  requestProblems.delete(requestId);
-  updateAvailability();
+function markRecovered(response, requestId) {
+  if (requestGenerations.get(response) === unavailableGeneration && unavailableDelay) {
+    unavailableDelay = 0;
+    unavailableUntil = 0;
+    updateAvailability();
+  }
+  clearRecoveredProblems(requestId);
 }
 
 function markBusy(response) {
@@ -131,11 +145,12 @@ async function availableFetch(path, options, { bypassCooldown = false, requestId
     response = await fetch(path, options);
   } catch (error) {
     if (error.name !== "AbortError") {
-      noteProblem(requestId, "failure");
+      noteProblem(requestId, path);
       throw unavailableError();
     }
     throw error;
   }
+  requestGenerations.set(response, generation);
   if ([502, 503, 504].includes(response.status)) {
     let detail = null;
     if ((response.headers.get("Content-Type") || "").includes("application/json")) {
@@ -147,25 +162,18 @@ async function availableFetch(path, options, { bypassCooldown = false, requestId
       return response;
     }
     if (detail?.error?.code === "host_busy") markBusy(response);
-    else noteProblem(requestId, "failure");
+    else noteProblem(requestId, path);
     if (response.body) void response.body.cancel().catch(() => {});
     throw unavailableError(detail?.error?.code === "host_busy" ? BUSY_ACTION_MESSAGE : REQUEST_ERROR_MESSAGE, response.status);
-  }
-  // An older in-flight success must not erase a newly observed outage.
-  if (generation === unavailableGeneration && unavailableDelay) {
-    unavailableDelay = 0;
-    unavailableUntil = 0;
-    updateAvailability();
   }
   return response;
 }
 
 // Bound dashboard reads through body parsing as well as connection setup.
 // A stalled read must release the refresh tick so a later one can recover.
-async function withReadDeadline(work, requestId = ++nextRequestId) {
+async function withReadDeadline(work, path, requestId = ++nextRequestId) {
   const controller = new AbortController();
   let expired = false;
-  const slowTimer = setTimeout(() => noteProblem(requestId, "slow"), SLOW_READ_MS);
   const timer = setTimeout(() => {
     expired = true;
     controller.abort();
@@ -174,14 +182,12 @@ async function withReadDeadline(work, requestId = ++nextRequestId) {
     return await work(controller.signal, requestId);
   } catch (error) {
     if (expired) {
-      noteProblem(requestId, "failure");
+      noteProblem(requestId, path);
       throw unavailableError("This request timed out. Please try again.");
     }
     throw error;
   } finally {
     clearTimeout(timer);
-    clearTimeout(slowTimer);
-    clearSlowProblem(requestId);
   }
 }
 
@@ -189,19 +195,31 @@ export function workspaceHtml(path) {
   return withReadDeadline(async (signal, requestId) => {
     const response = await availableFetch(path, { credentials: "same-origin", signal }, { requestId });
     if (!response.ok) throw new Error(`Could not load ${path}`);
-    return response.text();
-  });
+    const html = await response.text();
+    markRecovered(response, requestId);
+    return html;
+  }, path);
 }
 
 // POST the password to mint a session cookie. Returns the raw Response so the
 // caller can distinguish a wrong password (401) from a throttled attempt (429).
-export function login(password) {
-  return availableFetch("/v1/login", {
+export async function login(password) {
+  const requestId = ++nextRequestId;
+  const response = await availableFetch("/v1/login", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ password }),
     credentials: "same-origin",
-  });
+  }, { requestId });
+  if (response.ok) {
+    try {
+      await response.clone().json();
+      markRecovered(response, requestId);
+    } catch (_) {
+      // The caller still owns the original body and reports malformed login JSON.
+    }
+  }
+  return response;
 }
 
 export async function logout() {
@@ -242,17 +260,19 @@ export async function api(method, path, body, extraHeaders) {
       error.status = response.status;
       throw error;
     }
+    markRecovered(response, requestId);
     return data;
   };
-  return method === "GET" ? withReadDeadline(request) : request(undefined, ++nextRequestId);
+  return method === "GET" ? withReadDeadline(request, path) : request(undefined, ++nextRequestId);
 }
 
 export async function apiBlob(path) {
+  const requestId = ++nextRequestId;
   const response = await availableFetch(path, {
     method: "GET",
     headers: authenticatedHeaders(),
     credentials: "same-origin",
-  });
+  }, { requestId });
   if (response.status === 401) { unauthorizedHandler(); throw new Error("unauthorized"); }
   if (!response.ok) {
     let message = response.statusText;
@@ -264,16 +284,19 @@ export async function apiBlob(path) {
     error.status = response.status;
     throw error;
   }
-  return response.blob();
+  const blob = await response.blob();
+  markRecovered(response, requestId);
+  return blob;
 }
 
 export async function apiUpload(file) {
+  const requestId = ++nextRequestId;
   const response = await availableFetch(`/v1/agent-files/upload?filename=${encodeURIComponent(file.name)}`, {
     method: "POST",
     headers: authenticatedHeaders(),
     body: file,
     credentials: "same-origin",
-  });
+  }, { requestId });
   let data = null;
   try {
     data = await response.json();
@@ -283,5 +306,6 @@ export async function apiUpload(file) {
     throw new Error(data && data.error ? data.error.message : response.statusText || `upload failed (${response.status})`);
   }
   if (!data) throw new Error("file upload returned an invalid response");
+  markRecovered(response, requestId);
   return data;
 }

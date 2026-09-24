@@ -1487,6 +1487,9 @@ $(cat /tmp/kern_cloudflare_rules)
     oif lo tcp dport @ADMIN_PORT@ meta skuid "kern-admin" accept
     oif lo tcp dport @ADMIN_PORT@ meta skuid "kern-operator" accept
     oif lo tcp dport @ADMIN_PORT@ meta skuid "cloudflared" accept
+    # A closed socket loses skuid, including for the kernel's final TCP ACK.
+    # Let admitted connections finish; every SYN still needs a UID allow above.
+    oif lo tcp dport @ADMIN_PORT@ tcp flags & syn == 0 ct state established accept
     oif lo tcp dport @ADMIN_PORT@ drop
     oif lo tcp dport @PROXY_PORT@ meta skuid "kern-agent" accept
 @AGENT_PREVIEW_NFTABLES_RULES@

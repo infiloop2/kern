@@ -236,7 +236,10 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ),
     ),
     "brave_search": (("search_web", {"query": "Kern"}),),
-    "web_fetch": tuple((action, {"url": "https://example.com/"}) for action in ("fetch_page", "fetch_page_file", "head_url")),
+    "web_fetch": (
+        *((action, {"url": "https://example.com/"}) for action in ("fetch_page", "fetch_page_file", "head_url")),
+        ("download_media", {"url": "https://www.python.org/static/community_logos/python-logo.png"}),
+    ),
     "whatsapp": (
         ("connection_status", {}),
         ("list_chats", {"limit": 1}),
@@ -2390,6 +2393,7 @@ class AwsSmoke:
 
     def check_enforcement(self) -> None:
         self._step("network enforcement (proxy + nftables, as the agent user)")
+        self._check_admin_tcp_cleanup()
         proxy = f"http://127.0.0.1:{PROXY_PORT}"
         agent = "sudo -u kern-agent env"
         allowed = self._ssh_code(f"{agent} HTTPS_PROXY={proxy} curl -s -o /dev/null -w '%{{http_code}}' --max-time 20 https://example.com/")
@@ -4833,6 +4837,22 @@ LEFT JOIN proxy_provider_pins USING (provider)
         if isinstance(detail, str) and detail:
             return f"  {runtime} runtime status: {status}{suffix}; error_message={detail!r}"
         return f"  {runtime} runtime status: {status}{suffix}"
+
+    def _check_admin_tcp_cleanup(self) -> None:
+        # Exercise the deployed rules without altering the live host's firewall
+        # or listener. Each run gets a new network namespace and a delayed test
+        # listener on the real admin port. The negative control must fail first.
+        source = Path(__file__).with_name("admin_tcp_cleanup.py").read_text()
+        for option, expected in (
+            (" --without-cleanup", "admin TCP cleanup: old-rule stall reproduced"),
+            ("", "admin TCP cleanup: reconnect and UID boundary passed"),
+        ):
+            result = self._ssh_code(
+                f"sudo timeout 30 unshare --net python3 - --port {ADMIN_PORT}{option} 2>&1 <<'KERN_TCP_TEST'\n"
+                + source + "\nKERN_TCP_TEST"
+            )
+            if result != expected:
+                raise AssertionError(f"isolated admin TCP cleanup check failed: {result}")
 
     def _ssh_code(self, remote_command: str) -> str:
         result = subprocess.run(

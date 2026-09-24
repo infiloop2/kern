@@ -111,13 +111,25 @@ class NetworkIntrospectionTests(unittest.TestCase):
             "https", "CONNECT", "evil.example.com", 443, "", "", False,
             "host_not_allowed",
         )
+        state.append_network_event(
+            "https", "GET", "example.com", 443, "/article", "", False,
+            "network_policy_denied",
+        )
 
         result = network_introspection_api.call_action("recent_network_denials", {})
 
         denials = result["result"]["denials"]
-        self.assertEqual([denial["host"] for denial in denials], ["evil.example.com", "github.com"])
-        self.assertIn("write repositories", denials[1]["guidance"])
-        self.assertIn("custom-domain rule", denials[0]["guidance"])
+        self.assertEqual(
+            [denial["host"] for denial in denials],
+            ["example.com", "evil.example.com", "github.com"],
+        )
+        for denial in denials[:2]:
+            self.assertIn("web_fetch", denial["guidance"])
+            self.assertIn("if the operator has enabled it", denial["guidance"].lower())
+            self.assertIn("public HTTPS page", denial["guidance"])
+        self.assertIn("custom-domain rule", denials[1]["guidance"])
+        self.assertIn("write repositories", denials[2]["guidance"])
+        self.assertNotIn("web_fetch", denials[2]["guidance"])
 
     def test_repeated_denials_collapse_into_counted_entries(self) -> None:
         for _ in range(3):

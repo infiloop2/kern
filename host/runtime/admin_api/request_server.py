@@ -22,9 +22,26 @@ _BUSY_RESPONSE = (
     + str(len(_BUSY_BODY)).encode() + b"\r\n\r\n" + _BUSY_BODY
 )
 
+_AGENT_RUNTIME_DIAGNOSTIC_ROUTES = frozenset({
+    "/v1/agent-runtime/status",
+    "/v1/agent-runtime/account",
+    "/v1/agent-runtime/refresh",
+    "/v1/agent-runtime/codex-oauth-login",
+    "/v1/agent-runtime/codex-2-oauth-login",
+    "/v1/agent-runtime/codex-3-oauth-login",
+    "/v1/agent-runtime/claude-oauth-login",
+    "/v1/agent-runtime/claude-oauth-login/complete",
+    "/v1/agent-runtime/grok-oauth-login",
+    "/v1/agent-runtime/grok-2-oauth-login",
+    "/v1/agent-runtime/bedrock-credentials",
+    "/v1/agent-runtime/reset-linked-account",
+})
+
 
 def request_group(method: str, path: str) -> str:
     # Never record URL parameters, resource ids, file paths, or capability tokens.
+    if path in _AGENT_RUNTIME_DIAGNOSTIC_ROUTES:
+        return f"{method} {path}"
     for prefix in ("/v1/workspace/chat", "/v1/workspace/web-apps", "/v1/workspace/memory",
                    "/v1/workspace/schedules", "/v1/agent-runtime", "/v1/agent-files",
                    "/v1/approvals", "/v1/health", "/v1/login", "/v1/tools"):
