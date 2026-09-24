@@ -5,15 +5,16 @@ from __future__ import annotations
 import http.client
 from http import HTTPStatus
 import json
+import os
+import socket
 from typing import Any
 from urllib.parse import urlencode
 
 from host.constants import (
-    LOOPBACK,
     MAX_REQUEST_BODY_BYTES,
     MAX_WORKSPACE_RESPONSE_BODY_BYTES,
     WORKSPACE_ADMIN_API_TIMEOUT_SECONDS,
-    WORKSPACE_PORT,
+    WORKSPACE_BROWSER_SOCKET_PATH,
 )
 from host.runtime.admin_api.errors import ApiError
 from host.runtime.core import host_errors
@@ -21,6 +22,7 @@ from host.runtime.core import host_errors
 
 PROXY_TIMEOUT_SECONDS = WORKSPACE_ADMIN_API_TIMEOUT_SECONDS + 10
 RECALL_TIMEOUT_SECONDS = 3
+BROWSER_SOCKET = os.environ.get("KERN_WORKSPACE_BROWSER_SOCKET", WORKSPACE_BROWSER_SOCKET_PATH)
 ROUTE_PREFIXES = {
     "/v1/workspace/getting-started": "/getting-started",
     "/v1/workspace/chat": "/chat",
@@ -28,6 +30,22 @@ ROUTE_PREFIXES = {
     "/v1/workspace/memory": "/memory",
     "/v1/workspace/schedules": "/schedules",
 }
+
+
+class _UnixHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, socket_path: str, timeout: float) -> None:
+        super().__init__("kern-workspace", timeout=timeout)
+        self._socket_path = socket_path
+
+    def connect(self) -> None:
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        sock.settimeout(self.timeout)
+        try:
+            sock.connect(self._socket_path)
+        except OSError:
+            sock.close()
+            raise
+        self.sock = sock
 
 
 def send_message(thread_id: str, message: str) -> dict[str, Any]:
@@ -85,9 +103,7 @@ def _proxy(
         )
     conn: http.client.HTTPConnection | None = None
     try:
-        conn = http.client.HTTPConnection(
-            LOOPBACK, WORKSPACE_PORT, timeout=timeout_seconds
-        )
+        conn = _UnixHTTPConnection(BROWSER_SOCKET, timeout=timeout_seconds)
         conn.request(method, target, body=encoded, headers=headers)
         response = conn.getresponse()
         raw = response.read(MAX_WORKSPACE_RESPONSE_BODY_BYTES + 1)

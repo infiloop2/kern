@@ -91,7 +91,7 @@ for line in sys.stdin:
         meta = params.get("_meta", {})
         if params.get("cwd") != "/mnt/kern-agent/agent-home" or params.get("mcpServers") != []:
             send({"id": mid, "error": {"message": "bad new-session boundary"}})
-        elif meta.get("modelId") != "grok-4.6" or meta.get("reasoningEffort") != "high" or meta.get("yoloMode") is not True:
+        elif meta.get("modelId") != "grok-4.7" or meta.get("reasoningEffort") != "high" or meta.get("yoloMode") is not True:
             send({"id": mid, "error": {"message": "bad model metadata"}})
         else:
             session_id = "grok-session-new"
@@ -111,7 +111,7 @@ for line in sys.stdin:
         # _meta.usage and repeated flat beside it.
         completion = {"stopReason": "end_turn", "_meta": {
             "sessionId": session_id, "promptId": "prompt-1", "requestId": "prompt-1",
-            "modelId": "grok-4.6", "inputTokens": 100, "outputTokens": 20,
+            "modelId": "grok-4.7", "inputTokens": 100, "outputTokens": 20,
             "cachedReadTokens": 60, "totalTokens": 120,
             "usage": {"inputTokens": 100, "outputTokens": 20, "cachedReadTokens": 60,
                       "cacheCreationTokens": 0, "modelCalls": 1, "numTurns": 1}}}
@@ -313,7 +313,7 @@ class GrokTurnTests(unittest.TestCase):
         try:
             server.start()
             session_id, answer = grok_agent.run_turn(
-                server, "hello", None, "grok-4.6", "high", events.append
+                server, "hello", None, "grok-4.7", "high", events.append
             )
         finally:
             server.close()
@@ -380,7 +380,7 @@ class GrokTurnTests(unittest.TestCase):
         server = GrokAcpServer(command=turn_command(), runtime_type="grok-2")
         try:
             server.start()
-            grok_agent.run_turn(server, "hello", None, "grok-4.6", "high", events.append)
+            grok_agent.run_turn(server, "hello", None, "grok-4.7", "high", events.append)
         finally:
             server.close()
 
@@ -415,7 +415,7 @@ class GrokTurnTests(unittest.TestCase):
         try:
             server.start()
             session_id, answer = grok_agent.run_turn(
-                server, "hello", "existing-session", "grok-4.6", "high", events.append
+                server, "hello", "existing-session", "grok-4.7", "high", events.append
             )
         finally:
             server.close()
@@ -429,7 +429,7 @@ class GrokTurnTests(unittest.TestCase):
             server.start()
             with self.assertRaises(grok_agent.GrokSessionNotFoundError):
                 grok_agent.run_turn(
-                    server, "hello", "deleted", "grok-4.6", "high", lambda _event: None
+                    server, "hello", "deleted", "grok-4.7", "high", lambda _event: None
                 )
         finally:
             server.close()
@@ -449,7 +449,7 @@ class GrokTurnTests(unittest.TestCase):
             try:
                 result.append(
                     grok_agent.run_turn(
-                        server, "hello", None, "grok-4.6", "high", events.append
+                        server, "hello", None, "grok-4.7", "high", events.append
                     )
                 )
             except BaseException as exc:

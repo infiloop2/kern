@@ -31,6 +31,9 @@ SUBREDDIT_RE = re.compile(r"[A-Za-z0-9_]{2,21}", re.ASCII)
 CURSOR_RE = re.compile(r"[A-Za-z0-9_+/=.-]{1,1024}", re.ASCII)
 SORTS = ["relevance", "new", "top", "comments"]
 TIMES = ["all", "day", "week", "month", "year"]
+# The provider documents rising, but five live listing reads across different
+# subreddits returned HTTP 400; withhold it until a bounded call succeeds.
+LISTING_SORTS = ["hot", "new", "top", "best"]
 
 
 def _object(properties: JSONObject) -> JSONObject:
@@ -101,9 +104,9 @@ MANIFEST = ToolManifest(
         ActionSpec(id="search_posts", cost_description='One ScrapeCreators request. Uses the published $47/25,000-credit pack rate for returned charged credits; free or larger packs may cost less.', description="Search public Reddit posts by query. Optionally restrict to one subreddit using the provider's dedicated subreddit search. Subreddit search may omit post text; use read_post." + COST_NOTE,
             data_policy="Sends query, optional subreddit, sort, timeframe and pagination cursor. " + POLICY,
             input_schema=schema({"query": {"type": "string", "description": "Public search terms, 1-512 characters; passes the host parameter guard."}, "subreddit": SUBREDDIT_INPUT, "sort": {"type": "string", "enum": [*SORTS], "description": "Search ordering; default relevance. comments orders by comment count."}, "timeframe": {"type": "string", "enum": [*TIMES], "description": "Provider time filter; default all."}, "cursor": CURSOR_INPUT, "limit": LIMIT_INPUT}, ["query"]), output_schema=LIST_SCHEMA),
-        ActionSpec(id="get_subreddit_posts", cost_description='One ScrapeCreators request. Uses the published $47/25,000-credit pack rate for returned charged credits; free or larger packs may cost less.', description="Read one page of public posts from a named subreddit, sorted hot, new, top, best or rising." + COST_NOTE,
+        ActionSpec(id="get_subreddit_posts", cost_description='One ScrapeCreators request. Uses the published $47/25,000-credit pack rate for returned charged credits; free or larger packs may cost less.', description="Read one page of public posts from a named subreddit, sorted hot, new, top or best. Rising is withheld because live provider calls returned HTTP 400." + COST_NOTE,
             data_policy="Sends subreddit, sort, timeframe and pagination cursor. " + POLICY,
-            input_schema=schema({"subreddit": SUBREDDIT_INPUT, "sort": {"type": "string", "enum": ["hot", "new", "top", "best", "rising"], "description": "Subreddit ordering; default hot."}, "timeframe": {"type": "string", "enum": [*TIMES], "description": "Provider time filter; default all."}, "cursor": CURSOR_INPUT, "limit": LIMIT_INPUT}, ["subreddit"]), output_schema=LIST_SCHEMA),
+            input_schema=schema({"subreddit": SUBREDDIT_INPUT, "sort": {"type": "string", "enum": [*LISTING_SORTS], "description": "Subreddit ordering; default hot. Rising is withheld after live HTTP 400 responses."}, "timeframe": {"type": "string", "enum": [*TIMES], "description": "Provider time filter; default all."}, "cursor": CURSOR_INPUT, "limit": LIMIT_INPUT}, ["subreddit"]), output_schema=LIST_SCHEMA),
         ActionSpec(id="read_post", cost_description='One ScrapeCreators request. Uses the published $47/25,000-credit pack rate for returned charged credits; free or larger packs may cost less.', description="Read the text and metadata of one public Reddit post. Does not fetch comments. Missing text is null; any clipping is flagged." + COST_NOTE,
             data_policy="Sends a canonical public Reddit URL built only from the validated post id. " + POLICY,
             input_schema=schema({"post_id": POST_ID_INPUT}, ["post_id"]), output_schema=DETAIL_SCHEMA),
@@ -354,7 +357,7 @@ class RedditScrapeCreatorsTool(Tool):
                             params["sort"] = "comment_count"
                 else:
                     path = "/v1/reddit/subreddit"
-                    params["sort"] = _choice(tool_input, "sort", ["hot", "new", "top", "best", "rising"], "hot")
+                    params["sort"] = _choice(tool_input, "sort", LISTING_SORTS, "hot")
                 if cursor:
                     params[cursor_key] = cursor
             else:

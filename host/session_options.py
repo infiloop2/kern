@@ -81,10 +81,10 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
     # Grok Build's subscription runtime exposes one pinned model in the
     # vendored CLI. These are its wire-level reasoning effort values.
     "grok": {
-        "grok-4.6": ("xhigh", "high"),
+        "grok-4.7": ("xhigh", "high"),
     },
     "grok-2": {
-        "grok-4.6": ("xhigh", "high"),
+        "grok-4.7": ("xhigh", "high"),
     },
     # Hermes's headless CLI has no effort flag.
     "hermes": {
@@ -102,8 +102,8 @@ DEFAULT_INTERACTIVE_MODELS: dict[str, str] = {
     "codex-2": "gpt-6-sol",
     "codex-3": "gpt-6-sol",
     "claude_code": "claude-opus-5-5",
-    "grok": "grok-4.6",
-    "grok-2": "grok-4.6",
+    "grok": "grok-4.7",
+    "grok-2": "grok-4.7",
     "hermes": "moonshotai.kimi-k2.5",
 }
 

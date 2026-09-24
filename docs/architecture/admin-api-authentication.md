@@ -158,7 +158,7 @@ The authenticated browser calls `/v1/workspace/chat/...` or
 `/v1/workspace/web-apps/...` through the normal TCP pipeline. The admin API
 authenticates the operator cookie and CSRF header before forwarding only the
 JSON body and query to path-prefixed `/chat/...` or `/apps/...` routes on the
-fixed backend port 7450. No identity header or arbitrary backend target is
+fixed Workspace browser Unix socket. No identity header or arbitrary backend target is
 accepted. Fixed Workspace files under `/workspace/` are release assets, not
 an API authority. The capability-worker sandbox has a separate restrictive
 CSP and no network access.

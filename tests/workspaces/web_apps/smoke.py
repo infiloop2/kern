@@ -1393,12 +1393,12 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#model")).to_have_value("gpt-6-sol")
     expect(frame.locator("#effort")).to_have_value("high")
     frame.locator("#runtime").select_option("grok")
-    expect(frame.locator("#model")).to_have_value("grok-4.6")
+    expect(frame.locator("#model")).to_have_value("grok-4.7")
     expect(frame.locator("#effort option")).to_have_count(2)
     app_sidebar_meta = page.locator(
         f"#web-apps-nav-items .workspace-nav-item[data-item-id='{first_app}'] .workspace-nav-meta"
     )
-    expect(app_sidebar_meta).to_have_text("Grok · grok-4.6 · high")
+    expect(app_sidebar_meta).to_have_text("Grok · grok-4.7 · high")
     frame.locator("#runtime").select_option("codex")
     expect(frame.locator("#app-subtitle")).to_have_text(
         "Codex · gpt-6-sol · High"

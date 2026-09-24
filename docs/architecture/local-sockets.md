@@ -23,6 +23,7 @@ definition.
 | `/run/kern-tools/tools.sock` | `kern-tools` (tools service) | `kern-agent`, `kern-admin` (each path-scoped) | Agent-facing tools surface plus operator delegation, scoped strictly by path per peer. Only `kern-agent` reaches `GET /tools`, JSON `POST /call`, and raw-byte `POST /assets/video` and `POST /assets/image`; the MCP shim forwards calls and streams agent-opened media without sending its pathname. Only `kern-admin` reaches `/operator/...` for OAuth, revoke, and approved execution. Neither peer can call the other's routes. |
 | `/run/kern-agent-network/agent-network.sock` | `kern-agent-network` (network-introspection service) | `kern-agent` | Agent-facing `list_network_integrations` and `recent_network_denials` tools. The service has no egress and a SELECT-only Postgres role for policy and network-event tables; the MCP shim aggregates its listing with bundled tools and `workspace_api`. |
 | `/run/kern-admin-api/workspace.sock` | `kern-admin:kern-workspace-api`, mode `0660` (admin API) | `kern-workspace` | Workspace service → host admin API. The kernel peer uid authenticates the fixed service and a narrow allowlist exposes only thread list/detail/message/stop/event operations. Thread ids pass through unchanged. |
+| `/run/kern-workspace/browser.sock` | `kern-workspace:kern-workspace-api`, mode `0660` (Workspace service) | `kern-admin` | Admin API → Workspace browser routes. The server checks peer uid before allocating a handler; operator authentication and CSRF checks remain in the admin API. |
 | `/run/kern-embedding.sock` | `kern-embedding:kern-workspace-api`, mode `0660` (systemd socket activation) | `kern-admin`, `kern-workspace` | Bounded local query/passage inference for conversation and memory search. The CPU-only ONNX service has no network or database access and exits after five idle minutes. |
 | `/run/kern-workspace/agent.sock` | `kern-workspace` | `kern-agent` | Agent → Workspace API (`POST /call`, used by `workspace_api` and the typed conversation-history tools). Peer authentication and pre-handler connection caps precede validation of bounded Web App, global Memory/Schedules, thread-identity, and read-only conversation-history routes. See [`workspace-agent-api.md`](workspaces/workspace-agent-api.md). |
 
@@ -34,22 +35,23 @@ definition.
   `RuntimeDirectory=kern-agent-network`, and the Workspace unit
   `RuntimeDirectory=kern-workspace`, all at mode `0755`, so admitted service
   uids can reach the socket paths. Most sockets rely on the server's peer-uid
-  check. `workspace.sock` additionally uses mode `0660` and a group containing
-  only its admin owner and the fixed Workspace service account.
+  check. `workspace.sock` and `browser.sock` additionally use mode `0660` and
+  a group containing only their admin and Workspace service accounts.
 - **Every socket server bounds pre-authentication work.** Peer credentials are
-  read only once a request arrives, so each server sets a per-connection read
-  timeout and caps concurrent handlers; a local uid that connects and stalls can
-  cost at most one slot. `workspace.sock` drops connections past its cap
+  checked before the browser socket allocates a handler. Its only admitted uid
+  is the bounded admin API, and a read timeout limits incomplete requests.
+  The agent and admin service sockets cap concurrent handlers;
+  `workspace.sock` drops connections past its cap
   rather than queueing them, because it shares the admin API process's fd table
   with the operator-facing TCP listener.
 - **Sockets are not TCP.** They carry no port, are unreachable over SSH
   forwarding or the Cloudflare Tunnel, and are not affected by the agent's nftables
-  loopback drop rules. TCP loopback listeners (the admin API on `127.0.0.1:7443`,
-  the Workspace service on `127.0.0.1:7450`) are separately firewalled by uid; see
+  loopback drop rules. The admin API's TCP listener on `127.0.0.1:7443` is
+  separately firewalled by uid; see
   [`network-controls.md`](network-controls.md) and
   [`services-and-runtimes.md`](services-and-runtimes.md).
-- **workspaces share one backend process.** The service listens on the fixed
-  loopback port `7450`; only `kern-admin` may connect.
+- **workspaces share one backend process.** The browser proxy reaches the
+  service through `/run/kern-workspace/browser.sock`; only `kern-admin` may connect.
   Browser requests use `/v1/workspace/chat/...` or `/v1/workspace/web-apps/...` and are reverse
   proxied by `workspace_proxy.py`. Calls in the other direction use
   `workspace.sock`, where peer credentials prove the fixed service account.

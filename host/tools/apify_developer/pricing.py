@@ -113,7 +113,7 @@ def proposal(values) -> dict[str, Any]:
 
 
 def verified(actor, body):
-    """Require independent readback, tolerating provider-added metadata only."""
+    """Require independent readback, allowing Apify's synthetic start copy."""
     desired = body["pricingInfos"][0]
     actual = current_and_scheduled(actor)
     if len(actual) != 1:
@@ -122,6 +122,19 @@ def verified(actor, body):
     saved = actual[0]
     if saved.get("pricingModel") != "PAY_PER_EVENT" or timestamp(saved.get("startedAt")) != timestamp(desired["startedAt"]):
         return False
-    if saved.get("pricingPerEvent") != desired["pricingPerEvent"] or saved.get("minimalMaxTotalChargeUsd") != desired["minimalMaxTotalChargeUsd"]:
+    saved_pricing = saved.get("pricingPerEvent")
+    desired_pricing = desired["pricingPerEvent"]
+    if isinstance(saved_pricing, dict):
+        saved_events = saved_pricing.get("actorChargeEvents")
+        desired_start = desired_pricing["actorChargeEvents"].get("apify-actor-start")
+        if isinstance(saved_events, dict) and isinstance(desired_start, dict):
+            saved_start = saved_events.get("apify-actor-start")
+            if isinstance(saved_start, dict):
+                # Apify replaces this synthetic event's display text. Keep its
+                # price/flags and every other event subject to exact comparison.
+                start = {**saved_start, "eventTitle": desired_start["eventTitle"],
+                         "eventDescription": desired_start["eventDescription"]}
+                saved_pricing = {**saved_pricing, "actorChargeEvents": {**saved_events, "apify-actor-start": start}}
+    if saved_pricing != desired_pricing or saved.get("minimalMaxTotalChargeUsd") != desired["minimalMaxTotalChargeUsd"]:
         return False
     return saved.get("apifyMarginPercentage") == desired["apifyMarginPercentage"]

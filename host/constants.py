@@ -22,7 +22,6 @@ MAX_REQUEST_BODY_BYTES = 1024 * 1024
 # Admin API requests remain capped above.
 MAX_WORKSPACE_RESPONSE_BODY_BYTES = 24 * 1024 * 1024
 PROXY_PORT = 7445
-WORKSPACE_PORT = 7450
 # Agent preview ports: a fixed loopback TCP range the agent may bind its own
 # HTTP servers on (dev servers, test harnesses, UIs it is building) and — the
 # only carve-out from its loopback egress drop — connect to, so it can test
@@ -30,7 +29,7 @@ WORKSPACE_PORT = 7450
 # local forward (ssh -L); nothing is exposed on a public interface and the
 # admin console never renders this content. Kept at 8000 — the classic dev
 # server default — well clear of the 7xxx host-service block (admin 7443,
-# proxy 7445, workspaces 7450). See
+# proxy 7445). See
 # docs/architecture/agent-preview-ports.md.
 AGENT_PREVIEW_PORT_BASE = 8000
 AGENT_PREVIEW_PORT_COUNT = 16
@@ -42,6 +41,7 @@ AGENT_PREVIEW_PORT_COUNT = 16
 TOOLS_SOCKET_PATH = "/run/kern-tools/tools.sock"
 HOST_INFERENCE_SOCKET_PATH = "/run/kern-host-inference/host-inference.sock"
 WORKSPACE_AGENT_SOCKET_PATH = "/run/kern-workspace/agent.sock"
+WORKSPACE_BROWSER_SOCKET_PATH = "/run/kern-workspace/browser.sock"
 AGENT_NETWORK_SOCKET_PATH = "/run/kern-agent-network/agent-network.sock"
 WORKSPACE_ADMIN_SOCKET_PATH = "/run/kern-admin-api/workspace.sock"
 TRANSCRIPTION_SOCKET_PATH = "/run/kern-transcription.sock"

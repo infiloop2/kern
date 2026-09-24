@@ -44,8 +44,8 @@ const DEFAULT_MODELS = Object.freeze({
   "codex-2": "gpt-6-sol",
   "codex-3": "gpt-6-sol",
   claude_code: "claude-opus-5-5",
-  grok: "grok-4.6",
-  "grok-2": "grok-4.6",
+  grok: "grok-4.7",
+  "grok-2": "grok-4.7",
   hermes: "moonshotai.kimi-k2.5",
 });
 let apps = [];

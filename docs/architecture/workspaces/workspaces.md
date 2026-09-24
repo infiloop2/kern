@@ -85,9 +85,10 @@ The operator page calls:
 ```
 
 The admin API authenticates the operator and validates CSRF before proxying to
-path-prefixed `/chat/...` and `/apps/...` routes on `127.0.0.1:7450`. Cookies,
-CSRF values, and identity headers are not forwarded. nftables permits only
-`kern-admin` to connect to that port.
+path-prefixed `/chat/...` and `/apps/...` routes on
+`/run/kern-workspace/browser.sock`. Cookies, CSRF values, and identity headers
+are not forwarded. The socket's permissions and peer credentials admit only
+`kern-admin`.
 
 The backend calls host thread operations through
 `/run/kern-admin-api/workspace.sock`. Filesystem permissions and

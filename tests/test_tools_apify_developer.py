@@ -318,6 +318,44 @@ class ApifyDeveloperTests(unittest.TestCase):
         self.assertIn("do not repeat", result.error)
         self.assertEqual(len(self.writes()), 1)
 
+    def test_pricing_readback_accepts_apify_start_copy_but_not_billing_changes(self):
+        # Real first-write response: Apify canonicalizes start text and createdAt.
+        # Exercise both initial setup and an update to an existing PPE period.
+        cases = [("initial", None), ("existing", None),
+                 ("start_price", ("apify-actor-start", "eventPriceUsd", 0.05)),
+                 ("start_flag", ("apify-actor-start", "isOneTimeEvent", False)),
+                 ("result_price", ("result", "eventPriceUsd", 0.1)),
+                 ("result_copy", ("result", "eventDescription", "Different unit"))]
+        for name, mutation in cases:
+            with self.subTest(name=name):
+                values = self.pricing_input()
+                values["events"].append({"name": "apify-actor-start", "title": "Start",
+                    "description": "Run start", "price_usd": 0.00005, "primary": False, "one_time": True})
+                if name == "initial":
+                    self.provider.actor["pricingInfos"] = []
+                pending = self.execute("set_monetization", values)
+                before = len(self.writes())
+                def canonicalized(method, url, **kwargs):
+                    response = self.provider(method, url, **kwargs)
+                    if method == "PUT":
+                        saved = self.provider.actor["pricingInfos"][0]
+                        saved["createdAt"] = (datetime.now(timezone.utc) + timedelta(milliseconds=70)).isoformat()
+                        events = saved["pricingPerEvent"]["actorChargeEvents"]
+                        events["apify-actor-start"].update(eventTitle="Actor Start", eventDescription=(
+                            "Charged when the Actor starts running. Number of events charged depends on "
+                            "Actor memory (one event per GB, minimum one event)."))
+                        if mutation:
+                            event, key, value = mutation
+                            events[event][key] = value
+                    return response
+                with patch.object(dev, "request_bytes", canonicalized):
+                    result = self.approve(pending)
+                self.assertIsInstance(result, ActionFailed if mutation else ApprovalExecuted)
+                self.assertEqual(len(self.writes()), before + 1)
+                saved_start = self.provider.actor["pricingInfos"][0]["pricingPerEvent"]["actorChargeEvents"]["apify-actor-start"]
+                self.assertEqual(saved_start["eventTitle"], "Actor Start")
+                self.assertEqual(self.api.approvals.get(pending.approval_id).payload["input"], values)
+
     def test_pricing_readback_mismatch_is_not_success_or_retried(self):
         result = self.execute("set_monetization", self.pricing_input())
         real = self.provider
@@ -690,6 +728,29 @@ class ApifyDeveloperTests(unittest.TestCase):
                 self.assertIsInstance(result, ActionFailed)
                 self.assertNotIn(TOKEN, result.error)
                 self.assertEqual(request.call_count, 1)
+
+    def test_pricing_rejection_exposes_known_type_without_provider_message(self):
+        for code in ("cannot-remove-pricing-info", "cannot-modify-actor-pricing-with-immediate-effect",
+                     TOKEN, {"secret": TOKEN}):
+            with self.subTest(code=code):
+                pending = self.execute("set_monetization", self.pricing_input())
+                before = len(self.writes())
+                attempts = []
+                def rejected(method, url, **kwargs):
+                    if method == "PUT":
+                        attempts.append(url)
+                        raise WebRequestError(TOKEN, status=400, body=json.dumps({
+                            "error": {"type": code, "message": TOKEN}}).encode())
+                    return self.provider(method, url, **kwargs)
+                with patch.object(dev, "request_bytes", rejected):
+                    result = self.approve(pending)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("HTTP 400", result.error)
+                self.assertNotIn(TOKEN, result.error)
+                if isinstance(code, str) and code.startswith("cannot-"):
+                    self.assertIn(code, result.error)
+                self.assertEqual(len(self.writes()), before)
+                self.assertEqual(len(attempts), 1)
 
     def test_escaped_dataset_credentials_are_redacted_after_json_decoding(self):
         original = self.provider

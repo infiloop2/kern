@@ -1618,8 +1618,7 @@ class DeployUnitTests(unittest.TestCase):
             "CREATE SCHEMA IF NOT EXISTS app_personal_web_app_builder",
             postgres_setup,
         )
-        self.assertIn('oif lo tcp dport $WORKSPACE_PORT meta skuid "kern-admin" accept', bootstrap)
-        self.assertIn("oif lo tcp dport $WORKSPACE_PORT drop", bootstrap)
+        self.assertNotIn("WORKSPACE_PORT", bootstrap)
         self.assertIn('oif lo meta skuid "kern-workspace" drop', bootstrap)
         self.assertNotIn(
             "cat > /etc/systemd/system/kern-app-agent_chat.service",
@@ -1860,7 +1859,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("[features]\ntelemetry = false", grok_policy)
         self.assertIn("[telemetry]\ntrace_upload = false", grok_policy)
         self.assertIn(
-            '[model."grok-4.6"]\nsupports_backend_search = true',
+            '[model."grok-4.7"]\nsupports_backend_search = true',
             grok_policy,
         )
         self.assertIn(

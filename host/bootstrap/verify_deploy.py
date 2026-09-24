@@ -7,7 +7,7 @@ resulting system state and fails the deploy listing every mismatch at once:
 - managed paths carry the expected owner, group, and mode,
 - the runtime services are active and each Unix socket exists with the
   owner and mode its one serving package binds it with,
-- the three loopback TCP listeners are owned by the expected service uids,
+- the two loopback TCP listeners are owned by the expected service uids,
 - the nftables ruleset is loaded fail-closed, and live probes confirm the
   permission boundary in both directions: allowed paths connect (or are
   refused by a listener, which proves the packet passed the firewall) and
@@ -43,7 +43,6 @@ from host.constants import (
     WORKSPACE_AGENT_SOCKET_PATH,
     AGENT_NETWORK_SOCKET_PATH,
     WORKSPACE_ADMIN_SOCKET_PATH,
-    WORKSPACE_PORT,
     PROXY_PORT,
     SERVICE_ACCOUNTS,
     TOOLS_SOCKET_PATH,
@@ -302,7 +301,6 @@ def check_tcp_listeners(
     for port, owner in (
         (ADMIN_API_PORT, "kern-admin"),
         (PROXY_PORT, "kern-proxy"),
-        (WORKSPACE_PORT, "kern-workspace"),
     ):
         uid = resolve_uid(owner)
         if ("127.0.0.1", port, uid) not in listeners:
@@ -386,13 +384,11 @@ def enforced_probes() -> list[Probe]:
         # The agent's entire network world is the loopback proxy port.
         ("kern-agent", "127.0.0.1", PROXY_PORT, "reachable", "agent to egress proxy"),
         ("kern-agent", "127.0.0.1", ADMIN_API_PORT, "blocked", "agent to admin API"),
-        ("kern-agent", "127.0.0.1", WORKSPACE_PORT, "blocked", "agent to Workspace service"),
         ("kern-agent", EXTERNAL_PROBE_HOST, 443, "blocked", "agent direct egress"),
         ("kern-agent", EXTERNAL_PROBE_HOST, 53, "blocked", "agent direct DNS"),
         ("kern-admin", EXTERNAL_PROBE_HOST, 443, "blocked", "admin service egress"),
         ("kern-workspace", EXTERNAL_PROBE_HOST, 443, "blocked", "Workspace service egress"),
         ("kern-embedding", EXTERNAL_PROBE_HOST, 443, "blocked", "embedding service egress"),
-        ("kern-admin", "127.0.0.1", WORKSPACE_PORT, "reachable", "admin to Workspace service"),
         ("kern-agent-network", EXTERNAL_PROBE_HOST, 443, "blocked", "agent-network egress"),
         (
             "kern-agent-network",

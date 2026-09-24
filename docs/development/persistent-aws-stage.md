@@ -107,7 +107,7 @@ turns merely to repeat the admission invariant.
 
 All agent turns use the least expensive exposed options: Codex uses
 `gpt-6-luna` with `high` effort, Claude Code uses `sonnet` with `high`
-effort, Grok uses `grok-4.6` with `high` effort, and Hermes uses
+effort, Grok uses `grok-4.7` with `high` effort, and Hermes uses
 `qwen.qwen3-coder-next` with `high` effort.
 This includes concurrency,
 steering, recovery, and the MCP catalog check. Every runtime asks its agent to

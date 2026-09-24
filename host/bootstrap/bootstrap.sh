@@ -11,7 +11,7 @@ CLAUDE_CODE_VERSION=2.1.280
 # Grok Build, xAI's coding agent. The npm package is a JS trampoline plus a
 # per-platform optional dependency carrying a brotli-compressed binary; see
 # docs/architecture/xai-integration.md for the upgrade review checklist.
-GROK_CLI_VERSION=1.0.34
+GROK_CLI_VERSION=1.0.40
 HERMES_AGENT_VERSION=0.18.2
 FASTEMBED_VERSION=0.8.0
 FASTER_WHISPER_VERSION=1.2.1
@@ -55,7 +55,6 @@ PG_MAJOR=14
 # live /etc/passwd at the end of this script).
 @SERVICE_ACCOUNT_CONSTANTS@
 PROXY_PORT=@PROXY_PORT@
-WORKSPACE_PORT=@WORKSPACE_PORT@
 
 # Persistent volume layout. The admin volume is durable across redeploys, so
 # the admin-state Postgres data directory and proxy-owned mutable state live
@@ -1199,7 +1198,7 @@ use_leader = false
 # Grok 1.0.5 separately injects the hosted x_search capability when the model
 # advertises backend search; keep that X-only capability on. The proxy still
 # denies web search and every hosted tool outside its explicit xAI/X allowlist.
-[model."grok-4.6"]
+[model."grok-4.7"]
 supports_backend_search = true
 
 # The only MCP server Grok may inherit is Kern's bundled-tools shim. Keeping
@@ -1494,8 +1493,6 @@ $(cat /tmp/kern_cloudflare_rules)
     oif lo meta skuid "kern-agent" drop
     oif lo ct state established,related meta skuid "kern-workspace" accept
     oif lo meta skuid "kern-workspace" drop
-    oif lo tcp dport $WORKSPACE_PORT meta skuid "kern-admin" accept
-    oif lo tcp dport $WORKSPACE_PORT drop
     oif lo meta skuid "kern-agent-network" drop
     oif lo accept
     ct state established,related accept
@@ -1828,7 +1825,7 @@ Slice=kern_workspace.slice
 UMask=0077
 RuntimeDirectory=kern-workspace
 RuntimeDirectoryMode=0755
-# Browser handlers can hold a TCP socket while opening an admin Unix socket.
+# Browser handlers can hold a Unix socket while opening the admin Unix socket.
 LimitNOFILE=4096
 Environment=PYTHONPATH=/opt/kern-host
 WorkingDirectory=/opt/kern-host

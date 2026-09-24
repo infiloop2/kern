@@ -68,10 +68,10 @@ class AgentChatBackendTests(unittest.TestCase):
                         "claude-sonnet-5": ["high", "max", "ultracode"],
                     },
                     "grok": {
-                        "grok-4.6": ["xhigh", "high"],
+                        "grok-4.7": ["xhigh", "high"],
                     },
                     "grok-2": {
-                        "grok-4.6": ["xhigh", "high"],
+                        "grok-4.7": ["xhigh", "high"],
                     },
                     "hermes": {
                         "deepseek.v3.2": ["high"],

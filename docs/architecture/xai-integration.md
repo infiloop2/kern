@@ -292,8 +292,9 @@ and successful S3 MP4 download (1,167,970 bytes). All captured video API
 responses reported `x-zero-data-retention: true`; the operator retained
 Opt out and confirmed playback. This verifies the laptop injection protocol,
 not deployment of Kern's implementation or an independent retention audit.
-The bootstrap now pins 1.0.34; historical ACP observations below identify the
-older version on which they were originally measured. The storage API is
+The bootstrap now pins 1.0.40; the video storage flow above was last verified
+on 1.0.34, and historical ACP observations below identify the older version
+on which they were originally measured. The storage API is
 documented in [Admin API](../api/AdminAPI.md#grok-video-storage); storage behavior
 is described under [Video storage settings](#video-storage-settings). AWS setup
 and the required download allowlist are in the in-product integration guide.
@@ -588,9 +589,9 @@ Two layers, and only the first is load-bearing:
    is any `search_parameters` that is not an explicit `mode: "off"`.
 2. **Grok's client posture.** The launcher passes `--disable-web-search`
    unconditionally, removing the client web-search and fetch tools. The
-   root-owned requirements set `grok-4.6`'s
-   `supports_backend_search = true`, which makes Grok 1.0.5 declare the
-   separately allowed hosted `x_search` tool. The flag is defence in depth for
+   root-owned requirements set `grok-4.7`'s
+   `supports_backend_search = true`, which lets Grok declare the separately
+   allowed hosted `x_search` tool. The flag is defence in depth for
    web access, not its enforcement — the agent has a shell and could run
    `grok` itself without it. See [Why the launcher is not the
    enforcement](#why-the-launcher-is-not-the-enforcement).
@@ -695,7 +696,7 @@ renders it for this integration.
 The integration has an account card like Codex's: it shows the linked account,
 its status, the live coding-data opt-out when available, and the
 device-login button. Grok is independently selectable in each task surface;
-the current pinned matrix is `grok-4.6` with
+the current pinned matrix is `grok-4.7` with
 `xhigh`/`high` reasoning effort.
 
 ### Subscription usage, and why the top bar usually shows none
@@ -798,10 +799,12 @@ notification first, then interrupts and reaps the whole thread scope. If
 only that exact saved mapping and asks the operator to retry; the next turn
 starts a fresh Grok session while the durable Kern transcript remains visible.
 
-The authenticated catalog offers `grok-4.6` with
-`xhigh`/`high`. `grok-4.6` is a family alias that currently
-resolves to `grok-4.6-build`; xAI offers no versioned alternative, so this is a
-documented divergence from Kern's normal exact-model rule.
+The authenticated catalog offers `grok-4.7` with `xhigh`/`high`. Grok Build
+1.0.40 advertises `grok-4.7` in its authenticated ACP model list and selects
+it by default. xAI documents the [release](https://x.ai/build/changelog) and
+the [model id and effort levels](https://docs.x.ai/developers/models/grok-4.7).
+Recorded `grok-4.6` threads remain readable, but must switch to an offered
+model before starting another turn.
 
 ## Upgrade review checklist
 

@@ -1,10 +1,12 @@
 """Task-focused recall and its diagnostic evidence."""
 from contextlib import ExitStack
 import json
+import re
 import unittest
 from unittest.mock import patch
 
 from host.runtime.admin_api import conversation_history, threads
+from host.runtime.host_inference import typesafe
 from host.runtime.workspace import memory
 
 
@@ -372,6 +374,52 @@ class TaskRecallTests(unittest.TestCase):
         self.assertEqual(details[0], "Jev response model: jev-latest.")
         self.assertIn("memory relevance 0.010000; Jev score 0.010", details[1])
         self.assertIn("memory relevance 0.060000; Jev score 0.600", details[-1])
+
+    def test_jev_questions_bind_each_candidate_through_provider_transport(self):
+        candidates = [
+            {
+                "page_id": f"guide-{index}",
+                "description": f"Guidance for task {index}",
+                "content": "Private memory body",
+            }
+            for index in range(memory.CANDIDATE_LIMIT)
+        ]
+        outgoing = {}
+        original_questions = {}
+
+        def transport(_method, _url, **kwargs):
+            outgoing.update(json.loads(kwargs["data"]))
+            return json.dumps({
+                "model": "jev-latest",
+                "answers": {
+                    candidate["id"]: {"type": "noul", "noul": index / 100}
+                    for index, candidate in enumerate(outgoing["state"]["candidates"])
+                },
+            }).encode()
+
+        def judge(state, questions, *, timeout_seconds):
+            original_questions.update(questions)
+            return typesafe.judge(
+                api_key="test-key", model="jev-latest", state=state,
+                questions=questions, timeout_seconds=timeout_seconds, transport=transport,
+            )
+
+        with patch.object(memory, "judge", side_effect=judge):
+            memory._add_jev_relevance_scores(candidates, query="repair a service", details=[])
+
+        self.assertEqual(outgoing["questions"], original_questions)
+        self.assertEqual(outgoing["state"]["task_query"], "repair a service")
+        for index, candidate in enumerate(outgoing["state"]["candidates"]):
+            with self.subTest(candidate=candidate["id"]):
+                question = outgoing["questions"][candidate["id"]]
+                self.assertEqual(question["type"], "noul")
+                self.assertEqual(re.findall(r"\bq\d+\b", question["instructions"]), [candidate["id"]])
+                self.assertIn("state.candidates", question["instructions"])
+                self.assertIn("state.task_query", question["instructions"])
+                self.assertEqual(candidate["description"], candidates[index]["description"])
+                self.assertEqual(candidates[index]["jev_score"], index / 100)
+        self.assertNotIn("Private memory body", json.dumps(outgoing))
+        self.assertNotIn("page_id", json.dumps(outgoing))
 
     def test_jev_scores_select_top_five_and_invalid_results_use_local_order(self):
         candidates = [
