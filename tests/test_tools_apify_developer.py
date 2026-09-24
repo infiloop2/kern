@@ -120,13 +120,12 @@ class ApifyDeveloperTests(unittest.TestCase):
         return [c for c in self.provider.calls if c[0] != "GET"]
 
     def pricing_input(self):
-        return {"actor_id": ACTOR, "effective_at": (datetime.now(timezone.utc) + timedelta(days=15)).isoformat(),
+        return {"actor_id": ACTOR,
                 "minimum_run_budget_usd": 0.01,
                 "events": [{"name": "result", "title": "Saved result", "description": "One saved row",
                             "price_usd": 0.001, "primary": True, "one_time": False}]}
 
-    def test_pricing_approval_preserves_history_and_only_writes_pricing(self):
-        history = copy.deepcopy(self.provider.actor["pricingInfos"])
+    def test_pricing_approval_sends_only_the_approved_new_period(self):
         result = self.execute("set_monetization", self.pricing_input())
         self.assertEqual(self.writes(), [])
         self.assertIn("SINGLE", result.summary)
@@ -134,15 +133,17 @@ class ApifyDeveloperTests(unittest.TestCase):
         self.assertIsInstance(approved, ApprovalExecuted)
         write = self.writes()[0]
         self.assertEqual(set(write[3]), {"pricingInfos"})
-        self.assertEqual(write[3]["pricingInfos"][:-1], history)
-        self.assertEqual(write[3]["pricingInfos"][-1]["apifyMarginPercentage"], 0.2)
+        self.assertEqual(len(write[3]["pricingInfos"]), 1)
+        self.assertEqual(write[3]["pricingInfos"][0]["apifyMarginPercentage"], 0.2)
+        self.assertEqual({k: v for k, v in write[3]["pricingInfos"][0].items() if k not in ("createdAt", "startedAt")},
+                         self.api.approvals.get(result.approval_id).payload["pricing_entry"])
         self.assertEqual(self.provider.calls[-1][0], "GET")
         self.assertFalse(self.provider.actor["isPublic"])
         readback = self.execute("get_monetization", {"actor_id": ACTOR})
         assert_matches_output_schema(self, dev.MANIFEST, "get_monetization", readback)
-        self.assertEqual(len(json.loads(readback.result["pricing_json"])), 2)
+        self.assertEqual(len(json.loads(readback.result["pricing_json"])), 1)
 
-    def test_sensitive_provider_pricing_never_reaches_approval_assessment(self):
+    def test_provider_history_never_reaches_approval_or_update(self):
         for extra in (
             {"pricingPerEvent": {"actorChargeEvents": {"old": {"eventTitle": TOKEN}}}},
             {"pricingPerEvent": {"actorChargeEvents": {"old": {"eventDescription": "Bearer historical-token"}}}},
@@ -157,7 +158,7 @@ class ApifyDeveloperTests(unittest.TestCase):
                 result = self.execute("set_monetization", self.pricing_input())
                 self.assertIsInstance(result, ActionPendingApproval)
                 record = self.api.approvals.get(result.approval_id)
-                self.assertEqual(set(record.payload), {"action", "account_id", "input", "pricing_entry", "listing_digest"})
+                self.assertEqual(set(record.payload), {"action", "account_id", "input", "pricing_entry"})
                 serialized = json.dumps(record.payload)
                 for marker in (TOKEN, "Bearer historical-token", "ghp_TEST_HISTORICAL_SECRET", "customer@example.com", "providerMetadata"):
                     self.assertNotIn(marker, serialized)
@@ -165,7 +166,8 @@ class ApifyDeveloperTests(unittest.TestCase):
                 self.assertIn("pricingPerEvent", record.payload["pricing_entry"])
                 self.assertEqual(self.provider.actor["pricingInfos"], [original])
                 self.assertIsInstance(self.approve(result), ApprovalExecuted)
-                self.assertEqual(self.writes()[-1][3]["pricingInfos"][:-1], [original])
+                self.assertEqual({k: v for k, v in self.writes()[-1][3]["pricingInfos"][0].items() if k not in ("createdAt", "startedAt")},
+                                 record.payload["pricing_entry"])
 
     def test_pricing_new_text_uses_parameter_guard_before_approval(self):
         for field in ("title", "description"):
@@ -212,8 +214,8 @@ class ApifyDeveloperTests(unittest.TestCase):
             self.assertIsInstance(self.execute("set_monetization", values), ActionFailed)
         self.assertEqual(self.provider.calls, [])
 
-    def test_pricing_stale_account_owner_history_and_expired_approval(self):
-        for change in ("account", "owner", "history", "expired"):
+    def test_pricing_account_and_owner_rechecked(self):
+        for change in ("account", "owner"):
             with self.subTest(change=change):
                 self.provider = Provider()
                 self.mock.stop()
@@ -225,34 +227,96 @@ class ApifyDeveloperTests(unittest.TestCase):
                     self.provider.account = OTHER
                 elif change == "owner":
                     self.provider.actor["userId"] = OTHER
-                elif change == "history":
-                    self.provider.actor["pricingInfos"][0]["apifyMarginPercentage"] = 0.3
-                if change == "expired":
-                    with patch.object(dev.pricing, "now", return_value=datetime.now(timezone.utc) + timedelta(days=16)):
-                        approved = self.approve(result)
-                else:
-                    approved = self.approve(result)
+                approved = self.approve(result)
                 self.assertIsInstance(approved, ActionFailed)
                 self.assertEqual(self.writes(), [])
         self.mock.stop()
 
-    def test_pricing_missing_margin_future_record_and_public_notice(self):
-        for mode in ("missing", "empty", "margin", "future", "notice"):
-            self.provider.actor = Provider().actor
-            if mode == "missing":
-                del self.provider.actor["pricingInfos"]
-            elif mode == "empty":
-                self.provider.actor["pricingInfos"] = []
-            elif mode == "margin":
-                del self.provider.actor["pricingInfos"][0]["apifyMarginPercentage"]
-            elif mode == "future":
-                self.provider.actor["pricingInfos"][0]["startedAt"] = self.pricing_input()["effective_at"]
-            else:
-                self.provider.actor["isPublic"] = True
-            values = self.pricing_input()
-            values["effective_at"] = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
-            self.assertIsInstance(self.execute("set_monetization", values), ActionFailed)
-        self.assertEqual(self.writes(), [])
+    def test_pricing_does_not_require_previous_records_or_margin(self):
+        for mode in ("missing", "null", "empty", "margin", "large"):
+            with self.subTest(mode=mode):
+                self.provider.actor = Provider().actor
+                if mode == "missing":
+                    del self.provider.actor["pricingInfos"]
+                elif mode == "null":
+                    self.provider.actor["pricingInfos"] = None
+                elif mode == "empty":
+                    self.provider.actor["pricingInfos"] = []
+                elif mode == "margin":
+                    del self.provider.actor["pricingInfos"][0]["apifyMarginPercentage"]
+                else:
+                    self.provider.actor["pricingInfos"] *= 1000
+                result = self.execute("set_monetization", self.pricing_input())
+                self.assertIsInstance(result, ActionPendingApproval)
+                self.assertIsInstance(self.approve(result), ApprovalExecuted)
+                self.assertEqual(len(self.writes()[-1][3]["pricingInfos"]), 1)
+                self.assertEqual(self.writes()[-1][3]["pricingInfos"][0]["apifyMarginPercentage"], 0.2)
+
+    def test_pricing_starts_at_execution_even_after_delayed_approval(self):
+        for public in (False, True):
+            with self.subTest(public=public):
+                self.provider.actor["isPublic"] = public
+                pending = self.execute("set_monetization", self.pricing_input())
+                entry = self.api.approvals.get(pending.approval_id).payload["pricing_entry"]
+                self.assertNotIn("startedAt", entry)
+                executed_at = datetime.now(timezone.utc) + timedelta(days=3)
+                with patch.object(dev.pricing, "now", return_value=executed_at):
+                    self.assertIsInstance(self.approve(pending), ApprovalExecuted)
+                written = self.writes()[-1][3]["pricingInfos"][0]
+                self.assertEqual(written["startedAt"], executed_at.isoformat(timespec="milliseconds"))
+                self.assertEqual(written["createdAt"], written["startedAt"])
+
+    def test_pricing_provider_rejection_does_not_schedule_or_retry(self):
+        pending = self.execute("set_monetization", self.pricing_input())
+        writes = []
+        def reject(method, url, **kwargs):
+            if method == "PUT":
+                writes.append(json.loads(kwargs["data"]))
+                raise WebRequestError("Provider rejects immediate pricing", status=400)
+            return self.provider(method, url, **kwargs)
+        with patch.object(dev, "request_bytes", reject):
+            self.assertIsInstance(self.approve(pending), ActionFailed)
+        self.assertEqual(len(writes), 1)
+
+    def test_monetization_read_returns_current_and_next_not_history(self):
+        past = Provider().actor["pricingInfos"][0]
+        current = dict(past, startedAt="2025-02-01T00:00:00Z")
+        future = dict(past, startedAt=(datetime.now(timezone.utc) + timedelta(days=15)).isoformat())
+        # Provider order is not part of the read contract.
+        self.provider.actor["pricingInfos"] = [future, past, current]
+        result = self.execute("get_monetization", {"actor_id": ACTOR})
+        self.assertEqual(json.loads(result.result["pricing_json"]), [current, future])
+        for missing in (None, []):
+            self.provider.actor["pricingInfos"] = missing
+            result = self.execute("get_monetization", {"actor_id": ACTOR})
+            self.assertEqual(json.loads(result.result["pricing_json"]), [])
+
+    def test_pricing_readback_ignores_old_periods_and_platform_metadata(self):
+        pending = self.execute("set_monetization", self.pricing_input())
+        def with_history(method, url, **kwargs):
+            response = self.provider(method, url, **kwargs)
+            if method == "PUT":
+                self.provider.actor["pricingInfos"][0]["apifyMarginPercentage"] = 0.2
+                self.provider.actor["pricingInfos"].insert(0, Provider().actor["pricingInfos"][0])
+            return response
+        with patch.object(dev, "request_bytes", with_history):
+            self.assertIsInstance(self.approve(pending), ApprovalExecuted)
+        self.assertEqual(len(self.writes()[0][3]["pricingInfos"]), 1)
+
+    def test_pricing_readback_rejects_a_retained_future_price(self):
+        pending = self.execute("set_monetization", self.pricing_input())
+        def retained_future(method, url, **kwargs):
+            response = self.provider(method, url, **kwargs)
+            if method == "PUT":
+                future = copy.deepcopy(self.provider.actor["pricingInfos"][0])
+                future["startedAt"] = (datetime.now(timezone.utc) + timedelta(days=15)).isoformat()
+                self.provider.actor["pricingInfos"].append(future)
+            return response
+        with patch.object(dev, "request_bytes", retained_future):
+            result = self.approve(pending)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("do not repeat", result.error)
+        self.assertEqual(len(self.writes()), 1)
 
     def test_pricing_readback_mismatch_is_not_success_or_retried(self):
         result = self.execute("set_monetization", self.pricing_input())

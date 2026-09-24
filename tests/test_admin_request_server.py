@@ -11,6 +11,22 @@ from host.runtime.admin_api import request_server
 
 
 class RequestServerTests(unittest.TestCase):
+    def test_workspace_tcp_snapshot_reports_counts_without_client_details(self):
+        sample = (
+            "  sl  local_address rem_address st tx_queue rx_queue\n"
+            "   0: 0100007F:1D1A 00000000:0000 0A 00000000:00000004\n"
+            "   1: 0100007F:AAAA 0100007F:1D1A 02 00000000:00000000\n"
+            "   2: 0100007F:1D1A 0100007F:AAAA 01 00000000:00000000\n"
+            "   3: 0100007F:1D1A 0100007F:BBBB 09 00000000:00000000\n"
+        )
+        with patch.object(request_server.Path, "read_text", return_value=sample):
+            self.assertEqual(request_server.workspace_connection_snapshot(), {
+                "workspace_pending_connections": 4,
+                "workspace_connecting": 1,
+                "workspace_established": 1,
+                "workspace_last_ack": 1,
+            })
+
     def setUp(self):
         self.started = threading.Event()
         self.release = threading.Event()

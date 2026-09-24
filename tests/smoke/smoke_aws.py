@@ -203,7 +203,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("list_actors", {"limit": 1}),
         ("get_actor", {"actor_id": "a" * 17}),
         ("get_monetization", {"actor_id": "a" * 17}),
-        ("set_monetization", {"actor_id": "a" * 17, "effective_at": "2099-01-01T00:00:00Z",
+        ("set_monetization", {"actor_id": "a" * 17,
                               "minimum_run_budget_usd": 0.01, "events": [{"name": "result", "title": "Saved result",
                               "description": "Never configured by credential-free smoke.", "primary": True,
                               "one_time": False, "price_usd": 0.001}]}),

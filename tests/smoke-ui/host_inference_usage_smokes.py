@@ -27,14 +27,14 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     typesafe = cards.filter(has_text="TypeSafe")
     expect(openai).to_be_visible()
     expect(typesafe).to_be_visible()
-    expect(openai).to_contain_text("$0.001234")
-    expect(typesafe).to_contain_text("$0.000084")
+    expect(openai).to_contain_text("$0.0012")
+    expect(typesafe).to_contain_text("$0.0001")
     expect(openai).to_have_attribute(
         "aria-label",
         re.compile(r"estimated month-to-date.*including 1.0k cached.*11 of 12 responses priced"),
     )
     expect(typesafe).to_have_attribute("aria-label", re.compile(r"estimated month-to-date"))
-    expect(toggle).to_contain_text("$0.001318 MTD")
+    expect(toggle).to_contain_text("$0.0013 MTD")
 
     widths = panel.evaluate("element => ({client: element.clientWidth, scroll: element.scrollWidth})")
     if widths["scroll"] > widths["client"] + 1:
@@ -46,14 +46,12 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
         "**/v1/host-inference/providers",
         lambda route: route.fulfill(status=500, json={"error": "usage unavailable"}),
     )
-    with page.expect_request(lambda request: "/v1/agent-runtime/refresh" in request.url):
-        runtime_toggle.click()
+    runtime_toggle.click()
     expect(runtime_toggle).to_have_attribute("aria-expanded", "true")
     expect(page.locator("#runtime-overview-runtimes-panel .runtime-summary").first).to_be_visible()
-    expect(toggle).to_contain_text("$0.001318 MTD")
+    expect(toggle).to_contain_text("$0.0013 MTD")
     page.unroute("**/v1/host-inference/providers")
-    with page.expect_request(lambda request: "/v1/agent-runtime/refresh" in request.url):
-        toggle.click()
+    toggle.click()
     expect(cards.first).to_be_visible()
 
     openai.click()

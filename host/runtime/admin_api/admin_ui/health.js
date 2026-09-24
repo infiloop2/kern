@@ -2,7 +2,7 @@
 
 import { api } from "./api.js";
 import {
-  $, badge, bedrockUsage, clampPercent, esc, formatTokenCount, gib, inlineMessage,
+  $, badge, bedrockUsage, clampPercent, costUnits, esc, formatCost, formatTokenCount, gib, inlineMessage,
   notice, setHtml, RUNTIME_PROVIDERS,
 } from "./helpers.js";
 import { renderIntegrationAccounts, setBedrockCredentialMetadata } from "./network.js";
@@ -187,9 +187,19 @@ function renderProviderAccounts(response) {
   renderIntegrationAccounts();
 }
 
+let pendingRuntimeAccountRefresh = null;
+
+function refreshRuntimeAccounts() {
+  if (!pendingRuntimeAccountRefresh) {
+    pendingRuntimeAccountRefresh = api("POST", "/v1/agent-runtime/refresh", {})
+      .finally(() => { pendingRuntimeAccountRefresh = null; });
+  }
+  return pendingRuntimeAccountRefresh;
+}
+
 export async function refreshProviderUsage() {
   const [response, hostInference] = await Promise.all([
-    api("POST", "/v1/agent-runtime/refresh", {}),
+    refreshRuntimeAccounts(),
     api("GET", "/v1/host-inference/providers").catch(() => null),
     loadToolUsage(),
   ]);
@@ -258,7 +268,7 @@ function renderRuntimeOverview() {
     ? `${running} agent turn${running === 1 ? "" : "s"} running`
     : "All agent runtimes idle";
   const hostAi = hostInferenceGroupSummary();
-  const toolSpend = latestToolUsage ? `${formatToolCost(toolCostUnits(latestToolUsage.month_to_date))} MTD` : "Unavailable";
+  const toolSpend = latestToolUsage ? `${formatCost(latestToolUsage.month_to_date)} MTD` : "Unavailable";
   const toolStatus = toolUsageStale ? " · stale" : "";
   setHtml(container, `
     <div class="runtime-overview-group" data-overview-group="runtimes">
@@ -414,7 +424,7 @@ function hostInferenceUsage(provider) {
   const amount = raw && typeof raw === "object" ? Number(raw.month_to_date) : NaN;
   if (!Number.isFinite(amount)) return null;
   const currency = !raw.currency || raw.currency === "USD" ? "$" : `${raw.currency} `;
-  const cost = formatHostInferenceCost(amount, currency);
+  const cost = formatCost(amount, currency);
   return {
     cost,
     inputTokens: Number(raw.input_tokens) || 0,
@@ -426,35 +436,13 @@ function hostInferenceUsage(provider) {
   };
 }
 
-function formatHostInferenceCost(amount, currency = "$") {
-  let decimals = 2;
-  if (amount > 0 && amount < 0.0001) decimals = 8;
-  else if (amount > 0 && amount < 0.01) decimals = 6;
-  const formatted = amount === 0
-    ? amount.toFixed(2)
-    : amount.toFixed(decimals).replace(/0+$/, "").replace(/\.$/, "");
-  return `${currency}${formatted}`;
-}
-
-function toolCostUnits(value) {
-  const [whole, fraction = ""] = String(value).split(".");
-  return BigInt(whole) * 1000000000n + BigInt((fraction + "000000000").slice(0, 9));
-}
-
-function formatToolCost(units) {
-  if (units === 0n) return "$0.00";
-  const whole = units / 1000000000n;
-  const fraction = String(units % 1000000000n).padStart(9, "0").replace(/0+$/, "");
-  return `$${whole}${fraction ? `.${fraction}` : ""}`;
-}
-
 function hostInferenceGroupSummary() {
   const amounts = latestHostInferenceProviders
     .map(provider => Number(provider?.usage?.month_to_date))
     .filter(Number.isFinite);
   if (!amounts.length) return { text: "No usage", label: "No metered usage yet" };
   const total = amounts.reduce((sum, amount) => sum + amount, 0);
-  const text = `${formatHostInferenceCost(total)} MTD`;
+  const text = `${formatCost(total)} MTD`;
   return { text, label: `Estimated month-to-date ${text}` };
 }
 
@@ -490,11 +478,11 @@ function hostInferenceSummary(providerName, label, guideId) {
 
 function toolUsagePanel() {
   if (!latestToolUsage) return '<p class="tool-spend-note">Tool spend is unavailable. Reopen to retry.</p>';
-  const totals = tool => toolCostUnits(tool.month_to_date);
+  const totals = tool => costUnits(tool.month_to_date);
   const tools = [...(latestToolUsage.tools || [])];
   tools.sort((a, b) => totals(a) === totals(b) ? a.display_name.localeCompare(b.display_name) : totals(a) > totals(b) ? -1 : 1);
   const cards = tools.map(tool => {
-    const value = formatToolCost(totals(tool));
+    const value = formatCost(tool.month_to_date);
     const detail = !tool.enabled ? "Disabled" : totals(tool) > 0n ? "Reported spend" : "Reporting costs";
     return `<button class="runtime-summary runtime-summary-metered tool-spend-card" data-action="open-provider" data-provider="tool:${esc(tool.tool_id)}" aria-label="${esc(`${tool.display_name}: ${value} month-to-date; ${detail}. Open integration guide`)}">
       <span class="runtime-summary-name"><span class="runtime-summary-copy"><span>${esc(tool.display_name)}</span><span class="runtime-state">${esc(detail)}</span></span></span>

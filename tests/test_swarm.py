@@ -1,6 +1,7 @@
 """Swarm lifecycle annotations and bounded persistence."""
 from __future__ import annotations
 
+import json
 import threading
 import unittest
 from http import HTTPStatus
@@ -12,7 +13,7 @@ from host.runtime.admin_api import service as admin_api
 from host.runtime.admin_api import threads as admin_threads
 from host.runtime.core import state
 from host.runtime.core.state import swarm
-from host.runtime.host_inference import client
+from host.runtime.host_inference import client, typesafe
 
 class SwarmAnnotationsTests(unittest.TestCase):
     def test_task_uses_prepared_context_and_task_contract(self) -> None:
@@ -25,10 +26,11 @@ class SwarmAnnotationsTests(unittest.TestCase):
         self.assertIn('CURRENT REQUEST\nReview this release', model.call_args.args[0])
         self.assertEqual(model.call_args.kwargs, {'purpose': 'swarm_task'})
         self.assertEqual(model.call_args.args[1]['required'], ['task'])
+        self.assertEqual(model.call_args.args[1]['properties']['task']['maxLength'], 50)
         save.assert_called_once_with('thread-1', 3, 'Review release')
 
     def test_invalid_task_never_saves(self) -> None:
-        for result in ({'task': ''}, {'task': 'x' * 101}, {'task': True}):
+        for result in ({'task': ''}, {'task': 'x' * 51}, {'task': True}):
             with (patch.object(client, 'openai_text_completion', return_value=result),
                   patch.object(state, 'save_swarm_task') as save,
                   self.assertRaises(ValueError)):
@@ -40,14 +42,28 @@ class SwarmAnnotationsTests(unittest.TestCase):
             {'source': 'user', 'text': 'Deploy'},
             {'source': 'agent', 'text': 'Which account should I use?'},
         ]}
-        for choice, expected in [('yes', True), ('no', False)]:
+        for probability, expected in [(0.8, True), (0.2, False), (0.5, False)]:
+            def judge(state_value, questions):
+                def transport(method, url, **kwargs):
+                    request = json.loads(kwargs['data'])
+                    self.assertEqual(request['questions'], questions)
+                    return json.dumps({
+                        'model': 'jev-latest',
+                        'answers': {'needs_human': {'type': 'noul', 'noul': probability}},
+                    }).encode()
+
+                return typesafe.judge(
+                    api_key='test', model='jev-latest', state=state_value,
+                    questions=questions, transport=transport,
+                )
+
             with (patch.object(state, 'swarm_ai_context', return_value=context),
-                  patch.object(client, 'typesafe_jev_judgment', return_value={'answers': {'needs_human': {'choice': choice}}}) as jev,
+                  patch.object(client, 'typesafe_jev_judgment', side_effect=judge) as jev,
                   patch.object(state, 'save_swarm_needs_human') as save):
                 swarm_annotations.assess_needs_human('thread-1', 3)
             save.assert_called_once_with('thread-1', 3, expected)
             self.assertIn('Which account', jev.call_args.args[0]['recent_turn'])
-            self.assertEqual(jev.call_args.args[1]['needs_human']['type'], 'choice')
+            self.assertEqual(jev.call_args.args[1]['needs_human']['type'], 'noul')
 
     def test_running_or_missing_final_reply_is_unassessed(self) -> None:
         for context in (None, {'run_status': 'running', 'messages': []},

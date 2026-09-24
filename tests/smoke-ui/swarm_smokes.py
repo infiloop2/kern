@@ -41,6 +41,21 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     first = page.locator('.swarm-figure[data-thread-id="app-1"]')
     expect(first.locator('.swarm-agent-task')).to_have_text('Prepare the next release')
     expect(first.locator('.swarm-agent-purpose')).to_have_text('Keep the project moving')
+    task_layout = first.evaluate("""figure => {
+      const task = figure.querySelector('.swarm-agent-task');
+      const original = task.textContent;
+      task.textContent = 'Document theming, add tests, and open the pull PR';
+      const layout = {
+        clamp: getComputedStyle(task).webkitLineClamp,
+        fits: task.scrollHeight <= task.clientHeight,
+        insideCard: figure.querySelector('.swarm-agent-label').getBoundingClientRect().bottom
+          <= figure.getBoundingClientRect().bottom,
+      };
+      task.textContent = original;
+      return layout;
+    }""")
+    if task_layout != {'clamp': '3', 'fits': True, 'insideCard': True}:
+        raise AssertionError(f"49-character Swarm task was clipped: {task_layout}")
     first.click()
     expect(page.locator('#swarm-detail')).to_contain_text('Prepare the next release')
     expect(page.locator('#swarm-bubbles')).to_contain_text('Prepare the next release')

@@ -451,7 +451,7 @@ class ApifyDeveloperTool(Tool):
             account = _account(api)
             if action == "get_monetization":
                 actor = _actor(api, values["actor_id"], account)
-                return _executed({"actor_id": values["actor_id"], "pricing_json": _json(pricing.history(actor)).decode("ascii"),
+                return _executed({"actor_id": values["actor_id"], "pricing_json": _json(pricing.current_and_scheduled(actor)).decode("ascii"),
                     "picture_url": _text(actor.get("pictureUrl"), 2048)}, api)
             if action == "get_account_usage":
                 usage = _object(_request(api, "GET", "/users/me/usage/monthly"))
@@ -534,13 +534,9 @@ class ApifyDeveloperTool(Tool):
                 actor = _actor(api, values["actor_id"], account)
                 target = values["actor_id"]
                 if action == "set_monetization":
-                    # The approval also reaches the configured risk assessor.
-                    # Include only the new record, never raw provider history.
-                    # The listing digest binds the unchanged history locally.
-                    payload["pricing_entry"] = pricing.proposal(actor, values)["pricingInfos"][-1]
+                    payload["pricing_entry"] = pricing.proposal(values)["pricingInfos"][-1]
                     if len(_json(payload)) > 48 * 1024:
                         raise ValueError("Pricing proposal exceeds the approval size limit.")
-                    payload["listing_digest"] = _digest(_listing_state(actor))
                 if action == "create_version":
                     versions = actor.get("versions", [])
                     if not isinstance(versions, list) or any(isinstance(v, dict) and v.get("versionNumber") == values["version"] for v in versions):
@@ -559,9 +555,9 @@ class ApifyDeveloperTool(Tool):
                     payload["listing_digest"] = _digest(_listing_state(actor))
             summary = f"Apify {action} on {target} in account {account}."
             if action == "set_monetization":
-                summary += (f" Schedule PAY_PER_EVENT from {values['effective_at']}. Prices in payload are USD per SINGLE event. "
+                summary += (" Replace PAY_PER_EVENT pricing immediately when approval executes. Prices in payload are USD per SINGLE event. "
                             f"Minimum permitted run budget ${values['minimum_run_budget_usd']}; not a minimum charge. "
-                            "Review every event and preserved history. No publication, run or payout changes.")
+                            "Review every event and the standard 20% Apify share. Sends one replacement record; previous periods are not preserved by this tool. No publication, run or payout changes.")
             if action == "create_actor":
                 summary += f" Name: {values['name']}. Private, limited permissions."
             if action == "create_version":
@@ -613,17 +609,12 @@ class ApifyDeveloperTool(Tool):
             actor_id = values["actor_id"]
             actor = _actor(api, actor_id, account)
             if action == "set_monetization":
-                if payload.get("listing_digest") != _digest(_listing_state(actor)):
-                    raise ValueError("Actor listing or pricing changed after approval; queue a new approval.")
                 entry = _object(payload.get("pricing_entry"))
-                # Rebuild the proposal from current history and validated input;
-                # retain the reviewed creation timestamp rather than changing it.
-                body = pricing.proposal(actor, values)
-                created = entry.get("createdAt")
-                pricing.timestamp(created)
-                body["pricingInfos"][-1]["createdAt"] = created
-                if entry != body["pricingInfos"][-1]:
+                body = pricing.proposal(values)
+                if entry != body["pricingInfos"][0]:
                     raise ValueError("Pricing approval payload differs from the reviewed inputs.")
+                effective = pricing.now().isoformat(timespec="milliseconds")
+                body["pricingInfos"][0].update(createdAt=effective, startedAt=effective)
                 _request(api, "PUT", f"/actors/{actor_id}", body=body)
                 try:
                     saved = _actor(api, actor_id, account)
@@ -631,7 +622,7 @@ class ApifyDeveloperTool(Tool):
                         raise ValueError("Pricing readback differs.")
                 except Exception:
                     return ActionFailed("Pricing write completed but readback was unavailable or different. Use get_monetization and Console to reconcile; do not repeat the write.")
-                return ApprovalExecuted(f"Verified scheduled pay-per-event pricing for Apify Actor {actor_id} from {values['effective_at']}. No publication or run started; paid billing is not verified.")
+                return ApprovalExecuted(f"Verified current pay-per-event pricing for Apify Actor {actor_id} from {effective}. No publication or run started; paid billing is not verified.")
             if action == "create_version":
                 # POST is create-only; an existing version must fail at the provider as well.
                 versions = actor.get("versions", [])
