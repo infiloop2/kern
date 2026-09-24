@@ -319,6 +319,26 @@ class UpworkTests(unittest.TestCase):
         self.assertIsInstance(result, ApprovalExecuted)
         self.assertEqual(self.client.call.call_args.args[0], "upwork__confirm_preview")
 
+    def test_preview_may_echo_selected_org_as_team_org_without_changing_identity(self):
+        pending = self.submit()
+        self.client.reset_mock()
+        self.client.call.side_effect = [self.job_cost(), self.preview(), self.stored_preview(teamOrgId="org-one"),
+            {"content": [{"type": "text", "text": "Submitted"}]}]
+        result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+        self.assertIsInstance(result, ApprovalExecuted)
+        self.assertEqual(self.client.call.call_args.args[0], "upwork__confirm_preview")
+
+    def test_preview_cannot_switch_to_an_unapproved_team_org(self):
+        pending = self.submit()
+        self.client.reset_mock()
+        self.client.call.side_effect = [self.job_cost(), self.preview(),
+            self.stored_preview(teamOrgId="private-other-org")]
+        result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("team_org_id (different from selected org)", result.error)
+        self.assertNotIn("private-other-org", result.error)
+        self.assertEqual(self.client.call.call_count, 3)
+
     def test_stored_preview_missing_fields_and_alias_collisions_never_confirm(self):
         for field, alias in (("coverLetter", "cover_letter"), ("chargedAmount", "charged_amount"),
                              ("jobReference", "job_reference"), ("connects_cost", "connectsCost")):
