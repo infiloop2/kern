@@ -284,9 +284,14 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
     # An empty object is as inert as an empty list for optional selections.
     unapproved = sorted(key for key in
         set(cast(JSONObject, OPERATIONS["submit_proposal"].input_schema["properties"])) - set(params) - {"org_uid"}
-        if key in values and values[key] not in (None, [], {}, "", 0))
+        if key in values and values[key] not in (None, [], {}, "", 0)
+        # Upwork may repeat the already selected freelancer organization as
+        # teamOrgId. It cannot change the submitting identity when identical.
+        and not (key == "team_org_id" and type(values[key]) is str and values[key] == params["org_uid"]))
     if unapproved:
-        raise ValueError("Upwork added unapproved proposal terms: " + ", ".join(unapproved)
+        names = ["team_org_id (different from selected org)" if key == "team_org_id" else key
+                 for key in unapproved]
+        raise ValueError("Upwork added unapproved proposal terms: " + ", ".join(names)
                          + ". Request a new approval.")
     balance = values.get("connects_balance", cost["connects_balance"])
     if values.get("can_apply", True) is not True or type(values["connects_cost"]) is not int or values["connects_cost"] != cost["connects_cost"] or type(balance) is not int or balance < cast(int, cost["maximum_connects"]):
