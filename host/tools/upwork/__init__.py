@@ -280,9 +280,14 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
     for key, expected in params.items():
         if key != "org_uid" and not validation._json_equal(values[key], expected):
             raise ValueError("Upwork changed the approved proposal. Request a new approval.")
-    for key in set(cast(JSONObject, OPERATIONS["submit_proposal"].input_schema["properties"])) - set(params) - {"org_uid"}:
-        if key in values and values[key] not in (None, [], "", 0):
-            raise ValueError("Upwork added unapproved proposal terms. Request a new approval.")
+    # Report only the fixed schema field names, never their provider values.
+    # An empty object is as inert as an empty list for optional selections.
+    unapproved = sorted(key for key in
+        set(cast(JSONObject, OPERATIONS["submit_proposal"].input_schema["properties"])) - set(params) - {"org_uid"}
+        if key in values and values[key] not in (None, [], {}, "", 0))
+    if unapproved:
+        raise ValueError("Upwork added unapproved proposal terms: " + ", ".join(unapproved)
+                         + ". Request a new approval.")
     balance = values.get("connects_balance", cost["connects_balance"])
     if values.get("can_apply", True) is not True or type(values["connects_cost"]) is not int or values["connects_cost"] != cost["connects_cost"] or type(balance) is not int or balance < cast(int, cost["maximum_connects"]):
         raise ValueError("Upwork changed the approved Connects cost or application eligibility. Request a new approval.")
