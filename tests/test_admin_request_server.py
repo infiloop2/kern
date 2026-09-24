@@ -116,6 +116,25 @@ class RequestServerTests(unittest.TestCase):
         self.release.set()
         first.getresponse().read()
 
+    def test_runtime_refresh_warns_after_its_longer_threshold(self):
+        ident = threading.get_ident()
+        with self.server._diagnostic_lock:
+            self.server._active[ident] = (
+                time.monotonic() - request_server.SLOW_REQUEST_SECONDS - 1,
+                "POST /v1/agent-runtime/refresh",
+            )
+        self.server.service_actions()
+        self.assertFalse(self.reported.is_set())
+
+        with self.server._diagnostic_lock:
+            self.server._active[ident] = (
+                time.monotonic() - request_server.RUNTIME_REFRESH_SLOW_REQUEST_SECONDS - 1,
+                "POST /v1/agent-runtime/refresh",
+            )
+        self.server.service_actions()
+        self.assertTrue(self.reported.wait(2))
+        self.assertEqual(self.records[0][1]["context"]["slow_handlers"], 1)
+
     def test_worker_start_failure_releases_capacity(self):
         a, b = socket.socketpair()
         try:

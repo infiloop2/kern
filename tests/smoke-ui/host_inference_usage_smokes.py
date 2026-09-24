@@ -18,7 +18,7 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(toggle).to_be_visible()
     expect(runtime_toggle).to_be_visible()
     expect(cards.first).to_be_hidden()
-    with page.expect_request(lambda request: "/v1/agent-runtime/refresh" in request.url):
+    with page.expect_request(lambda request: "/v1/host-inference/providers" in request.url):
         toggle.click()
     expect(toggle).to_have_attribute("aria-expanded", "true")
     expect(runtime_toggle).to_have_attribute("aria-expanded", "false")
@@ -40,18 +40,19 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     if widths["scroll"] > widths["client"] + 1:
         raise AssertionError(f"host inference usage panel overflows horizontally: {widths}")
 
-    # A broken Host AI aggregate must leave its last good figures in place and
-    # must not freeze the independent runtime-account refresh.
+    # A broken Host AI aggregate leaves its last good figures in place.
     page.route(
         "**/v1/host-inference/providers",
         lambda route: route.fulfill(status=500, json={"error": "usage unavailable"}),
     )
-    runtime_toggle.click()
+    with page.expect_request(lambda request: "/v1/agent-runtime/refresh" in request.url):
+        runtime_toggle.click()
     expect(runtime_toggle).to_have_attribute("aria-expanded", "true")
     expect(page.locator("#runtime-overview-runtimes-panel .runtime-summary").first).to_be_visible()
+    with page.expect_request(lambda request: "/v1/host-inference/providers" in request.url):
+        toggle.click()
     expect(toggle).to_contain_text("$0.0013 MTD")
     page.unroute("**/v1/host-inference/providers")
-    toggle.click()
     expect(cards.first).to_be_visible()
 
     openai.click()

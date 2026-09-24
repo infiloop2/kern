@@ -111,9 +111,11 @@ def simple_integration_parser(context: str) -> Callable[[dict[str, Any]], Manage
 # next to the integration catalogs so the agent introspection tools serve one
 # uniform reason lookup.
 _PUBLIC_PAGE_FETCH_HINT = (
-    "For a public HTTPS page, check list_bundled_tools for web_fetch. If the operator "
-    "has enabled it, use its fetch_page action; otherwise ask the operator to enable "
-    "Web Fetch in Home > Integrations."
+    "For public HTTPS content, check list_bundled_tools for web_fetch: fetch_page or "
+    "fetch_page_file reads text, download_media saves supported images/videos, and head_url "
+    "shows status and redirect destination. Web Fetch does not need agent-shell custom-domain "
+    "rules. If it is disabled, ask the operator to enable it in Home > Integrations. "
+    "Shell clients still need rules for every redirect host."
 )
 
 _CORE_PROXY_DENIAL_REASONS: tuple[DenialReason, ...] = (

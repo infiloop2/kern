@@ -7,11 +7,12 @@ import socket
 import threading
 import time
 import unittest
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 from host.tools import web_fetch
 from host.tools.web_fetch import BUNDLED_TOOL
-from host.tools.results import ActionExecuted, ActionFailed, StreamingAsset, StreamingAssetError
+from host.tools.results import ActionExecuted, ActionFailed, OpenedStreamingAsset, StreamingAsset, StreamingAssetError
 from test_tools import FakeHostAPI, assert_matches_output_schema
 
 HTML_PAGE = (
@@ -40,8 +41,10 @@ class WebFetchUrlValidationTests(unittest.TestCase):
 
     def test_guide_names_the_shared_fixed_user_agent(self) -> None:
         destination_card = web_fetch.MANIFEST.data_summary.cards[2]
-        self.assertIn("User-Agent: kern-web-fetch/1", destination_card.description)
+        self.assertIn("User-Agent: KernWebFetch/1.0 (https://kernai.cloud)", destination_card.description)
         self.assertIn("shared rather than unique", destination_card.description)
+        self.assertEqual(web_fetch._REQUEST_HEADERS["User-Agent"], web_fetch.FETCH_USER_AGENT)
+        self.assertIn("download_media before requesting a custom Network", web_fetch.MANIFEST.agent_notes)
 
     def assert_rejected(self, url: object) -> None:
         with patch.object(web_fetch, "_fetch_once", side_effect=AssertionError("must not fetch")):
@@ -91,6 +94,7 @@ class WebFetchFetchTests(unittest.TestCase):
         assert_matches_output_schema(self, web_fetch.MANIFEST, "head_url", result)
         assert isinstance(result, ActionExecuted)
         self.assertEqual(result.result["url"], "https://example.com/final")
+        self.assertEqual(result.result["redirect_hosts"], ["example.com"])
         self.assertEqual(result.result["status"], 405)
         self.assertTrue(result.result["headers_truncated"])
         self.assertIn({"name": "x-long", "value": "x" * 1024}, result.result["headers"])
@@ -319,6 +323,60 @@ class WebFetchFetchTests(unittest.TestCase):
             with self.assertRaisesRegex(StreamingAssetError, "supported image or video"):
                 with result.open_stream():
                     pass
+
+    def test_media_429_reports_final_host_and_bounded_retry_delay(self) -> None:
+        hops = [
+            _response(status=302, headers={"location": "https://media.example.org/photo.png"}),
+            _response(status=429, headers={"retry-after": "10"}),
+        ]
+        with patch.object(web_fetch, "_fetch_once", side_effect=hops):
+            result = self.download("https://example.com/photo.png")
+            assert isinstance(result, StreamingAsset)
+            with self.assertRaisesRegex(
+                StreamingAssetError,
+                r"remote host media\.example\.org returned HTTP 429\. Retry after 10 seconds",
+            ):
+                with result.open_stream():
+                    pass
+
+    def test_page_redirects_report_target_hosts_in_order(self) -> None:
+        hops = [
+            _response(status=302, headers={"location": "https://media.example.org/first"}),
+            _response(status=302, headers={"location": "https://cdn.example.net/final"}),
+            _response(),
+        ]
+        with patch.object(web_fetch, "_fetch_once", side_effect=hops):
+            result = self.execute("https://example.com/start")
+        assert isinstance(result, ActionExecuted)
+        self.assertEqual(result.result["url"], "https://cdn.example.net/final")
+        self.assertEqual(result.result["redirect_hosts"], ["media.example.org", "cdn.example.net"])
+
+    def test_media_summary_discloses_redirect_hosts_without_paths_or_queries(self) -> None:
+        @contextmanager
+        def opened():
+            yield OpenedStreamingAsset("image.png", "image/png", 3, io.BytesIO(b"png"), "Downloaded image.")
+
+        response = (
+            "https://upload.example.org/private-path.png?temporary=secret",
+            200, {"content-type": "image/png"}, StreamingAsset(opened), False,
+            ("upload.example.org",),
+        )
+        with patch.object(web_fetch, "_fetch_page", return_value=response):
+            result = self.download("https://example.com/start")
+            assert isinstance(result, StreamingAsset)
+            with result.open_stream() as media:
+                self.assertIn("Source host: example.com", media.summary)
+                self.assertIn("Final host: upload.example.org", media.summary)
+                self.assertIn("Redirect hosts: upload.example.org", media.summary)
+                self.assertNotIn("private-path", media.summary)
+                self.assertNotIn("temporary=secret", media.summary)
+
+    def test_429_does_not_echo_untrusted_retry_header(self) -> None:
+        response = _response(status=429, headers={"retry-after": "tomorrow; secret=abc"})
+        with patch.object(web_fetch, "_fetch_once", return_value=response):
+            result = self.execute()
+        assert isinstance(result, ActionFailed)
+        self.assertEqual(result.error, "The remote host example.com returned HTTP 429.")
 
     def test_download_media_keeps_the_existing_url_guard(self) -> None:
         with patch.object(web_fetch, "_fetch_once", side_effect=AssertionError("must not fetch")):

@@ -971,6 +971,10 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#panel-home")).to_be_visible()
     runtime_toggle = page.locator('[data-overview-group="runtimes"] .runtime-overview-toggle')
     host_ai_toggle = page.locator('[data-overview-group="host-ai"] .runtime-overview-toggle')
+    tools_toggle = page.locator('[data-overview-group="tools"] .runtime-overview-toggle')
+    runtime_refreshes = []
+    page.on("request", lambda request: runtime_refreshes.append(request.url)
+            if "/v1/agent-runtime/refresh" in request.url else None)
     expect(page.locator(".runtime-overview-toggle")).to_have_count(3)
     expect(runtime_toggle).to_be_visible()
     expect(host_ai_toggle).to_be_visible()
@@ -1014,6 +1018,10 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator('[data-overview-group="runtimes"] .runtime-summary').first).to_be_hidden()
     expect(page.locator('[data-overview-group="host-ai"] .runtime-summary').first).to_be_visible()
     expect(host_ai_toggle).to_contain_text("$0.0013 MTD")
+    expect(tools_toggle).to_have_attribute("aria-expanded", "false")
+    tools_toggle.click()
+    expect(tools_toggle).to_have_attribute("aria-expanded", "true")
+    assert len(runtime_refreshes) == 1, "Host AI and Tools must not probe agent runtimes"
     expect(page.locator("#panel-home").get_by_role("heading", name="Agent runtimes")).to_have_count(1)
     expect(page.locator("#panel-home").get_by_text("Provider usage")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Codex login")).to_have_count(0)

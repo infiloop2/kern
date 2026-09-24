@@ -316,6 +316,69 @@ class UpworkTests(unittest.TestCase):
                         upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
                     self.assertEqual(self.client.call.call_count, 3)
 
+    def test_identical_mirrored_preview_payload_confirms_once(self):
+        pending = self.submit()
+        preview = self.stored_preview()
+        data = json.loads(preview["content"][0]["text"])
+        data["details"] = {"params": copy.deepcopy(data["params"])}
+        preview["content"][0]["text"] = json.dumps(data)
+        self.client.call.reset_mock()
+        self.client.call.side_effect = [self.job_cost(), self.preview(), preview,
+            {"content": [{"type": "text", "text": "Submitted"}]}]
+        result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+        self.assertIsInstance(result, ApprovalExecuted)
+        self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
+                         ["upwork__find_jobs", "upwork__manage_proposals", "upwork__get_preview", "upwork__confirm_preview"])
+
+    def test_conflicting_mirrored_preview_payload_never_confirms(self):
+        for field, changed in (("coverLetter", "Changed"), ("chargedAmount", 51),
+                               ("jobReference", "124"), ("connects_cost", 11)):
+            with self.subTest(field=field):
+                pending = self.submit()
+                preview = self.stored_preview()
+                data = json.loads(preview["content"][0]["text"])
+                data["details"] = {"params": copy.deepcopy(data["params"])}
+                data["details"]["params"][field] = changed
+                preview["content"][0]["text"] = json.dumps(data)
+                self.client.call.reset_mock()
+                self.client.call.side_effect = [self.job_cost(), self.preview(), preview]
+                with self.assertRaisesRegex(ProviderWarning, "repeated fields:"):
+                    upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+                self.assertEqual(self.client.call.call_count, 3)
+
+    def test_preview_cannot_assemble_proposal_from_unrelated_objects(self):
+        pending = self.submit()
+        preview = self.stored_preview()
+        data = json.loads(preview["content"][0]["text"])
+        data["other"] = {"jobReference": data["params"].pop("jobReference")}
+        preview["content"][0]["text"] = json.dumps(data)
+        self.client.call.reset_mock()
+        self.client.call.side_effect = [self.job_cost(), self.preview(), preview]
+        with self.assertRaisesRegex(ProviderWarning, "complete proposal payload: False"):
+            upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+        self.assertEqual(self.client.call.call_count, 3)
+
+    def test_preview_cannot_split_approved_optional_terms_from_base_payload(self):
+        for field, alias, value in (
+            ("answers", "answers", [{"question": "Relevant work?", "answer": "API integrations"}]),
+            ("boost_connects", "boostConnects", 3),
+            ("team_org_id", "teamOrgId", "team-one"),
+            ("attachments", "attachments", ["file-one"]),
+            ("certificate_ids", "certificateIds", ["cert-one"]),
+            ("portfolio_project_ids", "portfolioProjectIds", ["project-one"]),
+        ):
+            with self.subTest(field=field):
+                pending = self.submit(**{field: value})
+                preview = self.stored_preview()
+                data = json.loads(preview["content"][0]["text"])
+                data["details"] = {alias: value}
+                preview["content"][0]["text"] = json.dumps(data)
+                self.client.call.reset_mock()
+                self.client.call.side_effect = [self.job_cost(), self.preview(), preview]
+                with self.assertRaisesRegex(ProviderWarning, "complete proposal payload: False"):
+                    upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+                self.assertEqual(self.client.call.call_count, 3)
+
     def test_fresh_job_ineligible_or_insufficient_balance_stops_before_preparation(self):
         for changes in ({"can_apply": False}, {"connects_balance": 1}):
             with self.subTest(changes=changes):

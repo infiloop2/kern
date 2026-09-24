@@ -125,8 +125,11 @@ class NetworkIntrospectionTests(unittest.TestCase):
         )
         for denial in denials[:2]:
             self.assertIn("web_fetch", denial["guidance"])
-            self.assertIn("if the operator has enabled it", denial["guidance"].lower())
-            self.assertIn("public HTTPS page", denial["guidance"])
+            self.assertIn("public HTTPS content", denial["guidance"])
+            self.assertIn("fetch_page", denial["guidance"])
+            self.assertIn("download_media", denial["guidance"])
+            self.assertIn("head_url", denial["guidance"])
+            self.assertIn("does not need agent-shell custom-domain rules", denial["guidance"])
         self.assertIn("custom-domain rule", denials[1]["guidance"])
         self.assertIn("write repositories", denials[2]["guidance"])
         self.assertNotIn("web_fetch", denials[2]["guidance"])

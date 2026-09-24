@@ -215,9 +215,14 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
         preview = response_object(text)
         if redact_json(preview, credential) != preview:
             raise ValueError("Upwork returned credential material in its proposal preview.")
-    fields: dict[str, list] = {key: [] for key in (
+    fields: dict[str, list[tuple[int, object]]] = {key: [] for key in (
         "preview_id", "cover_letter", "charged_amount", "job_reference", "connects_cost", "connects_balance", "can_apply",
         "answers", "boost_connects", "team_org_id", "attachments", "certificate_ids", "portfolio_project_ids", "screening_questions")}
+    # Every approved optional term must appear with the base proposal fields
+    # in at least one object; matching fragments in separate objects are not
+    # enough evidence to confirm the approved proposal.
+    required = {"cover_letter", "charged_amount", "job_reference", "connects_cost"} | (set(params) - {"org_uid"})
+    complete_payload = False
     # The stored preview uses provider camelCase parameters (coverLetter,
     # chargedAmount), even though the creating MCP action takes snake_case.
     aliases = {
@@ -228,11 +233,14 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
         "screeningQuestions": "screening_questions",
     }
     def inspect(value):
+        nonlocal complete_payload
         if isinstance(value, dict):
+            names = {aliases.get(key, key) for key in value}
+            complete_payload |= required <= names
             for key, child in value.items():
                 key = aliases.get(key, key)
                 if key in fields:
-                    fields[key].append(child)
+                    fields[key].append((id(value), child))
                 inspect(child)
         elif isinstance(value, list):
             for child in value:
@@ -240,14 +248,19 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
     inspect(preview)
     # Balance and eligibility are checked by the fresh get_job immediately
     # before preparation; they need not be repeated in the stored preview.
-    required = {"cover_letter", "charged_amount", "job_reference", "connects_cost"} | (set(params) - {"org_uid"})
     with _response("get_preview", text, credential):
         missing = sorted(key for key in required if not fields[key])
-        repeated = sorted(key for key, rows in fields.items() if len(rows) > 1)
-        if missing or repeated:
+        # Upwork can mirror the same approved fields in separate preview
+        # objects. A conflicting mirror or two aliases in one object is still
+        # ambiguous and must stop before confirmation.
+        repeated = sorted(key for key, rows in fields.items() if len(rows) > 1 and (
+            len({parent for parent, _ in rows}) != len(rows)
+            or any(not validation._json_equal(rows[0][1], child) for _, child in rows[1:])))
+        if missing or repeated or not complete_payload:
             raise ValueError("Upwork's preview does not expose unambiguous approved proposal content and cost. "
-                             f"Missing fields: {', '.join(missing) or 'none'}; repeated fields: {', '.join(repeated) or 'none'}.")
-    values = {key: rows[0] for key, rows in fields.items() if rows}
+                             f"Missing fields: {', '.join(missing) or 'none'}; repeated fields: {', '.join(repeated) or 'none'}; "
+                             f"complete proposal payload: {complete_payload}.")
+    values = {key: rows[0][1] for key, rows in fields.items() if rows}
     for key in ("connects_cost", "connects_balance"):
         value = values.get(key)
         if type(value) is float and value.is_integer():
