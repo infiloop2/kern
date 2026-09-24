@@ -196,15 +196,18 @@ function refreshRuntimeAccounts() {
   return pendingRuntimeAccountRefresh;
 }
 
-export async function refreshProviderUsage() {
-  const [response, hostInference] = await Promise.all([
-    refreshRuntimeAccounts(),
-    api("GET", "/v1/host-inference/providers").catch(() => null),
-    loadToolUsage(),
-  ]);
-  if (Array.isArray(hostInference?.providers)) latestHostInferenceProviders = hostInference.providers;
-  renderProviderAccounts(response);
-  await refreshHealth();
+export async function refreshProviderUsage(group) {
+  if (group === "runtimes") {
+    renderProviderAccounts(await refreshRuntimeAccounts());
+    await refreshHealth();
+  } else if (group === "host-ai") {
+    const hostInference = await api("GET", "/v1/host-inference/providers").catch(() => null);
+    if (Array.isArray(hostInference?.providers)) latestHostInferenceProviders = hostInference.providers;
+    renderRuntimeOverview();
+  } else if (group === "tools") {
+    await loadToolUsage();
+    renderRuntimeOverview();
+  }
 }
 
 // The top bar exposes provider families and tool spend as compact menus. One
@@ -215,9 +218,8 @@ export function toggleRuntimeOverview(group) {
   if (!["runtimes", "host-ai", "tools"].includes(group)) return;
   expandedOverviewGroup = expandedOverviewGroup === group ? null : group;
   applyOverviewExpanded();
-  // Opening runs the existing hard provider refresh. There is no second refresh
-  // control inside the menu, so desktop and phone use the same interaction.
-  if (expandedOverviewGroup) refreshProviderUsage().catch(() => {});
+  // Refresh only the provider family the operator opened.
+  if (expandedOverviewGroup) refreshProviderUsage(expandedOverviewGroup).catch(() => {});
 }
 
 export function collapseRuntimeOverview() {

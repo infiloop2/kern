@@ -14,6 +14,8 @@ from host.runtime.core import host_errors
 
 MAX_CONCURRENT_REQUESTS = 512
 SLOW_REQUEST_SECONDS = 10
+# The explicit all-runtime refresh includes live provider probes in series.
+RUNTIME_REFRESH_SLOW_REQUEST_SECONDS = 30
 REPORT_INTERVAL_SECONDS = 60
 _BUSY_BODY = b'{"error":{"message":"Kern is busy. Please try again shortly.","code":"host_busy"}}'
 _BUSY_RESPONSE = (
@@ -126,7 +128,14 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     def service_actions(self) -> None:
         now = time.monotonic()
         with self._diagnostic_lock:
-            slow = sum(now - started >= SLOW_REQUEST_SECONDS for started, _ in self._active.values())
+            slow = sum(
+                now - started >= (
+                    RUNTIME_REFRESH_SLOW_REQUEST_SECONDS
+                    if group == "POST /v1/agent-runtime/refresh"
+                    else SLOW_REQUEST_SECONDS
+                )
+                for started, group in self._active.values()
+            )
             if (not self._rejected and not slow) or self._reporting or now - self._last_report < REPORT_INTERVAL_SECONDS:
                 return
             active = sorted(self._active.items(), key=lambda item: item[1][0])
