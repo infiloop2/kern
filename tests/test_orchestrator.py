@@ -50,7 +50,7 @@ from host.runtime.core.state import (
 DEFAULT_SESSION = {
     "codex": ("gpt-6-astra", "high"),
     "claude_code": ("claude-opus-5-5", "high"),
-    "grok": ("grok-4.6", "high"),
+    "grok": ("grok-4.7", "high"),
     "hermes": ("qwen.qwen3-coder-next", "high"),
     "script": ("bash", "fixed"),
 }
@@ -1200,7 +1200,7 @@ class OrchestratorTests(unittest.TestCase):
                 {
                     "message": "hello",
                     "agent_runtime": "grok",
-                    "model": "grok-4.6",
+                    "model": "grok-4.7",
                     "effort": "xhigh",
                 },
                 None,
@@ -1210,7 +1210,7 @@ class OrchestratorTests(unittest.TestCase):
             self.wait_until_idle("thread-grok")
 
         self.assertEqual(seen, [None, "grok-session-1"])
-        self.assertEqual(seen_config, [("grok-4.6", "xhigh")] * 2)
+        self.assertEqual(seen_config, [("grok-4.7", "xhigh")] * 2)
         self.assertEqual(
             state.thread_session_config("thread-grok")["provider_session_id"],
             "grok-session-1",
@@ -1243,7 +1243,7 @@ class OrchestratorTests(unittest.TestCase):
                 "thread-stale-grok",
                 "deleted-session",
                 state.utc_now(),
-                "grok-4.6",
+                "grok-4.7",
                 "high",
             )
 

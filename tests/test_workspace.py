@@ -3,39 +3,83 @@
 from __future__ import annotations
 
 from http import HTTPStatus
+import os
 import socket
+import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from host.constants import SERVICE_ACCOUNTS
+from host.runtime.admin_api import workspace_proxy
 from host.runtime.workspace import getting_started, memory, service
 from host.runtime.workspace.chat import backend as chat
 from host.runtime.workspace.web_apps import backend as web_apps
 
 
 class WorkspaceTests(unittest.TestCase):
-    def test_browser_listener_has_room_for_parallel_admin_reads(self) -> None:
-        server = None
-        for port in range(8000, 8016):
+    def test_browser_socket_serves_admin_and_rejects_other_peers(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "browser.sock")
+            server = service.WorkspaceBrowserServer(path, service.Handler)  # type: ignore[arg-type]
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
             try:
-                server = service.WorkspaceHTTPServer(("127.0.0.1", port), service.Handler)
-                break
-            except OSError:
-                continue
-        if server is None:
-            self.fail("No free test port in 8000-8015")
-        clients = []
-        try:
-            # Keep the accept loop stopped. Every completed connect must fit
-            # in the listener queue, as it would during a brief accept pause.
-            for _ in range(12):
-                clients.append(socket.create_connection(server.server_address, timeout=1))
-            self.assertEqual(len(clients), 12)
-        finally:
-            for client in clients:
-                client.close()
-            server.server_close()
+                with patch.object(service, "peer_uids", return_value=frozenset({os.getuid()})):
+                    conn = workspace_proxy._UnixHTTPConnection(path, timeout=2)
+                    try:
+                        conn.request("GET", "/health")
+                        response = conn.getresponse()
+                        self.assertEqual(response.status, 200)
+                        self.assertEqual(response.read(), b'{"status":"ok"}')
+                    finally:
+                        conn.close()
+                    with (
+                        patch.object(workspace_proxy, "BROWSER_SOCKET", path),
+                        patch.object(chat, "route_browser", return_value={"chat": "ready"}) as routed,
+                    ):
+                        self.assertEqual(
+                            workspace_proxy.route_request("GET", "/v1/workspace/chat/health", {}, None),
+                            {"chat": "ready"},
+                        )
+                        routed.assert_called_once_with("GET", "/health", None, {})
+                with patch.object(service, "peer_uids", return_value=frozenset()):
+                    conn = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    conn.settimeout(2)
+                    try:
+                        conn.connect(path)
+                        try:
+                            conn.sendall(b"GET /health HTTP/1.1\r\nHost: workspace\r\n\r\n")
+                            self.assertEqual(conn.recv(1), b"")
+                        except (BrokenPipeError, ConnectionResetError):
+                            pass  # Rejected before request bytes reached a worker.
+                    finally:
+                        conn.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_browser_socket_has_room_for_parallel_admin_reads(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "browser.sock")
+            server = service.WorkspaceBrowserServer(path, service.Handler)  # type: ignore[arg-type]
+            clients = []
+            try:
+                self.assertEqual(Path(path).stat().st_mode & 0o777, 0o660)
+                # The accept loop is stopped, so completed connects consume
+                # listener backlog rather than handler threads.
+                for _ in range(12):
+                    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                    client.settimeout(1)
+                    client.connect(path)
+                    clients.append(client)
+                self.assertEqual(len(clients), 12)
+            finally:
+                for client in clients:
+                    client.close()
+                server.server_close()
 
     def test_memory_hybrid_cursor_retries_during_model_failure(self) -> None:
         rows = [
@@ -336,12 +380,12 @@ class WorkspaceTests(unittest.TestCase):
     def test_service_binds_both_endpoints_before_background_work(self) -> None:
         events: list[str] = []
 
-        class FakeTcpServer:
+        class FakeBrowserServer:
             def __init__(self, *_args: object) -> None:
-                events.append("tcp-bind")
+                events.append("browser-bind")
 
             def serve_forever(self) -> None:
-                events.append("tcp-serve")
+                events.append("browser-serve")
 
         class FakeAgentServer:
             def __init__(self, *_args: object) -> None:
@@ -359,7 +403,7 @@ class WorkspaceTests(unittest.TestCase):
                 events.append(self.name)
 
         with (
-            patch.object(service, "WorkspaceHTTPServer", FakeTcpServer),
+            patch.object(service, "WorkspaceBrowserServer", FakeBrowserServer),
             patch.object(service.agent_api, "AgentWorkspaceServer", FakeAgentServer),
             patch.object(service.threading, "Thread", FakeThread),
         ):
@@ -367,13 +411,13 @@ class WorkspaceTests(unittest.TestCase):
         self.assertEqual(
             events,
             [
-                "tcp-bind",
+                "browser-bind",
                 "agent-bind",
                 "workspace-agent-api",
                 "workspace-memory-embedding-index",
                 "workspace-scheduler",
                 "workspace-maintenance",
-                "tcp-serve",
+                "browser-serve",
             ],
         )
 

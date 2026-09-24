@@ -132,8 +132,7 @@ class ListenerTests(unittest.TestCase):
         "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
         "   0: 0100007F:1D13 00000000:0000 0A 00000000:00000000 00:00000000 00000000 47741        0 1000 1\n"
         "   1: 0100007F:1D15 00000000:0000 0A 00000000:00000000 00:00000000 00000000 47742        0 1001 1\n"
-        "   2: 0100007F:1D1A 00000000:0000 0A 00000000:00000000 00:00000000 00000000 47750        0 1002 1\n"
-        "   3: 0100007F:0016 00000000:0000 01 00000000:00000000 00:00000000 00000000     0        0 1003 1\n"
+        "   2: 0100007F:0016 00000000:0000 01 00000000:00000000 00:00000000 00000000     0        0 1003 1\n"
     )
 
     def test_parse_extracts_loopback_listeners_with_uids(self) -> None:
@@ -141,7 +140,7 @@ class ListenerTests(unittest.TestCase):
         self.assertIn(("127.0.0.1", ADMIN_API_PORT, 47741), listeners)
         self.assertIn(("127.0.0.1", PROXY_PORT, 47742), listeners)
         # Non-LISTEN rows are ignored.
-        self.assertEqual(len(listeners), 3)
+        self.assertEqual(len(listeners), 2)
 
     def test_expected_listeners_pass_and_wrong_owner_fails(self) -> None:
         self.assertEqual(

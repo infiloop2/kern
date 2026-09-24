@@ -808,7 +808,7 @@ import tests.stage.stage_aws
             {
                 "codex": "gpt-6-luna",
                 "claude_code": "claude-sonnet-5",
-                "grok": "grok-4.6",
+                "grok": "grok-4.7",
                 "hermes": "qwen.qwen3-coder-next",
             },
         )

@@ -85,9 +85,9 @@ on the other end of the socket:
   capability.
 - **A platform service.** None exists in the range, by construction and by CI:
   every platform listener has a pinned port in the 7xxx block (admin 7443,
-  proxy 7445, workspaces 7450; Postgres is Unix-socket / 5432), and
-  `test_deploy` asserts the preview range is disjoint from the admin API, the
-  network proxy, and the fixed Workspace port. The operational
+  proxy 7445; Workspace and Postgres use Unix sockets), and
+  `test_deploy` asserts the preview range is disjoint from the admin API and
+  network proxy ports. The operational
   invariant is that no platform or root service may ever bind `8000-8015`;
   adding one is a firewall change and must be reviewed as such.
 - **Any other local principal — service account or future user.** The

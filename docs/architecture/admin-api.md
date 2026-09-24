@@ -121,11 +121,11 @@ only host thread operations, and an idle timeout bounds accidental stalls. The u
 is raised for the same reason.
 
 The Workspace service's browser endpoint is reached only through the admin
-API reverse proxy. It binds fixed `127.0.0.1:7450`, and nftables accepts new
-connections only from `kern-admin` before dropping that port for every other
-local uid. Path prefixes select Chat or Web Apps; no operator credential or
-identity header is forwarded. Agent calls use the separately
-peer-authenticated `/run/kern-workspace/agent.sock`, not this TCP listener.
+API reverse proxy over `/run/kern-workspace/browser.sock`. The socket is group
+connectable by `kern-admin`, and Workspace checks the connecting uid before
+allocating a handler. Path prefixes select Chat or Web Apps; no operator
+credential or identity header is forwarded. Agent calls use the separately
+peer-authenticated `/run/kern-workspace/agent.sock`.
 
 The agent event log keeps the newest 10,000,000 entries. The network and tool
 event logs each keep the newest 1,000,000 entries.

@@ -810,7 +810,7 @@ def seed_state() -> None:
                 "model": (
                     "claude-opus-5-5"
                     if spec["agent_runtime"] == "claude_code"
-                    else "grok-4.6"
+                    else "grok-4.7"
                     if spec["agent_runtime"] in {"grok", "grok-2"}
                     else "gpt-6-astra"
                 ),

@@ -425,7 +425,21 @@ def _failure(exc: Exception) -> ActionFailed:
             return ActionFailed("Apify rate or account limits reached. No request was retried.")
         if exc.status == 402:
             return ActionFailed("Apify requires sufficient account credit or billing setup.")
-        return ActionFailed("Apify request failed; a mutation may already have executed. Reconcile Actors/builds/runs and get_monetization for pricing writes before retrying.")
+        # Documented pricing error types only; messages can echo private inputs.
+        try:
+            error_type = _object(_object(json.loads(exc.body)).get("error")).get("type")
+        except (ValueError, UnicodeDecodeError):
+            error_type = None
+        known = {"cannot-remove-pricing-info", "cannot-add-multiple-pricing-infos",
+                 "cannot-add-pricing-info-that-alters-past", "cannot-add-second-future-pricing-info",
+                 "cannot-modify-actor-pricing-too-frequently", "cannot-modify-actor-pricing-with-immediate-effect",
+                 "cannot-monetize-without-payout-billing-info", "cannot-add-apify-events-to-ppe-actor",
+                 "cannot-disable-one-time-event-for-apify-start-event", "invalid-input", "invalid-value",
+                 "schema-validation", "schema-validation-error", "schema-validation-failed"}
+        detail = f" (HTTP {exc.status})" if 100 <= exc.status <= 599 else ""
+        if isinstance(error_type, str) and error_type in known:
+            detail += f" [{error_type}]"
+        return ActionFailed(f"Apify request failed{detail}; a mutation may already have executed. Reconcile Actors/builds/runs and get_monetization for pricing writes before retrying.")
     if isinstance(exc, (ValueError, RuntimeError)):
         return ActionFailed(str(exc))
     return ActionFailed("Apify Developer request failed.")

@@ -1570,6 +1570,29 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             )
         self.assertEqual(old_pause_field.exception.status, HTTPStatus.BAD_REQUEST)
 
+    def test_restoring_old_grok_revision_uses_the_current_model(self) -> None:
+        schedule = schedules.create_schedule(
+            {
+                "name": "Grok review",
+                "message": "Review work",
+                "cadence": "interval",
+                "interval_minutes": 60,
+                "agent_runtime": "grok",
+                "model": "grok-4.6",
+                "effort": "high",
+            },
+            actor="user",
+        )
+        updated = schedules.update_schedule(
+            schedule["id"], schedule_update(schedule, model="grok-4.7"), actor="user"
+        )
+        restored = schedules.restore_revision(
+            schedule["id"], 1, {"expected_revision": updated["revision"]}
+        )
+        self.assertEqual(restored["model"], "grok-4.7")
+        revisions = schedules.list_revisions(schedule["id"], {})["revisions"]
+        self.assertEqual(next(item for item in revisions if item["revision"] == 1)["model"], "grok-4.6")
+
     def test_scheduled_agent_rename_updates_schedule_and_revision_history(self) -> None:
         schedule = schedules.create_schedule(
             {

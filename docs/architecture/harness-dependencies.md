@@ -12,7 +12,7 @@ can break when a harness package is upgraded.
 | --- | --- | --- | --- | --- |
 | Codex | `@openai/codex` | `0.155.1` | `codex`, `codex-2`, `codex-3` | `host/runtime/agent_runtime/codex_app_server.py` |
 | Claude Code | `@anthropic-ai/claude-code` | `2.1.280` | `claude_code` | `host/runtime/agent_runtime/claude_code.py` |
-| Grok Build | `@xai-official/grok` | `1.0.34` | `grok`, `grok-2` | `host/runtime/agent_runtime/grok_agent.py` |
+| Grok Build | `@xai-official/grok` | `1.0.40` | `grok`, `grok-2` | `host/runtime/agent_runtime/grok_agent.py` |
 | Hermes | `hermes-agent[bedrock,mcp]` | `0.18.2` | `hermes` | `host/runtime/agent_runtime/hermes_agent.py` |
 
 The `script` runtime (`host/runtime/agent_runtime/script_runner.py`) is on that

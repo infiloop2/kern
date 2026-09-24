@@ -444,7 +444,7 @@ def desktop_smoke(page: Any) -> None:
     assert upload_requests == [], "selecting and removing attachments must not upload them before Send"
     frame.locator("#new-task").fill("agent workspace smoke task")
     frame.locator("#new-task-runtime").select_option("grok")
-    expect(frame.locator("#new-task-model")).to_have_value("grok-4.6")
+    expect(frame.locator("#new-task-model")).to_have_value("grok-4.7")
     expect(frame.locator("#new-task-model option")).to_have_count(1)
     expect(frame.locator("#new-task-effort option")).to_have_count(2)
     expect(frame.locator("#new-task-effort")).to_contain_text("Xhigh")

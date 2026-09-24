@@ -51,6 +51,83 @@ class MigrateRunnerTests(unittest.TestCase):
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
             return {row[0] for row in cur.fetchall()}
 
+    def test_grok_4_7_migration_preserves_history_and_rolls_back_settings(self) -> None:
+        migrate.up(target=71, quiet=True)
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort, provider_session_id)"
+                " VALUES ('grok', 'thread-old-grok', 'grok-4.6', 'high', 'old-provider')"
+            )
+            cur.execute(
+                "INSERT INTO web_apps (app_id, name, revision, agent_runtime, agent_model,"
+                " agent_effort, created_at, updated_at)"
+                " VALUES ('app-73', 'Old Grok app', 0, 'grok', 'grok-4.6', 'high', 'now', 'now')"
+            )
+            cur.execute(
+                "INSERT INTO schedules (id, thread_id, name, message, cadence, interval_minutes,"
+                " agent_runtime, model, effort, next_run_at, created_at, updated_at)"
+                " VALUES (73, 'schedule-73', 'Old Grok job', 'hello', 'interval', 60,"
+                " 'grok-2', 'grok-4.6', 'xhigh', 'now', 'now', 'now')"
+            )
+        with self.assertRaises(Exception):
+            with db.transaction() as cur:
+                cur.execute(
+                    "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort)"
+                    " VALUES ('grok', 'thread-new-grok', 'grok-4.7', 'high')"
+                )
+
+        self.assertEqual(migrate.up(target=72, quiet=True), [72])
+        with db.transaction() as cur:
+            cur.execute("SELECT agent_model FROM web_apps WHERE app_id = 'app-73'")
+            self.assertEqual(cur.fetchone(), ("grok-4.7",))
+            cur.execute("SELECT model FROM schedules WHERE id = 73")
+            self.assertEqual(cur.fetchone(), ("grok-4.7",))
+            cur.execute(
+                "SELECT model, provider_session_id FROM thread_sessions"
+                " WHERE thread_id = 'thread-old-grok'"
+            )
+            self.assertEqual(cur.fetchone(), ("grok-4.6", "old-provider"))
+            for runtime in ("grok", "grok-2"):
+                cur.execute(
+                    "INSERT INTO thread_sessions"
+                    " (agent_runtime, thread_id, model, effort, provider_session_id)"
+                    " VALUES (%s, %s, 'grok-4.7', 'xhigh', 'new-provider')",
+                    (runtime, f"thread-{runtime}-4.7"),
+                )
+            cur.execute(
+                "INSERT INTO web_apps (app_id, name, revision, agent_runtime, agent_model,"
+                " agent_effort, created_at, updated_at)"
+                " VALUES ('app-72', 'Grok app', 0, 'grok', 'grok-4.7', 'high', 'now', 'now')"
+            )
+            cur.execute(
+                "INSERT INTO schedules (id, thread_id, name, message, cadence, interval_minutes,"
+                " agent_runtime, model, effort, next_run_at, created_at, updated_at)"
+                " VALUES (72, 'schedule-72', 'Grok job', 'hello', 'interval', 60,"
+                " 'grok-2', 'grok-4.7', 'xhigh', 'now', 'now', 'now')"
+            )
+        self.assertEqual(migrate.down(target=71, quiet=True), [72])
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT thread_id, model, provider_session_id FROM thread_sessions"
+                " WHERE agent_runtime IN ('grok', 'grok-2') ORDER BY thread_id"
+            )
+            self.assertEqual(
+                cur.fetchall(),
+                [
+                    ("thread-grok-2-4.7", "grok-4.6", None),
+                    ("thread-grok-4.7", "grok-4.6", None),
+                    ("thread-old-grok", "grok-4.6", "old-provider"),
+                ],
+            )
+            cur.execute("SELECT agent_model FROM web_apps WHERE app_id = 'app-72'")
+            self.assertEqual(cur.fetchone(), ("grok-4.6",))
+            cur.execute("SELECT agent_model FROM web_apps WHERE app_id = 'app-73'")
+            self.assertEqual(cur.fetchone(), ("grok-4.6",))
+            cur.execute("SELECT model FROM schedules WHERE id = 72")
+            self.assertEqual(cur.fetchone(), ("grok-4.6",))
+            cur.execute("SELECT model FROM schedules WHERE id = 73")
+            self.assertEqual(cur.fetchone(), ("grok-4.6",))
+
     def test_swarm_migration_retires_usage_buckets_and_preserves_jev(self) -> None:
         source = Path(__file__).resolve().parents[1] / "host" / "migrations"
         for path in sorted(source.glob("*.sql")):

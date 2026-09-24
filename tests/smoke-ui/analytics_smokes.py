@@ -11,7 +11,7 @@ def fixture():
     for i, (kind, thread, name, runtime, model) in enumerate([
         ('chats', 'thread-1', 'Research <notes>', 'codex', 'gpt-6-astra'),
         ('apps', 'app-1', 'Project dashboard', 'claude_code', 'claude-fable-5-1'),
-        ('schedules', 'schedule-1', 'Daily research', 'grok', 'grok-4.6'),
+        ('schedules', 'schedule-1', 'Daily research', 'grok', 'grok-4.7'),
     ]):
         for day_index, day in enumerate(days):
             tokens = dict(zip(fields, [10000*(i+1), 50000*(i+1), 1000, 2000]))

@@ -60,8 +60,8 @@ DEFAULT_SESSION_OPTIONS = {
     "codex-2": ("gpt-6-astra", "high"),
     "codex-3": ("gpt-6-astra", "high"),
     "claude_code": ("claude-opus-5-5", "high"),
-    "grok": ("grok-4.6", "high"),
-    "grok-2": ("grok-4.6", "high"),
+    "grok": ("grok-4.7", "high"),
+    "grok-2": ("grok-4.7", "high"),
     "hermes": ("deepseek.v3.2", "high"),
     "script": ("bash", "fixed"),
 }
@@ -1560,8 +1560,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 return b'{"status":"ok"}'
 
         class FakeConnection:
-            def __init__(self, host: str, port: int, timeout: int) -> None:
-                captured["connect"] = (host, port, timeout)
+            def __init__(self, socket_path: str, timeout: int) -> None:
+                captured["connect"] = (socket_path, timeout)
 
             def request(
                 self,
@@ -1578,23 +1578,23 @@ class AdminApiIntegrationTests(unittest.TestCase):
             def close(self) -> None:
                 captured["closed"] = True
 
-        with patch("host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection", FakeConnection):
+        with patch("host.runtime.admin_api.workspace_proxy._UnixHTTPConnection", FakeConnection):
             body = workspace_api_proxy.route_request("GET", "/v1/workspace/chat/health", {}, None)
 
         self.assertEqual(body, {"status": "ok"})
-        self.assertEqual(captured["connect"][1], 7450)
+        self.assertEqual(captured["connect"][0], workspace_api_proxy.BROWSER_SOCKET)
         self.assertEqual(captured["request"][1], "/chat/health")
         headers = captured["request"][3]
         self.assertEqual(headers, {})
 
-        with patch("host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection", FakeConnection):
+        with patch("host.runtime.admin_api.workspace_proxy._UnixHTTPConnection", FakeConnection):
             body = workspace_api_proxy.route_request(
                 "GET", "/v1/workspace/memory", {"limit": ["50"]}, None
             )
         self.assertEqual(body, {"status": "ok"})
         self.assertEqual(captured["request"][1], "/memory?limit=50")
 
-        with patch("host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection", FakeConnection):
+        with patch("host.runtime.admin_api.workspace_proxy._UnixHTTPConnection", FakeConnection):
             body = workspace_api_proxy.route_request(
                 "GET", "/v1/workspace/getting-started", {}, None
             )
@@ -1603,13 +1603,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         self.memory_recall_patch.stop()
         recall_message = chr(0xD800) + "💡 recall"
-        with patch("host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection", FakeConnection):
+        with patch("host.runtime.admin_api.workspace_proxy._UnixHTTPConnection", FakeConnection):
             body = workspace_api_proxy.recall_memory(
                 "thread-7", recall_message
             )
         self.assertEqual(body, {"status": "ok"})
         self.assertEqual(
-            captured["connect"][2],
+            captured["connect"][1],
             workspace_api_proxy.RECALL_TIMEOUT_SECONDS,
         )
         self.assertEqual(captured["request"][1], "/memory/recall")
@@ -1621,7 +1621,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.memory_recall_patch.stop()
 
         class FakeConnection:
-            def __init__(self, _host: str, _port: int, timeout: int) -> None:
+            def __init__(self, _socket_path: str, timeout: int) -> None:
                 del timeout
 
             def request(self, *_args: Any, **_kwargs: Any) -> None:
@@ -1635,7 +1635,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         with (
             patch(
-                "host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection",
+                "host.runtime.admin_api.workspace_proxy._UnixHTTPConnection",
                 FakeConnection,
             ),
             self.assertRaises(admin_api.ApiError) as error,
@@ -1647,7 +1647,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.memory_recall_patch.stop()
 
         class FakeConnection:
-            def __init__(self, _host: str, _port: int, timeout: int) -> None:
+            def __init__(self, _socket_path: str, timeout: int) -> None:
                 del timeout
 
             def request(self, *_args: Any, **_kwargs: Any) -> None:
@@ -1661,7 +1661,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         with (
             patch(
-                "host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection",
+                "host.runtime.admin_api.workspace_proxy._UnixHTTPConnection",
                 FakeConnection,
             ),
             self.assertRaises(admin_api.ApiError) as error,
@@ -1700,7 +1700,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 return b"not-json"
 
         class FakeConnection:
-            def __init__(self, _host: str, _port: int, timeout: int) -> None:
+            def __init__(self, _socket_path: str, timeout: int) -> None:
                 del timeout
 
             def request(self, *_args: Any, **_kwargs: Any) -> None:
@@ -1714,7 +1714,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         with (
             patch(
-                "host.runtime.admin_api.workspace_proxy.http.client.HTTPConnection",
+                "host.runtime.admin_api.workspace_proxy._UnixHTTPConnection",
                 FakeConnection,
             ),
             patch.object(workspace_api_proxy.host_errors, "report_warning") as report,

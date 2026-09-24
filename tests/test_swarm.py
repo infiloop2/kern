@@ -26,11 +26,13 @@ class SwarmAnnotationsTests(unittest.TestCase):
         self.assertIn('CURRENT REQUEST\nReview this release', model.call_args.args[0])
         self.assertEqual(model.call_args.kwargs, {'purpose': 'swarm_task'})
         self.assertEqual(model.call_args.args[1]['required'], ['task'])
-        self.assertEqual(model.call_args.args[1]['properties']['task']['maxLength'], 50)
+        self.assertEqual(model.call_args.args[1]['properties']['task']['maxLength'], 70)
+        self.assertIn('whole words and a natural ending', model.call_args.args[0])
+        self.assertIn('never cut off a word', model.call_args.args[0])
         save.assert_called_once_with('thread-1', 3, 'Review release')
 
     def test_invalid_task_never_saves(self) -> None:
-        for result in ({'task': ''}, {'task': 'x' * 51}, {'task': True}):
+        for result in ({'task': ''}, {'task': 'x' * 71}, {'task': True}):
             with (patch.object(client, 'openai_text_completion', return_value=result),
                   patch.object(state, 'save_swarm_task') as save,
                   self.assertRaises(ValueError)):

@@ -157,7 +157,7 @@ SMOKE_BEDROCK_REGION = "us-east-1"
 SMOKE_RUNTIME_MODELS = {
     "codex": "gpt-6-astra",
     "claude_code": "claude-opus-5-5",
-    "grok": "grok-4.6",
+    "grok": "grok-4.7",
     "hermes": "qwen.qwen3-coder-next",
 }
 SMOKE_BEDROCK_MODELS = (

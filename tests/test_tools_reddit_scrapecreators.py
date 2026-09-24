@@ -58,6 +58,25 @@ class RedditScrapeCreatorsTests(unittest.TestCase):
                     self.assertEqual(params['filter'], ['posts'])
                     self.assertEqual(params['sort'], ['comment_count'])
 
+    def test_top_day_request_shape_and_rising_is_rejected_locally(self):
+        _, path, params = self.run_read(
+            'get_subreddit_posts',
+            {'subreddit': 'AskReddit', 'sort': 'top', 'timeframe': 'day', 'limit': '15'},
+            fixture('subreddit'),
+        )
+        self.assertEqual(path, '/v1/reddit/subreddit')
+        self.assertEqual(params, {
+            'subreddit': ['AskReddit'], 'timeframe': ['day'], 'sort': ['top'],
+        })
+        spec = next(action for action in reddit.MANIFEST.actions if action.id == 'get_subreddit_posts')
+        self.assertNotIn('rising', spec.input_schema['properties']['sort']['enum'])
+        with patch.object(reddit, 'json_request') as request:
+            result = reddit.BUNDLED_TOOL.execute(
+                'get_subreddit_posts', {'subreddit': 'AskReddit', 'sort': 'rising'}, configured_api(),
+            )
+        self.assertIsInstance(result, ActionFailed)
+        request.assert_not_called()
+
     def test_subreddit_search_uses_dedicated_endpoint_and_preserves_missing_text(self):
         response = fixture('subreddit_search')
         result, path, params = self.run_read('search_posts', {'query': 'pushups', 'subreddit': 'fitness', 'sort': 'comments', 'cursor': 'next_page-1'}, response)

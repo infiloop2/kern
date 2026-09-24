@@ -78,7 +78,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
     def test_app_default_prefers_an_active_runtime_and_named_model(self) -> None:
         expected_models = {
             "claude_code": "claude-opus-5-5",
-            "grok": "grok-4.6",
+            "grok": "grok-4.7",
             "hermes": "moonshotai.kimi-k2.5",
         }
         for runtime, model in expected_models.items():

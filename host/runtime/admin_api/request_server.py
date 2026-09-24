@@ -3,12 +3,13 @@ from __future__ import annotations
 
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+import stat
 import sys
 import threading
 import time
 from typing import Any
 
-from host.constants import WORKSPACE_PORT
+from host.constants import WORKSPACE_BROWSER_SOCKET_PATH
 from host.runtime.core import host_errors
 
 MAX_CONCURRENT_REQUESTS = 512
@@ -40,31 +41,17 @@ def stack_location(frame: Any) -> str:
     return " <- ".join(parts)[:512]
 
 
-def workspace_connection_snapshot() -> dict[str, int]:
-    """Count local Workspace TCP states without opening another connection."""
-    port_suffix = f":{WORKSPACE_PORT:04X}"
-    snapshot = {
-        "workspace_connecting": 0,
-        "workspace_established": 0,
-        "workspace_last_ack": 0,
-    }
+def workspace_socket_snapshot() -> dict[str, int]:
+    """Check the proxy socket without opening a competing connection."""
     try:
-        for line in Path("/proc/net/tcp").read_text().splitlines()[1:]:
-            fields = line.split()
-            local = fields[1].endswith(port_suffix)
-            remote = fields[2].endswith(port_suffix)
-            state = fields[3]
-            if local and state == "0A":
-                snapshot["workspace_pending_connections"] = int(fields[4].split(":")[1], 16)
-            elif remote and state == "02":
-                snapshot["workspace_connecting"] += 1
-            elif local and state == "01":
-                snapshot["workspace_established"] += 1
-            elif local and state == "09":
-                snapshot["workspace_last_ack"] += 1
-    except (OSError, IndexError, ValueError):
-        return {}
-    return snapshot if "workspace_pending_connections" in snapshot else {}
+        info = Path(WORKSPACE_BROWSER_SOCKET_PATH).stat()
+    except OSError:
+        return {"workspace_socket_present": 0}
+    return {
+        "workspace_socket_present": int(stat.S_ISSOCK(info.st_mode)),
+        "workspace_socket_mode": stat.S_IMODE(info.st_mode),
+        "workspace_socket_uid": info.st_uid,
+    }
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -156,7 +143,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
                     context[f"pressure_{resource}"] = Path(f"/proc/pressure/{resource}").read_text()[:256].strip()
                 except OSError:
                     pass
-            context.update(workspace_connection_snapshot())
+            context.update(workspace_socket_snapshot())
             host_errors.report_warning(
                 "admin_api.request_capacity",
                 "Admin request capacity exhausted" if rejected else "Admin requests are taking unusually long",

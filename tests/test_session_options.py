@@ -174,8 +174,8 @@ class SessionOptionsTests(unittest.TestCase):
                 "codex-2": "gpt-6-sol",
                 "codex-3": "gpt-6-sol",
                 "claude_code": "claude-opus-5-5",
-                "grok": "grok-4.6",
-                "grok-2": "grok-4.6",
+                "grok": "grok-4.7",
+                "grok-2": "grok-4.7",
                 "hermes": "moonshotai.kimi-k2.5",
             },
         )
@@ -209,10 +209,10 @@ class SessionOptionsTests(unittest.TestCase):
                     "claude-sonnet-5": ("high", "max", "ultracode"),
                 },
                 "grok": {
-                    "grok-4.6": ("xhigh", "high"),
+                    "grok-4.7": ("xhigh", "high"),
                 },
                 "grok-2": {
-                    "grok-4.6": ("xhigh", "high"),
+                    "grok-4.7": ("xhigh", "high"),
                 },
                 "hermes": {
                     "deepseek.v3.2": ("high",),
@@ -269,8 +269,8 @@ class SessionOptionsTests(unittest.TestCase):
         self.assertIsNotNone(session_config_error("unsupported", "deepseek.v3.2", "max"))
         self.assertIsNone(session_config_error("hermes", "deepseek.v3.2", "high"))
         self.assertIsNotNone(session_config_error("hermes", "deepseek.v3.2", "max"))
-        self.assertIsNone(session_config_error("grok", "grok-4.6", "xhigh"))
-        self.assertIsNotNone(session_config_error("grok", "grok-4.6", "max"))
+        self.assertIsNone(session_config_error("grok", "grok-4.7", "xhigh"))
+        self.assertIsNotNone(session_config_error("grok", "grok-4.7", "max"))
 
     def test_rejects_the_superseded_claude_code_models(self) -> None:
         # Aliases and earlier exact ids remain readable from recorded sessions,
@@ -313,6 +313,16 @@ class SessionOptionsTests(unittest.TestCase):
                         (runtime, model, "high"),
                     )
 
+    def test_retired_grok_model_is_readable_but_cannot_run_new_work(self) -> None:
+        for runtime in ("grok", "grok-2"):
+            self.assertIsNotNone(session_config_error(runtime, "grok-4.6", "high"))
+            self.assertEqual(
+                recorded_session_config(
+                    {"agent_runtime": runtime, "model": "grok-4.6", "effort": "high"}
+                ),
+                (runtime, "grok-4.6", "high"),
+            )
+
     def test_public_options_are_json_facing_copies(self) -> None:
         options = public_session_options()
         self.assertEqual(options["codex"]["gpt-6-luna"], ["high", "max"])
@@ -321,7 +331,7 @@ class SessionOptionsTests(unittest.TestCase):
             options["claude_code"]["claude-fable-5-1"],
             ["high", "max", "ultracode"],
         )
-        self.assertEqual(options["grok"]["grok-4.6"], ["xhigh", "high"])
+        self.assertEqual(options["grok"]["grok-4.7"], ["xhigh", "high"])
         options["codex"]["gpt-6-luna"].append("invalid")
         schedule_session_options()["script"]["bash"].append("invalid")
         self.assertEqual(SESSION_OPTIONS["codex"]["gpt-6-luna"], ("high", "max"))
