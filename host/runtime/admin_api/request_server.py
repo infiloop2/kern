@@ -8,6 +8,7 @@ import threading
 import time
 from typing import Any
 
+from host.constants import WORKSPACE_PORT
 from host.runtime.core import host_errors
 
 MAX_CONCURRENT_REQUESTS = 512
@@ -37,6 +38,33 @@ def stack_location(frame: Any) -> str:
         parts.append(f"{Path(frame.f_code.co_filename).name}:{frame.f_code.co_name}:{frame.f_lineno}")
         frame = frame.f_back
     return " <- ".join(parts)[:512]
+
+
+def workspace_connection_snapshot() -> dict[str, int]:
+    """Count local Workspace TCP states without opening another connection."""
+    port_suffix = f":{WORKSPACE_PORT:04X}"
+    snapshot = {
+        "workspace_connecting": 0,
+        "workspace_established": 0,
+        "workspace_last_ack": 0,
+    }
+    try:
+        for line in Path("/proc/net/tcp").read_text().splitlines()[1:]:
+            fields = line.split()
+            local = fields[1].endswith(port_suffix)
+            remote = fields[2].endswith(port_suffix)
+            state = fields[3]
+            if local and state == "0A":
+                snapshot["workspace_pending_connections"] = int(fields[4].split(":")[1], 16)
+            elif remote and state == "02":
+                snapshot["workspace_connecting"] += 1
+            elif local and state == "01":
+                snapshot["workspace_established"] += 1
+            elif local and state == "09":
+                snapshot["workspace_last_ack"] += 1
+    except (OSError, IndexError, ValueError):
+        return {}
+    return snapshot if "workspace_pending_connections" in snapshot else {}
 
 
 class BoundedThreadingHTTPServer(ThreadingHTTPServer):
@@ -128,6 +156,7 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
                     context[f"pressure_{resource}"] = Path(f"/proc/pressure/{resource}").read_text()[:256].strip()
                 except OSError:
                     pass
+            context.update(workspace_connection_snapshot())
             host_errors.report_warning(
                 "admin_api.request_capacity",
                 "Admin request capacity exhausted" if rejected else "Admin requests are taking unusually long",

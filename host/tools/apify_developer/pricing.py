@@ -1,6 +1,6 @@
-"""Bounded PPE proposals. Provider history and revenue share are not agent inputs."""
+"""Bounded PPE proposals containing only the new approved pricing period."""
 
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 import json
 import math
 import re
@@ -34,7 +34,6 @@ def amount(value: Any, maximum: float) -> float:
 def validate(values, guard):
     """Normalize only the documented, operator-editable subset."""
     values = dict(values)
-    values["effective_at"] = timestamp(values["effective_at"]).isoformat()
     values["minimum_run_budget_usd"] = amount(values["minimum_run_budget_usd"], 100)
     events = values["events"]
     if not isinstance(events, list) or not 1 <= len(events) <= 20:
@@ -77,37 +76,25 @@ def validate(values, guard):
     return values
 
 
-def history(actor):
-    entries = actor.get("pricingInfos")
-    if not isinstance(entries, list) or len(entries) > 100 or any(not isinstance(e, dict) for e in entries):
-        raise ValueError("Complete bounded pricing history is unavailable; inspect monetization in Apify Console.")
+def current_and_scheduled(actor):
+    """Read the current and next period without returning an expanding history."""
+    current = now()
+    active = None
+    scheduled = None
+    for entry in actor.get("pricingInfos") or []:
+        started = timestamp(entry.get("startedAt"))
+        if started <= current:
+            if active is None or started > timestamp(active["startedAt"]):
+                active = entry
+        elif scheduled is None or started < timestamp(scheduled["startedAt"]):
+            scheduled = entry
+    entries = [e for e in (active, scheduled) if e is not None]
     if len(json.dumps(entries, allow_nan=False).encode()) > 24000:
-        raise ValueError("Pricing history exceeds the approval size limit; use Apify Console.")
+        raise ValueError("Current pricing exceeds the output size limit; inspect it in Apify Console.")
     return entries
 
 
-def check_time(actor, values, entries):
-    current = now()
-    effective = timestamp(values["effective_at"])
-    if not current < effective <= current + timedelta(days=90):
-        raise ValueError("Effective time must still be in the future and within 90 days; queue a new approval if it elapsed.")
-    if actor.get("isPublic") is not False and effective < current + timedelta(days=14):
-        raise ValueError("Public Actor pricing requires at least 14 days notice in this tool.")
-    if any(timestamp(e.get("startedAt")) > current for e in entries):
-        raise ValueError("Actor already has scheduled pricing; manage that change in Apify Console first.")
-
-
-def proposal(actor, values) -> dict[str, Any]:
-    entries = history(actor)
-    check_time(actor, values, entries)
-    # The public schema marks margin as platform-set. Never invent a margin
-    # for an Actor without a provider-supplied pricing record.
-    if len(entries) >= 100:
-        raise ValueError("Pricing history is at the tool limit; use Apify Console.")
-    if not entries:
-        raise ValueError("No platform-set revenue share is available. Initialize monetization in Apify Console first.")
-    latest = max(entries, key=lambda e: timestamp(e.get("startedAt")))
-    margin = amount(latest.get("apifyMarginPercentage"), 1)
+def proposal(values) -> dict[str, Any]:
     events = {}
     for event in values["events"]:
         result = {"eventTitle": event["title"], "eventDescription": event["description"],
@@ -117,30 +104,24 @@ def proposal(actor, values) -> dict[str, Any]:
         else:
             result["eventTieredPricingUsd"] = {t: {"tieredEventPriceUsd": p} for t, p in event["tier_prices_usd"].items()}
         events[event["name"]] = result
-    entry = {"pricingModel": "PAY_PER_EVENT", "apifyMarginPercentage": margin,
-             "createdAt": now().isoformat(), "startedAt": values["effective_at"],
+    # Required by the update schema; Apify documents the standard PPE split
+    # as 80% developer / 20% platform. No prior pricing record is needed.
+    entry = {"pricingModel": "PAY_PER_EVENT", "apifyMarginPercentage": 0.2,
              "pricingPerEvent": {"actorChargeEvents": events},
              "minimalMaxTotalChargeUsd": values["minimum_run_budget_usd"]}
-    return {"pricingInfos": [*entries, entry]}
+    return {"pricingInfos": [entry]}
 
 
 def verified(actor, body):
     """Require independent readback, tolerating provider-added metadata only."""
-    actual = history(actor)
-    expected = body["pricingInfos"]
-    def contains(value, subset):
-        if isinstance(subset, dict):
-            return isinstance(value, dict) and all(k in value and contains(value[k], v) for k, v in subset.items())
-        return value == subset
-    if len(actual) != len(expected):
+    desired = body["pricingInfos"][0]
+    actual = current_and_scheduled(actor)
+    if len(actual) != 1:
         return False
     # Do not accept an extra billable event or silently changed unit price.
-    desired = expected[-1]
-    matches = [e for e in actual if e.get("pricingModel") == "PAY_PER_EVENT"
-               and timestamp(e.get("startedAt")) == timestamp(desired["startedAt"])]
-    if len(matches) != 1:
+    saved = actual[0]
+    if saved.get("pricingModel") != "PAY_PER_EVENT" or timestamp(saved.get("startedAt")) != timestamp(desired["startedAt"]):
         return False
-    saved = matches[0]
     if saved.get("pricingPerEvent") != desired["pricingPerEvent"] or saved.get("minimalMaxTotalChargeUsd") != desired["minimalMaxTotalChargeUsd"]:
         return False
-    return saved.get("apifyMarginPercentage") == desired["apifyMarginPercentage"] and all(any(contains(e, old) for e in actual) for old in expected[:-1])
+    return saved.get("apifyMarginPercentage") == desired["apifyMarginPercentage"]

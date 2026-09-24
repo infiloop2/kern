@@ -456,7 +456,7 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#new-task-effort")).not_to_contain_text("Ultra")
     frame.locator("#new-task-effort").select_option("max")
     frame.get_by_role("button", name="Send").click()
-    expect(frame.locator("#status")).to_contain_text("Kern is busy or temporarily unavailable")
+    expect(frame.locator("#status")).to_contain_text("This request could not be completed. Please try again.")
     expect(frame.locator(".thread-title")).to_have_text("New thread")
     expect(frame.locator("#new-task")).to_have_value("agent workspace smoke task")
     assert len(upload_requests) == 2, "the first Send must stop after the second attachment fails"

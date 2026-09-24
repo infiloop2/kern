@@ -171,6 +171,30 @@ export function formatTokenCount(value) {
   return String(value);
 }
 
+// Exact nano-dollar units for a decimal cost string (tool spend arrives as
+// strings) or a number (metered inference), so sorting and rounding avoid
+// binary float drift such as 1.20515 rounding down.
+export function costUnits(value) {
+  const text = typeof value === "number" ? value.toFixed(9) : String(value);
+  const negative = text.startsWith("-");
+  const [whole, fraction = ""] = text.replace(/^[-+]/, "").split(".");
+  const units = BigInt(whole || "0") * 1000000000n + BigInt((fraction + "000000000").slice(0, 9));
+  return negative ? -units : units;
+}
+
+// Every spend readout rounds half-up to at most four decimals and keeps cents,
+// so $0.06, $0.0141 and $12.75 read alike. Nonzero spend below that precision
+// stays visible instead of collapsing to $0.00.
+export function formatCost(value, currency = "$") {
+  const units = costUnits(value);
+  if (units > 0n && units < 50000n) return `<${currency}0.0001`;
+  const magnitude = units < 0n ? -units : units;
+  const rounded = (magnitude + 50000n) / 100000n;
+  const sign = units < 0n && rounded > 0n ? "-" : "";
+  const fraction = String(rounded % 10000n).padStart(4, "0").replace(/0{1,2}$/, "");
+  return `${sign}${currency}${rounded / 10000n}.${fraction}`;
+}
+
 // Month-to-date usage the proxy metered live from Bedrock responses, formatted
 // for display; null when the payload is absent.
 export function bedrockUsage(account) {
@@ -179,7 +203,7 @@ export function bedrockUsage(account) {
   if (!Number.isFinite(amount)) return null;
   const currency = !usage.currency || usage.currency === "USD" ? "$" : `${usage.currency} `;
   return {
-    cost: `${currency}${amount.toFixed(2)}`,
+    cost: formatCost(amount, currency),
     inputTokens: (Number(usage.input_tokens) || 0) + (Number(usage.cache_read_tokens) || 0) + (Number(usage.cache_write_tokens) || 0),
     outputTokens: Number(usage.output_tokens) || 0,
     cacheReadTokens: Number(usage.cache_read_tokens) || 0,

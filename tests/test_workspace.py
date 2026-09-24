@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from http import HTTPStatus
+import socket
 import unittest
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,6 +15,28 @@ from host.runtime.workspace.web_apps import backend as web_apps
 
 
 class WorkspaceTests(unittest.TestCase):
+    def test_browser_listener_has_room_for_parallel_admin_reads(self) -> None:
+        server = None
+        for port in range(8000, 8016):
+            try:
+                server = service.WorkspaceHTTPServer(("127.0.0.1", port), service.Handler)
+                break
+            except OSError:
+                continue
+        if server is None:
+            self.fail("No free test port in 8000-8015")
+        clients = []
+        try:
+            # Keep the accept loop stopped. Every completed connect must fit
+            # in the listener queue, as it would during a brief accept pause.
+            for _ in range(12):
+                clients.append(socket.create_connection(server.server_address, timeout=1))
+            self.assertEqual(len(clients), 12)
+        finally:
+            for client in clients:
+                client.close()
+            server.server_close()
+
     def test_memory_hybrid_cursor_retries_during_model_failure(self) -> None:
         rows = [
             (
@@ -336,7 +359,7 @@ class WorkspaceTests(unittest.TestCase):
                 events.append(self.name)
 
         with (
-            patch.object(service, "ThreadingHTTPServer", FakeTcpServer),
+            patch.object(service, "WorkspaceHTTPServer", FakeTcpServer),
             patch.object(service.agent_api, "AgentWorkspaceServer", FakeAgentServer),
             patch.object(service.threading, "Thread", FakeThread),
         ):

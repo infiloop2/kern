@@ -25,7 +25,8 @@ let finishOld;
 globalThis.fetch = async () => {
   calls++;
   if (calls === 1) return new Promise(resolve => {finishOld = resolve;});
-  return new Response('<html>Busy</html>', {status:503, headers:{'Retry-After':'5'}});
+  return new Response('{"error":{"code":"host_busy"}}',
+    {status:503, headers:{'Retry-After':'5', 'Content-Type':'application/json'}});
 };
 const old = api.api('GET', '/old');
 await assert.rejects(api.api('GET', '/busy'), e => e.code === 'host_unavailable' && e.status === 503);
@@ -33,7 +34,7 @@ finishOld(new Response('{}'));
 await old;
 assert.equal(api.isOverloadCoolingDown(), true, 'old success cannot clear cooldown');
 await assert.rejects(api.api('POST', '/write', {value:1}), e => e.code === 'host_unavailable');
-assert.equal(calls, 2, 'blocked action must not send');
+assert.equal(calls, 3, 'operator action gets one attempt during read cooldown');
 now += 5000;
 await assert.rejects(api.api('GET', '/busy'), e => e.status === 503);
 now += 9999;
@@ -43,7 +44,7 @@ assert.equal(api.isOverloadCoolingDown(), false);
 globalThis.fetch = async () => { calls++; return new Response('{}'); };
 await api.api('GET', '/recovered');
 assert.equal(notices.at(-1), '');
-assert.equal(calls, 4, 'failed write was never replayed');
+assert.equal(calls, 5, 'failed write was never replayed');
 let unauthorized = 0;
 api.setUnauthorizedHandler(() => unauthorized++);
 globalThis.fetch = async () => new Response('{}', {status:401});
@@ -52,11 +53,10 @@ assert.equal(unauthorized, 1);
 assert.equal(api.isOverloadCoolingDown(), false);
 globalThis.fetch = async () => { throw new TypeError('network failed'); };
 await assert.rejects(api.api('GET', '/network'), e => e.code === 'host_unavailable');
-assert.equal(api.isOverloadCoolingDown(), true);
-now += 5000;
+assert.equal(api.isOverloadCoolingDown(), false, 'one network failure must not pause reads');
 globalThis.fetch = async () => new Response('bad gateway', {status:502});
 await assert.rejects(api.apiBlob('/file'), e => e.status === 502);
-now += 10000;
+assert.equal(api.isOverloadCoolingDown(), false);
 globalThis.fetch = async () => new Response(JSON.stringify({error:{message:'Usage temporarily unavailable'}}),
   {status:503, headers:{'Content-Type':'application/json'}});
 await assert.rejects(api.api('GET', '/analytics'), e => e.status === 503 && e.message === 'Usage temporarily unavailable');
@@ -81,13 +81,13 @@ globalThis.fetch = async (path, options) => {
   });
 };
 await assert.rejects(api.api('GET', '/stalled'), e => e.code === 'host_unavailable');
-assert.equal(api.isOverloadCoolingDown(), true, 'a stalled read must enter cooldown');
-now += 10000;
+assert.equal(api.isOverloadCoolingDown(), false, 'one stalled read must not pause reads');
 globalThis.fetch = async () => new Response('<html>Busy</html>', {status:503});
 await assert.rejects(api.workspaceHtml('/workspace/chat.html'), e => e.code === 'host_unavailable');
 now += 10000;
 globalThis.fetch = async () => new Response('<div>Chat</div>');
 assert.equal(await api.workspaceHtml('/workspace/chat.html'), '<div>Chat</div>');
+process.exit(0);
 '''.replace('SOURCE', json.dumps(source), 1)
         # CI already ships Playwright's Node driver, but no node on PATH.
         node = shutil.which('node') or str(Path(playwright.__file__).parent / 'driver' / 'node')

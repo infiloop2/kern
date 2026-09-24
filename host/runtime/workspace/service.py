@@ -24,6 +24,13 @@ PORT = int(os.environ.get("KERN_WORKSPACE_PORT", str(WORKSPACE_PORT)))
 MAINTENANCE_INTERVAL_SECONDS = 3600
 
 
+class WorkspaceHTTPServer(ThreadingHTTPServer):
+    # The admin UI starts several independent Workspace reads together. The
+    # default socket backlog is only five, so a short accept delay can make
+    # additional local connects stall before a request reaches any handler.
+    request_queue_size = 64
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "KernWorkspace/1"
 
@@ -148,7 +155,7 @@ def maintenance_loop() -> None:
 def main() -> int:
     # Bind first. A duplicate service instance must fail before it can start a
     # scheduler outside the serving process's workspace-lock domain.
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    server = WorkspaceHTTPServer((HOST, PORT), Handler)
     agent_server = agent_api.AgentWorkspaceServer(
         os.environ.get("KERN_WORKSPACE_AGENT_SOCKET", WORKSPACE_AGENT_SOCKET_PATH),
         agent_api.agent_peer_uids(),

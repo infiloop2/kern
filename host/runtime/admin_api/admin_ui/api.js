@@ -46,20 +46,66 @@ let unavailableDelay = 0;
 let unavailableGeneration = 0;
 let unavailableStatus = 503;
 let availabilityHandler = () => {};
-const BUSY_MESSAGE = "Kern is busy or temporarily unavailable. Refreshes will resume shortly.";
+let displayedAvailability = "";
+let nextRequestId = 0;
+const requestProblems = new Map();
+let problemExpiryTimer = null;
+const BUSY_MESSAGE = "Kern is having trouble responding. Updates will retry automatically.";
+const BUSY_ACTION_MESSAGE = "Kern is busy. Please try again.";
+const REQUEST_ERROR_MESSAGE = "This request could not be completed. Please try again.";
+const SLOW_READ_MS = 10000;
+const PROBLEM_WINDOW_MS = 15000;
 const READ_DEADLINE_MS = 30000;
 
 export function setAvailabilityHandler(handler) { availabilityHandler = handler; }
 export function isOverloadCoolingDown() { return Date.now() < unavailableUntil; }
 
-function unavailableError() {
-  const error = new Error(BUSY_MESSAGE);
-  error.status = unavailableStatus;
+function unavailableError(message = REQUEST_ERROR_MESSAGE, status = 0) {
+  const error = new Error(message);
+  error.status = status;
   error.code = "host_unavailable";
   return error;
 }
 
-function markUnavailable(response) {
+function showAvailability(message) {
+  if (message === displayedAvailability) return;
+  displayedAvailability = message;
+  availabilityHandler(message);
+}
+
+function updateAvailability() {
+  const now = Date.now();
+  if (problemExpiryTimer !== null) clearTimeout(problemExpiryTimer);
+  let nextExpiry = Infinity;
+  for (const [id, problem] of requestProblems) {
+    if (problem.kind !== "failure") continue;
+    const expiresAt = problem.at + PROBLEM_WINDOW_MS;
+    if (expiresAt <= now) requestProblems.delete(id);
+    else nextExpiry = Math.min(nextExpiry, expiresAt);
+  }
+  if (unavailableUntil > now) nextExpiry = Math.min(nextExpiry, unavailableUntil);
+  problemExpiryTimer = nextExpiry === Infinity ? null : setTimeout(updateAvailability, nextExpiry - now);
+  let slowCount = 0;
+  let failureCount = 0;
+  for (const problem of requestProblems.values()) {
+    if (problem.kind === "slow") slowCount += 1;
+    else failureCount += 1;
+  }
+  showAvailability(isOverloadCoolingDown() || slowCount >= 2 || failureCount >= 3 ? BUSY_MESSAGE : "");
+}
+
+function noteProblem(requestId, kind) {
+  requestProblems.set(requestId, { kind, at: Date.now() });
+  updateAvailability();
+}
+
+function clearSlowProblem(requestId) {
+  if (requestProblems.get(requestId)?.kind !== "slow") return;
+  requestProblems.delete(requestId);
+  updateAvailability();
+}
+
+function markBusy(response) {
   unavailableStatus = response?.status || 0;
   // Concurrent failures belong to one cooldown, rather than multiplying it.
   if (!isOverloadCoolingDown()) {
@@ -69,19 +115,23 @@ function markUnavailable(response) {
     unavailableDelay = Math.min(60000, Math.max(5000, unavailableDelay * 2, retryMs));
     unavailableUntil = Date.now() + unavailableDelay;
     unavailableGeneration += 1;
-    availabilityHandler(BUSY_MESSAGE);
+    updateAvailability();
   }
 }
 
-async function availableFetch(path, options, { bypassCooldown = false } = {}) {
-  if (!bypassCooldown && isOverloadCoolingDown()) throw unavailableError();
+async function availableFetch(path, options, { bypassCooldown = false, requestId = ++nextRequestId } = {}) {
+  // A cooldown reduces background reads. Operator actions still get one real
+  // attempt and are never queued or replayed.
+  if (!bypassCooldown && isOverloadCoolingDown() && (!options.method || options.method === "GET")) {
+    throw unavailableError(BUSY_MESSAGE, unavailableStatus);
+  }
   const generation = unavailableGeneration;
   let response;
   try {
     response = await fetch(path, options);
   } catch (error) {
     if (error.name !== "AbortError") {
-      markUnavailable(null);
+      noteProblem(requestId, "failure");
       throw unavailableError();
     }
     throw error;
@@ -96,44 +146,48 @@ async function availableFetch(path, options, { bypassCooldown = false } = {}) {
     if (typeof detail?.error?.message === "string" && detail.error.code !== "host_busy") {
       return response;
     }
-    markUnavailable(response);
+    if (detail?.error?.code === "host_busy") markBusy(response);
+    else noteProblem(requestId, "failure");
     if (response.body) void response.body.cancel().catch(() => {});
-    throw unavailableError();
+    throw unavailableError(detail?.error?.code === "host_busy" ? BUSY_ACTION_MESSAGE : REQUEST_ERROR_MESSAGE, response.status);
   }
   // An older in-flight success must not erase a newly observed outage.
   if (generation === unavailableGeneration && unavailableDelay) {
     unavailableDelay = 0;
     unavailableUntil = 0;
-    availabilityHandler("");
+    updateAvailability();
   }
   return response;
 }
 
 // Bound dashboard reads through body parsing as well as connection setup.
 // A stalled read must release the refresh tick so a later one can recover.
-async function withReadDeadline(work) {
+async function withReadDeadline(work, requestId = ++nextRequestId) {
   const controller = new AbortController();
   let expired = false;
+  const slowTimer = setTimeout(() => noteProblem(requestId, "slow"), SLOW_READ_MS);
   const timer = setTimeout(() => {
     expired = true;
     controller.abort();
   }, READ_DEADLINE_MS);
   try {
-    return await work(controller.signal);
+    return await work(controller.signal, requestId);
   } catch (error) {
     if (expired) {
-      markUnavailable(null);
-      throw unavailableError();
+      noteProblem(requestId, "failure");
+      throw unavailableError("This request timed out. Please try again.");
     }
     throw error;
   } finally {
     clearTimeout(timer);
+    clearTimeout(slowTimer);
+    clearSlowProblem(requestId);
   }
 }
 
 export function workspaceHtml(path) {
-  return withReadDeadline(async signal => {
-    const response = await availableFetch(path, { credentials: "same-origin", signal });
+  return withReadDeadline(async (signal, requestId) => {
+    const response = await availableFetch(path, { credentials: "same-origin", signal }, { requestId });
     if (!response.ok) throw new Error(`Could not load ${path}`);
     return response.text();
   });
@@ -162,7 +216,7 @@ export async function logout() {
 }
 
 export async function api(method, path, body, extraHeaders) {
-  const request = async signal => {
+  const request = async (signal, requestId) => {
     const headers = authenticatedHeaders(extraHeaders);
     if (body !== undefined) headers["Content-Type"] = "application/json";
     const response = await availableFetch(path, {
@@ -171,7 +225,7 @@ export async function api(method, path, body, extraHeaders) {
       body: body === undefined ? undefined : JSON.stringify(body),
       credentials: "same-origin",
       ...(signal ? { signal } : {}),
-    });
+    }, { requestId });
     if (response.status === 401) { unauthorizedHandler(); throw new Error("unauthorized"); }
     let data;
     try {
@@ -190,7 +244,7 @@ export async function api(method, path, body, extraHeaders) {
     }
     return data;
   };
-  return method === "GET" ? withReadDeadline(request) : request();
+  return method === "GET" ? withReadDeadline(request) : request(undefined, ++nextRequestId);
 }
 
 export async function apiBlob(path) {

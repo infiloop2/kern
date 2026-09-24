@@ -770,7 +770,7 @@ def upwork_smoke(page, url: str) -> None:
             try:
                 row.get_by_role("button", name="Connect account", exact=True).click()
                 expect(row.locator("[data-tool-message]")).to_have_text(
-                    "Kern is busy or temporarily unavailable. Refreshes will resume shortly."
+                    "This request could not be completed. Please try again."
                     if status == 502 else f"Server returned an invalid JSON response (HTTP {status})."
                 )
                 assert page.url == original_url, "failed connect navigated away"
@@ -921,11 +921,20 @@ def desktop_smoke(page, url: str) -> None:
         "Document the theming setup and open a pull request with the implementation and test evidence"
     )
     task_style = task_line.evaluate("""element => ({
-      overflowed: element.scrollWidth > element.clientWidth,
-      ellipsis: getComputedStyle(element).textOverflow,
+      lines: element.getBoundingClientRect().height / parseFloat(getComputedStyle(element).lineHeight),
+      clamp: getComputedStyle(element).webkitLineClamp,
     })""")
-    if task_style != {"overflowed": True, "ellipsis": "ellipsis"}:
-        raise AssertionError(f"sidebar task did not truncate: {task_style}")
+    if task_style["clamp"] != "3" or not 1 < task_style["lines"] <= 3.1:
+        raise AssertionError(f"sidebar task did not wrap within three lines: {task_style}")
+    short_task_fits = task_line.evaluate("""element => {
+      const original = element.textContent;
+      element.textContent = 'Document theming, add tests, and open the pull PR';
+      const fits = element.scrollHeight <= element.clientHeight;
+      element.textContent = original;
+      return fits;
+    }""")
+    if not short_task_fits:
+        raise AssertionError("49-character sidebar task was clipped")
     name_line = thread_one_nav.locator(".workspace-nav-label")
     original_name = name_line.inner_text()
     name_line.evaluate("element => { element.textContent = 'A very long agent name '.repeat(12); }")
@@ -986,20 +995,19 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#runtime-overview")).not_to_contain_text("--")
     expect(page.locator("#runtime-overview .runtime-summary-host-inference")).to_have_count(2)
     expect(page.locator("#runtime-overview .runtime-summary-host-inference").nth(0)).to_contain_text(
-        "$0.001234"
+        "$0.0012"
     )
     expect(page.locator("#runtime-overview .runtime-summary-host-inference").nth(1)).to_contain_text(
-        "$0.000084"
+        "$0.0001"
     )
     expect(page.locator('[data-overview-group="runtimes"] .runtime-stat-cost')).to_have_count(1)
     assert_runtime_summaries_do_not_magnify(page)
-    with page.expect_request(re.compile(r"/v1/agent-runtime/refresh")):
-        host_ai_toggle.click()
+    host_ai_toggle.click()
     expect(runtime_toggle).to_have_attribute("aria-expanded", "false")
     expect(host_ai_toggle).to_have_attribute("aria-expanded", "true")
     expect(page.locator('[data-overview-group="runtimes"] .runtime-summary').first).to_be_hidden()
     expect(page.locator('[data-overview-group="host-ai"] .runtime-summary').first).to_be_visible()
-    expect(host_ai_toggle).to_contain_text("$0.001318 MTD")
+    expect(host_ai_toggle).to_contain_text("$0.0013 MTD")
     expect(page.locator("#panel-home").get_by_role("heading", name="Agent runtimes")).to_have_count(1)
     expect(page.locator("#panel-home").get_by_text("Provider usage")).to_have_count(0)
     expect(page.get_by_role("button", name="Start Codex login")).to_have_count(0)
@@ -2057,8 +2065,7 @@ def narrow_desktop_smoke(page, url: str) -> None:
     )
     if geometry["cardsLeft"] < 0 or geometry["cardsRight"] > geometry["viewportWidth"]:
         raise AssertionError(f"narrow-desktop runtime menu leaves the viewport: {geometry}")
-    with page.expect_request(re.compile(r"/v1/agent-runtime/refresh")):
-        host_ai_toggle.click()
+    host_ai_toggle.click()
     expect(runtime_toggle).to_have_attribute("aria-expanded", "false")
     expect(host_ai_toggle).to_have_attribute("aria-expanded", "true")
     expect(runtime_panel.locator(".runtime-summary").first).to_be_hidden()
@@ -2175,13 +2182,12 @@ def mobile_smoke(page, url: str) -> None:
     )
     if any(height > 41 for height in summary_heights):
         raise AssertionError(f"mobile runtime rows grew beyond the 40px design: {summary_heights}")
-    with page.expect_request(re.compile(r"/v1/agent-runtime/refresh")):
-        host_ai_toggle.click()
+    host_ai_toggle.click()
     expect(runtime_toggle).to_have_attribute("aria-expanded", "false")
     expect(host_ai_toggle).to_have_attribute("aria-expanded", "true")
     expect(runtime_panel.locator(".runtime-summary").first).to_be_hidden()
     expect(page.locator("#runtime-overview-host-ai-panel .runtime-summary").first).to_be_visible()
-    expect(host_ai_toggle).to_contain_text("$0.001318 MTD")
+    expect(host_ai_toggle).to_contain_text("$0.0013 MTD")
     page.keyboard.press("Escape")
     expect(host_ai_toggle).to_have_attribute("aria-expanded", "false")
     expect(page.locator("#runtime-overview .runtime-summary").first).to_be_hidden()

@@ -201,7 +201,6 @@ EXEMPT_FIELDS = {
     ("apify_developer", "get_actor", "actor_id"): TYPED,
     ("apify_developer", "get_monetization", "actor_id"): TYPED,
     ("apify_developer", "set_monetization", "actor_id"): APPROVAL_GATED,
-    ("apify_developer", "set_monetization", "effective_at"): APPROVAL_GATED,
     ("apify_developer", "set_monetization", "minimum_run_budget_usd"): APPROVAL_GATED,
     ("apify_developer", "set_monetization", "events"): APPROVAL_GATED,
     ("apify_developer", "list_builds", "actor_id"): TYPED,

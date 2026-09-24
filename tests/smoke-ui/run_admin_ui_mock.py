@@ -1507,7 +1507,7 @@ def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dic
                           for name, label, amount in [
                               ("runway", "Runway", "1.2"),
                               ("twitterapi_io", "TwitterAPI.io", "0.00015"),
-                              ("twitter", "X", "0.005")]]}
+                              ("reddit_scrapecreators", "Reddit ScrapeCreators Search", "0.00564")]]}
     tool_config_match = TOOL_CONFIG_RE.fullmatch(path)
     if method == "PUT" and tool_config_match:
         return put_tool_config(tool_config_match.group(1), body)

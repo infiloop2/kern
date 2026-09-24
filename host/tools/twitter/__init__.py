@@ -329,10 +329,10 @@ MANIFEST = ToolManifest(
         },
     }),
     config=(
-        ConfigRequirement(key="X_APP_OWNER_USER_ID", description="Optional numeric X user id of the developer app owner, to apply $0.001 owned-read pricing. Leave unset for standard rates."),
         ConfigRequirement(key="X_OAUTH_CLIENT_ID", description="X developer app OAuth 2.0 client id."),
         ConfigRequirement(key="X_OAUTH_CLIENT_SECRET", description="X developer app OAuth 2.0 client secret (confidential client)."),
         ConfigRequirement(key="X_BEARER_TOKEN", description="X developer app Bearer Token (app-only auth; used by trends lookups, which do not accept user-context tokens)."),
+        ConfigRequirement(key="X_APP_OWNER_USER_ID", description="Optional numeric X user id of the developer app owner, to apply $0.001 owned-read pricing. Leave unset for standard rates."),
     ),
     protections=(
         "Reading does not require approval. Publishing a post, reply, or quote post happens only after your approval.",

@@ -8,7 +8,7 @@ def run(page, url, log_in, *, mobile=False):
     toggle = page.locator('[data-overview-group="tools"] .runtime-overview-toggle')
     panel = page.locator('#runtime-overview-tools-panel')
     expect(page.locator('.runtime-overview-toggle')).to_have_count(3)
-    expect(toggle).to_contain_text('$1.20515 MTD')
+    expect(toggle).to_contain_text('$1.2052 MTD')
     expect(toggle.locator('.tool-cost-indicator')).to_have_count(0)
     expect(toggle).not_to_have_attribute('aria-label', re.compile('partial'))
     toggle.click()
@@ -30,11 +30,19 @@ def run(page, url, log_in, *, mobile=False):
         return rows[1] > rows[0];
     }""")
     expect(panel.locator('.tool-spend-card').filter(has_text='retired_tool')).to_have_count(0)
-    expect(panel.get_by_role('button', name=re.compile('TwitterAPI.io:'))).to_contain_text('$0.00015')
+    expect(panel.get_by_role('button', name=re.compile('TwitterAPI.io:'))).to_contain_text('$0.0002')
     expect(panel.get_by_role('button', name=re.compile('Gmail:'))).to_have_count(0)
     expect(panel.locator('.tool-spend-card').filter(has_text='Disabled reporter')).to_have_count(0)
-    expect(panel.get_by_role('button', name=re.compile('Runway:'))).to_contain_text('$1.2')
+    expect(panel.get_by_role('button', name=re.compile('Runway:'))).to_contain_text('$1.20')
+    expect(panel.get_by_role('button', name=re.compile('Reddit ScrapeCreators Search:'))).to_contain_text('$0.0056')
     expect(panel).not_to_contain_text('unmeasured')
+    # A long tool name wraps within its column instead of running under the cost.
+    overlaps = panel.evaluate('''panel => [...panel.querySelectorAll('.tool-spend-card')].filter(card => {
+        const text = document.createRange();
+        text.selectNodeContents(card.querySelector('.runtime-summary-copy > span'));
+        return text.getBoundingClientRect().right > card.querySelector('.runtime-usage').getBoundingClientRect().left;
+    }).map(card => card.textContent.trim())''')
+    assert not overlaps, overlaps
     for target in (panel, page.locator('#runtime-overview')):
         bounds = target.evaluate('e => ({left:e.getBoundingClientRect().left,right:e.getBoundingClientRect().right,scroll:e.scrollWidth,client:e.clientWidth,width:innerWidth})')
         assert bounds['left'] >= 0 and bounds['right'] <= bounds['width'] + 1, bounds
@@ -44,17 +52,17 @@ def run(page, url, log_in, *, mobile=False):
     page.route('**/v1/tools/usage', lambda route: route.fulfill(json=tiny))
     toggle.click()
     toggle.click()
-    expect(toggle).to_contain_text('$0.000000001 MTD')
-    expect(panel.get_by_role('button', name=re.compile('Runway:'))).to_contain_text('$0.000000001')
+    expect(toggle).to_contain_text('<$0.0001 MTD')
+    expect(panel.get_by_role('button', name=re.compile('Runway:'))).to_contain_text('<$0.0001')
     page.unroute('**/v1/tools/usage')
     toggle.click()
     toggle.click()
-    expect(toggle).to_contain_text('$1.20515 MTD')
+    expect(toggle).to_contain_text('$1.2052 MTD')
     page.route('**/v1/tools/usage', lambda route: route.fulfill(status=500, json={"error": "unavailable"}))
     toggle.click()
     toggle.click()
     expect(toggle).to_have_attribute('aria-label', re.compile('stale'))
-    expect(toggle).to_contain_text('$1.20515')
+    expect(toggle).to_contain_text('$1.2052')
     expect(panel).to_contain_text('Refresh failed')
     page.unroute('**/v1/tools/usage')
     panel.get_by_role('button', name=re.compile('TwitterAPI.io:')).click()
