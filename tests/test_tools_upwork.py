@@ -297,6 +297,28 @@ class UpworkTests(unittest.TestCase):
                 self.assertIsInstance(result, ActionFailed)
                 self.assertEqual(self.client.call.call_count, 3)
 
+    def test_unapproved_preview_terms_report_names_only_and_never_confirm(self):
+        pending = self.submit()
+        self.client.reset_mock()
+        self.client.call.side_effect = [self.job_cost(), self.preview(), self.stored_preview(
+            boostConnects=3, attachments=["private-file-token"],
+            portfolioProjectIds=["private-project-token"])]
+        result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("attachments, boost_connects, portfolio_project_ids", result.error)
+        self.assertNotIn("private-file-token", result.error)
+        self.assertNotIn("private-project-token", result.error)
+        self.assertEqual(self.client.call.call_count, 3)
+
+    def test_empty_optional_preview_object_is_not_a_proposal_term(self):
+        pending = self.submit()
+        self.client.reset_mock()
+        self.client.call.side_effect = [self.job_cost(), self.preview(), self.stored_preview(answers={}),
+            {"content": [{"type": "text", "text": "Submitted"}]}]
+        result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+        self.assertIsInstance(result, ApprovalExecuted)
+        self.assertEqual(self.client.call.call_args.args[0], "upwork__confirm_preview")
+
     def test_stored_preview_missing_fields_and_alias_collisions_never_confirm(self):
         for field, alias in (("coverLetter", "cover_letter"), ("chargedAmount", "charged_amount"),
                              ("jobReference", "job_reference"), ("connects_cost", "connectsCost")):
