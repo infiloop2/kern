@@ -143,5 +143,13 @@ class RequestServerTests(unittest.TestCase):
         self.assertTrue(self.reported.wait(2))
 
     def test_route_groups_never_include_unrecognized_input(self):
+        self.assertEqual(request_server.request_group("POST", "/v1/agent-runtime/refresh"),
+                         "POST /v1/agent-runtime/refresh")
+        self.assertEqual(request_server.request_group("POST", "/v1/agent-runtime/reset-linked-account"),
+                         "POST /v1/agent-runtime/reset-linked-account")
+        self.assertEqual(request_server.request_group("POST", "/v1/agent-runtime/unknown/secret"),
+                         "POST /v1/agent-runtime")
+        self.assertEqual(request_server.request_group("POST", "/v1/agent-runtime/refresh/secret"),
+                         "POST /v1/agent-runtime")
         self.assertEqual(request_server.request_group("GET", "/tool-media/secret"), "other admin request")
         self.assertEqual(request_server.request_group("GET", "/v1/health-secret"), "other admin request")

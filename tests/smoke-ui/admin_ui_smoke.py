@@ -107,7 +107,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scope",
-        choices=("all", "core", "workspaces", "overload"),
+        choices=("all", "core", "workspaces", "overload", "oauth-poll"),
         default="all",
         help="Smoke only the host UI core, only workspaces, or both.",
     )
@@ -171,6 +171,12 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 overload_context = browser.new_context(service_workers="block")
                 overload_smokes.run(overload_context.new_page(), url, log_in)
                 overload_context.close()
+            if scope in {"all", "core", "oauth-poll"}:
+                import oauth_poll_smokes
+                for runtime, provider in (("grok-2", "xai"), ("claude_code", "claude")):
+                    oauth_context = browser.new_context(service_workers="block")
+                    oauth_poll_smokes.run(oauth_context.new_page(), url, log_in, runtime, provider)
+                    oauth_context.close()
             if scope in {"all", "core"}:
                 import swarm_smokes
                 for mobile in (False, True):

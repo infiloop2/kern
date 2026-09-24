@@ -1,4 +1,4 @@
-"""Bounded PPE proposals containing only the new approved pricing period."""
+"""Bounded PPE proposals; provider history is preserved at execution only."""
 
 from datetime import datetime, timezone
 import json
@@ -112,9 +112,43 @@ def proposal(values) -> dict[str, Any]:
     return {"pricingInfos": [entry]}
 
 
+def history(actor, guard):
+    """Check every existing record before sending it back unchanged to Apify."""
+    entries = actor.get("pricingInfos")
+    if entries is None:
+        entries = []
+    if not isinstance(entries, list) or any(not isinstance(e, dict) for e in entries):
+        raise ValueError("Apify pricing history must be an array of records.")
+    if len(json.dumps(entries, allow_nan=False).encode()) > 64 * 1024:
+        raise ValueError("Pricing history exceeds 64 KiB; use Apify Console.")
+    def walk(value, depth=0):
+        if depth > 12:
+            raise ValueError("Pricing history exceeds its nesting limit.")
+        if isinstance(value, dict):
+            for key, child in value.items():
+                guard(key)
+                walk(child, depth + 1)
+        elif isinstance(value, list):
+            for child in value:
+                walk(child, depth + 1)
+        elif isinstance(value, str):
+            guard(value)
+    walk(entries)
+    current = now()
+    if any(timestamp(e.get("startedAt")) > current for e in entries):
+        raise ValueError("Actor has scheduled pricing; resolve it in Apify Console before adding an immediate price.")
+    return entries
+
+
 def verified(actor, body):
     """Require independent readback, allowing Apify's synthetic start copy."""
-    desired = body["pricingInfos"][0]
+    # Notification timestamps belong to Apify; prior prices/periods must remain.
+    for previous in body["pricingInfos"][:-1]:
+        if not any(all(saved.get(key) == value for key, value in previous.items()
+                       if key not in ("notifiedAboutChangeAt", "notifiedAboutFutureChangeAt"))
+                   for saved in actor.get("pricingInfos") or []):
+            return False
+    desired = body["pricingInfos"][-1]
     actual = current_and_scheduled(actor)
     if len(actual) != 1:
         return False

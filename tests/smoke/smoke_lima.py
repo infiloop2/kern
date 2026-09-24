@@ -998,6 +998,7 @@ class LimaSmoke(AwsSmoke):
             raise AssertionError(f"network policy did not survive lifecycle operation: {stored}")
 
     def _check_network_enforcement(self) -> None:
+        self._check_admin_tcp_cleanup()
         proxy = f"http://127.0.0.1:{PROXY_PORT}"
         prefix = (
             "sudo -u kern-agent env -u HTTP_PROXY -u HTTPS_PROXY "

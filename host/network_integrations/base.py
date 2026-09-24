@@ -110,18 +110,24 @@ def simple_integration_parser(context: str) -> Callable[[dict[str, Any]], Manage
 # domain/method/path decision, transport rules, and inspection limits. Kept
 # next to the integration catalogs so the agent introspection tools serve one
 # uniform reason lookup.
+_PUBLIC_PAGE_FETCH_HINT = (
+    "For a public HTTPS page, check list_bundled_tools for web_fetch. If the operator "
+    "has enabled it, use its fetch_page action; otherwise ask the operator to enable "
+    "Web Fetch in Home > Integrations."
+)
+
 _CORE_PROXY_DENIAL_REASONS: tuple[DenialReason, ...] = (
     DenialReason(
         "network_policy_denied",
         "No network policy rule allows this host, method, and path. The operator can add a "
         "custom-domain rule or enable a managed network integration covering it in the admin UI's "
-        "Network tab.",
+        "Network tab. " + _PUBLIC_PAGE_FETCH_HINT,
     ),
     DenialReason(
         "host_not_allowed",
         "The host is not in the allowed network policy, so the connection was refused before "
         "DNS resolution. The operator can add a custom-domain rule or enable a managed network "
-        "integration covering it.",
+        "integration covering it. " + _PUBLIC_PAGE_FETCH_HINT,
     ),
     DenialReason(
         "network_policy_unavailable",

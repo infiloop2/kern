@@ -144,6 +144,7 @@ GUARDED_FIELDS = {
     ("twitter", "search_tweets", "query"),
     ("web_fetch", "fetch_page", "url"),
     ("web_fetch", "fetch_page_file", "url"),
+    ("web_fetch", "download_media", "url"),
     ("web_fetch", "head_url", "url"),
     ("twitterapi_io", "search_tweets", "query"),
     ("twitterapi_io", "search_tweets", "exclude_usernames"),
@@ -611,7 +612,7 @@ class BehavioralDenialTest(unittest.TestCase):
     def test_web_fetch_url_denied(self) -> None:
         from host.tools.web_fetch import BUNDLED_TOOL
 
-        for action in ("fetch_page", "fetch_page_file", "head_url"):
+        for action in ("fetch_page", "fetch_page_file", "download_media", "head_url"):
             result = BUNDLED_TOOL.execute(
                 action,
                 {"url": "https://example.com/lookup?q=AKIAIOSFODNN7EXAMPLE"},

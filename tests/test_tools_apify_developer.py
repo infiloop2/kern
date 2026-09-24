@@ -10,7 +10,7 @@ from unittest.mock import patch
 from host.runtime.tools.tools_host import unsupported_schema_error
 from host.tools import apify_developer as dev
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ApprovalExecuted, StreamingAsset
-from host.tools.shared.web import WebRequestError
+from host.tools.shared.web import ProviderWarning, WebRequestError
 from test_tools import FakeHostAPI, assert_matches_output_schema
 
 ACTOR = "a" * 17
@@ -125,7 +125,7 @@ class ApifyDeveloperTests(unittest.TestCase):
                 "events": [{"name": "result", "title": "Saved result", "description": "One saved row",
                             "price_usd": 0.001, "primary": True, "one_time": False}]}
 
-    def test_pricing_approval_sends_only_the_approved_new_period(self):
+    def test_pricing_approval_keeps_history_out_but_update_preserves_it(self):
         result = self.execute("set_monetization", self.pricing_input())
         self.assertEqual(self.writes(), [])
         self.assertIn("SINGLE", result.summary)
@@ -133,9 +133,10 @@ class ApifyDeveloperTests(unittest.TestCase):
         self.assertIsInstance(approved, ApprovalExecuted)
         write = self.writes()[0]
         self.assertEqual(set(write[3]), {"pricingInfos"})
-        self.assertEqual(len(write[3]["pricingInfos"]), 1)
-        self.assertEqual(write[3]["pricingInfos"][0]["apifyMarginPercentage"], 0.2)
-        self.assertEqual({k: v for k, v in write[3]["pricingInfos"][0].items() if k not in ("createdAt", "startedAt")},
+        self.assertEqual(len(write[3]["pricingInfos"]), 2)
+        self.assertEqual(write[3]["pricingInfos"][0], Provider().actor["pricingInfos"][0])
+        self.assertEqual(write[3]["pricingInfos"][-1]["apifyMarginPercentage"], 0.2)
+        self.assertEqual({k: v for k, v in write[3]["pricingInfos"][-1].items() if k not in ("createdAt", "startedAt")},
                          self.api.approvals.get(result.approval_id).payload["pricing_entry"])
         self.assertEqual(self.provider.calls[-1][0], "GET")
         self.assertFalse(self.provider.actor["isPublic"])
@@ -143,31 +144,48 @@ class ApifyDeveloperTests(unittest.TestCase):
         assert_matches_output_schema(self, dev.MANIFEST, "get_monetization", readback)
         self.assertEqual(len(json.loads(readback.result["pricing_json"])), 1)
 
-    def test_provider_history_never_reaches_approval_or_update(self):
+    def test_history_is_guarded_before_approval_and_again_before_write(self):
         for extra in (
             {"pricingPerEvent": {"actorChargeEvents": {"old": {"eventTitle": TOKEN}}}},
-            {"pricingPerEvent": {"actorChargeEvents": {"old": {"eventDescription": "Bearer historical-token"}}}},
-            {"providerMetadata": [{"nested": "ghp_TEST_HISTORICAL_SECRET"}]},
+            {"metadata": [{"nested": "Bearer historical-token"}]},
             {TOKEN: "secret in a provider-added key"},
-            {"providerMetadata": {"private_note": "historical customer@example.com"}},
+            {"metadata": {"private_note": "historical customer@example.com"}},
         ):
-            with self.subTest(extra_fields=list(extra)):
-                original = Provider().actor["pricingInfos"][0]
-                original.update(extra)
-                self.provider.actor["pricingInfos"] = [copy.deepcopy(original)]
-                result = self.execute("set_monetization", self.pricing_input())
-                self.assertIsInstance(result, ActionPendingApproval)
-                record = self.api.approvals.get(result.approval_id)
-                self.assertEqual(set(record.payload), {"action", "account_id", "input", "pricing_entry"})
-                serialized = json.dumps(record.payload)
-                for marker in (TOKEN, "Bearer historical-token", "ghp_TEST_HISTORICAL_SECRET", "customer@example.com", "providerMetadata"):
-                    self.assertNotIn(marker, serialized)
-                self.assertNotIn("pricingInfos", serialized)
-                self.assertIn("pricingPerEvent", record.payload["pricing_entry"])
-                self.assertEqual(self.provider.actor["pricingInfos"], [original])
-                self.assertIsInstance(self.approve(result), ApprovalExecuted)
-                self.assertEqual({k: v for k, v in self.writes()[-1][3]["pricingInfos"][0].items() if k not in ("createdAt", "startedAt")},
-                                 record.payload["pricing_entry"])
+            for after_approval in (False, True):
+                with self.subTest(extra=extra, after_approval=after_approval):
+                    self.provider.actor = Provider().actor
+                    pending = self.execute("set_monetization", self.pricing_input()) if after_approval else None
+                    self.provider.actor["pricingInfos"][0].update(extra)
+                    result = self.approve(pending) if pending else self.execute("set_monetization", self.pricing_input())
+                    self.assertIsInstance(result, ActionFailed)
+                    self.assertEqual(self.writes(), [])
+
+    def test_fresh_history_preserved_without_entering_approval(self):
+        pending = self.execute("set_monetization", self.pricing_input())
+        record = self.api.approvals.get(pending.approval_id)
+        self.assertEqual(set(record.payload), {"action", "account_id", "input", "pricing_entry"})
+        newer = dict(self.provider.actor["pricingInfos"][0], startedAt="2025-02-01T00:00:00Z",
+                     providerMetadata={"note": "existing provider field"})
+        self.provider.actor["pricingInfos"].append(newer)
+        previous = copy.deepcopy(self.provider.actor["pricingInfos"])
+        self.assertIsInstance(self.approve(pending), ApprovalExecuted)
+        self.assertEqual(self.writes()[-1][3]["pricingInfos"][:-1], previous)
+        self.assertNotIn("providerMetadata", json.dumps(record.payload))
+        self.assertNotIn("2025-02-01", json.dumps(record.payload))
+
+    def test_history_rejects_oversize_or_scheduled_without_writes(self):
+        for after_approval in (False, True):
+            for kind in ("large", "future"):
+                with self.subTest(kind=kind, after_approval=after_approval):
+                    self.provider.actor = Provider().actor
+                    pending = self.execute("set_monetization", self.pricing_input()) if after_approval else None
+                    if kind == "large":
+                        self.provider.actor["pricingInfos"] *= 1000
+                    else:
+                        self.provider.actor["pricingInfos"][0]["startedAt"] = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+                    result = self.approve(pending) if pending else self.execute("set_monetization", self.pricing_input())
+                    self.assertIsInstance(result, ActionFailed)
+                    self.assertEqual(self.writes(), [])
 
     def test_pricing_new_text_uses_parameter_guard_before_approval(self):
         for field in ("title", "description"):
@@ -233,7 +251,7 @@ class ApifyDeveloperTests(unittest.TestCase):
         self.mock.stop()
 
     def test_pricing_does_not_require_previous_records_or_margin(self):
-        for mode in ("missing", "null", "empty", "margin", "large"):
+        for mode in ("missing", "null", "empty", "margin"):
             with self.subTest(mode=mode):
                 self.provider.actor = Provider().actor
                 if mode == "missing":
@@ -244,17 +262,16 @@ class ApifyDeveloperTests(unittest.TestCase):
                     self.provider.actor["pricingInfos"] = []
                 elif mode == "margin":
                     del self.provider.actor["pricingInfos"][0]["apifyMarginPercentage"]
-                else:
-                    self.provider.actor["pricingInfos"] *= 1000
                 result = self.execute("set_monetization", self.pricing_input())
                 self.assertIsInstance(result, ActionPendingApproval)
                 self.assertIsInstance(self.approve(result), ApprovalExecuted)
-                self.assertEqual(len(self.writes()[-1][3]["pricingInfos"]), 1)
-                self.assertEqual(self.writes()[-1][3]["pricingInfos"][0]["apifyMarginPercentage"], 0.2)
+                self.assertEqual(len(self.writes()[-1][3]["pricingInfos"]), 2 if mode == "margin" else 1)
+                self.assertEqual(self.writes()[-1][3]["pricingInfos"][-1]["apifyMarginPercentage"], 0.2)
 
     def test_pricing_starts_at_execution_even_after_delayed_approval(self):
         for public in (False, True):
             with self.subTest(public=public):
+                self.provider.actor = Provider().actor
                 self.provider.actor["isPublic"] = public
                 pending = self.execute("set_monetization", self.pricing_input())
                 entry = self.api.approvals.get(pending.approval_id).payload["pricing_entry"]
@@ -262,7 +279,7 @@ class ApifyDeveloperTests(unittest.TestCase):
                 executed_at = datetime.now(timezone.utc) + timedelta(days=3)
                 with patch.object(dev.pricing, "now", return_value=executed_at):
                     self.assertIsInstance(self.approve(pending), ApprovalExecuted)
-                written = self.writes()[-1][3]["pricingInfos"][0]
+                written = self.writes()[-1][3]["pricingInfos"][-1]
                 self.assertEqual(written["startedAt"], executed_at.isoformat(timespec="milliseconds"))
                 self.assertEqual(written["createdAt"], written["startedAt"])
 
@@ -275,7 +292,8 @@ class ApifyDeveloperTests(unittest.TestCase):
                 raise WebRequestError("Provider rejects immediate pricing", status=400)
             return self.provider(method, url, **kwargs)
         with patch.object(dev, "request_bytes", reject):
-            self.assertIsInstance(self.approve(pending), ActionFailed)
+            with self.assertRaises(ProviderWarning):
+                self.approve(pending)
         self.assertEqual(len(writes), 1)
 
     def test_monetization_read_returns_current_and_next_not_history(self):
@@ -301,7 +319,7 @@ class ApifyDeveloperTests(unittest.TestCase):
             return response
         with patch.object(dev, "request_bytes", with_history):
             self.assertIsInstance(self.approve(pending), ApprovalExecuted)
-        self.assertEqual(len(self.writes()[0][3]["pricingInfos"]), 1)
+        self.assertEqual(len(self.writes()[0][3]["pricingInfos"]), 2)
 
     def test_pricing_readback_rejects_a_retained_future_price(self):
         pending = self.execute("set_monetization", self.pricing_input())
@@ -317,6 +335,26 @@ class ApifyDeveloperTests(unittest.TestCase):
         self.assertIsInstance(result, ActionFailed)
         self.assertIn("do not repeat", result.error)
         self.assertEqual(len(self.writes()), 1)
+
+    def test_pricing_readback_requires_prior_records_and_prices(self):
+        for mutation in ("dropped", "changed", "notification"):
+            with self.subTest(mutation=mutation):
+                self.provider.actor = Provider().actor
+                pending = self.execute("set_monetization", self.pricing_input())
+                def modified_history(method, url, **kwargs):
+                    response = self.provider(method, url, **kwargs)
+                    if method == "PUT":
+                        history = self.provider.actor["pricingInfos"]
+                        if mutation == "dropped":
+                            history.pop(0)
+                        elif mutation == "changed":
+                            history[0]["apifyMarginPercentage"] = 0.5
+                        else:
+                            history[0]["notifiedAboutChangeAt"] = datetime.now(timezone.utc).isoformat()
+                    return response
+                with patch.object(dev, "request_bytes", modified_history):
+                    result = self.approve(pending)
+                self.assertIsInstance(result, ApprovalExecuted if mutation == "notification" else ActionFailed)
 
     def test_pricing_readback_accepts_apify_start_copy_but_not_billing_changes(self):
         # Real first-write response: Apify canonicalizes start text and createdAt.
@@ -338,7 +376,7 @@ class ApifyDeveloperTests(unittest.TestCase):
                 def canonicalized(method, url, **kwargs):
                     response = self.provider(method, url, **kwargs)
                     if method == "PUT":
-                        saved = self.provider.actor["pricingInfos"][0]
+                        saved = self.provider.actor["pricingInfos"][-1]
                         saved["createdAt"] = (datetime.now(timezone.utc) + timedelta(milliseconds=70)).isoformat()
                         events = saved["pricingPerEvent"]["actorChargeEvents"]
                         events["apify-actor-start"].update(eventTitle="Actor Start", eventDescription=(
@@ -352,7 +390,7 @@ class ApifyDeveloperTests(unittest.TestCase):
                     result = self.approve(pending)
                 self.assertIsInstance(result, ActionFailed if mutation else ApprovalExecuted)
                 self.assertEqual(len(self.writes()), before + 1)
-                saved_start = self.provider.actor["pricingInfos"][0]["pricingPerEvent"]["actorChargeEvents"]["apify-actor-start"]
+                saved_start = self.provider.actor["pricingInfos"][-1]["pricingPerEvent"]["actorChargeEvents"]["apify-actor-start"]
                 self.assertEqual(saved_start["eventTitle"], "Actor Start")
                 self.assertEqual(self.api.approvals.get(pending.approval_id).payload["input"], values)
 
@@ -724,9 +762,10 @@ class ApifyDeveloperTests(unittest.TestCase):
     def test_provider_errors_are_redacted_and_never_retried(self):
         for status in (0, 400, 401, 402, 403, 408, 429, 500):
             with patch.object(dev, "request_bytes", side_effect=WebRequestError(TOKEN, status=status, body=TOKEN.encode())) as request:
-                result = self.execute("search_store", {})
-                self.assertIsInstance(result, ActionFailed)
-                self.assertNotIn(TOKEN, result.error)
+                with self.assertRaises(ProviderWarning) as caught:
+                    self.execute("search_store", {})
+                self.assertNotIn(TOKEN, str(caught.exception))
+                self.assertNotIn(TOKEN, caught.exception.response_body)
                 self.assertEqual(request.call_count, 1)
 
     def test_pricing_rejection_exposes_known_type_without_provider_message(self):
@@ -743,14 +782,77 @@ class ApifyDeveloperTests(unittest.TestCase):
                             "error": {"type": code, "message": TOKEN}}).encode())
                     return self.provider(method, url, **kwargs)
                 with patch.object(dev, "request_bytes", rejected):
-                    result = self.approve(pending)
-                self.assertIsInstance(result, ActionFailed)
-                self.assertIn("HTTP 400", result.error)
-                self.assertNotIn(TOKEN, result.error)
+                    with self.assertRaises(ProviderWarning) as caught:
+                        self.approve(pending)
+                result = caught.exception
+                self.assertIn("HTTP 400", str(result))
+                self.assertNotIn(TOKEN, str(result))
+                self.assertNotIn(TOKEN, result.response_body)
                 if isinstance(code, str) and code.startswith("cannot-"):
-                    self.assertIn(code, result.error)
+                    self.assertIn(code, str(result))
                 self.assertEqual(len(self.writes()), before)
                 self.assertEqual(len(attempts), 1)
+
+    def test_unknown_provider_details_reach_host_diagnostics_only(self):
+        from host.runtime.tools.tools_host import _provider_failure_result, _provider_warning_context
+        pending = self.execute("set_monetization", self.pricing_input())
+        # A new provider code must remain diagnosable without a new allowlist PR.
+        raw = json.dumps({"error": {"type": "new-pricing-rule", "message": "specific validation reason " + TOKEN}})
+        raw = raw.replace(TOKEN, "".join("\\u%04x" % ord(c) for c in TOKEN))
+        def reject(method, url, **kwargs):
+            if method == "PUT":
+                raise WebRequestError("private exception", status=400, body=raw.encode())
+            return self.provider(method, url, **kwargs)
+        with patch.object(dev, "request_bytes", reject), self.assertRaises(ProviderWarning) as caught:
+            self.approve(pending)
+        warning = caught.exception
+        context = _provider_warning_context("apify_developer", "set_monetization", warning)
+        result = _provider_failure_result(warning)
+        self.assertEqual(context["operation"], "PUT /actors/" + ACTOR)
+        self.assertEqual(context["http_status"], 400)
+        self.assertIn("specific validation reason", context["provider_response"])
+        self.assertIn("new-pricing-rule", context["provider_response"])
+        self.assertNotIn(TOKEN, json.dumps(context))
+        self.assertNotIn("specific validation reason", result.error)
+        self.assertNotIn("new-pricing-rule", result.error)
+        self.assertNotIn("private exception", result.error)
+
+    def test_provider_diagnostic_is_bounded_and_handles_non_json(self):
+        for body in (b"not JSON " + TOKEN.encode(), b"x" * 10000):
+            with patch.object(dev, "request_bytes", side_effect=WebRequestError("private", status=400, body=body)):
+                with self.assertRaises(ProviderWarning) as caught:
+                    self.execute("search_store", {})
+            self.assertLessEqual(len(caught.exception.response_body.encode()), 3000)
+            self.assertNotIn(TOKEN, caught.exception.response_body)
+
+    def test_unsafe_json_diagnostics_are_omitted_including_escaped_credentials(self):
+        escaped = "".join("\\u%04x" % ord(c) for c in TOKEN)
+        bodies = [('[' * 55 + '"' + escaped + '"' + ']' * 55).encode(),
+                  ('{"error":"' + escaped + '"').encode()]
+        for body in bodies:
+            with patch.object(dev, "request_bytes", side_effect=WebRequestError("private", status=400, body=body)):
+                with self.assertRaises(ProviderWarning) as caught:
+                    self.execute("search_store", {})
+            self.assertIn("response omitted", caught.exception.response_body)
+            self.assertNotIn(escaped, caught.exception.response_body)
+            self.assertNotIn(TOKEN, caught.exception.response_body)
+
+    def test_diagnostics_redact_percent_and_mixed_escaped_credentials(self):
+        encoded = "".join("%%%02x" % ord(c) for c in TOKEN)
+        mixed = "".join("%%5Cu%04x" % ord(c) for c in TOKEN)
+        nested = encoded
+        for _ in range(8):
+            nested = nested.replace("%", "%25")
+        for value in ("%61" + TOKEN[1:], encoded, encoded.replace("%", "%25"), mixed,
+                      nested):
+            body = json.dumps({"error": {"message": "Provider reason " + value}}).encode()
+            with patch.object(dev, "request_bytes", side_effect=WebRequestError("private", status=400, body=body)):
+                with self.assertRaises(ProviderWarning) as caught:
+                    self.execute("search_store", {})
+            response = caught.exception.response_body
+            self.assertNotIn(TOKEN, response)
+            self.assertNotIn(value, response)
+            self.assertTrue("[redacted]" in response or "response omitted" in response)
 
     def test_escaped_dataset_credentials_are_redacted_after_json_decoding(self):
         original = self.provider

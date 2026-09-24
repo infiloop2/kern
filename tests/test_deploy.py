@@ -1678,6 +1678,21 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("python3 -m host.runtime.deploy.write_config", bootstrap)
         self.assertNotIn("/var/lib/kern-host", bootstrap)
 
+    def test_admin_tcp_cleanup_keeps_new_connections_uid_gated(self) -> None:
+        from host.constants import ADMIN_API_PORT
+
+        prefix = f"oif lo tcp dport {ADMIN_API_PORT}"
+        rules = [line.strip() for line in render._render_bootstrap().splitlines()
+                 if line.strip().startswith(prefix + " ")]
+        self.assertEqual(rules, [
+            prefix + ' meta skuid 0 accept',
+            prefix + ' meta skuid "kern-admin" accept',
+            prefix + ' meta skuid "kern-operator" accept',
+            prefix + ' meta skuid "cloudflared" accept',
+            prefix + ' tcp flags & syn == 0 ct state established accept',
+            prefix + ' drop',
+        ])
+
     def test_vendored_pgvector_matches_bootstrap_pins(self) -> None:
         """Both host architectures install exact packages tied to PG_MAJOR."""
         root = Path(__file__).resolve().parent.parent

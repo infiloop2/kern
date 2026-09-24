@@ -147,11 +147,10 @@ export async function refreshHealth() {
     </div>`);
   renderRuntimeOverview();
   renderIntegrationAccounts();
-  // A pending login survives page reloads and provider-card re-renders: every
-  // poll re-shows it inside the expanded provider card (showOauth is a no-op
-  // while the card is collapsed, and a GET never starts a new login).
-  for (const pending of runtimes.filter(runtime => runtime.status === "awaiting_login")) {
-    await showOauth(false, pending.type);
+  // Restore pending codes only on the visible provider card.
+  for (const runtime of runtimes) {
+    if (runtime.status === "awaiting_login") await showOauth(false, runtime.type);
+    else oauthRetryAt.delete(runtime.type);
   }
 }
 
@@ -573,31 +572,30 @@ function usageRing(label, window) {
     </span>`;
 }
 
-// The device-code runtimes: the provider shows the operator a code and polls
-// for approval itself, so the host has nothing to submit back. Claude is the
-// odd one out and keeps its own branch below.
-const DEVICE_LOGINS = {
-  codex: { provider: "openai", label: "Codex" },
-  "codex-2": { provider: "openai", label: "Codex 2" },
-  "codex-3": { provider: "openai", label: "Codex 3" },
-  grok: { provider: "xai", label: "Grok" },
-  "grok-2": { provider: "xai", label: "Grok 2" },
-};
+// Space out unsuccessful recovery reads; explicit login starts bypass this.
+const OAUTH_RETRY_MS = 30000;
+const oauthRetryAt = new Map();
 
 async function showOauth(start, runtime) {
   if (runtime === "hermes") return; // no OAuth flow; credentials connect in the integration card
-  const device = DEVICE_LOGINS[runtime];
-  const provider = runtime === "claude_code" ? "claude" : device?.provider;
-  if (!provider) return;
-  // The card target is re-queried after each await: the 5-second poll can
-  // re-render the provider card while the request is in flight, and writing
-  // into the detached old node would silently drop the login card.
-  if (!document.querySelector(`[data-provider-oauth="${runtime}"]`)) return;
+  const device = RUNTIME_PROVIDERS[runtime];
+  if (!device) return;
+  const { provider } = device;
+  let target = document.querySelector(`[data-provider-oauth="${runtime}"]`);
+  // Empty OAuth placeholders are display:none; measure their containing card.
+  if (!target?.closest(".detail-card")?.getClientRects().length) return;
+  if (!start && Date.now() < (oauthRetryAt.get(runtime) || 0)) return;
+  // Set this before awaiting so overlapping health refreshes share the pause.
+  // A late failed GET cannot reinstate a pause cleared by a successful start.
+  oauthRetryAt.set(runtime, Date.now() + OAUTH_RETRY_MS);
   try {
+    const route = runtime === "claude_code" ? "claude" : runtime;
+    const login = await api(start ? "POST" : "GET", `/v1/agent-runtime/${route}-oauth-login`);
+    oauthRetryAt.delete(runtime);
+    // A health/network refresh may have replaced the card during the request.
+    target = document.querySelector(`[data-provider-oauth="${runtime}"]`);
+    if (!target) return;
     if (runtime === "claude_code") {
-      const login = await api(start ? "POST" : "GET", "/v1/agent-runtime/claude-oauth-login");
-      const target = document.querySelector(`[data-provider-oauth="${runtime}"]`);
-      if (!target) return;
       setHtml(target, `<div class="oauth-card">
         <span>Claude Code login: open
         <a href="${esc(login.login_url)}" target="_blank" rel="noopener noreferrer">${esc(login.login_url)}</a>
@@ -605,9 +603,6 @@ async function showOauth(start, runtime) {
         <button class="primary sm" data-action="complete-claude-login">Submit code</button></div>`);
       return;
     }
-    const login = await api(start ? "POST" : "GET", `/v1/agent-runtime/${runtime}-oauth-login`);
-    const target = document.querySelector(`[data-provider-oauth="${runtime}"]`);
-    if (!target) return;
     setHtml(target, `<div class="oauth-card">
       <span>${esc(device.label)} login: enter code <b>${esc(login.device_code)}</b> at
       <a href="${esc(login.login_url)}" target="_blank" rel="noopener noreferrer">${esc(login.login_url)}</a>

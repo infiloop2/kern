@@ -73,11 +73,8 @@ class RuntimeListTests(unittest.TestCase):
                 self.assertEqual(adapter.managed_provider, RUNTIMES[runtime].provider)
 
     def test_every_browser_copy_of_the_labels_agrees(self) -> None:
-        # Five bundles across three served apps name the runtimes, because the
-        # admin UI, Chat and the Web App builder ship separately and share no
-        # module. None can import Python, so each is compared here. A file may
-        # list a subset (the device-login table only covers OAuth runtimes) but
-        # may not rename one.
+        # Separately served browser bundles cannot import Python, so compare
+        # their runtime labels here. Admin modules share helpers.js.
         for path, (anchor, expected) in self._runtime_label_sources().items():
             source = (REPO_ROOT / path).read_text()
             # Read the declaration itself, not whichever quoted string happens
@@ -101,7 +98,7 @@ class RuntimeListTests(unittest.TestCase):
                 )
 
     def test_no_browser_copy_of_the_labels_is_unchecked(self) -> None:
-        # The check above is a fixed list, so a seventh copy would escape it.
+        # The check above is a fixed list, so a new copy would escape it.
         # Runtime labels are distinctive strings: any bundle carrying two of
         # them is a copy and belongs in that list.
         checked = set(self._runtime_label_sources())
@@ -119,16 +116,9 @@ class RuntimeListTests(unittest.TestCase):
         The covered set is stated per file and derived, so adding a runtime
         fails here until every bundle that must name it does.
         """
-        from host.runtime.admin_api.runtime_accounts import OAUTH_RUNTIME_TYPES
-
-        # Claude's login is not a device-code flow, so the health panel's
-        # device-login table is the OAuth runtimes without it.
-        device_logins = tuple(r for r in OAUTH_RUNTIME_TYPES if r != "claude_code")
         return {
             "host/runtime/admin_api/admin_ui/helpers.js":
                 ("export const RUNTIME_PROVIDERS = {", INTERACTIVE_RUNTIMES),
-            "host/runtime/admin_api/admin_ui/health.js":
-                ("const DEVICE_LOGINS = {", device_logins),
             "host/runtime/workspace/ui/workspace.js":
                 ("const runtimeLabel = runtime => ({", tuple(RUNTIMES)),
             "host/runtime/workspace/chat/ui/agent_chat.js":

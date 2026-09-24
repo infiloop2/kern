@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
+import io
 import socket
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from host.tools import web_fetch
 from host.tools.web_fetch import BUNDLED_TOOL
-from host.tools.results import ActionExecuted, ActionFailed, StreamingAsset
+from host.tools.results import ActionExecuted, ActionFailed, StreamingAsset, StreamingAssetError
 from test_tools import FakeHostAPI, assert_matches_output_schema
 
 HTML_PAGE = (
@@ -76,6 +77,9 @@ class WebFetchUrlValidationTests(unittest.TestCase):
 class WebFetchFetchTests(unittest.TestCase):
     def execute(self, url: str = "https://example.com/article") -> object:
         return BUNDLED_TOOL.execute("fetch_page", {"url": url}, FakeHostAPI())
+
+    def download(self, url: str = "https://example.com/media") -> object:
+        return BUNDLED_TOOL.execute("download_media", {"url": url}, FakeHostAPI())
 
     def test_head_returns_status_and_bounded_headers_after_redirect(self) -> None:
         hops = [
@@ -299,13 +303,37 @@ class WebFetchFetchTests(unittest.TestCase):
         assert isinstance(result, ActionFailed)
         self.assertEqual(result.error, "The page returned HTTP 404.")
 
-    def test_binary_content_refused(self) -> None:
-        response = _response(headers={"content-type": "image/png"}, body=b"\x89PNG")
+    def test_unsupported_binary_content_refused(self) -> None:
+        response = _response(headers={"content-type": "application/octet-stream"}, body=b"\x89PNG")
         with patch.object(web_fetch, "_fetch_once", return_value=response):
             result = self.execute()
         self.assertIsInstance(result, ActionFailed)
         assert isinstance(result, ActionFailed)
         self.assertIn("text content type", result.error)
+        self.assertIn("try download_media", result.error)
+
+    def test_download_media_rejects_text_without_saving_it(self) -> None:
+        with patch.object(web_fetch, "_fetch_once", return_value=_response()):
+            result = self.download()
+            assert isinstance(result, StreamingAsset)
+            with self.assertRaisesRegex(StreamingAssetError, "supported image or video"):
+                with result.open_stream():
+                    pass
+
+    def test_download_media_keeps_the_existing_url_guard(self) -> None:
+        with patch.object(web_fetch, "_fetch_once", side_effect=AssertionError("must not fetch")):
+            for url in ("https://127.0.0.1/media.png", "https://example.com/?email=alice%40example.com"):
+                with self.subTest(url=url):
+                    self.assertIsInstance(self.download(url), ActionFailed)
+
+    def test_download_media_rejects_private_redirect(self) -> None:
+        hop = _response(status=302, headers={"location": "https://10.0.0.8/media.mp4"}, body=b"")
+        with patch.object(web_fetch, "_fetch_once", return_value=hop):
+            result = self.download()
+            assert isinstance(result, StreamingAsset)
+            with self.assertRaisesRegex(StreamingAssetError, "redirected"):
+                with result.open_stream():
+                    pass
 
     def test_missing_content_type_refused(self) -> None:
         with patch.object(
@@ -339,6 +367,68 @@ class WebFetchFetchTests(unittest.TestCase):
         assert isinstance(content, str)
         self.assertEqual(len(content), 5)
 
+    def test_media_responses_are_saved_with_their_original_bytes(self) -> None:
+        samples = (
+            ("image/png", b"\x89PNG\r\n\x1a\nimage bytes", "web-fetch-image.png"),
+            ("image/jpeg", b"\xff\xd8\xffimage bytes", "web-fetch-image.jpg"),
+            ("image/webp", b"RIFF\x04\x00\x00\x00WEBPimage bytes", "web-fetch-image.webp"),
+            ("image/gif", b"GIF89aimage bytes", "web-fetch-image.gif"),
+            ("video/mp4", b"\x00\x00\x00\x18ftypisomvideo bytes", "web-fetch-video.mp4"),
+            ("video/quicktime", b"\x00\x00\x00\x18ftypqt  video bytes", "web-fetch-video.mov"),
+        )
+        for media_type, body, filename in samples:
+            with self.subTest(media_type=media_type):
+                connection = MagicMock()
+                response = connection.getresponse.return_value
+                response.status = 200
+                response.getheaders.return_value = [
+                    ("Content-Type", media_type), ("Content-Length", str(len(body)))
+                ]
+                media = io.BytesIO(body)
+                response.read.side_effect = media.read
+                response.read1.side_effect = media.read
+                with patch.object(web_fetch, "_public_addresses", return_value=("93.184.216.34",)), patch.object(
+                    web_fetch, "_PinnedHTTPSConnection", return_value=connection
+                ), patch.object(web_fetch, "_response_socket", return_value=MagicMock()):
+                    result = self.download()
+                    self.assertIsInstance(result, StreamingAsset)
+                    assert isinstance(result, StreamingAsset)
+                    connection.connect.assert_not_called()
+                    with result.open_stream() as opened:
+                        self.assertEqual(opened.filename, filename)
+                        self.assertEqual(opened.media_type, media_type)
+                        self.assertEqual(opened.size_bytes, len(body))
+                        self.assertEqual(opened.source.read(), body)
+                    response.close.assert_called_once()
+
+    def test_media_rejects_unbounded_or_spoofed_responses(self) -> None:
+        body = b"\x89PNG\r\n\x1a\nimage bytes"
+        cases = (
+            ("missing size", [("Content-Type", "image/png")], body, "Content-Length"),
+            ("too large", [("Content-Type", "image/png"), ("Content-Length", str(web_fetch.MAX_MEDIA_BYTES + 1))], body, "outside the supported range"),
+            ("spoofed", [("Content-Type", "image/png"), ("Content-Length", "12")], b"not an image", "does not match"),
+            ("compressed", [("Content-Type", "image/png"), ("Content-Length", str(len(body))), ("Content-Encoding", "gzip")], body, "Compressed"),
+            ("duplicate size", [("Content-Type", "image/png"), ("Content-Length", str(len(body))), ("Content-Length", str(len(body)))], body, "exactly one"),
+            ("chunked", [("Content-Type", "image/png"), ("Content-Length", str(len(body))), ("Transfer-Encoding", "chunked")], body, "Chunked"),
+        )
+        for name, headers, body, expected in cases:
+            with self.subTest(name=name):
+                connection = MagicMock()
+                response = connection.getresponse.return_value
+                response.status = 200
+                response.getheaders.return_value = headers
+                media = io.BytesIO(body)
+                response.read.side_effect = media.read
+                response.read1.side_effect = media.read
+                with patch.object(web_fetch, "_public_addresses", return_value=("93.184.216.34",)), patch.object(
+                    web_fetch, "_PinnedHTTPSConnection", return_value=connection
+                ), patch.object(web_fetch, "_response_socket", return_value=MagicMock()):
+                    result = self.download()
+                    assert isinstance(result, StreamingAsset)
+                    with self.assertRaisesRegex(StreamingAssetError, expected):
+                        with result.open_stream():
+                            pass
+
     def test_redirects_share_one_wall_clock_deadline(self) -> None:
         deadlines: list[float] = []
         hops = [
@@ -346,8 +436,9 @@ class WebFetchFetchTests(unittest.TestCase):
             _response(),
         ]
 
-        def fetch(url: str, deadline: float, method: str) -> tuple[int, dict[str, str], bytes, bool]:
+        def fetch(url: str, deadline: float, method: str, allow_media: bool) -> tuple[int, dict[str, str], bytes, bool]:
             del url, method
+            self.assertFalse(allow_media)
             deadlines.append(deadline)
             return hops.pop(0)
 
@@ -374,8 +465,8 @@ class WebFetchFetchTests(unittest.TestCase):
         self.assertEqual(
             [call.args for call in fetch.call_args_list],
             [
-                ("https://example.com/", "2606:2800:220:1:248:1893:25c8:1946", 110.0, "GET"),
-                ("https://example.com/", "93.184.216.34", deadline, "GET"),
+                ("https://example.com/", "2606:2800:220:1:248:1893:25c8:1946", 110.0, "GET", False),
+                ("https://example.com/", "93.184.216.34", deadline, "GET", False),
             ],
         )
 

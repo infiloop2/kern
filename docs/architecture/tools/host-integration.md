@@ -249,9 +249,15 @@ context instead of rewriting its prefix:
   the existing 4 MiB download cap. Its summary includes the final URL, original
   content type, separate download/preview truncation notices, and a 1,024-character
   UTF-8 preview. JavaScript is only read as source text; there is no execution.
-  The existing `fetch_page` inline result remains available with its 100,000-character
-  cap. Both downloads share the same anonymous GET, URL guard, public-address
-  validation, redirect checks and deadline. `head_url` reuses those checks for
+  The existing `fetch_page` inline text result remains available with its
+  100,000-character cap. The `download_media` action saves JPEG, PNG, WebP,
+  GIF, MP4, and MOV responses under `/tool_assets`, up to 200 MB. It requires
+  one valid `Content-Length`, identity encoding, a matching file signature,
+  and a complete body. It streams directly into the existing asset handoff,
+  which verifies the declared length and removes partial downloads on failure. The connect and
+  redirect deadline is 20 seconds and a media body gets 120 seconds.
+  All reads share the same anonymous GET, URL guard, public-address
+  validation, and redirect checks. `head_url` reuses those checks for
   anonymous HEAD requests and returns status and bounded response headers
   (up to 50, each capped at 1,024 characters, with clipping reported). It reports
   non-success HTTP statuses and does not fall back to GET or replay cookies.

@@ -20,7 +20,7 @@ from host.tools.results import (
 )
 from host.tools.shared.inputs import clip_text
 from host.tools.shared.cost_reporting import report_provider_usd
-from host.tools.shared.web import WebRequestError, request_bytes
+from host.tools.shared.web import ProviderWarning, WebRequestError, request_bytes
 from host.tools.tool import Tool
 from .manifest import MANIFEST
 from . import pricing
@@ -117,10 +117,29 @@ def _request(api: HostAPI, method: str, path: str, *, params=None, body=None, ra
     url = ORIGIN + path
     if params:
         url += "?" + urllib.parse.urlencode(params)
-    response = request_bytes(method, url, headers={"Authorization": "Bearer " + token,
-        "Content-Type": "application/json", "Accept": "application/json"},
-        data=body if isinstance(body, bytes) else _json(body) if body is not None else None,
-        timeout=30, max_bytes=MAX_RESPONSE, failure_message="Apify Developer request failed.")
+    try:
+        response = request_bytes(method, url, headers={"Authorization": "Bearer " + token,
+            "Content-Type": "application/json", "Accept": "application/json"},
+            data=body if isinstance(body, bytes) else _json(body) if body is not None else None,
+            timeout=30, max_bytes=MAX_RESPONSE, failure_message="Apify Developer request failed.")
+    except WebRequestError as exc:
+        # Only the authenticated Host diagnostics panel receives provider detail.
+        # Normalize bounded JSON/percent escaping before retaining debug text.
+        detail = exc.body.decode("utf-8", "replace")
+        try:
+            for _ in range(7):
+                detail = json.dumps(_redact_result(json.loads(detail), api), ensure_ascii=True)
+                decoded = urllib.parse.unquote(detail, errors="strict")
+                if decoded == detail:
+                    break
+                detail = decoded
+            else:
+                raise ValueError("Excessive diagnostic encoding.")
+        except (ValueError, RecursionError):
+            detail = "Provider response omitted: not valid, safely redactable JSON."
+        raise ProviderWarning("Apify", method + " " + path,
+            _failure(exc).error + " Check Host diagnostics for provider details.",
+            status=exc.status, body=detail.encode()[:3000]) from exc
     if len(response) > MAX_RESPONSE:
         raise ValueError("Apify response exceeds the 2 MiB limit.")
     if raw:
@@ -548,6 +567,7 @@ class ApifyDeveloperTool(Tool):
                 actor = _actor(api, values["actor_id"], account)
                 target = values["actor_id"]
                 if action == "set_monetization":
+                    pricing.history(actor, lambda text: _guard_text(text, api))
                     payload["pricing_entry"] = pricing.proposal(values)["pricingInfos"][-1]
                     if len(_json(payload)) > 48 * 1024:
                         raise ValueError("Pricing proposal exceeds the approval size limit.")
@@ -571,7 +591,7 @@ class ApifyDeveloperTool(Tool):
             if action == "set_monetization":
                 summary += (" Replace PAY_PER_EVENT pricing immediately when approval executes. Prices in payload are USD per SINGLE event. "
                             f"Minimum permitted run budget ${values['minimum_run_budget_usd']}; not a minimum charge. "
-                            "Review every event and the standard 20% Apify share. Sends one replacement record; previous periods are not preserved by this tool. No publication, run or payout changes.")
+                            "Review every event and the standard 20% Apify share. Appends the approved record to freshly read, parameter-guarded pricing history. No publication, run or payout changes.")
             if action == "create_actor":
                 summary += f" Name: {values['name']}. Private, limited permissions."
             if action == "create_version":
@@ -589,6 +609,8 @@ class ApifyDeveloperTool(Tool):
                             "Future runs selecting latest use this build. No build or run starts; pricing and run defaults are unchanged.")
             approval = api.approvals.request(action_id=action, summary=summary, payload=payload)
             return ActionPendingApproval(approval.approval_id, approval.summary)
+        except ProviderWarning:
+            raise
         except Exception as exc:
             return _failure(exc)
 
@@ -629,11 +651,16 @@ class ApifyDeveloperTool(Tool):
                     raise ValueError("Pricing approval payload differs from the reviewed inputs.")
                 effective = pricing.now().isoformat(timespec="milliseconds")
                 body["pricingInfos"][0].update(createdAt=effective, startedAt=effective)
+                body["pricingInfos"] = pricing.history(actor, lambda text: _guard_text(text, api)) + body["pricingInfos"]
                 _request(api, "PUT", f"/actors/{actor_id}", body=body)
                 try:
                     saved = _actor(api, actor_id, account)
                     if not pricing.verified(saved, body):
                         raise ValueError("Pricing readback differs.")
+                except ProviderWarning as exc:
+                    raise ProviderWarning("Apify", "pricing readback",
+                        "Pricing write completed but readback failed. Use get_monetization and Host diagnostics to reconcile; do not repeat the write.",
+                        status=exc.status, body=exc.response_body.encode()) from exc
                 except Exception:
                     return ActionFailed("Pricing write completed but readback was unavailable or different. Use get_monetization and Console to reconcile; do not repeat the write.")
                 return ApprovalExecuted(f"Verified current pay-per-event pricing for Apify Actor {actor_id} from {effective}. No publication or run started; paid billing is not verified.")
@@ -677,6 +704,8 @@ class ApifyDeveloperTool(Tool):
                     "taggedBuilds": {"latest": {"buildId": values["build_id"]}}})
                 return ApprovalExecuted(f"Published Apify Actor {actor_id} with latest build {values['build_id']}.")
             raise ValueError("Unsupported Apify Developer approval.")
+        except ProviderWarning:
+            raise
         except Exception as exc:
             return _failure(exc)
 
