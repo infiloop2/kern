@@ -251,11 +251,14 @@ context instead of rewriting its prefix:
   UTF-8 preview. JavaScript is only read as source text; there is no execution.
   The existing `fetch_page` inline text result remains available with its
   100,000-character cap. The `download_media` action saves JPEG, PNG, WebP,
-  GIF, MP4, and MOV responses under `/tool_assets`, up to 200 MB. It requires
+  GIF, MP4, MOV, and PDF responses under `/tool_assets`, up to 200 MB. It requires
   one valid `Content-Length`, identity encoding, a matching file signature,
   and a complete body. It streams directly into the existing asset handoff,
   which verifies the declared length and removes partial downloads on failure. The connect and
   redirect deadline is 20 seconds and a media body gets 120 seconds.
+  PDFs require `application/pdf` and a `%PDF-` header, and are saved unchanged
+  as `.pdf` files. This checks the format, not document validity or safety;
+  PDF rendering, text extraction, and OCR are outside the download action.
   All reads share the same anonymous GET, URL guard, public-address
   validation, and redirect checks. `head_url` reuses those checks for
   anonymous HEAD requests and returns status and bounded response headers

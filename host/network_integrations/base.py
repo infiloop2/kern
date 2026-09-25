@@ -112,7 +112,7 @@ def simple_integration_parser(context: str) -> Callable[[dict[str, Any]], Manage
 # uniform reason lookup.
 _PUBLIC_PAGE_FETCH_HINT = (
     "For public HTTPS content, check list_bundled_tools for web_fetch: fetch_page or "
-    "fetch_page_file reads text, download_media saves supported images/videos, and head_url "
+    "fetch_page_file reads text, download_media saves supported images/videos/PDFs, and head_url "
     "shows status and redirect destination. Web Fetch does not need agent-shell custom-domain "
     "rules. If it is disabled, ask the operator to enable it in Home > Integrations. "
     "Shell clients still need rules for every redirect host."

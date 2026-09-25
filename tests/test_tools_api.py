@@ -263,6 +263,20 @@ class StreamMaterializationUnitTests(unittest.TestCase):
             self.assertEqual(local_path.stat().st_mode & 0o777, 0o600)
             self.assertEqual(local_path.parent.stat().st_mode & 0o777, 0o700)
 
+    def test_pdf_download_materializes_as_private_pdf_file(self) -> None:
+        payload = b"%PDF-1.7\n%%EOF\n"
+        response = _MemoryResponse(payload, **{
+            "Content-Length": str(len(payload)), "Content-Type": "application/pdf",
+            "X-Kern-Filename": "web-fetch-document.pdf",
+        })
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {"HOME": directory}):
+            result = tools_mcp_shim._materialize_stream(response)  # type: ignore[arg-type]
+            local_path = Path(result["filesystem_path"])
+            self.assertEqual(local_path.suffix, ".pdf")
+            self.assertEqual(result["media_type"], "application/pdf")
+            self.assertEqual(local_path.read_bytes(), payload)
+            self.assertEqual(local_path.stat().st_mode & 0o777, 0o600)
+
     def test_short_stream_leaves_no_partial_file(self) -> None:
         response = _MemoryResponse(
             b"short",

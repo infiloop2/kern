@@ -148,30 +148,28 @@ function matches(agent) {
 function character(agent) {
   const pose = poseForAgent(agent);
   const variant = hash(agent.thread_id) % 3;
-  const eyes = pose === "idle"
-    ? '<path d="M16 23q3 3 6 0m6 0q3 3 6 0"/>'
-    : '<ellipse cx="19" cy="23" rx="2" ry="3"/><ellipse cx="31" cy="23" rx="2" ry="3"/>';
-  const hair = [
-    '<path d="M25 12V7m0 1q-7-7-9-1 3 5 9 1"/>',
-    '<path d="M18 12q0-10 6-7 5 3 1 7"/>',
-    '<path d="M19 11l-3-6m15 6 3-6"/><circle cx="16" cy="5" r="2"/><circle cx="34" cy="5" r="2"/>',
-  ][variant];
+  const eyes = pose === "failed"
+    ? '<path d="m17 22 4 4m0-4-4 4m12-4 4 4m0-4-4 4"/>'
+    : pose === "idle"
+    ? '<path d="M17 24q2 2 4 0m8 0q2 2 4 0"/>'
+    : '<ellipse cx="19" cy="24" rx="2" ry="3"/><ellipse cx="31" cy="24" rx="2" ry="3"/>';
   return `<svg viewBox="0 0 50 60" aria-hidden="true">
-    <ellipse class="critter-shadow" cx="25" cy="54" rx="16" ry="3"/>
+    <ellipse class="critter-shadow" cx="25" cy="56" rx="17" ry="3"/>
     <g class="critter-body">
-      <g class="critter-hair">${hair}</g>
-      <path class="critter-foot" d="M16 46v6h-4m22-6v6h4"/>
-      <rect class="critter-suit" x="9" y="12" width="32" height="36" rx="14"/>
-      <rect class="critter-face" x="12" y="17" width="26" height="17" rx="8"/>
+      <path class="critter-foot" d="M16 49v5h-4m22-5v5h4"/>
+      <path class="critter-arm arm-left" d="M12 38 7 42"/>
+      <g class="arm-right"><path class="critter-arm" d="${pose === "needs-human" ? 'M38 37q9-3 7-14' : 'M38 38 43 42'}"/></g>
+      <rect class="critter-suit" x="11" y="30" width="28" height="21" rx="11"/>
+      <circle class="critter-badge" cx="25" cy="41" r="2"/>
+      <rect class="critter-head" x="8" y="7" width="34" height="30" rx="14"/>
+      <circle class="critter-ear" cx="8" cy="23" r="3"/><circle class="critter-ear" cx="42" cy="23" r="3"/>
+      <rect class="critter-face" x="12" y="15" width="26" height="18" rx="8"/>
       <g class="critter-eyes">${eyes}</g>
-      <path class="critter-mouth" d="${(pose === "needs-human" || pose === "failed") ? 'M23 29q2-3 4 0' : 'M22 28q3 3 6 0'}"/>
-      <circle class="critter-cheek" cx="15" cy="28" r="2"/><circle class="critter-cheek" cx="35" cy="28" r="2"/>
-      <path class="critter-arm arm-left" d="M10 36 5 40"/>
-      <g class="arm-right"><path class="critter-arm" d="${pose === "needs-human" ? 'M40 34q9-3 6-12' : 'M40 36 45 40'}"/></g>
-      ${pose === "busy" ? '<g class="critter-laptop"><path d="M13 38h24l-2 11H15z"/><path d="M11 50h28"/><circle cx="25" cy="44" r="1.5"/></g>' : ''}
-      ${pose === "needs-human" ? '<g class="critter-question"><circle cx="43" cy="12" r="7"/><text x="43" y="15" text-anchor="middle">?</text></g>' : ''}
-      ${pose === "failed" ? '<g class="critter-failed"><circle cx="43" cy="12" r="7"/><text x="43" y="15" text-anchor="middle">!</text></g>' : ''}
-      ${pose === "idle" && variant === 0 ? '<text class="critter-zzz" x="39" y="13">z</text>' : ''}
+      ${pose === "failed" ? '<path class="critter-frown" d="M22 30q3-3 6 0"/>' : ''}
+      ${pose === "busy" ? '<g class="critter-laptop"><path d="M13 39h24l-2 11H15z"/><path d="M11 51h28"/><circle cx="25" cy="45" r="1.5"/></g>' : ''}
+      ${pose === "needs-human" ? '<g class="critter-question"><circle cx="43" cy="10" r="7"/><text x="43" y="13" text-anchor="middle">?</text></g>' : ''}
+      ${pose === "failed" ? '<g class="critter-failed"><circle cx="43" cy="10" r="7"/><text x="43" y="13" text-anchor="middle">!</text></g>' : ''}
+      ${pose === "idle" && variant === 0 ? '<text class="critter-zzz" x="40" y="10">z</text>' : ''}
     </g></svg>`;
 }
 
