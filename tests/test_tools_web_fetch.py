@@ -320,7 +320,7 @@ class WebFetchFetchTests(unittest.TestCase):
         with patch.object(web_fetch, "_fetch_once", return_value=_response()):
             result = self.download()
             assert isinstance(result, StreamingAsset)
-            with self.assertRaisesRegex(StreamingAssetError, "supported image or video"):
+            with self.assertRaisesRegex(StreamingAssetError, "supported image, video, or PDF"):
                 with result.open_stream():
                     pass
 
@@ -427,6 +427,7 @@ class WebFetchFetchTests(unittest.TestCase):
 
     def test_media_responses_are_saved_with_their_original_bytes(self) -> None:
         samples = (
+            ("application/pdf", b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\n%%EOF\n", "web-fetch-document.pdf"),
             ("image/png", b"\x89PNG\r\n\x1a\nimage bytes", "web-fetch-image.png"),
             ("image/jpeg", b"\xff\xd8\xffimage bytes", "web-fetch-image.jpg"),
             ("image/webp", b"RIFF\x04\x00\x00\x00WEBPimage bytes", "web-fetch-image.webp"),
@@ -465,6 +466,7 @@ class WebFetchFetchTests(unittest.TestCase):
             ("missing size", [("Content-Type", "image/png")], body, "Content-Length"),
             ("too large", [("Content-Type", "image/png"), ("Content-Length", str(web_fetch.MAX_MEDIA_BYTES + 1))], body, "outside the supported range"),
             ("spoofed", [("Content-Type", "image/png"), ("Content-Length", "12")], b"not an image", "does not match"),
+            ("spoofed PDF", [("Content-Type", "application/pdf"), ("Content-Length", "11")], b"<html>login!", "does not match"),
             ("compressed", [("Content-Type", "image/png"), ("Content-Length", str(len(body))), ("Content-Encoding", "gzip")], body, "Compressed"),
             ("duplicate size", [("Content-Type", "image/png"), ("Content-Length", str(len(body))), ("Content-Length", str(len(body)))], body, "exactly one"),
             ("chunked", [("Content-Type", "image/png"), ("Content-Length", str(len(body))), ("Transfer-Encoding", "chunked")], body, "Chunked"),
