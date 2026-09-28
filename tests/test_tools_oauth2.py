@@ -42,6 +42,36 @@ class OAuthStateTests(unittest.TestCase):
 
 
 class OAuthCredentialGuardTests(unittest.TestCase):
+    def test_no_separate_check_can_race_a_conditional_mutation(self) -> None:
+        api = FakeHostAPI()
+        loaded = {
+            "account": {"id": "one", "label": "one", "scopes": []},
+            "secret": {"access_token": "old"}, "metadata": {},
+        }
+        reconnected = {**loaded, "secret": {"access_token": "new"}}
+        conditional_save = api.credentials.save_if_current
+        conditional_clear = api.credentials.clear_if_current
+
+        def disconnect_then_save(expected, replacement):
+            api.credentials.clear()
+            return conditional_save(expected, replacement)
+
+        def reconnect_then_clear(expected):
+            api.credentials.save(reconnected)
+            return conditional_clear(expected)
+
+        api.credentials.save(loaded)
+        with patch.object(api.credentials, "save_if_current", side_effect=disconnect_then_save):
+            with self.assertRaises(IntegrationReconnectRequired):
+                oauth2.save_if_still_connected(
+                    api, loaded, loaded, reconnect_message="reconnect",  # type: ignore[arg-type]
+                )
+        self.assertIsNone(api.credentials.load())
+        api.credentials.save(loaded)
+        with patch.object(api.credentials, "clear_if_current", side_effect=reconnect_then_clear):
+            oauth2.clear_if_still_loaded(api, loaded)  # type: ignore[arg-type]
+        self.assertEqual(api.credentials.load(), reconnected)
+
     def test_stale_refresh_cannot_overwrite_or_clear_a_reconnected_account(self) -> None:
         api = FakeHostAPI()
         loaded = {

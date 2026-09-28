@@ -26,10 +26,19 @@ There is no provider-slot abstraction. Host feature code calls the contract it
 actually needs:
 
 - `openai_text_completion(...)` sends a bounded prompt and strict JSON schema.
-  The caller names a feature purpose, and reviewed host code chooses the OpenAI
-  model for that purpose.
+  The caller supplies `model`, `instructions`, `reasoning_effort`,
+  `max_output_tokens` (1 to 4096), and `timeout_seconds` (0.1 to 60 seconds).
+  Supported models are `gpt-6-luna` and `gpt-6-sol`. The shared socket client adds a fixed 100 ms
+  for local dispatch and response overhead.
+  There is no feature-purpose field or purpose-to-model mapping. Recall and
+  task titles keep their Luna/none/400-token settings and existing timeouts.
 - `typesafe_jev_judgment(...)` sends bounded state and yes/no Jev questions and
-  validates the returned probabilities.
+  validates the returned probabilities using `jev-latest`. Its existing timeout
+  range remains 0.1 to 2 seconds.
+
+The service binds the caller's timeout to the shared HTTP transport before
+passing it to either adapter. Adapters only build provider requests and parse
+responses; they do not choose or carry timeout settings.
 
 This makes differences between providers explicit. Adding another provider
 does not silently make it interchangeable with either existing contract.
@@ -69,8 +78,76 @@ calls are not logged merely for operating within those limits. Features must
 handle that error by preserving their last good state or using a deterministic
 fallback.
 
-When TypeSafe Jev is enabled, memory recall sends the task query and up to 20
-candidate descriptions with short local ids. Jev ranks those candidates, and
-Kern loads the top five page contents locally. Page contents are never sent to
-Jev. If Jev is disabled or does not return a valid answer, recall keeps its existing
-deterministic order.
+Memory recall optionally uses OpenAI Luna or TypeSafe Jev to score the bounded
+task query and up to 20 candidate descriptions under short local ids. Recall
+randomly chooses no reranking, OpenAI, or Jev with probability 1/3 each,
+regardless of enablement. A disabled assigned provider makes no call and keeps
+hybrid order. The inference service owns enablement checks and reports
+`provider_disabled` or `timeout` to callers without exposing configuration
+tables or credentials. Page contents are never sent to either provider. Unsuccessful
+reranking also retains hybrid order. Swarm task titles use the same bounded
+query text as recall, passed to Luna with task-title instructions. See
+[Memory recall](memory-recall.md) for retrieval, assignment, and diagnostics.
+
+## Auto-approval
+
+Approvals > Auto-approval manages one natural-language policy per bundled
+operator-gated tool action. Saving activates it; deleting removes it. There
+are no rule names, enabled flags, priorities, account selectors, or policy
+version states. The operator may restrict accounts and other conditions in
+the policy text. Tool/action scope is enforced by the host; textual conditions
+are model judgments, not deterministic spending limits or verified external facts.
+GitHub pushes are outside this feature.
+
+The admin service starts one serial review loop after binding its listener.
+It schedules checks 25 to 35 minutes apart, after the previous run finishes,
+and pauses from 00:00 to 08:00 UTC. Startup schedules the next check rather than
+replaying missed runs. Each run takes up to 20 eligible requests in oldest-first order. A provider
+failure ends the batch after recording that failed check. A disabled or
+unconfigured provider records that specific reason for each request with a policy,
+without calling inference. The batch continues recording these checks.
+Each approval is checked once. Any recorded result, including no policy found or
+a failure, excludes it from future checks. Policy edits,
+deletions and additions never make checked requests eligible again. The page
+exposes the next check time, provider availability,
+policies and paginated review history. Ordinary approvals show their last check
+and a Set/Edit policy action. Saving a policy takes effect at the next scheduled
+review; the editor does not run inference or approve requests.
+
+The auto-approver owns its prompt, strict `{approve, reason}` schema, and
+`gpt-6-sol`/medium/4096-token/60-second settings. It uses the shared
+`/openai/text-completion` socket route, with the same credential redaction,
+request bounds and usage metering as other Host AI calls. The inference service
+has no approval-specific route or logic. Operator instructions and exact request data are separate
+JSON fields under host-authored instructions that treat request content as
+untrusted evidence. Missing, redacted or unverifiable material facts leave the
+request pending. Oversized requests fail rather than being truncated into a
+potentially misleading approval. The reviewer has no tools or external lookup.
+
+A positive review goes through the existing admin-to-tools approval path.
+Policy text, OpenAI availability and quiet hours are checked before review.
+The returned decision uses that policy snapshot, without rechecking conditions
+after inference. The tools service knows nothing
+about AI reviews or policies; its existing pending-to-approved transition
+prevents duplicate execution, including races with manual decisions.
+
+The worker saves its decision and reason before calling tools. This recorded
+check prevents later batches from picking up the approval, even if admin crashes
+before making the call. If saving fails, tools is not called. The tools service
+updates only its existing request status and execution result.
+
+The AI decision and execution status are independent. A crash after saving can
+leave an approve decision with a pending request; no retry or recovery follows.
+Approval-call errors are recorded separately without replacing the decision or
+reason. A lost response can leave execution unconfirmed. The worker does not
+replay the call, reread the outcome, or send a recovery notification. Policy or availability changes during
+review do not invalidate its decision; a review already started can approve
+after quiet hours begin.
+
+Review records retain the timestamp, exact policy text, model, explanation and
+outcome. They reference the immutable original approval payload and follow its
+existing retention through a cascading foreign key. Later policy edits do not
+rewrite these records. Approved decisions and tool execution outcomes remain
+separate. Policy routes are authenticated operator-only admin
+routes, unavailable to Workspace agents. Agents cannot edit their own approval
+policies or call the inference socket.

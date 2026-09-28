@@ -41,6 +41,11 @@ SCHEMA = {
 }
 
 
+TEXT_SETTINGS = {"instructions": "Return a JSON object that matches the supplied schema.",
+                 "reasoning_effort": "none", "max_output_tokens": 400}
+OPENAI_SETTINGS = {"model": "gpt-6-luna", **TEXT_SETTINGS}
+
+
 class InferenceRedactionTests(unittest.TestCase):
     def test_redacts_long_numbered_tokens_without_an_english_word_list(self) -> None:
         self.assertEqual(
@@ -98,8 +103,8 @@ class OpenAITextAdapterTests(unittest.TestCase):
     def test_sends_one_bounded_fixed_endpoint_request_and_validates_result(self) -> None:
         seen = {}
 
-        def transport(method, url, **kwargs):
-            seen.update(method=method, url=url, **kwargs)
+        def transport(url, **kwargs):
+            seen.update(url=url, **kwargs)
             return json.dumps({
                 "choices": [{"message": {"content": json.dumps({
                     "status_line": "Finished the import.",
@@ -114,10 +119,10 @@ class OpenAITextAdapterTests(unittest.TestCase):
             schema_name="swarm_task",
             schema=SCHEMA,
             transport=transport,
+            **TEXT_SETTINGS,
         )
         self.assertEqual(result["status_line"], "Finished the import.")
-        self.assertEqual((seen["method"], seen["url"]), ("POST", openai.ENDPOINT))
-        self.assertEqual(seen["timeout"], openai.TIMEOUT_SECONDS)
+        self.assertEqual(seen["url"], openai.ENDPOINT)
         self.assertEqual(seen["max_bytes"], openai.MAX_RESPONSE_BYTES)
         request = json.loads(seen["data"])
         self.assertEqual(request["model"], "gpt-6-luna")
@@ -130,13 +135,14 @@ class OpenAITextAdapterTests(unittest.TestCase):
         sent = {}
         prompt = "Review the completed deployment abcdefghijk Q7x8Y9z0A1b2 and sk-proj-short. sk-test-secret"
 
-        def transport(_method, _url, **kwargs):
+        def transport(_url, **kwargs):
             sent.update(json.loads(kwargs["data"]))
             return b'{"choices":[{"message":{"content":"{\\"status_line\\":\\"Done\\",\\"needs_operator\\":false}"}}]}'
 
         openai.complete(
             api_key="sk-test-secret", model="gpt-5.6-luna", prompt=prompt,
             schema_name="status", schema=SCHEMA, transport=transport,
+            **TEXT_SETTINGS,
         )
         outgoing = sent["messages"][1]["content"]
         self.assertIn("completed", outgoing)
@@ -162,6 +168,7 @@ class OpenAITextAdapterTests(unittest.TestCase):
                     schema_name="status",
                     schema=SCHEMA,
                     transport=lambda *_args, **_kwargs: response,
+                    **TEXT_SETTINGS,
                 )
 
     def test_rejects_oversized_inputs_before_transport(self) -> None:
@@ -180,6 +187,7 @@ class OpenAITextAdapterTests(unittest.TestCase):
                 schema_name="status",
                 schema=SCHEMA,
                 transport=transport,
+                **TEXT_SETTINGS,
             )
         self.assertFalse(called)
 
@@ -187,13 +195,14 @@ class OpenAITextAdapterTests(unittest.TestCase):
         prompt = "😀" * (openai.MAX_PROMPT_BYTES // 4)
         seen = {}
 
-        def transport(_method, _url, **kwargs):
+        def transport(_url, **kwargs):
             seen.update(kwargs)
             return b'{"choices":[{"message":{"content":"{\\"status_line\\":\\"ok\\",\\"needs_operator\\":false}"}}]}'
 
         openai.complete(
             api_key="sk-test", model="gpt-6-luna", prompt=prompt,
             schema_name="status", schema=SCHEMA, transport=transport,
+            **TEXT_SETTINGS,
         )
         self.assertLess(len(seen["data"]), openai.MAX_REQUEST_BYTES)
         self.assertIn("😀".encode("utf-8"), seen["data"])
@@ -214,6 +223,7 @@ class OpenAITextAdapterTests(unittest.TestCase):
                 schema_name="status",
                 schema=schema,
                 transport=lambda *_args, **_kwargs: b"{}",
+                **TEXT_SETTINGS,
             )
 
     def test_enum_comparison_preserves_json_boolean_and_number_types(self) -> None:
@@ -231,6 +241,7 @@ class OpenAITextAdapterTests(unittest.TestCase):
                 api_key="sk-test", model="gpt-6-luna", prompt="x",
                 schema_name="status", schema=schema,
                 transport=lambda *_args, **_kwargs: response,
+                **TEXT_SETTINGS,
             )
 
     def test_integer_schema_accepts_integral_json_numbers_only(self) -> None:
@@ -309,6 +320,7 @@ class HostInferenceUsageTests(unittest.TestCase):
                 schema_name="status", schema=SCHEMA,
                 transport=lambda *_args, **_kwargs: json.dumps(response).encode(),
                 usage_recorder=lambda model, payload: recorded.append((model, payload)),
+                **TEXT_SETTINGS,
             )
         self.assertEqual(recorded, [("gpt-6-luna", response)])
 
@@ -416,7 +428,7 @@ class TypeSafeJevAdapterTests(unittest.TestCase):
     def test_sends_host_defined_approval_questions_unchanged(self) -> None:
         seen = {}
 
-        def transport(_method, _url, **kwargs):
+        def transport(_url, **kwargs):
             seen.update(json.loads(kwargs["data"]))
             return json.dumps({
                 "model": "jev-latest",
@@ -446,8 +458,8 @@ class TypeSafeJevAdapterTests(unittest.TestCase):
 
     def test_sends_one_bounded_fixed_endpoint_request(self) -> None:
         seen = {}
-        def transport(method, url, **kwargs):
-            seen.update(method=method, url=url, **kwargs)
+        def transport(url, **kwargs):
+            seen.update(url=url, **kwargs)
             return json.dumps({
                 "model": "jev-latest",
                 "answers": {
@@ -468,12 +480,10 @@ class TypeSafeJevAdapterTests(unittest.TestCase):
                     "instructions": "Classify risk.",
                 }
             },
-            timeout_seconds=1.2,
             transport=transport,
         )
         self.assertEqual(result["answers"]["risk"]["noul"], 0.8)
-        self.assertEqual((seen["method"], seen["url"]), ("POST", typesafe.ENDPOINT))
-        self.assertEqual(seen["timeout"], 1.2)
+        self.assertEqual(seen["url"], typesafe.ENDPOINT)
         self.assertNotIn("jev-secret", seen["data"].decode())
         self.assertEqual(list(json.loads(seen["data"])["questions"]), ["risk"])
 
@@ -485,7 +495,7 @@ class TypeSafeJevAdapterTests(unittest.TestCase):
         }}
         question_id = "flag"
 
-        def transport(_method, _url, **kwargs):
+        def transport(_url, **kwargs):
             seen.update(json.loads(kwargs["data"]))
             return b'{"model":"jev-latest","answers":{"flag":{"type":"noul","noul":0.5}}}'
 
@@ -506,7 +516,7 @@ class TypeSafeJevAdapterTests(unittest.TestCase):
     def test_preserves_question_definition_for_credential_word_id(self) -> None:
         seen = {}
 
-        def transport(_method, _url, **kwargs):
+        def transport(_url, **kwargs):
             seen.update(json.loads(kwargs["data"]))
             return b'{"model":"jev-latest","answers":{"token_risk":{"type":"noul","noul":0.5}}}'
 
@@ -523,7 +533,7 @@ class TypeSafeJevAdapterTests(unittest.TestCase):
         body_text = "hello " * 10_000
         seen = {}
 
-        def transport(_method, _url, **kwargs):
+        def transport(_url, **kwargs):
             seen["request"] = json.loads(kwargs["data"])
             return json.dumps({
                 "model": "jev-1.13.0",
@@ -583,17 +593,22 @@ class TypeSafeJevAdapterTests(unittest.TestCase):
         self.assertIn("😀".encode("utf-8"), sent)
 
 class ConcreteProviderTests(unittest.TestCase):
-    def test_disabled_openai_returns_none_without_calling_adapter(self) -> None:
-        adapter = MagicMock()
-        with patch.object(providers.state, "enabled_host_inference_provider", return_value=None):
-            self.assertIsNone(
-                providers.openai_text_completion(
-                    "prompt", SCHEMA, "status", purpose="swarm_task", adapter=adapter
-                )
-            )
-        adapter.assert_not_called()
+    def test_disabled_provider_never_calls_adapter_or_logs_failure(self) -> None:
+        for provider in ("openai", "typesafe"):
+            adapter = MagicMock()
+            with self.subTest(provider=provider), \
+                 patch.object(providers.state, "enabled_host_inference_provider", return_value=None), \
+                 patch.object(providers.host_errors, "report_warning") as warning, \
+                 self.assertRaises(providers.ProviderDisabledError):
+                if provider == "openai":
+                    providers.openai_text_completion("prompt", SCHEMA, "status",
+                                                     timeout_seconds=20, adapter=adapter, **OPENAI_SETTINGS)
+                else:
+                    providers.typesafe_jev_judgment({}, {}, adapter=adapter)
+            adapter.assert_not_called()
+            warning.assert_not_called()
 
-    def test_openai_model_is_selected_by_feature_purpose(self) -> None:
+    def test_openai_uses_caller_model(self) -> None:
         adapter = MagicMock(return_value={"status_line": "done", "needs_operator": False})
         with patch.object(
             providers.state,
@@ -601,7 +616,8 @@ class ConcreteProviderTests(unittest.TestCase):
             return_value={"provider": "openai", "api_key": "sk-secret", "features": {}},
         ):
             result = providers.openai_text_completion(
-                "prompt", SCHEMA, "status", purpose="swarm_task", adapter=adapter
+                "prompt", SCHEMA, "status", timeout_seconds=20, adapter=adapter,
+                **OPENAI_SETTINGS,
             )
         self.assertEqual(result["status_line"], "done")
         self.assertEqual(
@@ -624,7 +640,28 @@ class ConcreteProviderTests(unittest.TestCase):
             )
         self.assertEqual(result["model"], "jev-latest")
         self.assertEqual(adapter.call_args.kwargs["model"], "jev-latest")
-        self.assertEqual(adapter.call_args.kwargs["timeout_seconds"], 1.2)
+        self.assertEqual(adapter.call_args.kwargs["transport"].keywords["timeout"], 1.2)
+
+    def test_service_binds_caller_timeout_for_both_adapters(self) -> None:
+        for provider in ("openai", "typesafe"):
+            for timeout in (1.2, 2.0):
+                with self.subTest(provider=provider, timeout=timeout), \
+                     patch.object(providers.state, "enabled_host_inference_provider", return_value={"api_key": "test"}), \
+                     patch.object(providers.usage, "record_openai_response"), \
+                     patch.object(providers.usage, "record_typesafe_response"), \
+                     patch.object(provider_http, "post") as post:
+                    if provider == "openai":
+                        post.return_value = json.dumps({"choices": [{"message": {"content": json.dumps(
+                            {"status_line": "done", "needs_operator": False})}}]}).encode()
+                        result = providers.openai_text_completion("query", SCHEMA, "status", timeout_seconds=timeout, **OPENAI_SETTINGS)
+                    else:
+                        post.return_value = json.dumps({"model": "jev-latest", "answers": {
+                            "q": {"type": "noul", "noul": 0.8}}}).encode()
+                        result = providers.typesafe_jev_judgment({}, {"q": {"type": "noul", "instructions": "Assess"}},
+                                                                timeout_seconds=timeout)
+                self.assertIsNotNone(result)
+                self.assertEqual(post.call_args.kwargs["timeout"], timeout)
+
 
 
 class HostInferenceBoundaryTests(unittest.TestCase):
@@ -637,13 +674,13 @@ class HostInferenceBoundaryTests(unittest.TestCase):
                 {
                     "prompt": "p",
                     "schema": SCHEMA,
-                    "schema_name": "status",
-                    "purpose": "swarm_task",
+                    "schema_name": "status", **OPENAI_SETTINGS,
+                    "timeout_seconds": 20.0,
                 },
             )
         self.assertEqual(result, {"result": {"ok": True}})
         complete.assert_called_once_with(
-            "p", SCHEMA, "status", purpose="swarm_task"
+            "p", SCHEMA, "status", timeout_seconds=20.0, **OPENAI_SETTINGS
         )
         with self.assertRaisesRegex(ValueError, "invalid TypeSafe"):
             api.dispatch(
@@ -654,8 +691,33 @@ class HostInferenceBoundaryTests(unittest.TestCase):
                     "timeout_seconds": 2.1,
                 },
             )
-        with self.assertRaises(LookupError):
-            api.dispatch("/slot/text", {})
+        for path in ("/slot/text", "/openai/auto-approval"):
+            with self.assertRaises(LookupError):
+                api.dispatch(path, {})
+
+    def test_openai_timeout_is_required_and_bounded_at_both_boundaries(self) -> None:
+        body = {"prompt": "p", "schema": SCHEMA, "schema_name": "task", **OPENAI_SETTINGS}
+        with self.assertRaises(ValueError):
+            api.dispatch("/openai/text-completion", body)
+        for timeout in (True, None, "1.2", 0, -1, 60.1, float("nan"), float("inf")):
+            with self.subTest(timeout=timeout), patch.object(client, "_request") as request, \
+                 patch.object(api.providers, "openai_text_completion") as complete:
+                with self.assertRaises(ValueError):
+                    client.openai_text_completion("p", SCHEMA, "task",
+                                                  timeout_seconds=timeout, **OPENAI_SETTINGS)
+                with self.assertRaises(ValueError):
+                    api.dispatch("/openai/text-completion", {**body, "timeout_seconds": timeout})
+                request.assert_not_called()
+                complete.assert_not_called()
+
+    def test_service_rejects_unsupported_model_and_invalid_output_budget(self) -> None:
+        body = {"prompt": "p", "schema": SCHEMA, "schema_name": "task", "timeout_seconds": 60, **OPENAI_SETTINGS}
+        for override in ({"model": "unknown"}, {"max_output_tokens": True},
+                         {"max_output_tokens": 0}, {"max_output_tokens": 4097}):
+            with self.subTest(override=override), patch.object(api.providers, "openai_text_completion") as complete:
+                with self.assertRaises(ValueError):
+                    api.dispatch("/openai/text-completion", {**body, **override})
+                complete.assert_not_called()
 
     def test_host_socket_accepts_authenticated_host_services(self) -> None:
         with (
@@ -697,8 +759,8 @@ class HostInferenceBoundaryTests(unittest.TestCase):
                             {
                                 "prompt": "p",
                                 "schema": SCHEMA,
-                                "schema_name": "status",
-                                "purpose": "swarm_task",
+                                "schema_name": "status", **OPENAI_SETTINGS,
+                                "timeout_seconds": 20.0,
                             }
                         ),
                     )
@@ -764,7 +826,7 @@ class HostInferenceBoundaryTests(unittest.TestCase):
                 {"x": 1}, {"risk": {"type": "noul", "instructions": "Assess risk"}}, timeout_seconds=1.2
             )
         self.assertEqual(result["model"], "jev-latest")
-        connect.assert_called_once_with(1.2)
+        connect.assert_called_once_with(1.3)
         self.assertEqual(
             connection.request.call_args.args[:2], ("POST", "/typesafe/jev-judgment")
         )
@@ -803,7 +865,8 @@ class HostInferenceBoundaryTests(unittest.TestCase):
                 client.HostInferenceError, "no usable result"
             ):
                 client.openai_text_completion(
-                    "prompt", {"type": "object"}, "answer", purpose="swarm_task"
+                    "prompt", {"type": "object"}, "answer", timeout_seconds=20.0,
+                    **OPENAI_SETTINGS,
                 )
         warning.assert_not_called()
         connection.close.assert_called_once()

@@ -3,13 +3,22 @@
 from __future__ import annotations
 
 import unittest
-from typing import Any, cast
+import io
+from contextlib import contextmanager
+from typing import Any, Iterator, cast
 from unittest.mock import patch
 
 from host.runtime.tools import tools_host
 from host.tools import zoho_mail
 from host.tools.json_types import JSONObject, JSONValue
-from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ApprovalExecuted
+from host.tools.results import (
+    ActionExecuted,
+    ActionFailed,
+    ActionPendingApproval,
+    ApprovalExecuted,
+    StreamingAsset,
+    StreamingAssetError,
+)
 from host.tools.shared.web import WebRequestError
 from host.tools.zoho_mail import ZohoMailTool
 
@@ -83,6 +92,7 @@ class ZohoMailToolTests(unittest.TestCase):
                 "list_senders",
                 "list_messages",
                 "read_message",
+                "download_attachment",
                 "create_folder",
                 "move_messages",
                 "archive_messages",
@@ -417,6 +427,151 @@ class ZohoMailToolTests(unittest.TestCase):
             tools_host.validate_against_schema(result.result, read.output_schema, path="result"),
             "",
         )
+
+    def test_read_message_lists_attachments_only_when_the_message_has_them(self) -> None:
+        urls: list[str] = []
+
+        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
+            urls.append(url)
+            if url.endswith("/details"):
+                return success({"messageId": "1", "folderId": "2", "hasAttachment": "1"})
+            if url.endswith("/content"):
+                return success({"content": "<p>Packet attached</p>"})
+            if url.endswith("/attachmentinfo"):
+                return success({"attachments": [
+                    {"attachmentId": "77", "attachmentName": "Bid Packet.pdf", "attachmentSize": "5120"},
+                    {"attachmentId": "", "attachmentName": "dropped.pdf"},
+                ]})
+            raise AssertionError(url)
+
+        with patch.object(zoho_mail, "json_request", fake_json_request):
+            result = ZohoMailTool().execute("read_message", {"folder_id": "2", "message_id": "1"}, connected_api())
+
+        assert isinstance(result, ActionExecuted)
+        message = result.result["zoho_message"]
+        assert isinstance(message, dict)
+        self.assertEqual(
+            message["attachments"],
+            [{"attachment_id": "77", "name": "Bid Packet.pdf", "size_bytes": 5120}],
+        )
+        self.assertTrue(urls[-1].endswith("/accounts/2560636000000008002/folders/2/messages/1/attachmentinfo"))
+        read = zoho_mail.MANIFEST.action("read_message")
+        assert read is not None
+        self.assertEqual(tools_host.validate_against_schema(result.result, read.output_schema, path="result"), "")
+
+        urls.clear()
+
+        def no_attachment_request(method: str, url: str, **kwargs: Any) -> JSONObject:
+            urls.append(url)
+            if url.endswith("/details"):
+                return success({"messageId": "1", "folderId": "2", "hasAttachment": "0"})
+            if url.endswith("/content"):
+                return success({"content": "Hi"})
+            raise AssertionError(url)
+
+        with patch.object(zoho_mail, "json_request", no_attachment_request):
+            plain = ZohoMailTool().execute("read_message", {"folder_id": "2", "message_id": "1"}, connected_api())
+        assert isinstance(plain, ActionExecuted)
+        self.assertEqual(len(urls), 2)
+        plain_message = plain.result["zoho_message"]
+        assert isinstance(plain_message, dict)
+        self.assertEqual(plain_message["attachments"], [])
+
+    def test_download_attachment_streams_the_named_file_with_the_mailbox_token(self) -> None:
+        requests: list[tuple[str, dict[str, str]]] = []
+        info = success({"attachments": [
+            {"attachmentId": "77", "attachmentName": "../Bid/Packet.pdf", "attachmentSize": 5},
+        ]})
+
+        @contextmanager
+        def fake_stream(method: str, url: str, **kwargs: Any) -> Iterator[tuple[io.BytesIO, dict[str, str]]]:
+            requests.append((url, dict(kwargs["headers"])))
+            yield io.BytesIO(b"%PDF-"), {"content-length": "5", "content-type": "application/pdf; name=x"}
+
+        with patch.object(zoho_mail, "json_request", return_value=info), \
+                patch.object(zoho_mail, "open_response_stream", fake_stream):
+            result = ZohoMailTool().execute(
+                "download_attachment",
+                {"folder_id": "2", "message_id": "1", "attachment_id": "77"},
+                connected_api(),
+            )
+            assert isinstance(result, StreamingAsset)
+            with result.open_stream() as opened:
+                self.assertEqual(opened.filename, ".._Bid_Packet.pdf")
+                self.assertEqual(opened.media_type, "application/pdf")
+                self.assertEqual(opened.size_bytes, 5)
+                self.assertEqual(opened.source.read(), b"%PDF-")
+
+        url, headers = requests[0]
+        self.assertEqual(
+            url,
+            "https://mail.zoho.eu/api/accounts/2560636000000008002/folders/2/messages/1/attachments/77",
+        )
+        self.assertEqual(headers["authorization"], "Zoho-oauthtoken zoho-access")
+        download = zoho_mail.MANIFEST.action("download_attachment")
+        assert download is not None
+        self.assertEqual(download.approval, "direct")
+        self.assertTrue(download.returns_asset)
+
+    def test_download_attachment_rejects_ids_not_on_the_message_and_unsized_bodies(self) -> None:
+        info = success({"attachments": [{"attachmentId": "77", "attachmentName": "", "attachmentSize": 5}]})
+        with patch.object(zoho_mail, "json_request", return_value=info):
+            missing = ZohoMailTool().execute(
+                "download_attachment",
+                {"folder_id": "2", "message_id": "1", "attachment_id": "78"},
+                connected_api(),
+            )
+        assert isinstance(missing, ActionFailed)
+        self.assertIn("not on this message", missing.error)
+
+        @contextmanager
+        def unsized_stream(method: str, url: str, **kwargs: Any) -> Iterator[tuple[io.BytesIO, dict[str, str]]]:
+            yield io.BytesIO(b"x"), {"content-type": "weird type"}
+
+        with patch.object(zoho_mail, "json_request", return_value=info), \
+                patch.object(zoho_mail, "open_response_stream", unsized_stream):
+            result = ZohoMailTool().execute(
+                "download_attachment",
+                {"folder_id": "2", "message_id": "1", "attachment_id": "77"},
+                connected_api(),
+            )
+            assert isinstance(result, StreamingAsset)
+            with self.assertRaisesRegex(StreamingAssetError, "valid size"):
+                with result.open_stream():
+                    pass
+
+        @contextmanager
+        def denied_stream(method: str, url: str, **kwargs: Any) -> Iterator[tuple[io.BytesIO, dict[str, str]]]:
+            raise WebRequestError("failed", status=404)
+            yield io.BytesIO(b""), {}
+
+        with patch.object(zoho_mail, "json_request", return_value=info), \
+                patch.object(zoho_mail, "open_response_stream", denied_stream):
+            result = ZohoMailTool().execute(
+                "download_attachment",
+                {"folder_id": "2", "message_id": "1", "attachment_id": "77"},
+                connected_api(),
+            )
+            assert isinstance(result, StreamingAsset)
+            with self.assertRaisesRegex(StreamingAssetError, "could not find"):
+                with result.open_stream():
+                    pass
+        self.assertEqual(zoho_mail._attachment_filename("", "77"), "attachment-77")
+
+    def test_download_attachment_enforces_one_whole_transfer_deadline(self) -> None:
+        clock = [1000.0]
+
+        class TrickleBody(io.BytesIO):
+            def read1(self, size: int = -1) -> bytes:
+                clock[0] += 70
+                return super().read1(1)
+
+        body = zoho_mail._DeadlineBody(TrickleBody(b"abcd"), 1000.0 + zoho_mail.ATTACHMENT_TIMEOUT_SECONDS)
+        with patch.object(zoho_mail.time, "monotonic", lambda: clock[0]):
+            self.assertEqual(body.read(4), b"a")
+            self.assertEqual(body.read(4), b"b")
+            with self.assertRaisesRegex(StreamingAssetError, "exceeded 120 seconds"):
+                body.read(4)
 
     def test_read_message_bounds_original_html(self) -> None:
         raw_html = "<div>" + "x" * zoho_mail.MAX_MESSAGE_HTML_CHARS + "</div>"

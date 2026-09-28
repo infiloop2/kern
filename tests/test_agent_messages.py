@@ -36,6 +36,14 @@ class AgentMessageTests(unittest.TestCase):
                     agent_messages.send_agent_message(body, sender_thread_id=sender)
                 post.assert_not_called()
 
+    def test_spawned_agent_can_reply_to_parent(self):
+        with patch.object(agent_messages, "call_admin_api", return_value={"status": "accepted"}) as post:
+            result = agent_messages.send_agent_message(
+                {"thread_id": "thread-2", "message": "Done"}, sender_thread_id="thread-3"
+            )
+        self.assertEqual(result, {"status": "accepted", "thread_id": "thread-2"})
+        self.assertIn("Sender thread: thread-3", post.call_args.args[2]["message"])
+
     def test_sender_header_comes_from_host(self):
         self.cursor.fetchone.return_value = ("codex", "gpt-6-astra", "high", False, False)
         with patch.object(

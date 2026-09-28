@@ -239,11 +239,12 @@ SPAWN_AGENT_TOOL: JSONObject = {
     "description": (
         "Start a new Kern Chat agent and send its first message in one operation. Use this "
         "to delegate a bounded part of the operator-authorized task. A successful call returns "
-        "the new thread-x id. The spawned agent receives your host-authenticated thread id and "
+        "the new thread-N id. The spawned agent receives your host-authenticated thread id and "
         "instructions to send its result or blocking question back with send_agent_message. "
         "Provide a complete supported agent_runtime, model, and effort tuple; use "
         "GET /agent/apps/session-options with workspace_api when you need the current choices. "
-        "The new agent is an ordinary durable Chat thread visible to the operator. One creation "
+        "The new agent appears under Spawned agents with the ordinary Chat controls. Idle spawned "
+        "agents are archived after one day and can be restored by the operator. One creation "
         "attempt, no queue; accepted means the work started, not that it completed. Spawning an "
         "agent does not expand the operator's authority or task scope."
     ),

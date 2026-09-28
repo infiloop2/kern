@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 import json
 import re
@@ -97,7 +98,7 @@ def route_browser(
         }
     if method == "GET" and path == "/threads":
         query = query or {}
-        unexpected = sorted(set(query) - {"archived"})
+        unexpected = sorted(set(query) - {"archived", "spawned"})
         if unexpected:
             raise WorkspaceError(
                 HTTPStatus.BAD_REQUEST,
@@ -109,7 +110,13 @@ def route_browser(
             if archived_values[0] not in {"true", "false"}:
                 raise WorkspaceError(HTTPStatus.BAD_REQUEST, "archived must be true or false")
             archived = archived_values[0] == "true"
-        return list_chat_threads(archived=archived)
+        spawned_values = query.get("spawned") or []
+        if len(spawned_values) > 1 or (
+            spawned_values and spawned_values[0] not in {"true", "false"}
+        ):
+            raise WorkspaceError(HTTPStatus.BAD_REQUEST, "spawned must be true or false")
+        spawned = bool(spawned_values and spawned_values[0] == "true")
+        return list_chat_threads(archived=archived, spawned=spawned)
     if method == "POST" and path == "/scheduled-agents/order":
         return navigation_order.move("schedules", body)
     if method == "GET" and path == "/scheduled-agents":
@@ -199,9 +206,9 @@ def route_browser(
     raise WorkspaceError(HTTPStatus.NOT_FOUND, "route not found")
 
 
-def list_chat_threads(*, archived: bool = False) -> dict[str, Any]:
-    """Return ordinary Chat threads joined with live host state."""
-    return _list_indexed_threads(prefix="thread-", archived=archived, scheduled=False)
+def list_chat_threads(*, archived: bool = False, spawned: bool = False) -> dict[str, Any]:
+    """Return user or spawned Chat threads joined with live host state."""
+    return _list_indexed_threads(prefix="thread-", archived=archived, scheduled=False, spawned=spawned)
 
 
 def list_scheduled_agent_threads() -> dict[str, Any]:
@@ -215,9 +222,9 @@ def list_scheduled_agent_threads() -> dict[str, Any]:
 
 
 def _list_indexed_threads(
-    *, prefix: str, archived: bool, scheduled: bool
+    *, prefix: str, archived: bool, scheduled: bool, spawned: bool = False
 ) -> dict[str, Any]:
-    recorded = _recorded_threads(archived=archived, scheduled=scheduled)
+    recorded = _recorded_threads(archived=archived, scheduled=scheduled, spawned=spawned)
     summaries = {
         summary.get("thread_id"): summary
         for summary in _host_thread_summaries(prefix)
@@ -322,21 +329,22 @@ def _host_thread_summaries(prefix: str) -> list[dict[str, Any]]:
 
 
 def _recorded_threads(
-    *, archived: bool, scheduled: bool
+    *, archived: bool, scheduled: bool, spawned: bool = False
 ) -> dict[str, dict[str, Any]]:
     """Return the database-owned members and metadata for one thread index."""
     if scheduled:
         query = (
             "SELECT thread_id, name, id, agent_runtime, model, effort,"
-            " next_run_at, created_at FROM schedules"
+            " next_run_at, created_at, NULL FROM schedules"
             " WHERE deleted_at IS NULL"
         )
         params: tuple[Any, ...] = ()
     else:
         query = (
             "SELECT thread_id, COALESCE(name, thread_id),"
-            " NULL, NULL, NULL, NULL, NULL, NULL FROM chat_threads"
-            " WHERE archived = %s"
+            " NULL, NULL, NULL, NULL, NULL, NULL, spawned_by_thread_id FROM chat_threads"
+            " WHERE archived = %s AND spawned_by_thread_id IS "
+            + ("NOT NULL" if spawned else "NULL")
         )
         params = (archived,)
     with db.transaction() as cur:
@@ -351,6 +359,7 @@ def _recorded_threads(
             "effort": row[5],
             "next_run_at": row[6],
             "created_at": row[7],
+            "spawned_by_thread_id": row[8],
         }
         for row in rows
     }
@@ -387,6 +396,7 @@ def _chat_thread_summary(
         "schedule_id": metadata["schedule_id"],
         "next_run_at": metadata["next_run_at"],
         "has_session": has_session,
+        "spawned_by_thread_id": metadata.get("spawned_by_thread_id"),
     }
 
 
@@ -472,7 +482,7 @@ def send_chat_message(
         # naming, so the operator never types an id. Reservation is already
         # serialized by its database table lock; the generated id then gets
         # the same per-thread delivery lock as every existing conversation.
-        thread_id = _reserve_generated_thread_id()
+        thread_id = _reserve_generated_thread_id(spawned_by_thread_id=peer_sender_thread_id)
     with _message_send_lock(thread_id):
         schedule_config = _require_sendable_thread(thread_id)
         host_request: dict[str, Any] = {"message": message}
@@ -570,7 +580,10 @@ def set_chat_thread_archived(thread_id: str, *, archived: bool) -> dict[str, Any
         )
     with db.transaction() as cur:
         # Serialize the idle check and archive with Workspace message admission.
-        cur.execute("SELECT 1 FROM chat_threads WHERE thread_id = %s FOR UPDATE", (thread_id,))
+        cur.execute(
+            "SELECT 1 FROM chat_threads WHERE thread_id = %s FOR UPDATE",
+            (thread_id,),
+        )
         if cur.fetchone() is None:
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "thread not found")
         if archived:
@@ -611,6 +624,42 @@ def unarchive_chat_thread(thread_id: str) -> dict[str, Any]:
     return set_chat_thread_archived(thread_id, archived=False)
 
 
+def archive_idle_spawned_agents() -> int:
+    """Archive spawned Chats whose host summary is idle and over a day old."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=1)
+    cutoff_text = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT thread_id FROM chat_threads"
+            " WHERE spawned_by_thread_id IS NOT NULL AND archived = FALSE",
+        )
+        candidates = {row[0] for row in cur.fetchall()}
+    if not candidates:
+        return 0
+    archived = 0
+    for summary in _host_thread_summaries("thread-"):
+        thread_id = summary.get("thread_id")
+        if (
+            not isinstance(thread_id, str)
+            or thread_id not in candidates
+            or summary.get("status") != "idle"
+        ):
+            continue
+        if not summary.get("last_used_at"):
+            continue
+        if str(summary["last_used_at"]) >= cutoff_text:
+            continue
+        with _message_send_lock(thread_id):
+            try:
+                archive_chat_thread(thread_id)
+            except WorkspaceError as exc:
+                if exc.status in {HTTPStatus.CONFLICT, HTTPStatus.NOT_FOUND}:
+                    continue
+                raise
+            archived += 1
+    return archived
+
+
 THREAD_NAME_MAX_CHARS = 100
 
 
@@ -645,8 +694,8 @@ def rename_chat_thread(thread_id: str, body: Any) -> dict[str, Any]:
     return {"thread_id": row[0], "name": row[1]}
 
 
-def _reserve_generated_thread_id() -> str:
-    """Allocate the next successive thread name (thread-1, thread-2, ...).
+def _reserve_generated_thread_id(*, spawned_by_thread_id: str | None = None) -> str:
+    """Allocate the next successive thread-N identity with optional origin.
 
     The name is reserved by inserting its thread row before the host call:
     the primary key makes concurrent generators take distinct names instead
@@ -674,9 +723,10 @@ def _reserve_generated_thread_id() -> str:
             ]
             candidate = f"thread-{max(numbers, default=0) + 1}"
             cur.execute(
-                "INSERT INTO chat_threads (thread_id, archived) VALUES (%s, FALSE)"
+                "INSERT INTO chat_threads (thread_id, archived, spawned_by_thread_id)"
+                " VALUES (%s, FALSE, %s)"
                 " ON CONFLICT (thread_id) DO NOTHING RETURNING thread_id",
-                (candidate,),
+                (candidate, spawned_by_thread_id),
             )
             if cur.fetchone() is not None:
                 return candidate

@@ -48,6 +48,7 @@ EXPECTED_SHIM_TOOLS = [
     "recent_network_denials",
     "stage_image",
     "stage_video",
+    "stage_audio",
     "search_conversation_history",
     "read_thread_history",
     "send_agent_message",
@@ -1156,6 +1157,28 @@ class McpShimTests(ToolsApiTestCase):
         self.assertEqual(metadata.filename, "clip.mp4")
         self.assertEqual(metadata.size_bytes, 512)
         self.assertNotIn(str(video), staged["result"]["content"][0]["text"])
+
+        # Both ingress layers admit falAI and preserve per-tool isolation.
+        (Path(socket_dir.name) / "voice.mp3").write_bytes(b"a" * 512)
+        with state.mutation() as cur:
+            state.set_tool_enabled(cur, "fal_ai", True)
+        for kind, path in (("image", "/slide.jpg"), ("video", "/clip.mp4"), ("audio", "/voice.mp3")):
+            staged_topaz = self.rpc(shim, {
+                "jsonrpc": "2.0", "id": 20, "method": "tools/call",
+                "params": {"name": "stage_" + kind, "arguments": {"path": path, "for_tool": "fal_ai"}},
+            })
+            self.assertFalse(staged_topaz["result"]["isError"])
+            asset_id = json.loads(staged_topaz["result"]["content"][0]["text"])[kind + "_asset_id"]
+            self.assertTrue(server.asset_store.describe("fal_ai", asset_id).media_type.startswith(kind + "/"))
+            with self.assertRaises(AssetError):
+                server.asset_store.describe("runway", asset_id)
+        with state.mutation() as cur:
+            state.set_tool_enabled(cur, "fal_ai", False)
+        disabled = self.rpc(shim, {
+            "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+            "params": {"name": "stage_image", "arguments": {"path": "/slide.jpg", "for_tool": "fal_ai"}},
+        })
+        self.assertTrue(disabled["result"]["isError"])
 
         image = Path(socket_dir.name) / "frame.png"
         image.write_bytes(b"i" * 512)

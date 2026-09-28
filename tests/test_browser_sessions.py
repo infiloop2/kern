@@ -1,0 +1,550 @@
+"""Browser service boundary and durable submission tests; no provider credentials."""
+from __future__ import annotations
+import json
+import os
+import socket
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
+from datetime import datetime, timezone
+from pathlib import Path
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest.mock import patch
+
+from host.runtime.browser.client import BrowserError
+from host.runtime.browser.accounts import Profile, Accounts
+from host.runtime.browser.providers import PROVIDERS
+from host.runtime.browser.browser import Browser, permitted_url
+from host.runtime.browser.actions.x_post_tweet import validate_post, execute as post_tweet, PostRejected
+from host.runtime.browser.service import authorized, Handler, Server
+from host.runtime.core.unix_socket_service import UnixSocketServer
+from host.runtime.agent_shim.mcp_shim import UnixHTTPConnection
+from host.runtime.admin_api import browser as admin_browser
+from host.runtime.admin_api.errors import ApiError
+from host.tools.browser import BUNDLED_TOOL, MANIFEST
+from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ApprovalExecuted
+from test_tools import FakeHostAPI, assert_matches_output_schema
+
+
+class FakeBrowser:
+    account_value = "example"
+    fail_prepare = False
+    fail_submit = False
+    submissions = 0
+    def __init__(self, profile, site):
+        self.page = self
+        self.profile = profile
+        self.site = site
+    def account(self):
+        return self.account_value
+    def origin(self):
+        return self.site
+    def frame(self):
+        return "operator-only-image"
+    def close(self):
+        pass
+    def save_state(self):
+        pass
+    def input(self, payload):
+        pass
+    def prepare(self, account, text, reply_id=""):
+        if self.fail_prepare or account != self.account_value:
+            raise RuntimeError("secret provider DOM")
+    def submit(self, account, reply_id=""):
+        type(self).submissions += 1
+        state = json.loads((self.profile.parent / "state.json").read_text())
+        assert state["usage"]["x_post_tweet"]["count"] > 0
+        if self.fail_submit:
+            raise RuntimeError("secret provider response")
+        return f"https://x.com/{account}/status/123"
+
+
+class BrowserSessionsTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        FakeBrowser.account_value = "example"
+        FakeBrowser.fail_submit = FakeBrowser.fail_prepare = False
+        FakeBrowser.submissions = 0
+        self.enterContext(patch("host.runtime.browser.providers.x.verify_account", side_effect=lambda page: page.account()))
+        self.enterContext(patch("host.runtime.browser.actions.x_post_tweet.prepare_post", side_effect=lambda page, *args: page.prepare(*args)))
+        self.enterContext(patch("host.runtime.browser.actions.x_post_tweet.submit_prepared_post", side_effect=lambda page, *args: page.submit(*args)))
+        self.diagnostics = self.enterContext(patch("host.runtime.browser.actions.x_post_tweet.host_errors.emit_record"))
+        self.engine = Profile(self.root / "session", "x", FakeBrowser)
+        self.body = {"provider_identifier": "example", "text": "hello"}
+
+    def connect(self):
+        lease = self.engine.dispatch("open", {})["lease"]
+        self.engine.dispatch("save", {"lease": lease})
+
+    def test_takeover_pauses_until_saved_or_checked(self):
+        self.connect()
+        self.assertEqual(self.engine.status()["state"], "connected")
+        lease = self.engine.dispatch("open", {})["lease"]
+        with self.assertRaises(BrowserError):
+            post_tweet(self.engine, self.body)
+        self.engine.dispatch("cancel", {"lease": lease})
+        self.assertEqual(self.engine.status()["state"], "needs_attention")
+        self.assertEqual(self.engine.dispatch("check", {})["state"], "connected")
+
+    def test_login_check_detects_account_change_and_pauses(self):
+        self.connect()
+        FakeBrowser.account_value = "other"
+        state = self.engine.dispatch("check", {})
+        self.assertEqual(state["provider_identifier"], "example")
+        self.assertEqual(state["state"], "needs_attention")
+        restored = Profile(self.engine.directory, "x", FakeBrowser)
+        self.assertEqual(restored.status()["state"], "needs_attention")
+        with self.assertRaises(BrowserError):
+            post_tweet(restored, self.body)
+
+    def test_provider_contract_preserves_identifier_and_x_action_rejects_it(self):
+        provider = SimpleNamespace(name="fixture", login_url="https://fixture.example/",
+                                   verify_account=lambda page: "Owner@example.test",
+                                   validate_identifier=lambda value: value)
+        with patch.dict(PROVIDERS, {"fixture": provider}):
+            accounts = Accounts(self.root / "providers", FakeBrowser)
+            login = accounts.dispatch("create", {"provider": "fixture"})
+            lease = accounts.dispatch("open", login)["lease"]
+            saved = accounts.dispatch("save", {**login, "lease": lease})
+            self.assertEqual(saved["provider"], "fixture")
+            self.assertEqual(saved["provider_identifier"], "Owner@example.test")
+            restored = Accounts(accounts.directory, FakeBrowser)
+            self.assertEqual(restored.dispatch("list", {})["accounts"], [saved])
+            profile = restored.profiles[saved["account_id"]]
+            with patch.object(profile, "launch") as launch:
+                with self.assertRaisesRegex(BrowserError, "requires an X connection"):
+                    restored.dispatch("post_tweet", {"account_id": saved["account_id"], **self.body}, agent_action=True)
+                launch.assert_not_called()
+
+    def test_each_service_call_attempts_once_and_allows_identical_content(self):
+        self.connect()
+        self.assertEqual(post_tweet(self.engine, self.body)["status"], "posted")
+        restored = Profile(self.engine.directory, "x", FakeBrowser)
+        self.assertEqual(post_tweet(restored, self.body)["status"], "posted")
+        self.assertEqual(FakeBrowser.submissions, 2)
+        self.assertEqual(restored.data["usage"]["x_post_tweet"]["count"], 2)
+
+    def test_submit_failure_is_terminal_counts_attempt_and_does_not_pause_login(self):
+        self.connect()
+        FakeBrowser.fail_submit = True
+        with self.assertRaisesRegex(BrowserError, "Check X before approving another attempt"):
+            post_tweet(self.engine, self.body)
+        self.assertEqual(FakeBrowser.submissions, 1)
+        restored = Profile(self.engine.directory, "x", FakeBrowser)
+        self.assertEqual(restored.status()["state"], "connected")
+        self.assertEqual(restored.data["usage"]["x_post_tweet"]["count"], 1)
+        FakeBrowser.fail_submit = False
+        self.assertEqual(post_tweet(restored, self.body)["status"], "posted")
+        self.assertEqual(FakeBrowser.submissions, 2)
+
+    def test_post_result_survives_snapshot_failure(self):
+        self.connect()
+        with patch.object(FakeBrowser, "save_state", side_effect=OSError("private disk detail")), patch("host.runtime.browser.actions.x_post_tweet.host_errors.report_warning") as warning:
+            self.assertEqual(post_tweet(self.engine, self.body), {"status": "posted", "url": "https://x.com/example/status/123"})
+            self.assertEqual(FakeBrowser.submissions, 1)
+            self.assertIsNone(self.engine.browser)
+            warning.assert_called_once()
+            self.assertEqual(str(warning.call_args.args[1]), "OSError")
+            self.assertEqual(warning.call_args.kwargs["context"], {"stage": "cleanup"})
+            FakeBrowser.fail_prepare = True
+            with self.assertRaisesRegex(BrowserError, "not submitted"):
+                post_tweet(self.engine, self.body)
+
+    def test_explicit_rejection_preserves_message_and_counts_attempt(self):
+        self.connect()
+        with patch("host.runtime.browser.actions.x_post_tweet.submit_prepared_post", side_effect=PostRejected("X rejected the submission (duplicate post, code 187).")):
+            with self.assertRaisesRegex(PostRejected, "duplicate post"):
+                post_tweet(self.engine, self.body)
+        self.assertEqual(self.engine.data["usage"]["x_post_tweet"]["count"], 1)
+
+    def test_post_diagnostics_keep_stages_stack_and_safe_reasons(self):
+        self.connect()
+        for function, error, stage in [
+            ("prepare_post", RuntimeError("private-live-token"), "prepare"),
+            ("submit_prepared_post", RuntimeError("private-live-token"), "confirm"),
+            ("submit_prepared_post", PostRejected("X rejected the submission (code 226)."), "rejected"),
+        ]:
+            with self.subTest(stage=stage), patch("host.runtime.browser.actions.x_post_tweet." + function, side_effect=error):
+                with self.assertRaises(BrowserError):
+                    post_tweet(self.engine, self.body)
+                record = self.diagnostics.call_args.args[0]
+                self.assertEqual(record["component"], "browser.x_post_tweet")
+                self.assertEqual(record["context"], {"stage": stage})
+                self.assertIn("x_post_tweet.py", record["traceback"])
+                self.assertNotIn("private-live-token", json.dumps(record))
+                self.assertEqual(record["summary"], str(error) if stage == "rejected" else "RuntimeError")
+
+    def test_check_cannot_launch_while_another_login_is_open(self):
+        accounts = Accounts(self.root / "sites", FakeBrowser)
+        first = self.connect_account(accounts)
+        login = accounts.dispatch("create", {"provider": "x"})
+        accounts.dispatch("open", login)
+        with patch.object(accounts.profiles[first], "launch") as launch:
+            with self.assertRaisesRegex(BrowserError, "Another website is open"):
+                accounts.dispatch("check", {"account_id": first})
+            launch.assert_not_called()
+
+    def test_prepare_failure_has_no_submission_or_usage(self):
+        self.connect()
+        FakeBrowser.fail_prepare = True
+        with self.assertRaisesRegex(BrowserError, "not submitted"):
+            post_tweet(self.engine, self.body)
+        self.assertEqual(FakeBrowser.submissions, 0)
+        self.assertEqual(self.engine.data["usage"], {})
+
+    def test_daily_limit_counts_post_and_reply_attempts_after_restart(self):
+        self.connect()
+        with self.assertRaises(BrowserError):
+            post_tweet(self.engine, {**self.body, "provider_identifier": "other"})
+        for number in range(50):
+            payload = {**self.body, "text": str(number)}
+            if number % 2:
+                payload["in_reply_to_tweet_id"] = "12345"
+            post_tweet(self.engine, payload)
+        restored = Profile(self.engine.directory, "x", FakeBrowser)
+        with self.assertRaisesRegex(BrowserError, "daily"):
+            post_tweet(restored, self.body)
+        self.assertEqual(FakeBrowser.submissions, 50)
+        restored.data["usage"]["x_post_tweet"]["day"] = "2000-01-01"
+        restored.data["usage"]["another_action"] = {"day": datetime.now(timezone.utc).date().isoformat(), "count": 500}
+        self.assertEqual(post_tweet(restored, self.body)["status"], "posted")
+        self.assertEqual(restored.data["usage"]["x_post_tweet"]["count"], 1)
+
+    def test_lease_authentication_and_idle_expiry(self):
+        lease = self.engine.dispatch("open", {})["lease"]
+        with self.assertRaises(BrowserError):
+            self.engine.dispatch("frame", {"lease": "wrong"})
+        with self.assertRaises(BrowserError):
+            self.engine.dispatch("open", {})
+        with self.assertRaises(BrowserError):
+            self.engine.dispatch("check", {})
+        expires = self.engine.expires
+        self.engine.dispatch("frame", {"lease": lease})
+        self.assertEqual(expires, self.engine.expires)
+        self.engine.expires = 0
+        with self.assertRaises(BrowserError):
+            self.engine.dispatch("input", {"lease": lease, "kind": "home"})
+        self.assertEqual(self.engine.status()["state"], "needs_attention")
+        self.assertIsNone(self.engine.browser)
+
+    def connect_account(self, accounts, handle="example"):
+        FakeBrowser.account_value = handle
+        login = accounts.dispatch("create", {"provider": "x"})
+        lease = accounts.dispatch("open", login)["lease"]
+        return accounts.dispatch("save", {**login, "lease": lease})["account_id"]
+
+    def test_temporary_login_is_not_an_account_and_cancel_discards_it(self):
+        accounts = Accounts(self.root / "sites", FakeBrowser)
+        login = accounts.dispatch("create", {"provider": "x"})
+        self.assertEqual(accounts.dispatch("list", {}), {"accounts": []})
+        with self.assertRaises(BrowserError):
+            accounts.dispatch("post_tweet", {**login, **self.body}, agent_action=True)
+        with self.assertRaisesRegex(BrowserError, "Unsupported browser provider"):
+            accounts.dispatch("create", {"provider": "linkedin"})
+        lease = accounts.dispatch("open", login)["lease"]
+        accounts.dispatch("cancel", {**login, "lease": lease})
+        self.assertEqual(list(accounts.directory.iterdir()), [])
+        login = accounts.dispatch("create", {"provider": "x"})
+        accounts.pending[login["login_id"]].expires = 0
+        accounts.expire()
+        self.assertEqual(list(accounts.directory.iterdir()), [])
+        accounts.dispatch("create", {"provider": "x"})
+        restarted = Accounts(accounts.directory, FakeBrowser)
+        self.assertEqual(restarted.dispatch("list", {}), {"accounts": []})
+        self.assertEqual(list(accounts.directory.iterdir()), [])
+
+    def test_agent_actions_pause_only_for_account_needing_attention(self):
+        accounts = Accounts(self.root / "sites", FakeBrowser)
+        first = self.connect_account(accounts)
+        second = self.connect_account(accounts, "another")
+        lease = accounts.dispatch("open", {"account_id": second})["lease"]
+        with self.assertRaisesRegex(BrowserError, "operator control"):
+            accounts.dispatch("post_tweet", {"account_id": second, **self.body}, agent_action=True)
+        accounts.dispatch("save", {"account_id": second, "lease": lease})
+        self.assertEqual(accounts.dispatch("check", {"account_id": first})["state"], "needs_attention")
+        with self.assertRaisesRegex(BrowserError, "login needs attention"):
+            accounts.dispatch("post_tweet", {"account_id": first, **self.body}, agent_action=True)
+        self.assertEqual(accounts.dispatch("post_tweet", {"account_id": second, **self.body, "provider_identifier": "another"}, agent_action=True)["status"], "posted")
+        self.assertNotEqual(accounts.profiles[first].directory, accounts.profiles[second].directory)
+        with self.assertRaises(BrowserError):
+            accounts.dispatch("open", {"account_id": "../../admin-state"})
+
+    def test_account_binding_cannot_change_on_reconnect(self):
+        accounts = Accounts(self.root / "sites", FakeBrowser)
+        account_id = self.connect_account(accounts)
+        FakeBrowser.account_value = "another"
+        lease = accounts.dispatch("open", {"account_id": account_id})["lease"]
+        with self.assertRaisesRegex(BrowserError, "another account"):
+            accounts.dispatch("save", {"account_id": account_id, "lease": lease})
+        accounts.dispatch("cancel", {"account_id": account_id, "lease": lease})
+        restored = Accounts(accounts.directory, FakeBrowser)
+        saved = restored.dispatch("list", {})["accounts"][0]
+        self.assertEqual(saved, {"account_id": account_id, "provider": "x", "provider_identifier": "example", "state": "needs_attention", "checked_at": saved["checked_at"]})
+        FakeBrowser.account_value = "example"
+        lease = restored.dispatch("open", {"account_id": account_id})["lease"]
+        restored.dispatch("save", {"account_id": account_id, "lease": lease})
+        self.assertEqual(restored.dispatch("list", {})["accounts"][0]["state"], "connected")
+
+    def test_disconnect_deletes_usage_and_releases_account_slot(self):
+        accounts = Accounts(self.root / "sites", FakeBrowser)
+        ids = [self.connect_account(accounts, f"user{index}") for index in range(5)]
+        with self.assertRaisesRegex(BrowserError, "Up to 5 browser accounts"):
+            accounts.dispatch("create", {"provider": "x"})
+        FakeBrowser.account_value = "user0"
+        accounts.dispatch("post_tweet", {"account_id": ids[0], **self.body, "provider_identifier": "user0"}, agent_action=True)
+        directory = accounts.profiles[ids[0]].directory
+        accounts.dispatch("disconnect", {"account_id": ids[0]})
+        self.assertFalse(directory.exists())
+        restored = Accounts(accounts.directory, FakeBrowser)
+        self.assertEqual(len(restored.dispatch("list", {})["accounts"]), 4)
+        with self.assertRaises(BrowserError):
+            restored.dispatch("post_tweet", {"account_id": ids[0], **self.body}, agent_action=True)
+        self.connect_account(restored, "replacement")
+        FakeBrowser.account_value = "user1"
+        FakeBrowser.fail_submit = True
+        with self.assertRaisesRegex(BrowserError, "Could not confirm"):
+            restored.dispatch("post_tweet", {"account_id": ids[1], **self.body, "provider_identifier": "user1"}, agent_action=True)
+        restored.dispatch("disconnect", {"account_id": ids[1]})
+        self.assertFalse((restored.directory / ids[1]).exists())
+        self.assertNotIn(ids[1], restored.profiles)
+
+    def test_snapshot_budget_is_shared_and_keeps_previous_snapshot(self):
+        first = self.root / "first"
+        second = self.root / "second"
+        first.mkdir()
+        second.mkdir()
+        auth_file = first / "auth.json"
+        original = '{"cookies": [], "origins": []}'
+        auth_file.write_text(original)
+        (second / "auth.json").write_bytes(b"x" * 100)
+        browser = Browser.__new__(Browser)
+        browser.auth_file = auth_file
+        browser.context = SimpleNamespace(storage_state=lambda **kwargs: {"cookies": [], "origins": []})
+        with patch("host.runtime.browser.browser.SAVED_STATE_LIMIT_BYTES", 120):
+            with self.assertRaisesRegex(BrowserError, "1 GB total"):
+                browser.save_state()
+        self.assertEqual(auth_file.read_text(), original)
+        self.assertFalse(auth_file.with_suffix(".tmp").exists())
+        browser.save_state()
+        self.assertEqual(auth_file.stat().st_mode & 0o777, 0o600)
+
+    def test_save_failure_closes_browser_and_disconnect_does_not_save(self):
+        self.connect()
+        self.engine.launch()
+        with patch.object(self.engine.browser, "save_state", side_effect=BrowserError("storage full")), patch.object(self.engine.browser, "close") as close:
+            with self.assertRaisesRegex(BrowserError, "storage full"):
+                self.engine.close()
+            close.assert_called_once()
+        self.assertIsNone(self.engine.browser)
+        self.engine.launch()
+        with patch.object(self.engine.browser, "save_state", side_effect=AssertionError("disconnect must not save")), patch.object(self.engine.browser, "close") as close:
+            self.engine.dispatch("disconnect", {})
+            close.assert_called_once()
+
+    def test_browser_firewall_allows_dns_before_private_network_blocks(self):
+        bootstrap = (Path(__file__).resolve().parents[1] / "host/bootstrap/bootstrap.sh").read_text()
+        private_drop = bootstrap.index('meta skuid "kern-browser" ip daddr')
+        for protocol in ("udp", "tcp"):
+            dns_allow = bootstrap.index(f'meta skuid "kern-browser" {protocol} dport 53 accept')
+            self.assertLess(dns_allow, private_drop)
+        https_allow = bootstrap.index('meta skuid "kern-browser" tcp dport 443 accept')
+        self.assertLess(private_drop, https_allow)
+        self.assertLess(bootstrap.index('meta skuid "kern-browser" ip6 daddr'), https_allow)
+        self.assertLess(https_allow, bootstrap.index('meta skuid "kern-browser" drop'))
+        self.assertLess(bootstrap.index('meta skuid "kern-browser" drop'), bootstrap.index('    oif lo accept'))
+
+    def test_input_and_origin_validation(self):
+        for url in ["file:///etc/passwd", "http://x.com", "https://127.0.0.1", "https://[::1]", "https://169.254.169.254", "https://user:password@x.com", "https://x.com:7443"]:
+            self.assertFalse(permitted_url(url), url)
+        self.assertTrue(permitted_url("https://x.com/"))
+        for body in [{**self.body, "reply_id": "123"}, {**self.body, "in_reply_to_tweet_id": ""},
+                     {**self.body, "in_reply_to_tweet_id": "https://x.com/i/status/123"},
+                     {**self.body, "request_id": "short"}, {**self.body, "text": ""}]:
+            with self.assertRaises(BrowserError):
+                validate_post(body)
+
+    def test_peers_have_disjoint_capabilities(self):
+        self.assertEqual(MANIFEST.host_service_dependency, "kern-browser.service")
+        self.assertFalse(MANIFEST.service)
+        with self.assertRaisesRegex(ValueError, "host_service_dependency must name"):
+            replace(MANIFEST, host_service_dependency="browser")
+        with self.assertRaisesRegex(ValueError, "both service and host_service_dependency"):
+            replace(MANIFEST, service="host.tools.whatsapp.gateway:GATEWAY")
+        def user(name):
+            return SimpleNamespace(pw_uid={"kern-admin": 1, "kern-tools": 2}[name])
+        with patch("host.runtime.browser.service.pwd.getpwnam", side_effect=user):
+            self.assertEqual(authorized(1, "/operator/frame"), "frame")
+            self.assertEqual(authorized(1, "/operator/check"), "check")
+            self.assertEqual(authorized(2, "/actions/post_tweet"), "post_tweet")
+            for uid, path in [(2, "/operator/frame"), (2, "/operator/check"), (2, "/operator/settings"), (1, "/actions/post_tweet"), (3, "/actions/list"), (3, "/operator/input"), (2, "/actions/evaluate")]:
+                self.assertIsNone(authorized(uid, path))
+
+    def test_real_socket_rejects_forbidden_peer_before_dispatch(self):
+        socket_path = str(self.root / "browser.sock")
+        server = UnixSocketServer(socket_path, Handler)
+        server.busy = threading.Lock()
+        server.worker = ThreadPoolExecutor(max_workers=1)
+        server.profiles = SimpleNamespace(dispatch=lambda operation, body, *, agent_action=False: {"operation": operation, "agent_action": agent_action, "body": body})
+        thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
+        thread.start()
+        try:
+            for role, path, expected in [("agent", "/actions/list", 403), ("tools", "/operator/frame", 403),
+                                          ("admin", "/actions/post_tweet", 403), ("tools", "/actions/list", 200),
+                                          ("admin", "/operator/list", 200), ("admin", "/operator/input", 200)]:
+                def user(name):
+                    admitted = (role == "tools" and name == "kern-tools") or (role == "admin" and name == "kern-admin")
+                    return SimpleNamespace(pw_uid=os.getuid() if admitted else -1)
+                with patch("host.runtime.browser.service.pwd.getpwnam", side_effect=user):
+                    connection = UnixHTTPConnection(socket_path)
+                    try:
+                        if path == "/operator/input":
+                            server.busy.acquire()
+                            threading.Timer(0.05, server.busy.release).start()
+                        body = {"kind": "text", "text": "😀" * 4096} if path == "/operator/input" else {}
+                        connection.request("POST", path, json.dumps(body) if body else None, {"Content-Type": "application/json"})
+                        response = connection.getresponse()
+                        self.assertEqual(response.status, expected)
+                        result = json.loads(response.read())
+                        if expected == 403:
+                            self.assertNotIn("operation", result)
+                        else:
+                            self.assertEqual(result["agent_action"], role == "tools")
+                            self.assertEqual(result["body"], body)
+                    finally:
+                        connection.close()
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            server.worker.shutdown()
+
+    def test_untrusted_peer_is_closed_before_allocating_a_handler_thread(self):
+        server = Server.__new__(Server)
+        server.allowed_uids = frozenset({os.getuid() + 1})
+        request, client = socket.socketpair()
+        self.addCleanup(client.close)
+        with patch.object(UnixSocketServer, "process_request") as start_handler:
+            server.process_request(request, None)
+        start_handler.assert_not_called()
+        self.assertEqual(request.fileno(), -1)
+
+        server.allowed_uids = frozenset({os.getuid()})
+        admitted, client2 = socket.socketpair()
+        self.addCleanup(admitted.close)
+        self.addCleanup(client2.close)
+        with patch.object(UnixSocketServer, "process_request") as start_handler:
+            server.process_request(admitted, None)
+        start_handler.assert_called_once_with(admitted, None)
+
+    def test_admin_routes_complete_new_login_through_real_account_service(self):
+        from host.runtime.admin_api import service as admin_api
+        accounts = Accounts(self.root / "sites", FakeBrowser)
+        def route(operation, body):
+            return admin_api.route("POST", "/v1/browser/" + operation, {}, body,
+                                   principal=admin_api.OperatorPrincipal("test-session"))
+        def request(path, body):
+            return accounts.dispatch(path.removeprefix("/operator/"), body)
+        with patch.object(admin_browser.state, "enabled_tool_ids", return_value={"browser"}), patch.object(admin_browser.client, "request", side_effect=request):
+            login = route("create", {"provider": "x"})
+            lease = route("open", login)["lease"]
+            saved = route("save", {**login, "lease": lease})
+            self.assertEqual(route("list", {})["accounts"], [saved])
+            restored = Accounts(accounts.directory, FakeBrowser)
+            self.assertEqual(restored.dispatch("list", {})["accounts"], [saved])
+            for operation in ("finish", "settings", "history", "resolve"):
+                with self.assertRaises(ApiError) as failure:
+                    route(operation, {})
+                self.assertEqual(failure.exception.status, 404)
+            with self.assertRaises(ApiError):
+                admin_api.route("POST", "/v1/browser/save", {}, {**login, "lease": lease},
+                                principal=admin_api.WorkspacePrincipal())
+
+    def test_unexpected_login_check_error_persists_attention(self):
+        self.connect()
+        with patch.object(FakeBrowser, "account", side_effect=RuntimeError("provider detail")):
+            with self.assertRaises(RuntimeError):
+                self.engine.dispatch("check", {})
+        restored = Profile(self.engine.directory, "x", FakeBrowser)
+        self.assertEqual(restored.status()["state"], "needs_attention")
+
+    def test_disabled_integration_cannot_open_but_can_disconnect(self):
+        with patch.object(admin_browser.state, "enabled_tool_ids", return_value=set()), patch.object(admin_browser.client, "request", return_value={}) as request:
+            with self.assertRaises(ApiError):
+                admin_browser.control("open", {})
+            request.assert_not_called()
+            admin_browser.control("disconnect", {"account_id": "saved"})
+            request.assert_called_once()
+
+    def test_approved_text_is_preserved_without_outbound_guard(self):
+        api = FakeHostAPI()
+        text = "Contact example@example.com about this post."
+        selected = {"accounts": [{"account_id": "acct_" + "a" * 32, "provider": "x", "provider_identifier": "example", "state": "connected"}]}
+        with patch.object(api.outbound, "guard_request_parameter_string", side_effect=AssertionError("approval is the content control")), patch("host.tools.browser.client.request", return_value=selected):
+            pending = BUNDLED_TOOL.execute("x_post_tweet", {"account_id": "acct_" + "a" * 32, "text": text}, api)
+        self.assertIsInstance(pending, ActionPendingApproval)
+        self.assertEqual(api.approvals.get(pending.approval_id).payload["text"], text)
+
+    def test_tool_requires_approval_for_exact_post_or_reply(self):
+        api = FakeHostAPI()
+        post_schema = next(action.input_schema for action in MANIFEST.actions if action.id == "x_post_tweet")
+        self.assertEqual(set(post_schema["required"]), {"account_id", "text"})
+        self.assertNotIn("provider_identifier", post_schema["properties"])
+        selected = {"accounts": [{"account_id": "a" * 32, "provider": "x", "provider_identifier": "example", "state": "connected"}]}
+        reply = {"account_id": "a" * 32, "text": self.body["text"], "in_reply_to_tweet_id": "12345"}
+        with patch("host.tools.browser.client.request", return_value=selected) as request:
+            pending = BUNDLED_TOOL.execute("x_post_tweet", reply, api)
+            self.assertIsInstance(pending, ActionPendingApproval)
+            request.assert_called_once_with("/actions/list")
+        record = api.approvals.get(pending.approval_id)
+        self.assertEqual(record.payload["in_reply_to_tweet_id"], "12345")
+        self.assertIn("https://x.com/i/status/12345", record.summary)
+        self.assertIn("hello", record.summary)
+        with patch("host.tools.browser.client.request", side_effect=[selected, {"status": "posted", "url": "https://x.com/example/status/67890"}]) as request:
+            result = BUNDLED_TOOL.execute_approved(api.approvals.approve(pending.approval_id), api)
+            self.assertIsInstance(result, ApprovalExecuted)
+            self.assertEqual(request.call_args.args, ("/actions/post_tweet", {**reply, "provider_identifier": "example"}))
+
+    def test_approved_submission_failure_returns_failure_without_retry(self):
+        api = FakeHostAPI()
+        selected = {"accounts": [{"account_id": "acct_" + "a" * 32, "provider": "x", "provider_identifier": "example", "state": "connected"}]}
+        payload = {"account_id": "acct_" + "a" * 32, "text": "hello"}
+        with patch("host.tools.browser.client.request", return_value=selected):
+            pending = BUNDLED_TOOL.execute("x_post_tweet", payload, api)
+        approved = api.approvals.approve(pending.approval_id)
+        with patch("host.tools.browser.client.request", side_effect=[selected, BrowserError("Could not confirm publication. Check X before approving another attempt.")]) as request:
+            result = BUNDLED_TOOL.execute_approved(approved, api)
+            self.assertIsInstance(result, ActionFailed)
+            self.assertEqual(request.call_count, 2)
+            self.assertEqual(request.call_args.args[0], "/actions/post_tweet")
+        with patch("host.tools.browser.client.request", return_value=selected):
+            next_request = BUNDLED_TOOL.execute("x_post_tweet", payload, api)
+        self.assertIsInstance(next_request, ActionPendingApproval)
+        self.assertNotEqual(next_request.approval_id, pending.approval_id)
+
+    def test_approval_rechecks_account_and_permission(self):
+        api = FakeHostAPI()
+        selected = {"accounts": [{"account_id": "a" * 32, "provider": "x", "provider_identifier": "example", "state": "connected"}]}
+        with patch("host.tools.browser.client.request", return_value=selected):
+            pending = BUNDLED_TOOL.execute("x_post_tweet", {"account_id": "a" * 32, **{key: value for key, value in self.body.items() if key != "provider_identifier"}}, api)
+        approved = api.approvals.approve(pending.approval_id)
+        for changes in ({"provider_identifier": "other"}, {"provider": "linkedin"}, {"state": "needs_attention"}):
+            blocked = {"accounts": [{**selected["accounts"][0], **changes}]}
+            with patch("host.tools.browser.client.request", return_value=blocked) as request:
+                self.assertIsInstance(BUNDLED_TOOL.execute_approved(approved, api), ActionFailed)
+                request.assert_called_once_with("/actions/list")
+
+    def test_tool_returns_only_schema_metadata(self):
+        state = {"accounts": [{"account_id": "abc", **self.engine.status()}]}
+        with patch("host.tools.browser.client.request", return_value=state):
+            result = BUNDLED_TOOL.execute("x_connection_status", {}, FakeHostAPI())
+        self.assertIsInstance(result, ActionExecuted)
+        assert_matches_output_schema(self, MANIFEST, "x_connection_status", result)
+        self.assertNotIn("lease", json.dumps(result.result))
+
+
+if __name__ == "__main__":
+    unittest.main()

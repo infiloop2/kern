@@ -49,7 +49,8 @@ def approval_smoke(browser, url):
     def tool_request(route):
         parts = urlparse(route.request.url).path.split("/")
         if route.request.method == "GET":
-            route.fulfill(json={"approval": {"payload": {"to": "recipient@example.test", "body": "Exact reviewed message"}}})
+            row = next(row for row in rows if row["id"] == parts[-1])
+            route.fulfill(json={"approval": {**row, "payload": {"to": "recipient@example.test", "body": "Exact reviewed message"}}})
         else:
             held.append(route)
             submitted_keys.append(f"tool:{parts[-2]}")
@@ -172,5 +173,66 @@ def approval_smoke(browser, url):
         page.set_viewport_size({"width": width, "height": 900})
         page.wait_for_timeout(300)
         assert not page.evaluate("document.documentElement.scrollWidth > innerWidth"), width
+
+    # The write can finish while its response is lost. Reconcile from the
+    # stored approval without submitting the publishing action again.
+    page.locator('[data-action="approval-view"][data-view="pending"]').click()
+    for item_id, decision, recorded_status, expected in (
+        ("lost-executed", "approve", "executed", "1 approved"),
+        ("lost-failed", "approve", "failed", "0 approved, 1 failed"),
+        ("lost-pending", "approve", "pending", "0 approved, 1 unconfirmed"),
+        ("lost-denied", "approve", "denied", "0 approved, 1 resolved differently"),
+        ("lost-approved", "deny", "executed", "0 denied, 1 resolved differently"),
+    ):
+        row = {**next(row for row in rows if row["id"] == "2"),
+               "id": item_id, "status": "pending", "summary": item_id}
+        if recorded_status == "failed":
+            row["result"] = "Instagram declined request"
+        rows.insert(0, row)
+        page.locator('[data-action="approval-refresh"]').click()
+        before = len(held)
+        page.locator(f'[data-approval-key="tool:{item_id}"] [data-decision="{decision}"]').click()
+        deadline = time.monotonic() + 5
+        while len(held) == before and time.monotonic() < deadline:
+            page.wait_for_timeout(10)
+        assert len(held) == before + 1
+        row["status"] = recorded_status
+        held[-1].abort("failed")
+        expect(page.locator("#approval-feedback")).to_contain_text(expected)
+        if recorded_status == "failed":
+            expect(page.locator("#approval-feedback")).to_contain_text("Instagram declined request")
+        if recorded_status == "pending":
+            expect(page.locator("#approval-feedback")).to_contain_text("Check History before taking further action")
+        if item_id in {"lost-denied", "lost-approved"}:
+            expect(page.locator("#approval-feedback")).to_contain_text(
+                "Already denied in another session" if decision == "approve" else "Already approved in another session"
+            )
+        assert len(held) == before + 1, "decision must not be replayed"
+        if recorded_status == "pending":
+            rows.remove(row)
+            page.locator('[data-action="approval-refresh"]').click()
+    page.route("**/v1/network-tools/github-pending-pushes", lambda route: route.fulfill(
+        json={"pending_pushes": [row for row in rows if row["kind"] == "github_push"]}
+    ))
+    for item_id, recorded_status, expected in (
+        ("lost-github", "approved", "1 approved"),
+        ("lost-github-rejected", "rejected", "0 approved, 1 resolved differently"),
+    ):
+        github = {**next(row for row in rows if row["id"] == "0"),
+                  "id": item_id, "status": "pending", "summary": item_id}
+        rows.insert(0, github)
+        page.locator('[data-action="approval-refresh"]').click()
+        before = len(held)
+        page.locator(f'[data-approval-key="github_push:{item_id}"] [data-decision="approve"]').click()
+        deadline = time.monotonic() + 5
+        while len(held) == before and time.monotonic() < deadline:
+            page.wait_for_timeout(10)
+        assert len(held) == before + 1
+        github["status"] = recorded_status
+        held[-1].abort("failed")
+        expect(page.locator("#approval-feedback")).to_contain_text(expected)
+        if recorded_status == "rejected":
+            expect(page.locator("#approval-feedback")).to_contain_text("Already denied in another session")
+        assert len(held) == before + 1
     assert not errors, errors
     context.close()

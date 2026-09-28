@@ -20,11 +20,12 @@ from unittest.mock import MagicMock, patch
 
 import pg_harness
 
-from host.runtime.admin_api import service
+from host.runtime.admin_api import service, threads as admin_threads
 from host.runtime.agent_runtime import orchestrator, provider_account_trust
 from host.runtime.admin_api.errors import ApiError
 from host.runtime.core import db, state
 from host.runtime.workspace import schedules
+from host.runtime.workspace.chat import backend as chat
 from host.network_integrations.claude import guard as claude_guard
 from host.network_integrations.claude.manifest import ClaudeIntegration
 
@@ -69,6 +70,7 @@ class FakeServer:
         on_ready=None,
         on_session_id=None,
         web_search: bool = False,
+        runtime_type: str = "codex",
     ) -> None:
         self.started = 0
         self.closed = False
@@ -77,6 +79,7 @@ class FakeServer:
         self.on_ready = on_ready
         self.on_session_id = on_session_id
         self.web_search = web_search
+        self.runtime_type = runtime_type
         self.steered: list[str] = []
         self._delivered_steers = 0
         FakeServer.instances.append(self)
@@ -142,6 +145,72 @@ def save_attested_claude_account(account_id: str, **extra: object) -> None:
     )
 
 
+class CodexRotationTests(unittest.TestCase):
+    """Exercise cleanup failures without requiring the production database."""
+
+    def setUp(self) -> None:
+        self.size = self.enterContext(patch.object(
+            orchestrator.codex_app_server, "session_rollout_size",
+            return_value=orchestrator.codex_app_server.SESSION_ROLLOUT_MAX_BYTES,
+        ))
+        self.delete = self.enterContext(patch.object(orchestrator.codex_app_server, "delete_session"))
+        self.mutation = self.enterContext(patch.object(orchestrator.state, "mutation"))
+        self.clear = self.enterContext(patch.object(orchestrator.state, "clear_thread_provider_session"))
+        self.report = self.enterContext(patch.object(orchestrator.host_errors, "report_unexpected"))
+        self.server = MagicMock()
+        self.turn = orchestrator._Turn(
+            "codex", "schedule-1", "gpt-6-astra", "high", 4,
+            phase=orchestrator.ExecutionPhase.FINISHING,
+            provider_session_id="old-session",
+        )
+
+    def test_threshold_detaches_before_delete_for_each_codex_account(self) -> None:
+        for runtime in orchestrator.codex_app_server.CODEX_RUNTIME_TYPES:
+            with self.subTest(runtime=runtime):
+                self.turn.runtime_type = runtime
+                self.turn.provider_session_id = "old-session"
+
+                def delete(server, session_id):
+                    self.assertIsNone(self.turn.provider_session_id)
+                    self.assertEqual(self.turn.phase, orchestrator.ExecutionPhase.FINISHING)
+                    self.clear.assert_called_with(
+                        self.mutation.return_value.__enter__.return_value,
+                        "schedule-1", 4, "old-session",
+                    )
+
+                self.delete.side_effect = delete
+                orchestrator._rotate_large_codex_session(self.turn, self.server)
+                self.delete.assert_called_with(self.server, "old-session")
+        self.report.assert_not_called()
+
+    def test_small_and_non_codex_sessions_are_preserved(self) -> None:
+        self.size.return_value -= 1
+        orchestrator._rotate_large_codex_session(self.turn, self.server)
+        self.size.assert_called_once()
+        self.turn.runtime_type = "claude_code"
+        orchestrator._rotate_large_codex_session(self.turn, self.server)
+        self.size.assert_called_once()
+        self.mutation.assert_not_called()
+        self.delete.assert_not_called()
+        self.assertEqual(self.turn.provider_session_id, "old-session")
+
+    def test_measurement_or_detach_failure_never_deletes(self) -> None:
+        for stage in (self.size, self.clear, self.mutation.return_value.__exit__):
+            with self.subTest(stage=stage):
+                stage.side_effect = RuntimeError("failed")
+                orchestrator._rotate_large_codex_session(self.turn, self.server)
+                self.delete.assert_not_called()
+                self.assertEqual(self.turn.provider_session_id, "old-session")
+                stage.side_effect = None
+        self.assertEqual(self.report.call_count, 3)
+
+    def test_delete_failure_does_not_restore_the_retired_mapping(self) -> None:
+        self.delete.side_effect = RuntimeError("partial deletion")
+        orchestrator._rotate_large_codex_session(self.turn, self.server)
+        self.assertIsNone(self.turn.provider_session_id)
+        self.report.assert_called_once()
+
+
 class OrchestratorTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
@@ -171,6 +240,9 @@ class OrchestratorTests(unittest.TestCase):
         self.server_patch = patch.object(orchestrator.codex_app_server, "CodexAppServer", FakeServer)
         self.server_patch.start()
         self.addCleanup(self.server_patch.stop)
+        self.rollout_size = self.enterContext(patch.object(
+            orchestrator.codex_app_server, "session_rollout_size", return_value=0,
+        ))
         self.grok_server_patch = patch.object(orchestrator.grok_agent, "GrokAcpServer", FakeServer)
         self.grok_server_patch.start()
         self.addCleanup(self.grok_server_patch.stop)
@@ -267,7 +339,7 @@ class OrchestratorTests(unittest.TestCase):
                 cur, after_commit, thread_id, runtime, model, effort, message
             )
             assert turn is not None
-        orchestrator.launch_turn(turn, message, provider_session_id)
+        orchestrator.launch_turn(turn, message, provider_session_id, task_context=message)
         return turn
 
     def send_message(
@@ -347,23 +419,25 @@ class OrchestratorTests(unittest.TestCase):
         from host.runtime.workspace.agent_messages import MESSAGE_HEADER
         from host.runtime.admin_api import threads as thread_routes
         message = MESSAGE_HEADER.format(sender="thread-2") + "Review the release"
-        with (patch.object(orchestrator.swarm_annotations, "enqueue_task") as task,
-              patch.object(orchestrator.swarm_annotations, "enqueue_needs_human") as needs,
+        history = [{"event_type": "thread.message", "payload": {
+            "source": "user", "message": "Prepare the release checklist",
+        }}]
+        with (patch.object(thread_routes.state, "page_thread_events", return_value=history) as history_read,
+              patch.object(orchestrator.swarm_annotations, "enqueue_task") as task,
               patch.object(thread_routes, "_recalled_memory_pages", return_value=(
                   [{"page_id": "release-notes", "content": "Use the release checklist."}], "Recall complete.",
-              )),
+              )) as recall,
               patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub())):
             self.send_message("thread-1", message, peer_sender_thread_id="thread-2")
             self.wait_until_idle("thread-1")
         run = state.thread_session_config("thread-1")["run_number"]
         self.assertEqual(task.call_args.args[:2], ("thread-1", run))
-        self.assertIn("Kern host context", task.call_args.args[2])
-        self.assertIn("Use the release checklist.", task.call_args.args[2])
-        self.assertIn("Review the release", task.call_args.args[2])
-        needs.assert_called_once_with("thread-1", run)
+        self.assertEqual(task.call_args.args[2], "Review the release\n\nPrepare the release checklist")
+        history_read.assert_called_once()
+        self.assertEqual(task.call_args.args[2], recall.call_args.args[1])
         with db.transaction() as cur:
-            cur.execute("SELECT run_number, task, needs_human FROM swarm_agent_ai WHERE thread_id = 'thread-1'")
-            self.assertEqual(cur.fetchone(), (run, None, None))
+            cur.execute("SELECT run_number, task FROM swarm_agent_ai WHERE thread_id = 'thread-1'")
+            self.assertEqual(cur.fetchone(), (run, None))
         latest = state.swarm_peer_messages()["messages"][0]
         self.assertEqual((latest["sender_thread_id"], latest["target_thread_id"]), ("thread-2", "thread-1"))
 
@@ -1091,7 +1165,6 @@ class OrchestratorTests(unittest.TestCase):
         try:
             with (
                 patch.object(orchestrator, "_new_agent_server", return_value=server),
-                patch.object(orchestrator, "refresh_runtime_status", return_value="active"),
                 patch.object(orchestrator.claude_code, "run_turn", guarded_claude_run),
             ):
                 worker.start()
@@ -1272,6 +1345,125 @@ class OrchestratorTests(unittest.TestCase):
             state.thread_session_config("thread-stale-grok")["provider_session_id"],
             "replacement-session",
         )
+
+    def test_archived_chat_sweep_preserves_history_for_restore(self) -> None:
+        thread_id = "thread-71"
+        with state.mutation() as cur:
+            cur.execute("INSERT INTO chat_threads (thread_id, archived) VALUES (%s, TRUE)", (thread_id,))
+            state.save_thread_session(cur, "codex", thread_id, "retired-session", state.utc_now(), "gpt-6-astra", "high")
+            state.append_agent_event(cur, "thread.message", thread_id, {
+                "source": "user", "message": "Keep the deployment paused until Friday.",
+            })
+        before = thread_events(thread_id)
+        with patch.object(admin_threads.codex_app_server, "delete_session") as delete:
+            self.assertEqual(admin_threads.sweep_archived_codex_sessions(), 1)
+            self.assertEqual(admin_threads.sweep_archived_codex_sessions(), 0)
+        delete.assert_called_once()
+        self.assertEqual(delete.call_args.args[1], "retired-session")
+        self.assertIsNone(state.thread_session_config(thread_id)["provider_session_id"])
+        self.assertEqual(state.thread_session_config(thread_id)["context_cleared_seq"], 0)
+        self.assertEqual(thread_events(thread_id), before)
+        with db.transaction() as cur:
+            cur.execute("SELECT archived FROM chat_threads WHERE thread_id = %s", (thread_id,))
+            self.assertTrue(cur.fetchone()[0])
+        chat.unarchive_chat_thread(thread_id)
+        # Capture the real send/handoff arguments without a provider call.
+        captured = []
+        stub = self.run_turn_stub()
+        def capture(*args):
+            captured.append(args)
+            return stub(*args)
+        with patch.object(orchestrator.codex_app_server, "run_turn", capture):
+            self.send_message(thread_id, "continue")
+            self.wait_until_idle(thread_id)
+        self.assertIsNone(captured[0][2])
+        self.assertIn("Keep the deployment paused until Friday.", captured[0][1])
+        self.assertFalse(any(e["event_type"] == "thread.memory_cleared" for e in thread_events(thread_id)))
+
+    def test_archived_sweep_skips_restored_running_and_finishing_threads(self) -> None:
+        for n, runtime, archived in (
+            (71, "codex", True), (72, "codex-2", True), (73, "codex-3", True),
+            (74, "codex", False), (75, "claude_code", True),
+            (76, "codex", True), (77, "codex", True),
+        ):
+            model, effort = DEFAULT_SESSION.get(runtime, DEFAULT_SESSION["codex"])
+            with state.mutation() as cur:
+                cur.execute("INSERT INTO chat_threads (thread_id, archived) VALUES (%s, %s)", (f"thread-{n}", archived))
+                state.save_thread_session(cur, runtime, f"thread-{n}", f"session-{n}", state.utc_now(), model, effort)
+        finishing = self.register_live_turn("codex", "thread-76", finished=True)
+        with state.mutation() as cur:
+            state.finish_thread_run(cur, "thread-76", finishing.run_number)
+            state.start_thread_run(cur, "thread-77")
+        self.assertEqual(state.archived_thread_session_ids("codex"), ["thread-71", "thread-76"])
+        # Include a stale snapshot candidate that was unarchived before detach.
+        candidates = state.archived_thread_session_ids
+        def with_restored(runtime):
+            return candidates(runtime) + (["thread-74"] if runtime == "codex" else [])
+        with (
+            patch.object(state, "archived_thread_session_ids", side_effect=with_restored),
+            patch.object(admin_threads.codex_app_server, "delete_session") as delete,
+        ):
+            self.assertEqual(admin_threads.sweep_archived_codex_sessions(), 3)
+        self.assertEqual({(call.args[0].runtime_type, call.args[1]) for call in delete.call_args_list}, {
+            ("codex", "session-71"), ("codex-2", "session-72"), ("codex-3", "session-73"),
+        })
+        for n in (74, 75, 76, 77):
+            self.assertEqual(state.thread_session_config(f"thread-{n}")["provider_session_id"], f"session-{n}")
+
+    def test_large_codex_session_rotates_and_next_send_receives_history(self) -> None:
+        schedule = schedules.create_schedule({
+            "name": "Long-lived Codex", "message": "continue the work",
+            "agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high",
+            "cadence": "interval", "interval_minutes": 60,
+        }, actor="user")
+        for thread_id in ("thread-rotation", schedule["thread_id"]):
+            with self.subTest(thread_id=thread_id):
+                attempts = []
+
+                def run(server, message, session_id, model, effort, on_message):
+                    attempts.append((session_id, message))
+                    on_message("Keep the deployment paused until Friday.")
+                    return "old-session" if len(attempts) == 1 else "new-session", "done"
+
+                def delete(server, session_id):
+                    self.assertEqual(session_id, "old-session")
+                    self.assertIsNone(state.thread_session_config(thread_id)["provider_session_id"])
+                    self.assertFalse(server.closed)
+                    with self.assertRaises(ApiError) as conflict:
+                        service.send_thread_message(thread_id, {"message": "too soon"}, None)
+                    self.assertEqual(conflict.exception.status.value, 409)
+
+                self.rollout_size.side_effect = [
+                    orchestrator.codex_app_server.SESSION_ROLLOUT_MAX_BYTES, 1,
+                ]
+                with (
+                    patch.object(orchestrator.codex_app_server, "run_turn", run),
+                    patch.object(orchestrator.codex_app_server, "delete_session", side_effect=delete) as deletion,
+                ):
+                    self.send_message(thread_id, "remember the release plan")
+                    self.wait_until_idle(thread_id)
+                    deletion.assert_called_once()
+                    self.assertIsNone(state.thread_session_config(thread_id)["provider_session_id"])
+                    self.send_message(thread_id, "continue")
+                    self.wait_until_idle(thread_id)
+                self.assertEqual([sid for sid, _ in attempts], [None, None])
+                self.assertIn("remember the release plan", attempts[1][1])
+                self.assertIn("Keep the deployment paused until Friday.", attempts[1][1])
+                self.assertEqual(state.thread_session_config(thread_id)["provider_session_id"], "new-session")
+                self.assertFalse(any(event["event_type"] == "thread.error" for event in thread_events(thread_id)))
+
+    def test_rotation_delete_failure_keeps_history_handoff_available(self) -> None:
+        self.rollout_size.return_value = orchestrator.codex_app_server.SESSION_ROLLOUT_MAX_BYTES
+        with (
+            patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()),
+            patch.object(orchestrator.codex_app_server, "delete_session", side_effect=RuntimeError("delete timed out")),
+            patch.object(orchestrator.host_errors, "report_unexpected") as report,
+        ):
+            self.send_message("thread-cleanup-error", "a completed task")
+            self.wait_until_idle("thread-cleanup-error")
+        self.assertIsNone(state.thread_session_config("thread-cleanup-error")["provider_session_id"])
+        report.assert_called_once()
+        self.assertFalse(any(event["event_type"] == "thread.error" for event in thread_events("thread-cleanup-error")))
 
     def test_missing_codex_session_errors_then_hands_off_history_on_the_next_send(self) -> None:
         thread_id = "thread-stale-codex"
@@ -1477,59 +1669,43 @@ class OrchestratorTests(unittest.TestCase):
                 self.wait_until_idle("thread-chat")
             self.assertEqual(seen, ["claude-session-1"])
 
-    def test_claude_turn_updates_rotated_token_metadata_before_the_turn(self) -> None:
+    def test_claude_turn_starts_without_refreshing_a_rotated_token(self) -> None:
         # The Claude CLI refreshes its OAuth access token on its own schedule.
-        # Turn-start convergence updates the stored token metadata, while the
-        # proxy authorizes both hashes through the one account-UUID rule.
+        # A turn starts from the cached active status without a provider
+        # refresh: the proxy authorizes the rotated bearer by account UUID
+        # before the stored token metadata converges on the next recheck.
         old_token = "old-token"
         fresh_token = "fresh-token"
+        old_hash = hashlib.sha256(old_token.encode()).hexdigest()
         claude_guard.clear_token_attestation_cache()
         self.addCleanup(claude_guard.clear_token_attestation_cache)
         policy = ClaudeIntegration(enabled=True, web_search=False)
-        save_attested_claude_account("acct", access_token_sha256=hashlib.sha256(old_token.encode()).hexdigest())
+        save_attested_claude_account("acct", access_token_sha256=old_hash)
         save_proxy_claude_account_id("acct")
-        old_headers = [("Authorization", f"Bearer {old_token}")]
-        self.assertIsNone(
-            anthropic_request_denied(
-                policy, "POST", "api.anthropic.com", "/v1/messages", old_headers,
-                lambda _token: "acct",
-            )
-        )
 
         with (
             patch.object(orchestrator.claude_code, "ClaudeCodeSession", FakeServer),
             patch.object(orchestrator.claude_code, "run_turn", self.run_turn_stub()),
             patch.object(
-                orchestrator.claude_code,
-                "account_status",
-                return_value=(
-                    "active",
-                    None,
-                    {"account_id": "acct", "access_token_sha256": hashlib.sha256(fresh_token.encode()).hexdigest()},
-                ),
-            ),
-            patch.object(
-                orchestrator.claude_code,
-                "read_attested_identity",
-                return_value={
-                    "access_token_sha256": hashlib.sha256(fresh_token.encode()).hexdigest(),
-                    "account_uuid": "acct",
-                },
+                orchestrator,
+                "refresh_runtime_status",
+                side_effect=AssertionError("a Claude turn must not refresh before it starts"),
             ),
         ):
             self.send_message("thread-chat", "hi", runtime="claude_code")
             self.wait_until_idle("thread-chat")
 
         self.assertEqual(event_summary(thread_events("thread-chat"))[-1], ("thread.message", "hi"))
-        self.assertEqual(read_claude_account()["access_token_sha256"], hashlib.sha256(fresh_token.encode()).hexdigest())
+        self.assertEqual(read_claude_account()["access_token_sha256"], old_hash)
         self.assertEqual(read_proxy_claude_account_id(), "acct")
-        fresh_headers = [("Authorization", f"Bearer {fresh_token}")]
-        self.assertIsNone(
-            anthropic_request_denied(
-                policy, "POST", "api.anthropic.com", "/v1/messages", fresh_headers,
-                lambda _token: "acct",
+        for token in (old_token, fresh_token):
+            self.assertIsNone(
+                anthropic_request_denied(
+                    policy, "POST", "api.anthropic.com", "/v1/messages",
+                    [("Authorization", f"Bearer {token}")],
+                    lambda _token: "acct",
+                )
             )
-        )
 
     def test_app_turn_server_receives_its_direct_thread_id(self) -> None:
         with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
@@ -1571,6 +1747,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(events[-1]["payload"]["error_message"], "turn failed")
         self.assertNotIn("codex:thread-chat", orchestrator._LIVE)
         self.assertTrue(FakeServer.instances[0].closed)
+        self.rollout_size.assert_not_called()
 
     def test_server_acquire_failure_fails_the_turn_instead_of_orphaning_it(self) -> None:
         # The turn was admitted (its events recorded) before the server exists.
@@ -1713,7 +1890,6 @@ class OrchestratorTests(unittest.TestCase):
                 running = threading.Event()
                 release = threading.Event()
                 provider = MagicMock()
-                provider.refresh_before_turn = False
 
                 def blocking_run_turn(server, *_args):
                     server.on_session_id(session_id)
@@ -1726,7 +1902,6 @@ class OrchestratorTests(unittest.TestCase):
                 with (
                     patch.object(orchestrator, "runtime_network_enabled", return_value=True),
                     patch.object(orchestrator, "runtime_status", return_value="active"),
-                    patch.object(orchestrator, "refresh_runtime_status", return_value="active"),
                     patch.object(
                         orchestrator,
                         "_new_agent_server",

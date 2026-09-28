@@ -16,7 +16,7 @@ from host.runtime.core.unix_socket_service import (
     peer_uids,
 )
 from host.runtime.host_inference import providers
-from host.runtime.host_inference.typesafe import DEFAULT_TIMEOUT_SECONDS as JEV_MAX_TIMEOUT_SECONDS
+from host.runtime.host_inference.providers import OPENAI_MAX_TIMEOUT_SECONDS, JEV_MAX_TIMEOUT_SECONDS
 
 
 SOCKET_PATH = os.environ.get("KERN_HOST_INFERENCE_SOCKET", HOST_INFERENCE_SOCKET_PATH)
@@ -32,15 +32,26 @@ def caller_uids() -> frozenset[int]:
 
 def dispatch(path: str, body: dict[str, Any]) -> dict[str, Any]:
     if path == "/openai/text-completion":
-        if set(body) != {"prompt", "schema", "schema_name", "purpose"}:
+        if set(body) != {"prompt", "schema", "schema_name", "timeout_seconds", "model", "instructions", "reasoning_effort", "max_output_tokens"}:
             raise ValueError("invalid OpenAI text-completion request")
-        if not all(isinstance(body.get(key), str) for key in ("prompt", "schema_name", "purpose")):
+        if not all(isinstance(body.get(key), str) for key in ("prompt", "schema_name", "instructions", "reasoning_effort")):
             raise ValueError("invalid OpenAI text-completion request")
         if not isinstance(body.get("schema"), dict):
             raise ValueError("invalid OpenAI text-completion request")
+        if body["model"] not in ("gpt-6-luna", "gpt-6-sol"):
+            raise ValueError("unsupported OpenAI model")
+        if type(body["max_output_tokens"]) is not int or not 1 <= body["max_output_tokens"] <= 4096:
+            raise ValueError("invalid OpenAI output token limit")
+        timeout = body.get("timeout_seconds")
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                or not 0.1 <= timeout <= OPENAI_MAX_TIMEOUT_SECONDS):
+            raise ValueError("invalid OpenAI text-completion timeout")
         return {
             "result": providers.openai_text_completion(
-                body["prompt"], body["schema"], body["schema_name"], purpose=body["purpose"]
+                body["prompt"], body["schema"], body["schema_name"],
+                model=body["model"], instructions=body["instructions"],
+                reasoning_effort=body["reasoning_effort"], max_output_tokens=body["max_output_tokens"],
+                timeout_seconds=float(timeout),
             )
         }
     if path == "/typesafe/jev-judgment":
@@ -90,6 +101,10 @@ class HostInferenceHandler(UnixSocketRequestHandler):
                 return
             try:
                 result = dispatch(self.path, body)
+            except TimeoutError:
+                result = {"result": None, "error": "timeout"}
+            except providers.ProviderDisabledError:
+                result = {"result": None, "error": "provider_disabled"}
             except ValueError as exc:
                 self._send_json(HTTPStatus.BAD_REQUEST, {"error": str(exc)})
                 return

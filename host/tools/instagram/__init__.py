@@ -10,8 +10,9 @@ from collections.abc import Mapping
 from contextlib import ExitStack
 from typing import cast
 
+from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.json_types import JSONObject, JSONValue
-from host.tools.manifest import protect_inputs, validated_input, ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
+from host.tools.manifest import protect_inputs, guarded_input, validated_input, ActionSpec, ConfigRequirement, DataSummary, DataSummaryCard, DataSummaryLink, DataSummaryPoint, SetupStep, ToolManifest
 from host.tools.results import (
     ActionExecuted,
     ActionFailed,
@@ -54,8 +55,10 @@ IG_AUTHORIZE_URL = "https://www.instagram.com/oauth/authorize"
 IG_TOKEN_URL = "https://api.instagram.com/oauth/access_token"
 IG_GRAPH_BASE_URL = "https://graph.instagram.com"
 IG_GRAPH_VERSION = "v25.0"
-IG_OAUTH_SCOPES = ("instagram_business_basic", "instagram_business_content_publish")
-REQUIRED_IG_SCOPES = frozenset(IG_OAUTH_SCOPES)
+BASE_IG_SCOPES = ("instagram_business_basic", "instagram_business_content_publish")
+REQUIRED_IG_SCOPES = frozenset(BASE_IG_SCOPES)
+IG_INSIGHTS_SCOPE = "instagram_business_manage_insights"
+IG_OAUTH_SCOPES = (*BASE_IG_SCOPES, IG_INSIGHTS_SCOPE)
 IG_RECONNECT_MESSAGE = "Instagram is no longer connected. Please reconnect the tool."
 LONG_LIVED_TOKEN_LIFETIME_SECONDS = 60 * 24 * 3600
 # Long-lived tokens refresh in place while still valid; refresh opportunistically
@@ -67,6 +70,10 @@ MAX_CAROUSEL_IMAGES = 10
 MEDIA_ID_RE = re.compile(r"^[0-9]{1,30}$")
 PUBLISH_POLL_ATTEMPTS = 8
 PUBLISH_POLL_DELAY_SECONDS = 15
+REEL_INSIGHT_METRICS = (
+    "views", "reach", "likes", "comments", "saved", "shares", "total_interactions",
+    "ig_reels_avg_watch_time", "ig_reels_video_view_total_time",
+)
 IG_READ_POLICY = (
     "Read-only. Fetches the connected professional account's own profile or "
     "media data from Instagram and returns it to the host and active model context. "
@@ -106,8 +113,21 @@ GET_RECENT_MEDIA_OUTPUT_SCHEMA: JSONObject = outputs.obj(
             ),
             "Up to the requested limit of recent posts, newest first.",
         ),
+        "next_cursor": outputs.nullable(outputs.text("Cursor for the next page of older posts."), "Null when Instagram returned no next page."),
     },
-    ["message", "media"],
+    ["message", "media", "next_cursor"],
+)
+GET_REEL_INSIGHTS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Confirmation that Reel insights were loaded."),
+        "media_id": outputs.text("Instagram media id of the Reel."),
+        "metrics": outputs.obj(
+            {name: outputs.nullable({"type": "integer"}, f"Lifetime {name}; null when Instagram omits it.")
+             for name in REEL_INSIGHT_METRICS},
+            list(REEL_INSIGHT_METRICS),
+        ),
+    },
+    ["message", "media_id", "metrics"],
 )
 GET_PUBLISHING_LIMIT_OUTPUT_SCHEMA: JSONObject = outputs.obj(
     {
@@ -132,14 +152,23 @@ MANIFEST = ToolManifest(
             output_schema=GET_PROFILE_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="get_recent_media",
-            description="Read up to 25 recent posts from the connected account with captions, permalinks, timestamps, and like/comment counts. This measures that account's own performance; it is not public-post, hashtag, audio, or global trend discovery.",
+            description="Read one page of up to 25 posts from the connected account with captions, permalinks, timestamps, and like/comment counts. Pass next_cursor as after to inspect older posts. This is not public-post, hashtag, audio, or global trend discovery.",
             data_policy=IG_READ_POLICY,
             input_schema={
                 "type": "object",
-                "properties": {"limit": {"type": "string", "description": "1-25 (default 10)."}},
+                "properties": {"limit": {"type": "string", "description": "1-25 (default 10)."},
+                               "after": {"type": "string", "description": "Opaque next_cursor returned by an earlier page."}},
                 "additionalProperties": False,
             },
             output_schema=GET_RECENT_MEDIA_OUTPUT_SCHEMA,
+        ),
+        ActionSpec(id="get_reel_insights",
+            description="Read lifetime insights for one Reel owned by the connected professional Instagram account. Use a Reel id from get_recent_media or a successful post_reel result. Requires reconnecting if the existing connection lacks insights permission.",
+            data_policy=IG_READ_POLICY,
+            input_schema={"type": "object", "required": ["media_id"],
+                          "properties": {"media_id": {"type": "string", "description": "Numeric Instagram Reel media id (validated by Kern)."}},
+                          "additionalProperties": False},
+            output_schema=GET_REEL_INSIGHTS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="get_publishing_limit",
             description="Read how many API-published posts the connected account has used from Instagram's 100-post rolling 24-hour publishing quota. This is quota status, not media analytics.",
@@ -210,6 +239,10 @@ MANIFEST = ToolManifest(
     ), {
         "get_recent_media": {
             "limit": validated_input("Integer from 1 to 25."),
+            "after": guarded_input(allow_machine_tokens=True),
+        },
+        "get_reel_insights": {
+            "media_id": validated_input("Numeric media id, verified as a Reel before requesting insights."),
         },
     }),
     config=(
@@ -218,9 +251,11 @@ MANIFEST = ToolManifest(
     ),
     protections=(
         "Your Instagram app credentials and connected-account OAuth tokens stay in the host credential store and are never returned to or read by the agent.",
-        "OAuth connects one professional Instagram account and requests only profile, media, and publishing permissions. Reads are limited to that connected account; public discovery is a separate tool.",
+        "OAuth connects one professional Instagram account and requests profile, media, publishing, and insights permissions. Reads are limited to that connected account; public discovery is a separate tool.",
         "Publishing happens only after your approval.",
+        PARAM_GUARD_PROTECTION,
     ),
+    technical_details=(PARAM_GUARD_TECHNICAL_DETAIL,),
     setup_steps=(
         SetupStep(
             title="Prepare a professional Instagram account",
@@ -249,12 +284,12 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Copy the Instagram credentials and register the callback",
             show_callback=True,
-            description="Stay inside the same Meta app and open Instagram > API setup with Instagram login in the left sidebar. Copy the Instagram App ID and Instagram App Secret shown on that page; these are the values Kern uses. On the same page, find Set up Instagram business login and open Business login settings. Paste the exact callback URI displayed in this guide into Valid OAuth Redirect URIs, then save changes. If Client OAuth Login and Web OAuth Login switches are shown, leave both enabled. A different scheme, host, port, path, or trailing slash causes Meta to reject Connect. Kern requests only instagram_business_basic and instagram_business_content_publish.",
+            description="Stay inside the same Meta app and open Instagram > API setup with Instagram login in the left sidebar. Copy the Instagram App ID and Instagram App Secret shown on that page; these are the values Kern uses. On the same page, find Set up Instagram business login and open Business login settings. Paste the exact callback URI displayed in this guide into Valid OAuth Redirect URIs, then save changes. If Client OAuth Login and Web OAuth Login switches are shown, leave both enabled. A different scheme, host, port, path, or trailing slash causes Meta to reject Connect. Kern requests instagram_business_basic, instagram_business_content_publish, and instagram_business_manage_insights. Existing connections must reconnect to grant insights; their existing publishing access continues until then. Meta App Review may be needed to connect accounts outside app roles.",
         ),
         SetupStep(
             title="Configure and connect Kern",
             show_config=True,
-            description="Open Instagram under Home > Integrations. Save the Instagram App ID as INSTAGRAM_APP_ID and Instagram App Secret as INSTAGRAM_APP_SECRET, enable the tool, choose Connect, sign in to the intended professional account, and approve the displayed scopes. The page shows the connected username automatically; confirm it matches the username recorded above.",
+            description="Open Instagram under Home > Integrations. Save the Instagram App ID as INSTAGRAM_APP_ID and Instagram App Secret as INSTAGRAM_APP_SECRET, enable the tool, choose Connect, sign in to the intended professional account, and approve the displayed scopes including insights. If Instagram was already connected, choose Connect again to grant insights. The page shows the connected username automatically; confirm it matches the username recorded above.",
         ),
     ),
     data_summary=DataSummary(
@@ -302,7 +337,8 @@ MANIFEST = ToolManifest(
         "Kern accepts up to 10 images of at most 8 MB each. Prepare compatible dimensions "
         "and matching aspect ratios: Meta may crop carousel images to the first slide. "
         "Kern does not crop or transcode. Approval covers the whole post, not individual slides. "
-        "If publication is unconfirmed, inspect get_recent_media before requesting a retry."
+        "If publication is unconfirmed, inspect get_recent_media before requesting a retry. "
+        "Use get_reel_insights with a Reel id to read its lifetime metrics; values can lag publication."
     ),
 )
 
@@ -435,7 +471,7 @@ class InstagramCredentialStore(OAuth2CredentialStore):
             raise _connect_web_error(exc, "OAuth token exchange") from exc
         short_lived = _short_lived_token(token_response)
         granted_scopes = _granted_permissions(token_response)
-        missing = REQUIRED_IG_SCOPES - set(granted_scopes)
+        missing = set(IG_OAUTH_SCOPES) - set(granted_scopes)
         if missing:
             # Nothing was saved yet, so an already-connected account survives a
             # reconnect the user under-approved.
@@ -592,18 +628,25 @@ def _profile_result(me: JSONObject) -> JSONObject:
     }
 
 
-def _recent_media(access_token: str, tool_input: JSONObject) -> JSONObject:
-    extra = set(tool_input) - {"limit"}
+def _recent_media(access_token: str, tool_input: JSONObject, api: HostAPI) -> JSONObject:
+    extra = set(tool_input) - {"limit", "after"}
     if extra:
-        raise ToolInputValidationError("Instagram recent media tool input only supports limit.")
+        raise ToolInputValidationError("Instagram recent media tool input only supports limit and after.")
     limit = int_field(tool_input, "limit", provider="Instagram", default=10, low=1, high=25)
+    after = tool_input.get("after")
+    if after is not None and (not isinstance(after, str) or not 0 < len(after) <= 1024
+                              or any(ord(char) < 33 or ord(char) > 126 for char in after)):
+        raise ToolInputValidationError("Instagram after must be a nonempty paging cursor of at most 1024 characters.")
+    params = {
+        "fields": "id,media_type,media_product_type,caption,permalink,timestamp,like_count,comments_count",
+        "limit": str(limit),
+    }
+    if isinstance(after, str):
+        params["after"] = api.outbound.guard_request_parameter_string(after, allow_machine_tokens=True)
     response = _graph_get(
         access_token,
         "/me/media",
-        {
-            "fields": "id,media_type,media_product_type,caption,permalink,timestamp,like_count,comments_count",
-            "limit": str(limit),
-        },
+        params,
         what="media listing",
     )
     data = response.get("data")
@@ -624,10 +667,43 @@ def _recent_media(access_token: str, tool_input: JSONObject) -> JSONObject:
                 "comments_count": record.get("comments_count") if isinstance(record.get("comments_count"), int) else None,
             }
         )
+    paging = response.get("paging")
+    cursors = paging.get("cursors") if isinstance(paging, dict) else None
+    next_cursor = cursors.get("after") if isinstance(paging, dict) and isinstance(cursors, dict) and paging.get("next") else None
     return {
-                "message": f"Instagram returned {len(media)} recent post(s).",
+        "message": f"Instagram returned {len(media)} post(s).",
         "media": media,
+        "next_cursor": next_cursor if isinstance(next_cursor, str) and 0 < len(next_cursor) <= 1024 else None,
     }
+
+
+def _reel_insights(access_token: str, tool_input: JSONObject) -> JSONObject:
+    media_id = tool_input.get("media_id")
+    if set(tool_input) != {"media_id"} or not isinstance(media_id, str) or not MEDIA_ID_RE.fullmatch(media_id):
+        raise ToolInputValidationError("Instagram get_reel_insights requires one numeric Reel media_id.")
+    media = _graph_get(access_token, f"/{media_id}", {"fields": "id,media_product_type"}, what="Reel lookup")
+    if media.get("id") != media_id or media.get("media_product_type") != "REELS":
+        raise ToolInputValidationError("Instagram media_id is not a Reel accessible to the connected account.")
+    response = _graph_get(
+        access_token,
+        f"/{media_id}/insights",
+        {"metric": ",".join(REEL_INSIGHT_METRICS)},
+        what="Reel insights",
+    )
+    metrics: JSONObject = {name: None for name in REEL_INSIGHT_METRICS}
+    data = response.get("data")
+    for item in data if isinstance(data, list) else []:
+        if not isinstance(item, dict) or item.get("name") not in metrics:
+            continue
+        total_value = item.get("total_value")
+        if isinstance(total_value, dict):
+            value = total_value.get("value")
+        else:
+            values = item.get("values")
+            value = values[0].get("value") if isinstance(values, list) and values and isinstance(values[0], dict) else None
+        if isinstance(value, int) and not isinstance(value, bool):
+            metrics[str(item["name"])] = value
+    return {"message": "Instagram Reel insights loaded.", "media_id": media_id, "metrics": metrics}
 
 
 def _publishing_limit(access_token: str, user_id: str) -> JSONObject:
@@ -920,7 +996,13 @@ class InstagramTool:
                     raise ToolInputValidationError("Instagram get_profile takes no input.")
                 return ActionExecuted(_profile_result(_fetch_me(IG_CREDENTIALS.access_token(api))))
             if action == "get_recent_media":
-                return ActionExecuted(_recent_media(IG_CREDENTIALS.access_token(api), tool_input))
+                return ActionExecuted(_recent_media(IG_CREDENTIALS.access_token(api), tool_input, api))
+            if action == "get_reel_insights":
+                access_token = IG_CREDENTIALS.access_token(api)
+                connected = api.credentials.load()
+                if connected is None or IG_INSIGHTS_SCOPE not in connected["account"]["scopes"]:
+                    return ActionFailed("Instagram insights permission is missing. Reconnect Instagram and approve insights access.")
+                return ActionExecuted(_reel_insights(access_token, tool_input))
             if action == "get_publishing_limit":
                 if tool_input:
                     raise ToolInputValidationError("Instagram get_publishing_limit takes no input.")

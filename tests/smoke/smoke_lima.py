@@ -739,7 +739,7 @@ class LimaSmoke(AwsSmoke):
         self._open_tunnel()
 
     def _ssh_code(self, remote_command: str) -> str:
-        return self._ssh(remote_command)
+        return self._ssh(remote_command).strip()
 
     def _api(
         self,

@@ -53,8 +53,10 @@ STATUS_TIMEOUT_SECONDS = 45
 USAGE_TIMEOUT_SECONDS = 30
 LOGIN_START_TIMEOUT_SECONDS = 30
 PROCESS_EXIT_TIMEOUT_SECONDS = 3
-INTERRUPT_RESPONSE_MESSAGE_TYPE = "_kern_interrupt_response"
-INTERRUPT_REQUEST_ID_PREFIX = "kern-interrupt-"
+# Claude Code reports each stream-json user message's progress as
+# command_lifecycle frames keyed by the uuid Kern stamped on it. The reader
+# forwards each non-queued state as this in-order start marker.
+COMMAND_STARTED_MESSAGE_TYPE = "_kern_command_started"
 LOGIN_URL_RE = re.compile(r"If the browser didn't open, visit: (https://\S+)")
 # Usage lines are parsed one window per line: a window header, a percent, and
 # an optional reset time. Each piece is matched independently so one odd line
@@ -132,19 +134,16 @@ class ClaudeCodeSession:
         self._messages: queue.Queue[dict[str, Any]] = queue.Queue()
         self._stderr_tail: deque[str] = deque(maxlen=20)
         self._stdin_lock = threading.Lock()
-        # Keep each interrupt-then-message pair adjacent on Claude's input
-        # stream, including when operators steer rapidly from multiple calls.
-        self._steer_lock = threading.Lock()
-        self._next_control_request_id = 1
         # close() may win before run() reaches the CLI spawn. Keep that
         # terminal decision under the same lock as Popen/_proc publication so
         # a stopped turn can never create a process afterward.
         self._closed = False
-        # Count only successfully flushed direct steers. The turn driver uses
-        # the count at the atomic completion boundary; message content never
-        # sits in a host mailbox.
-        self._delivered_steers = 0
-        self._latest_delivered_interrupt_id = 0
+        # Record only successfully flushed direct steers, by message uuid.
+        # take_delivered_steers() claims them for the turn driver, including
+        # at the atomic completion boundary; message content never sits in a
+        # host mailbox.
+        self._unclaimed_steer_ids: list[str] = []
+        self._claimed_steer_ids: list[str] = []
         self._accepting_steers = False
         # Mirrors run()'s local result_session_id, but as an attribute so a
         # kill (which surfaces as an exception out of run(), discarding its
@@ -290,8 +289,8 @@ class ClaudeCodeSession:
                 text=True,
             )
             self._proc = proc
-            self._delivered_steers = 0
-            self._latest_delivered_interrupt_id = 0
+            self._unclaimed_steer_ids = []
+            self._claimed_steer_ids = []
             self._accepting_steers = False
         assert proc.stdout is not None and proc.stderr is not None
         threading.Thread(target=self._read_stdout, args=(proc.stdout,), daemon=True).start()
@@ -306,18 +305,23 @@ class ClaudeCodeSession:
         result_session_id = session_id
         self._last_session_id = session_id
         final: str | None = None
-        latest_delivered_interrupt_id = 0
-        latest_responded_interrupt_id = 0
+        # Steers Claude has not yet started. Claude queues stream-json input
+        # that arrives mid-turn and starts it at its next safe point: after
+        # the in-flight tool calls return, or as a follow-up query once the
+        # current one has produced its result.
+        steers_awaiting_start: set[str] = set()
+        started_command_ids: set[str] = set()
 
         def observe_delivered_steers(count: int | None = None) -> int:
-            nonlocal latest_delivered_interrupt_id
             delivered = self.take_delivered_steers() if count is None else count
-            if delivered:
-                with self._stdin_lock:
-                    latest_delivered_interrupt_id = max(
-                        latest_delivered_interrupt_id,
-                        self._latest_delivered_interrupt_id,
-                    )
+            with self._stdin_lock:
+                claimed = self._claimed_steer_ids
+                self._claimed_steer_ids = []
+            steers_awaiting_start.update(
+                message_id
+                for message_id in claimed
+                if message_id not in started_command_ids
+            )
             return delivered
 
         def finish_or_observe_late_steers() -> bool:
@@ -347,18 +351,15 @@ class ClaudeCodeSession:
             except queue.Empty:
                 self._require_proc()
                 continue
-            # steer() publishes delivery under _stdin_lock after both frames
-            # flush. Synchronize again after dequeue so an immediate abort
-            # cannot overtake its replacement message's accounting.
+            # steer() publishes delivery under _stdin_lock after the message
+            # flushes. Synchronize again after dequeue so an immediate start
+            # marker cannot overtake its message's accounting.
             observe_delivered_steers()
             message_type = message.get("type")
-            if message_type == INTERRUPT_RESPONSE_MESSAGE_TYPE:
-                interrupt_id = message.get("interrupt_id")
-                if isinstance(interrupt_id, int):
-                    latest_responded_interrupt_id = max(
-                        latest_responded_interrupt_id,
-                        interrupt_id,
-                    )
+            if message_type == COMMAND_STARTED_MESSAGE_TYPE:
+                command_id = message["command_id"]
+                started_command_ids.add(command_id)
+                steers_awaiting_start.discard(command_id)
                 continue
             reported_session_id = message.get("session_id")
             if isinstance(reported_session_id, str):
@@ -390,15 +391,6 @@ class ClaudeCodeSession:
             elif message.get("type") != "result":
                 _emit_claude_stream_status(message, on_message)
             if message.get("type") == "result":
-                if (
-                    latest_delivered_interrupt_id
-                    and message.get("terminal_reason")
-                    in ("aborted_streaming", "aborted_tools")
-                ):
-                    # Interrupt boundaries are expected after steering. Claude
-                    # owns cancellation and will run the newest flushed prompt;
-                    # its later success result is the host turn's completion.
-                    continue
                 if message.get("subtype") != "success" or message.get("is_error"):
                     # Headless failures (including --resume of a deleted
                     # session) can have only an errors array, with no result.
@@ -420,17 +412,17 @@ class ClaudeCodeSession:
                 final = agent_activity.clean_text(
                     message.get("result") or last_message or "Task completed."
                 )
-                # A result emitted before the newest interrupt response belongs
-                # to older work. stdout ordering guarantees that the newest
-                # replacement's result follows its control response.
-                if latest_responded_interrupt_id < latest_delivered_interrupt_id:
+                # A steer still queued at this result has not been answered.
+                # Claude starts it next, and stdout ordering puts its start
+                # marker ahead of the result that answers it.
+                if steers_awaiting_start:
                     continue
                 if not finish_or_observe_late_steers():
                     continue
                 assert result_session_id is not None
                 return result_session_id, final
 
-    def _send_user_message_locked(self, text: str) -> None:
+    def _send_user_message_locked(self, text: str) -> str:
         proc = self._require_proc()
         assert proc.stdin is not None
         message_id = str(uuid4())
@@ -441,45 +433,39 @@ class ClaudeCodeSession:
             "uuid": message_id,
         }) + "\n")
         proc.stdin.flush()
+        return message_id
 
     def steer(self, text: str) -> None:
-        """Interrupt the active query, then flush a replacement user message.
+        """Flush one more user message to the active query without waiting.
 
-        The delivery contract remains the same as before: once both frames
-        flush to Claude's stdin, the caller records the user message. The
-        interrupt merely asks Claude to stop current work before reading it.
+        Claude Code queues the message and injects it at its next safe point:
+        after the in-flight tool calls return, or as a follow-up query once
+        the current one finishes. Steering deliberately sends no control
+        interrupt. Claude aborts in-flight tools on an interrupt and reports
+        each one to the model as a user rejection telling it to stop, so a
+        mere message delivery would read as an operator stop. Stopping a turn
+        is the separate interrupt()/close() path.
+
+        Once the message flushes to Claude's stdin, the caller records it.
         """
-        with self._steer_lock:
-            with self._stdin_lock:
-                if not self._accepting_steers:
-                    raise ClaudeCodeError("Claude Code turn is not ready for steering")
-                proc = self._require_proc()
-                assert proc.stdin is not None
-                interrupt_id = self._next_control_request_id
-                request_id = f"{INTERRUPT_REQUEST_ID_PREFIX}{interrupt_id}"
-                self._next_control_request_id += 1
-                try:
-                    proc.stdin.write(json.dumps({
-                        "type": "control_request",
-                        "request_id": request_id,
-                        "request": {
-                            "subtype": "interrupt",
-                            "cancel_queued": True,
-                        },
-                    }) + "\n")
-                    self._send_user_message_locked(text)
-                except OSError as exc:
-                    raise ClaudeCodeError(
-                        f"Claude Code rejected the message: {exc}"
-                    ) from exc
-                self._latest_delivered_interrupt_id = interrupt_id
-                self._delivered_steers += 1
+        with self._stdin_lock:
+            if not self._accepting_steers:
+                raise ClaudeCodeError("Claude Code turn is not ready for steering")
+            try:
+                message_id = self._send_user_message_locked(text)
+            except OSError as exc:
+                raise ClaudeCodeError(
+                    f"Claude Code rejected the message: {exc}"
+                ) from exc
+            self._unclaimed_steer_ids.append(message_id)
 
     def take_delivered_steers(self) -> int:
+        """Claim flushed steers for the turn driver and return their count."""
         with self._stdin_lock:
-            delivered = self._delivered_steers
-            self._delivered_steers = 0
-            return delivered
+            delivered = self._unclaimed_steer_ids
+            self._unclaimed_steer_ids = []
+            self._claimed_steer_ids.extend(delivered)
+            return len(delivered)
 
     def _read_stdout(self, stream: IO[str]) -> None:
         # The reader owns its pipe: close() must not close it from another
@@ -493,24 +479,23 @@ class ClaudeCodeSession:
                     continue
                 if not isinstance(message, dict):
                     continue
-                if message.get("type") == "control_response":
-                    response = message.get("response")
-                    request_id = (
-                        response.get("request_id")
-                        if isinstance(response, dict)
-                        else None
-                    )
-                    if isinstance(request_id, str) and request_id.startswith(
-                        INTERRUPT_REQUEST_ID_PREFIX
+                if message.get("type") == "command_lifecycle":
+                    command_id = message.get("command_uuid")
+                    if (
+                        isinstance(command_id, str)
+                        and len(command_id) <= 64
+                        and message.get("state") != "queued"
                     ):
-                        suffix = request_id[len(INTERRUPT_REQUEST_ID_PREFIX):]
-                        if suffix.isascii() and suffix.isdigit() and len(suffix) <= 20:
-                            # The marker shares stdout ordering with result
-                            # frames; no synchronous response waiter exists.
-                            self._messages.put({
-                                "type": INTERRUPT_RESPONSE_MESSAGE_TYPE,
-                                "interrupt_id": int(suffix),
-                            })
+                        # The marker shares stdout ordering with result
+                        # frames, which is what places a start before or
+                        # after a given result.
+                        self._messages.put({
+                            "type": COMMAND_STARTED_MESSAGE_TYPE,
+                            "command_id": command_id,
+                        })
+                    continue
+                if message.get("type") == "control_response":
+                    # Kern sends no control requests during a turn.
                     continue
                 self._messages.put(message)
 

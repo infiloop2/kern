@@ -19,6 +19,7 @@ from typing import cast
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.host_api import ApprovalRecord, HostAPI
+from host.tools.fal_ai import media as fal_media
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
     protect_inputs,
@@ -43,8 +44,6 @@ from host.tools.results import (
 from host.tools.shared import outputs
 from host.tools.shared.inputs import (
     ToolInputValidationError,
-    guard_url_parameter_string,
-    provider_fetched_https_url,
 )
 from host.tools.shared.media import open_downloaded_video
 from host.tools.shared.web import (
@@ -101,7 +100,7 @@ OBJECT_LIFECYCLE_HEADER = json.dumps(
 QUEUE_STATUSES = frozenset({"IN_QUEUE", "IN_PROGRESS", "COMPLETED"})
 
 GENERATE_POLICY = (
-    "Sends the prompt, generation settings, and any public reference-media URLs to fal to "
+    "Sends the prompt, generation settings, and selected staged reference-media bytes to fal to "
     "generate a native-audio H3 Max video, billed to the deployment's fal account. This "
     "runs directly with no approval and publishes nothing. fal's optional safety checker is disabled; "
     "request-history storage is disabled, and the generated public CDN object expires after 24 hours."
@@ -155,7 +154,7 @@ GET_TASK_OUTPUT_SCHEMA: JSONObject = outputs.obj(
 )
 
 
-def _url_array_schema(description: str) -> JSONObject:
+def _asset_array_schema(description: str) -> JSONObject:
     return {
         "type": "array",
         "items": {"type": "string"},
@@ -166,8 +165,8 @@ def _url_array_schema(description: str) -> JSONObject:
 
 MANIFEST = ToolManifest(
     reports_cost=True,
-    tool_id="h3max",
-    display_name="H3 Max Video Generation",
+    tool_id="fal_ai",
+    display_name="falAI",
     description=(
         "Connect fal and let your agent generate fal's H3 Max native-audio video from text, "
         "first/last frames, or multimodal references."
@@ -177,9 +176,9 @@ MANIFEST = ToolManifest(
         ActionSpec(
             id="generate_video", cost_description='Reports the published per-second charge for text and keyframe generation when fal accepts the task. Multimodal reference charges depend on unknown input sizes and are not reported.',
             description=(
-                "Start an async H3 Max generation. With no media it uses text-to-video; image_url "
-                "selects image-to-video and optional end_image_url adds a last keyframe; any "
-                "reference_*_urls list selects reference-to-video. Returns a task_id to poll. "
+                "Start an async H3 Max generation. With no media it uses text-to-video; image_asset_id "
+                "selects image-to-video and optional end_image_asset_id adds a last keyframe; any "
+                "reference_*_asset_ids list selects reference-to-video. Returns a task_id to poll. "
                 "Clips include synchronized audio, run 5-15 seconds, and are billed per second "
                 "of output. Reference inputs can add charges above fal's allowance."
             ),
@@ -195,22 +194,22 @@ MANIFEST = ToolManifest(
                             "For reference mode, name files as Image 1, Video 1, Audio 1, and so on."
                         ),
                     },
-                    "image_url": {
+                    "image_asset_id": {
                         "type": "string",
-                        "description": "Optional public HTTPS opening-frame image; selects image-to-video.",
+                        "description": "Optional staged opening-frame image; selects image-to-video.",
                     },
-                    "end_image_url": {
+                    "end_image_asset_id": {
                         "type": "string",
-                        "description": "Optional public HTTPS final-frame image; requires image_url.",
+                        "description": "Optional staged final-frame image; requires image_asset_id.",
                     },
-                    "reference_image_urls": _url_array_schema(
-                        "Public HTTPS subject/style image URLs for reference mode, ordered as Image 1, Image 2, and so on."
+                    "reference_image_asset_ids": _asset_array_schema(
+                        "Staged subject/style image ids for reference mode, ordered as Image 1, Image 2, and so on."
                     ),
-                    "reference_video_urls": _url_array_schema(
-                        "Public HTTPS motion-reference video URLs for reference mode, ordered as Video 1, Video 2, and so on. Each must be 2-15 seconds; combined video length at most 15 seconds."
+                    "reference_video_asset_ids": _asset_array_schema(
+                        "Staged motion-reference video ids for reference mode, ordered as Video 1, Video 2, and so on. Each must be 2-15 seconds; combined video length at most 15 seconds."
                     ),
-                    "reference_audio_urls": _url_array_schema(
-                        "Public HTTPS audio-reference URLs for reference mode, ordered as Audio 1, Audio 2, and so on. Each must be 2-15 seconds; combined audio length at most 15 seconds and audio cannot be the only reference type."
+                    "reference_audio_asset_ids": _asset_array_schema(
+                        "Staged audio-reference ids for reference mode, ordered as Audio 1, Audio 2, and so on. Each must be 2-15 seconds; combined audio length at most 15 seconds and audio cannot be the only reference type."
                     ),
                     "resolution": {
                         "type": "string",
@@ -222,7 +221,7 @@ MANIFEST = ToolManifest(
                         "enum": list(REFERENCE_RATIOS),
                         "description": (
                             "Text/reference output ratio. Text defaults 16:9; reference defaults adaptive. "
-                            "Image-to-video always follows image_url and rejects this field."
+                            "Image-to-video always follows image_asset_id and rejects this field."
                         ),
                     },
                     "duration_seconds": {
@@ -286,11 +285,11 @@ MANIFEST = ToolManifest(
     ), {
         "generate_video": {
             "prompt": guarded_input(),
-            "image_url": guarded_input(),
-            "end_image_url": guarded_input(),
-            "reference_image_urls": guarded_input(),
-            "reference_video_urls": guarded_input(),
-            "reference_audio_urls": guarded_input(),
+            "image_asset_id": validated_input("Tool-scoped staged media id(s); type, size, ownership and expiry checked before upload."),
+            "end_image_asset_id": validated_input("Tool-scoped staged media id(s); type, size, ownership and expiry checked before upload."),
+            "reference_image_asset_ids": validated_input("Tool-scoped staged media id(s); type, size, ownership and expiry checked before upload."),
+            "reference_video_asset_ids": validated_input("Tool-scoped staged media id(s); type, size, ownership and expiry checked before upload."),
+            "reference_audio_asset_ids": validated_input("Tool-scoped staged media id(s); type, size, ownership and expiry checked before upload."),
             "resolution": validated_input("One of the listed choices."),
             "aspect_ratio": validated_input("One of the listed choices."),
             "duration_seconds": validated_input("Integer from 5 to 15."),
@@ -306,7 +305,7 @@ MANIFEST = ToolManifest(
     }),
     config=(
         ConfigRequirement(
-            key="H3MAX_FAL_KEY",
+            key="FAL_API_KEY",
             description="API-scoped key from the fal dashboard (fal.ai/dashboard/keys).",
         ),
     ),
@@ -316,7 +315,7 @@ MANIFEST = ToolManifest(
         "fal's optional content safety checker is disabled for this integration. The operator and agent "
         "remain responsible for prompts, reference media, generated content, and compliance with fal's terms.",
         "fal normally stores request JSON for 30 days. Kern sends X-Fal-Store-IO: 0 on generation "
-        "and polling so prompts and reference URLs do not appear in fal request history, and caps the "
+        "and polling so prompts and reference media do not appear in fal request history, and caps the "
         "public generated-media URL at 24 hours.",
         "Generation is billed to your fal account and never publishes the result. Saving is a separate "
         "read-only handoff into the private agent workspace; any later social publish remains separately approval-gated.",
@@ -352,8 +351,8 @@ MANIFEST = ToolManifest(
             title="Configure and enable H3 Max",
             show_config=True,
             description=(
-                "Open H3 Max Video Generation under Home > Integrations, save the key as H3MAX_FAL_KEY, "
-                "then enable the tool. Never put the key in a prompt or reference URL."
+                "Open falAI under Home > Integrations, save the key as FAL_API_KEY, "
+                "then enable the tool. Never put the key in a prompt or reference media."
             ),
         ),
     ),
@@ -366,17 +365,17 @@ MANIFEST = ToolManifest(
                         label="Generation request",
                         text=(
                             "fal receives the prompt; duration, resolution, ratio, expansion mode, and optional "
-                            "seed; plus every public first/last-frame or multimodal reference URL. The prompt and "
-                            "each complete URL first pass Kern's parameter guard, which denies secret-, credential-, "
-                            "and high-risk-identifier-shaped values before transmission."
+                            "seed; plus selected staged first/last-frame or multimodal reference bytes. The prompt "
+                            "passes Kern's parameter guard before transmission. Media IDs are checked for tool "
+                            "ownership, expiry, type and size before uploading."
                         ),
                     ),
                     DataSummaryPoint(
                         label="Reference media",
                         text=(
-                            "Kern sends URLs, not workspace bytes. fal fetches the referenced image, video, or audio "
-                            "from its existing public host, so the media and anything encoded in the URL path/query "
-                            "become available to fal. Kern does not fetch or inspect those files itself."
+                            "Kern uploads selected image, video or audio bytes to fal storage using generic filenames. "
+                            "Caller-supplied URLs and workspace paths are not sent. Provider media URLs remain "
+                            "accessible to anyone holding them until expiry."
                         ),
                     ),
                 ),
@@ -452,7 +451,8 @@ MANIFEST = ToolManifest(
         )
     ),
     agent_notes=(
-        "Use one reference mode at a time: image_url/end_image_url for keyframes, or reference_*_urls "
+        "Stage images/videos/audio with for_tool=fal_ai; source URLs are rejected. Successful submission consumes staged IDs. "
+        "Use one reference mode at a time: image_asset_id/end_image_asset_id for keyframes, or reference_*_asset_ids "
         "for identity/style/motion/audio conditioning. Poll the returned task_id unchanged. H3 Max always "
         "generates audio, so put dialogue, effects, ambience, music, or 'no music' directly in the prompt."
     ),
@@ -509,37 +509,23 @@ def _unsigned_integer(
     return value
 
 
-def _guarded_url(tool_input: JSONObject, key: str, api: HostAPI) -> str:
-    url = provider_fetched_https_url(tool_input, key, api, provider="H3 Max")
-    # The first pass covers what is literally on the wire; decoded path/query
-    # views cover values a downstream fetcher may unwrap one or more times.
-    return guard_url_parameter_string(url, api)
-
-
-def _guarded_url_list(tool_input: JSONObject, key: str, api: HostAPI) -> list[str]:
+def _staged_list(tool_input: JSONObject, key: str, kind: str, api: HostAPI) -> list[str]:
     value = tool_input.get(key)
     if value is None:
         return []
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise ToolInputValidationError(f"H3 Max tool_input.{key} must be a list of HTTPS URLs.")
-    if len(value) > MAX_REFERENCE_FILES:
-        raise ToolInputValidationError(
-            f"H3 Max tool_input.{key} must contain at most {MAX_REFERENCE_FILES} URLs."
-        )
-    guarded: list[str] = []
-    for item in value:
-        guarded.append(_guarded_url({key: item}, key, api))
-    return guarded
+    if not isinstance(value, list) or len(value) > MAX_REFERENCE_FILES:
+        raise ToolInputValidationError(f"H3 Max {key} must be a list of at most {MAX_REFERENCE_FILES} staged ids.")
+    return [fal_media.staged_asset_id(item, kind, api) for item in value]
 
 
 def _generation_request(api: HostAPI, tool_input: JSONObject) -> tuple[str, JSONObject]:
     allowed = {
         "prompt",
-        "image_url",
-        "end_image_url",
-        "reference_image_urls",
-        "reference_video_urls",
-        "reference_audio_urls",
+        "image_asset_id",
+        "end_image_asset_id",
+        "reference_image_asset_ids",
+        "reference_video_asset_ids",
+        "reference_audio_asset_ids",
         "resolution",
         "aspect_ratio",
         "duration_seconds",
@@ -580,24 +566,24 @@ def _generation_request(api: HostAPI, tool_input: JSONObject) -> tuple[str, JSON
         body["seed"] = seed
 
     reference_keys = (
-        "reference_image_urls",
-        "reference_video_urls",
-        "reference_audio_urls",
+        "reference_image_asset_ids",
+        "reference_video_asset_ids",
+        "reference_audio_asset_ids",
     )
     reference_supplied = any(key in tool_input for key in reference_keys)
-    keyframe_supplied = "image_url" in tool_input or "end_image_url" in tool_input
+    keyframe_supplied = "image_asset_id" in tool_input or "end_image_asset_id" in tool_input
     if reference_supplied and keyframe_supplied:
         raise ToolInputValidationError(
-            "H3 Max keyframe URLs and reference_*_urls cannot be used in the same request."
+            "H3 Max keyframes and reference_*_asset_ids cannot be used in the same request."
         )
 
     if reference_supplied:
-        images = _guarded_url_list(tool_input, "reference_image_urls", api)
-        videos = _guarded_url_list(tool_input, "reference_video_urls", api)
-        audio = _guarded_url_list(tool_input, "reference_audio_urls", api)
+        images = _staged_list(tool_input, "reference_image_asset_ids", "image", api)
+        videos = _staged_list(tool_input, "reference_video_asset_ids", "video", api)
+        audio = _staged_list(tool_input, "reference_audio_asset_ids", "audio", api)
         count = len(images) + len(videos) + len(audio)
         if count == 0:
-            raise ToolInputValidationError("H3 Max reference mode requires at least one reference URL.")
+            raise ToolInputValidationError("H3 Max reference mode requires at least one reference file.")
         if count > MAX_REFERENCE_FILES:
             raise ToolInputValidationError(
                 f"H3 Max accepts at most {MAX_REFERENCE_FILES} reference files in total."
@@ -607,11 +593,11 @@ def _generation_request(api: HostAPI, tool_input: JSONObject) -> tuple[str, JSON
                 "H3 Max reference audio requires at least one reference image or video."
             )
         if images:
-            body["reference_image_urls"] = cast(list[JSONValue], images)
+            body["reference_image_asset_ids"] = cast(list[JSONValue], images)
         if videos:
-            body["reference_video_urls"] = cast(list[JSONValue], videos)
+            body["reference_video_asset_ids"] = cast(list[JSONValue], videos)
         if audio:
-            body["reference_audio_urls"] = cast(list[JSONValue], audio)
+            body["reference_audio_asset_ids"] = cast(list[JSONValue], audio)
         body["aspect_ratio"] = _choice(
             tool_input,
             "aspect_ratio",
@@ -621,15 +607,15 @@ def _generation_request(api: HostAPI, tool_input: JSONObject) -> tuple[str, JSON
         return "reference", body
 
     if keyframe_supplied:
-        if "image_url" not in tool_input:
-            raise ToolInputValidationError("H3 Max end_image_url requires image_url.")
+        if "image_asset_id" not in tool_input:
+            raise ToolInputValidationError("H3 Max end_image_asset_id requires image_asset_id.")
         if "aspect_ratio" in tool_input:
             raise ToolInputValidationError(
-                "H3 Max image-to-video follows image_url and does not accept aspect_ratio."
+                "H3 Max image-to-video follows image_asset_id and does not accept aspect_ratio."
             )
-        body["image_url"] = _guarded_url(tool_input, "image_url", api)
-        if "end_image_url" in tool_input:
-            body["end_image_url"] = _guarded_url(tool_input, "end_image_url", api)
+        body["image_asset_id"] = fal_media.staged_asset_id(tool_input["image_asset_id"], "image", api)
+        if "end_image_asset_id" in tool_input:
+            body["end_image_asset_id"] = fal_media.staged_asset_id(tool_input["end_image_asset_id"], "image", api)
         return "image", body
 
     body["aspect_ratio"] = _choice(
@@ -864,10 +850,26 @@ class H3MaxTool:
 
     def execute(self, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:
         try:
-            api_key = api.config["H3MAX_FAL_KEY"]
+            api_key = api.config["FAL_API_KEY"]
             headers = _headers(api_key)
             if action == "generate_video":
                 mode, body = _generation_request(api, tool_input)
+                # Validate all fields first, then upload each distinct staged asset once.
+                uploaded: dict[str, str] = {}
+                for field, wire in (
+                    ("image_asset_id", "image_url"), ("end_image_asset_id", "end_image_url"),
+                    ("reference_image_asset_ids", "reference_image_urls"),
+                    ("reference_video_asset_ids", "reference_video_urls"),
+                    ("reference_audio_asset_ids", "reference_audio_urls"),
+                ):
+                    if field not in body:
+                        continue
+                    value = body.pop(field)
+                    ids = cast(list[str], value) if isinstance(value, list) else [cast(str, value)]
+                    for asset_id in ids:
+                        if asset_id not in uploaded:
+                            uploaded[asset_id] = fal_media.upload(asset_id, api, headers)
+                    body[wire] = cast(list[JSONValue], [uploaded[item] for item in ids]) if isinstance(value, list) else uploaded[ids[0]]
                 response = json_request(
                     "POST",
                     _endpoint(mode),
@@ -877,7 +879,7 @@ class H3MaxTool:
                     invalid_response_message="fal returned an invalid queue submission response.",
                 )
                 request_id = response.get("request_id")
-                # Reference inputs add charges that cannot be calculated from URLs.
+                # Reference inputs add charges that cannot be calculated from staged media.
                 if mode != "reference":
                     promotional_text = mode == "text" and datetime.now(timezone.utc).date() <= date(2026, 9, 30)
                     rates = {"480P": "0.025", "768P": "0.04"} if promotional_text else {"480P": "0.05", "768P": "0.08"}
@@ -889,6 +891,8 @@ class H3MaxTool:
                         api.costs.record(str(Decimal(rate) * duration), charge_id=charge_id)
                 if not isinstance(request_id, str) or not REQUEST_ID_RE.fullmatch(request_id):
                     return ActionFailed("fal returned no valid H3 Max request id.")
+                for asset_id in uploaded:
+                    api.assets.delete(asset_id)
                 task_id = f"{mode}_{request_id}"
                 return ActionExecuted(
                     {
@@ -921,4 +925,3 @@ class H3MaxTool:
         return ActionFailed("H3 Max has no approval-gated actions.")
 
 
-BUNDLED_TOOL = H3MaxTool()

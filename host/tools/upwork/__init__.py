@@ -144,7 +144,22 @@ def _response(operation: str, text: str, credential: StoredCredential):
     except (ValueError, RuntimeError) as exc:
         try:
             # Redact before limiting the diagnostic, including split escapes.
-            sample = _redact(text, credential).encode("utf-8")
+            redacted = _redact(text, credential)
+            if operation == "get_preview":
+                # Long proposal text otherwise consumes the host diagnostic's
+                # 512-byte context field before the answer fields are visible.
+                # Retain structure, not private proposal or answer values.
+                def shape(value):
+                    if isinstance(value, dict):
+                        return {key: shape(child) for key, child in value.items()}
+                    if isinstance(value, list):
+                        return [shape(child) for child in value[:1]]
+                    return type(value).__name__
+                try:
+                    redacted = json.dumps(shape(json.loads(redacted)), separators=(",", ":"))
+                except ValueError:
+                    redacted = "Preview was not valid JSON; response content omitted."
+            sample = redacted.encode("utf-8")
             if len(sample) > 8192:
                 sample = sample[:8150].decode("utf-8", "ignore").encode() + b"\n[diagnostic sample clipped at 8 KiB]"
         except (ValueError, RecursionError):
@@ -230,7 +245,7 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
         "jobReference": "job_reference", "connectsCost": "connects_cost", "connectsBalance": "connects_balance",
         "canApply": "can_apply", "boostConnects": "boost_connects", "teamOrgId": "team_org_id",
         "certificateIds": "certificate_ids", "portfolioProjectIds": "portfolio_project_ids",
-        "screeningQuestions": "screening_questions",
+        "screeningQuestions": "screening_questions", "screeningAnswers": "answers",
     }
     def inspect(value):
         nonlocal complete_payload

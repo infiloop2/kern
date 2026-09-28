@@ -15,7 +15,7 @@ The MCP shim sends `POST /call` to
 the caller is `kern-agent` with `SO_PEERCRED` before allocating a handler. It
 caps connections and active calls, bounds request and response bodies, permits
 only `GET`, `POST`, `PUT`, and `DELETE`, and accepts paths only below
-`/agent/`. The agent cannot reach the service's browser TCP listener, admin API
+`/agent/`. The agent cannot reach the service's browser Unix socket, the admin API
 socket, or PostgreSQL role.
 The socket admits 64 active calls, with a separate eight-call cap for routes
 that can return the full 24 MiB response. Identity, self-memory, and agent

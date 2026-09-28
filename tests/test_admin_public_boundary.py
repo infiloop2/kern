@@ -39,6 +39,7 @@ PUBLIC_AUTH = {
 STATIC_FILES = {
     "/": ADMIN_UI / "index.html",
     "/oauth/callback": ADMIN_UI / "index.html",
+    "/browser.html": ADMIN_UI / "browser.html",
     "/admin_ui.css": ADMIN_UI / "admin_ui.css",
     "/manifest.webmanifest": ADMIN_UI / "manifest.webmanifest",
     "/service-worker.js": ADMIN_UI / "service-worker.js",
@@ -243,7 +244,8 @@ class AdminPublicBoundaryTests(unittest.TestCase):
     def test_public_login_contract_does_not_grant_an_admin_session(self):
         status, _, body = self.request("GET", "/v1/login/status")
         self.assertEqual((status, json.loads(body)), (200, {"passkey_configured": True}))
-        status, headers, _ = self.request("POST", "/v1/login", body=b'{"password":"wrong"}')
+        status, headers, _ = self.request("POST", "/v1/login",
+            (("Content-Type", "application/json"),), body=b'{"password":"wrong"}')
         self.assertEqual(status, 401)
         self.assertNotIn(b"Set-Cookie:", headers)
         self.assertEqual(self.request("POST", "/v1/login/passkey",
@@ -253,7 +255,8 @@ class AdminPublicBoundaryTests(unittest.TestCase):
         with patch.object(admin_auth.admin_passkeys, "begin_login",
                           return_value=("preauth", {"challenge": "test"})):
             status, headers, body = self.request(
-                "POST", "/v1/login", body=b'{"password":"test-password"}')
+                "POST", "/v1/login", (("Content-Type", "application/json"),),
+                body=b'{"password":"test-password"}')
         self.assertEqual(status, 200)
         self.assertEqual(json.loads(body), {"passkey_required": True,
                                            "publicKey": {"challenge": "test"}})
@@ -264,6 +267,45 @@ class AdminPublicBoundaryTests(unittest.TestCase):
                 if (method, path) not in PUBLIC_AUTH:
                     with self.subTest(path=path, method=method):
                         self.assertEqual(self.request(method, path)[0], 401)
+        self.assert_no_privileged_work()
+
+    def test_simple_cross_origin_logins_cannot_spend_attempts_or_mint_cookies(self):
+        # Browsers can send JSON-shaped bytes without a CORS preflight when
+        # the declared type is text/plain. Body validation alone is no guard.
+        hostile = (("Origin", "https://attacker.invalid"),
+                   ("Sec-Fetch-Site", "cross-site"),
+                   ("Sec-Fetch-Mode", "no-cors"))
+        for public in (True, False):
+            for content_types in (
+                (),
+                (("Content-Type", "text/plain;charset=UTF-8"),),
+                (("Content-Type", "application/x-www-form-urlencoded"),),
+                (("Content-Type", "multipart/form-data; boundary=test"),),
+                (("Content-Type", "text/plain"), ("Content-Type", "application/json")),
+                (("Content-Type", "application/json"), ("Content-Type", "text/plain")),
+            ):
+                for password in (b'wrong', b'test-password'):
+                    with self.subTest(public=public, content_types=content_types, password=password):
+                        for _ in range(admin_auth.MAX_FAILURES_PER_CLIENT + 1):
+                            status, headers, _ = self.request(
+                                "POST", "/v1/login", (*hostile, *content_types),
+                                b'{"password":"' + password + b'"}', public=public)
+                            self.assertEqual(status, 415)
+                            self.assertNotIn(b"Set-Cookie:", headers)
+                        self.assertEqual(admin_auth._client_failures, {})
+        with patch.object(admin_auth.admin_passkeys, "begin_login",
+                          return_value=("preauth", {"challenge": "test"})):
+            status, _, _ = self.request("POST", "/v1/login",
+                (("Content-Type", "application/json; charset=utf-8"),),
+                b'{"password":"test-password"}')
+        self.assertEqual(status, 200)
+        # Normal JSON guesses still consume the budget, independently of
+        # Origin/Sec-Fetch headers that a non-browser attacker can forge.
+        for _ in range(admin_auth.MAX_FAILURES_PER_CLIENT):
+            self.assertEqual(self.request("POST", "/v1/login",
+                (("Content-Type", "application/json"),), b'{"password":"wrong"}')[0], 401)
+        self.assertEqual(self.request("POST", "/v1/login",
+            (("Content-Type", "application/json"),), b'{"password":"test-password"}')[0], 429)
         self.assert_no_privileged_work()
 
     def test_public_exceptions_do_not_extend_to_nearby_or_encoded_paths(self):

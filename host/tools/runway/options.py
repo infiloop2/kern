@@ -11,7 +11,7 @@ from typing import cast
 
 from host.tools.host_api import HostAPI
 from host.tools.json_types import JSONObject, JSONValue
-from host.tools.shared.inputs import ToolInputValidationError, provider_fetched_https_url, schema
+from host.tools.shared.inputs import ToolInputValidationError, schema
 
 SEEDANCE_MODELS = ("seedance2", "seedance2_fast", "seedance2_5")
 GEN4_IMAGE_RATIOS = ("1280:720", "720:1280", "1104:832", "832:1104", "960:960", "1584:672", "672:1584")
@@ -43,14 +43,13 @@ def choice_schema(values: tuple[str, ...], description: str) -> JSONObject:
 
 
 MEDIA_PROPERTIES: JSONObject = {
-    "uri": {"type": "string", "description": "Public HTTPS media URL or existing runway:// upload URI. Use exactly one of uri or asset_id; stage local files instead of inline base64."},
     "asset_id": {"type": "string", "description": "Built-in workspace media reference, uploaded only after the complete request validates."},
 }
 
 
 def media_array(description: str, extras: JSONObject | None = None, maximum: int = 30) -> JSONObject:
     return {"type": "array", "minItems": 1, "maxItems": maximum,
-            "items": schema({**MEDIA_PROPERTIES, **(extras or {})}), "description": description}
+            "items": schema({**MEDIA_PROPERTIES, **(extras or {})}, ["asset_id"]), "description": description}
 
 
 FORMAT_PROPERTIES: JSONObject = {
@@ -62,11 +61,8 @@ VIDEO_PROPERTIES: JSONObject = {
     "prompt_images": media_array("First/last keyframes: position first or last. Gen-4 accepts first only; H3 Max requires first before last. Seedance also accepts unpositioned reference images; do not mix them with keyframes.", {"position": choice_schema(("first", "last"), "Omit only for Seedance reference images.")}),
     "reference_images": media_array("Seedance text/video-to-video reference images: up to 9 for 2.0/Fast, 30 for 2.5. Cannot combine with prompt_images or first-frame shorthand."),
     "reference_videos": media_array("Seedance text/video-to-video video references. Provider checks combined duration: 15s for 2.0/Fast, 30s for 2.5."),
-    "reference_audio": {"type": "array", "minItems": 1, "maxItems": 30,
-                        "items": schema({"uri": MEDIA_PROPERTIES["uri"]}, ["uri"]),
-                        "description": "Seedance audio reference URLs or runway:// URIs (workspace audio staging is not available). Provider checks combined duration: 15s for 2.0/Fast, under 30s for 2.5."},
-    "video_url": {"type": "string", "description": "Seedance video-to-video source, public HTTPS URL or runway:// URI. Mutually exclusive with video_asset_id and image keyframes."},
-    "video_asset_id": {"type": "string", "description": "Seedance video-to-video source from the workspace. Mutually exclusive with video_url and image keyframes."},
+    "reference_audio": media_array("Staged MP3/WAV audio references. Provider checks combined duration: 15s for 2.0/Fast, under 30s for 2.5."),
+    "video_asset_id": {"type": "string", "description": "Seedance video-to-video source from the workspace. Cannot combine with image keyframes."},
     "resolution": choice_schema(("480p", "768p"), "H3 Max only; default 768p. Seedance selects resolution through ratio pixel dimensions."),
     "prompt_expansion_mode": choice_schema(("disabled", "balanced", "quality"), "H3 Max only. Provider default balanced; disabled avoids rewriting for more repeatable seeds."),
     "audio": {"type": "boolean", "description": "Veo/Seedance native audio toggle. Omit for provider default; audio affects pricing."},
@@ -103,21 +99,15 @@ def text(value: JSONValue, name: str, api: HostAPI, limit: int | None = None, *,
 
 
 def media_uri(value: JSONObject, kind: str, api: HostAPI, uploads: dict[str, str]) -> str:
-    uri, asset_id = value.get("uri"), value.get("asset_id")
-    if (uri is None) == (asset_id is None):
-        raise ToolInputValidationError("Runway media requires exactly one of uri or asset_id.")
-    if asset_id is not None:
-        if kind == "audio":
-            raise ToolInputValidationError("Runway audio references require a URI; workspace audio staging is not available.")
-        if not isinstance(asset_id, str) or not asset_id:
-            raise ToolInputValidationError("Runway asset_id must be a non-empty string.")
-        if not api.assets.describe(asset_id).media_type.startswith(f"{kind}/"):
-            raise ToolInputValidationError(f"Runway asset_id does not refer to a staged {kind}.")
-        uploads[asset_id] = kind
-        return f"kern-asset:{asset_id}"
-    if isinstance(uri, str) and uri.startswith("runway://") and len(uri) <= 2048 and len(uri) > 9:
-        return api.outbound.guard_request_parameter_string(uri)
-    return provider_fetched_https_url({"uri": uri}, "uri", api, provider="Runway")
+    if "uri" in value:
+        raise ToolInputValidationError("Runway media requires a staged asset_id; source URLs and URIs are not accepted.")
+    asset_id = value.get("asset_id")
+    if not isinstance(asset_id, str) or not asset_id:
+        raise ToolInputValidationError("Runway asset_id must be a non-empty string.")
+    if not api.assets.describe(asset_id).media_type.startswith(f"{kind}/"):
+        raise ToolInputValidationError(f"Runway asset_id does not refer to a staged {kind}.")
+    uploads[asset_id] = kind
+    return f"kern-asset:{asset_id}"
 
 
 def media_list(value: JSONValue, kind: str, api: HostAPI, uploads: dict[str, str], *, maximum: int = 30, extras: tuple[str, ...] = ()) -> list[JSONObject]:
@@ -125,7 +115,7 @@ def media_list(value: JSONValue, kind: str, api: HostAPI, uploads: dict[str, str
         raise ToolInputValidationError(f"Runway {kind} references must contain 1 to {maximum} items.")
     result: list[JSONObject] = []
     for item in value:
-        if not isinstance(item, dict) or set(item) - {"uri", "asset_id", *extras}:
+        if not isinstance(item, dict) or set(item) - {"asset_id", *extras}:
             raise ToolInputValidationError(f"Runway {kind} reference has unsupported fields.")
         result.append({"uri": media_uri(item, kind, api, uploads), **{k: item[k] for k in extras if k in item}})
     return result
@@ -136,7 +126,7 @@ def replace_assets(value: JSONValue, uploaded: dict[str, str]) -> JSONValue:
         return [replace_assets(v, uploaded) for v in value]
     if isinstance(value, dict):
         return {k: uploaded[v[len("kern-asset:"):]]
-                if k in {"uri", "promptImage", "promptVideo", "videoUri"} and isinstance(v, str) and v.startswith("kern-asset:")
+                if k in {"uri", "promptImage", "promptVideo", "videoUri", "imageUri"} and isinstance(v, str) and v.startswith("kern-asset:")
                 else replace_assets(v, uploaded) for k, v in value.items()}
     return value
 

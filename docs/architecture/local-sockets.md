@@ -9,7 +9,7 @@ be spoofed by a process running as another uid, and Unix sockets are invisible t
 the nftables loopback rules, so adding one does not widen the network surface.
 
 The complete inventory keeps the local trust boundaries auditable in one
-place. Every socket path is defined once in `host/constants.py` and served by
+place. Kern service socket paths are defined in `host/constants.py` and served by
 exactly one package under `host/runtime/` (the runtime's boundary rule: the
 package that binds a socket is the only code that parses messages arriving on
 it); servers, clients, and the end-of-deploy verifier all import the same
@@ -19,11 +19,13 @@ definition.
 
 | Socket | Server (uid) | Allowed client uids | Purpose |
 | --- | --- | --- | --- |
-| `/var/run/postgresql/.s.PGSQL.5432` | `postgres` | `kern-admin`, `kern-proxy`, `kern-tools`, `kern-agent-network`, `kern-workspace`, and `postgres`, each mapped to its matching database role | Host and workspace state. `pg_hba.conf` admits these named peer identities and then explicitly rejects everyone else; table/schema grants narrow each non-owner role. There is no TCP listener. |
+| `/var/run/postgresql/.s.PGSQL.5432` | `postgres` | `kern-admin`, `kern-proxy`, `kern-tools`, `kern-agent-network`, `kern-workspace`, `kern-host-inference`, and `postgres`, each mapped to its matching database role | Host and workspace state. `pg_hba.conf` admits these named peer identities and then explicitly rejects everyone else; table/schema grants narrow each non-owner role. There is no TCP listener. |
 | `/run/kern-tools/tools.sock` | `kern-tools` (tools service) | `kern-agent`, `kern-admin` (each path-scoped) | Agent-facing tools surface plus operator delegation, scoped strictly by path per peer. Only `kern-agent` reaches `GET /tools`, JSON `POST /call`, and raw-byte `POST /assets/video` and `POST /assets/image`; the MCP shim forwards calls and streams agent-opened media without sending its pathname. Only `kern-admin` reaches `/operator/...` for OAuth, revoke, and approved execution. Neither peer can call the other's routes. |
 | `/run/kern-agent-network/agent-network.sock` | `kern-agent-network` (network-introspection service) | `kern-agent` | Agent-facing `list_network_integrations` and `recent_network_denials` tools. The service has no egress and a SELECT-only Postgres role for policy and network-event tables; the MCP shim aggregates its listing with bundled tools and `workspace_api`. |
-| `/run/kern-admin-api/workspace.sock` | `kern-admin:kern-workspace-api`, mode `0660` (admin API) | `kern-workspace` | Workspace service → host admin API. The kernel peer uid authenticates the fixed service and a narrow allowlist exposes only thread list/detail/message/stop/event operations. Thread ids pass through unchanged. |
+| `/run/kern-admin-api/workspace.sock` | `kern-admin:kern-workspace-api`, mode `0660` (admin API) | `kern-workspace` | Workspace service → host admin API. The kernel peer uid authenticates the fixed service and a narrow allowlist exposes only runtime status, thread list/detail/message/stop/clear-memory/events, and bounded conversation-history search/read operations. Thread ids pass through unchanged. |
 | `/run/kern-workspace/browser.sock` | `kern-workspace:kern-workspace-api`, mode `0660` (Workspace service) | `kern-admin` | Admin API → Workspace browser routes. The server checks peer uid before allocating a handler; operator authentication and CSRF checks remain in the admin API. |
+| `/run/kern-host-inference/host-inference.sock` | `kern-host-inference` | `kern-admin`, `kern-workspace`, `kern-tools` | Fixed host-owned provider calls; credentials stay in the service. See [Host AI inference](host-ai-inference.md). |
+| `/run/kern-transcription.sock` | `kern-transcription:kern-admin`, mode `0660` (systemd socket) | `kern-admin` | Local dictation readiness and bounded PCM transcription. The model stays resident; no network or database access. |
 | `/run/kern-embedding.sock` | `kern-embedding:kern-workspace-api`, mode `0660` (systemd socket activation) | `kern-admin`, `kern-workspace` | Bounded local query/passage inference for conversation and memory search. The CPU-only ONNX service has no network or database access and exits after five idle minutes. |
 | `/run/kern-workspace/agent.sock` | `kern-workspace` | `kern-agent` | Agent → Workspace API (`POST /call`, used by `workspace_api` and the typed conversation-history tools). Peer authentication and pre-handler connection caps precede validation of bounded Web App, global Memory/Schedules, thread-identity, and read-only conversation-history routes. See [`workspace-agent-api.md`](workspaces/workspace-agent-api.md). |
 
@@ -62,8 +64,8 @@ definition.
 The tools socket is served by the dedicated `kern-tools` service (see
 [`tools/host-integration.md`](tools/host-integration.md)), so the agent connects
 to a low-privilege tools-owned socket rather than an admin-owned one. Instead of
-the tools service reaching back to admin over a fourth socket, it reads tool
-state directly with a Postgres role scoped to the five tool tables plus
+the tools service reaching back to admin over a reverse socket, it reads tool
+state directly with a Postgres role scoped to explicit tool-state tables plus
 read-only access to the encryption key used for its encrypted config and
 credentials. The **admin service** connects **into** the tools socket (peer uid `kern-admin`,
 `/operator/...` routes) to delegate the operator operations that need the tools

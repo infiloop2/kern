@@ -2,7 +2,7 @@ import { api } from "./api.js";
 import { $, runtimeLabel } from "./helpers.js";
 import { poseForAgent, SWARM_POSES } from "./swarm_pose.js";
 
-const LABELS = { busy: "Busy", failed: "Failed", idle: "Idle", "needs-human": "Needs you" };
+const LABELS = { busy: "Busy", failed: "Failed", idle: "Idle", "needs-human": "Approval pending" };
 let snapshot = null;
 let activeFilter = "all";
 let search = "";
@@ -210,8 +210,14 @@ function renderDetails() {
   const task = node("div", "swarm-detail-task");
   task.append(node("span", "swarm-caption", "TASK"), node("p", "", agent.task || "No task title yet."));
   if (agent.purpose) task.append(node("p", "muted", agent.purpose));
-  if (agent.state !== "busy") task.append(node("p", "muted", agent.needs_human == null
-    ? "Human input: not assessed." : agent.needs_human ? "May need your input · assessed by Host AI." : "No human blocker identified by Host AI."));
+  if (agent.pending_approval_count > 0) {
+    const count = agent.pending_approval_count;
+    task.append(node("p", "muted", `${count} pending Kern approval${count === 1 ? "" : "s"}.`));
+    const approvals = node("button", "ghost sm", "View approvals");
+    approvals.dataset.action = "show-tab";
+    approvals.dataset.tab = "approvals";
+    task.append(approvals);
+  }
   if (agent.next_run_at) task.append(node("p", "muted", `Next scheduled turn: ${new Date(agent.next_run_at).toLocaleString()}`));
   const open = node("button", "primary sm", "Open conversation");
   open.addEventListener("click", () => { void openAgent(agent); });

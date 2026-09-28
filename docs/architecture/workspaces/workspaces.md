@@ -104,8 +104,8 @@ stored only as presentation metadata in Workspace-owned tables.
 
 ## Agent path
 
-The MCP shim always lists `workspace_api`, `search_conversation_history`, and
-`read_thread_history`. Calls go to
+The MCP shim always lists `workspace_api`, `search_conversation_history`,
+`read_thread_history`, `spawn_agent`, and `send_agent_message`. Calls go to
 `/run/kern-workspace/agent.sock`, which is owned by the main service. The
 server authenticates the `kern-agent` uid with `SO_PEERCRED` before allocating
 a bounded handler, accepts a bounded `POST /call` envelope, and routes only
@@ -120,24 +120,29 @@ the local socket-activated encoder; timestamp-only search does not invoke it.
 An agent selects an existing Web App explicitly through routes under
 `/agent/apps/{app_id}/...`. Any agent thread may read any existing app and
 write any active app. Archived apps remain readable but reject every agent
-mutation. Chat has no agent-callable product API.
+mutation. Agents can create a Chat with `spawn_agent` and send a peer-labeled message
+to a known eligible thread with `send_agent_message`; see
+[Workspace agent API](workspace-agent-api.md).
 Agents can also list, search, fetch, create, edit, and delete swarm memory
 pages. Individual `app-*`, `thread-*`, and `schedule-*` pages are absent from
 those routes; App and Chat threads reach only their own page through
 self-memory, as do persistent model schedule threads. Agents perform ordinary
 CRUD on global schedules. Revision history and restore stay operator-only.
-The host-wide conversation-history tools are read-only and are not a
-Chat product mutation API.
+The host-wide conversation-history tools remain read-only.
 
 ## Service and database boundary
 
 `kern-workspace` is a fixed Linux and PostgreSQL identity with no internet or
-general loopback egress. One process serves the browser TCP endpoint, the
+general loopback egress. One process serves the browser Unix socket, the
 agent Unix socket, generated Web Apps, and the global schedule runner. All
 tables live in the admin database's `public` schema: Chat uses `chat_threads`;
-Web Apps uses `web_apps` and `web_app_revisions`; global resources use
+Web Apps uses `web_apps`, live collections, and shared recovery components;
+global resources use
 `memory_pages`, `memory_page_revisions`, `memory_page_embeddings`,
-`memory_page_links`, `schedules`, and `schedule_revisions`.
+`memory_page_links`, `schedules`, and `schedule_revisions`. Read markers,
+sidebar ordering, onboarding dismissal, and swarm annotations have their own
+bounded state. See [storage](../admin-state-storage.md) and
+[retention](../database-retention.md) for the inventories.
 
 All schema changes live in the single immutable `host/migrations` stream and
 its `schema_migrations` ledger. `kern-admin` owns every table and performs DDL.

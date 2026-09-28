@@ -269,7 +269,7 @@ def clear_thread_provider_session(
     run_number: int,
     provider_session_id: str,
 ) -> None:
-    """Clear one provider session after the provider confirms it is missing."""
+    """Detach exactly one run's provider session for recovery or retirement."""
     cur.execute(
         "UPDATE thread_sessions SET provider_session_id = NULL"
         " WHERE thread_id = %s AND run_number = %s AND provider_session_id = %s"
@@ -281,6 +281,46 @@ def clear_thread_provider_session(
             f"thread {thread_id!r} run {run_number} no longer has provider session"
             f" {provider_session_id!r}"
         )
+
+
+def archived_thread_session_ids(runtime: str) -> list[str]:
+    """Archived Chats with an idle provider mapping, bounded by the Chat quota."""
+    with _read() as cur:
+        cur.execute(
+            "SELECT session.thread_id FROM thread_sessions AS session"
+            " JOIN chat_threads AS chat USING (thread_id)"
+            " WHERE chat.archived = TRUE AND session.agent_runtime = %s"
+            " AND session.run_status = 'idle' AND session.provider_session_id IS NOT NULL"
+            " ORDER BY session.thread_id",
+            (runtime,),
+        )
+        return [str(row[0]) for row in cur.fetchall()]
+
+
+def detach_archived_thread_session(cur: Any, thread_id: str, runtime: str) -> str | None:
+    """Detach an archived Chat's provider context without clearing Kern history.
+
+    Lock archive state only through this short commit. A concurrent restore
+    either wins first (we skip it), or sees the detached mapping afterward.
+    Skip busy Workspace rows rather than wait while holding the host mutation
+    lock: Workspace may be calling the host while it owns that row.
+    """
+    cur.execute(
+        "SELECT 1 FROM chat_threads WHERE thread_id = %s AND archived = TRUE"
+        " FOR SHARE SKIP LOCKED",
+        (thread_id,),
+    )
+    if cur.fetchone() is None:
+        return None
+    session = thread_session_config(thread_id, cur)
+    if (
+        session is None or session["agent_runtime"] != runtime
+        or session["status"] != "idle" or not session["provider_session_id"]
+    ):
+        return None
+    session_id = str(session["provider_session_id"])
+    clear_thread_provider_session(cur, thread_id, session["run_number"], session_id)
+    return session_id
 
 
 def touch_thread_session(cur: Any, thread_id: str, last_used_at: str) -> None:

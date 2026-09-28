@@ -1,4 +1,5 @@
 // One operator queue. Decisions use the existing authenticated per-source APIs.
+import { refreshAutoApprovals, autoReviewAnnotation } from "./auto_approvals.js";
 import { api } from "./api.js";
 import { $, esc, badge, formatUnixTime } from "./helpers.js";
 
@@ -64,11 +65,15 @@ export async function pollApprovalBadge() {
 
 function render() {
   const data = current;
-  $("approval-tabs").innerHTML = ["pending", "history"].map(value => `<button data-action="approval-view" data-view="${value}" aria-pressed="${view === value}"${disabled()}>${value === "pending" ? "Pending" : "History"}<span>${counts[`${value}_count`]}</span></button>`).join("");
+  $("approval-tabs").innerHTML = ["pending", "history", "auto"].map(value => `<button data-action="approval-view" data-view="${value}" aria-pressed="${view === value}"${disabled()}>${value === "auto" ? "Auto-approval" : value === "pending" ? "Pending" : "History"}${value === "auto" ? "" : `<span>${counts[`${value}_count`]}</span>`}</button>`).join("");
   document.querySelector('#panel-approvals [data-action="approval-refresh"]').disabled = busy || loading;
   $("approval-toolbar").innerHTML = view === "pending" && data?.items.length
     ? `<div class="approval-bulk-actions"><button data-action="approval-bulk" data-decision="approve"${disabled()}>Approve all (${data.items.length})</button><button class="danger ghost" data-action="approval-bulk" data-decision="deny"${disabled()}>Deny all (${data.items.length})</button></div>`
     : "";
+  $("auto-approval-page").hidden = view !== "auto";
+  $("approval-list").hidden = view === "auto";
+  $("approval-pagination").hidden = view === "auto";
+  if (view === "auto") return;
   if (!data) {
     $("approval-list").innerHTML = `<div class="approval-empty">${loading ? "Loading approvals..." : "Approvals could not be loaded. Use Refresh to try again."}</div>`;
     return;
@@ -78,6 +83,7 @@ function render() {
       <div class="approval-card-top"><span class="approval-source">${esc(item.source)}${item.account_label ? `<span class="muted"> / ${esc(item.account_label)}</span>` : ""}${item.connection_id ? `<span class="muted"> · ${esc(item.connection_id)}</span>` : ""}</span>${badge(item.status)}</div>
       <h2>${esc(item.summary)}</h2>
       ${riskAnnotation(item)}
+      ${autoReviewAnnotation(item)}
       <div class="approval-card-meta"><time>${esc(formatUnixTime(view === "pending" ? item.created_at : item.updated_at))}</time><span>${esc(item.kind === "github_push" ? `push-${item.id}` : item.action_id)}</span></div>
       <details data-approval-details="${esc(keyOf(item))}"><summary>${item.kind === "tool" ? "View exact request" : "View changes"}</summary><pre class="approval-payload">${item.kind === "github_push" ? esc(JSON.stringify({ refs: item.ref_updates, paths: item.changed_paths }, null, 2)) : ""}</pre></details>
       ${item.result ? `<div class="approval-result">${esc(typeof item.result === "string" ? item.result : JSON.stringify(item.result))}</div>` : ""}
@@ -89,6 +95,7 @@ function render() {
 
 export async function refreshApprovals() {
   if (busy || loading) return;
+  if (view === "auto") { render(); return refreshAutoApprovals(); }
   const request = ++generation;
   loading = true;
   render();
@@ -114,6 +121,7 @@ export async function refreshApprovals() {
 }
 
 export async function pollApprovals() {
+  if (view === "auto") return;
   if (busy || loading) return;
   const request = generation;
   const data = await api("GET", `/v1/approvals?view=${view}&page=${page}`);
@@ -124,7 +132,7 @@ export async function pollApprovals() {
 }
 
 export function changeApprovalView(next) {
-  if (busy || loading || !["pending", "history"].includes(next) || next === view) return;
+  if (busy || loading || !["pending", "history", "auto"].includes(next) || next === view) return;
   view = next;
   page = 1;
   current = null;
@@ -143,6 +151,31 @@ function progress(item, message) {
   if (card) card.querySelector(".approval-progress").textContent = message;
 }
 
+// A decision can finish after the browser loses its response. Read the saved
+// status before reporting a failed action; never send the decision a second time.
+async function recordedOutcome(item, decision) {
+  try {
+    const record = item.kind === "tool"
+      ? (await api("GET", `/v1/tools/${encodeURIComponent(item.tool_id)}/approvals/${encodeURIComponent(item.id)}`)).approval
+      : (await api("GET", "/v1/network-tools/github-pending-pushes")).pending_pushes.find(push => push.id === item.id);
+    const success = item.kind === "tool"
+      ? (decision === "approve" ? "executed" : "denied")
+      : (decision === "approve" ? "approved" : "rejected");
+    const opposite = item.kind === "tool"
+      ? (decision === "approve" ? "denied" : "executed")
+      : (decision === "approve" ? "rejected" : "approved");
+    if (record?.status === success) return { status: "completed" };
+    if (record?.status === opposite) return {
+      status: "resolved_differently",
+      message: decision === "approve" ? "Already denied in another session." : "Already approved in another session.",
+    };
+    if (record?.status === "failed") return { status: "failed", error: record.result || record.detail || "Action failed." };
+  } catch (_) {
+    // A second read can fail too; the decision's outcome is then unknown.
+  }
+  return { status: "unconfirmed" };
+}
+
 async function decide(items, decision, confirmBulk = false) {
   if (busy || loading || !items.length || !["approve", "deny"].includes(decision)) return;
   const verb = decision === "approve" ? "Approve" : "Deny";
@@ -155,29 +188,37 @@ async function decide(items, decision, confirmBulk = false) {
   for (const item of items) progress(item, "Queued");
   async function run(item) {
     progress(item, decision === "approve" ? "Approving..." : "Denying...");
+    let outcome;
     try {
       const path = item.kind === "tool"
         ? `/v1/tools/${encodeURIComponent(item.tool_id)}/approvals/${encodeURIComponent(item.id)}/${decision}`
         : `/v1/network-tools/github-pending-pushes/${encodeURIComponent(item.id)}/${decision === "deny" ? "reject" : "approve"}`;
       const response = await api("POST", path, {});
-      if (response.result?.status === "failed") throw new Error(response.result.error || "Approved action failed");
-      progress(item, decision === "approve" ? "Approved" : "Denied");
-      outcomes.push({ item });
+      outcome = response.result?.status === "failed" || response.pending_push?.status === "failed"
+        ? { status: "failed", error: response.result?.error || response.pending_push?.detail || "Approved action failed" }
+        : { status: "completed" };
     } catch (error) {
-      progress(item, error.message);
-      outcomes.push({ item, error: error.message });
+      outcome = await recordedOutcome(item, decision);
     }
+    progress(item, outcome.status === "completed" ? (decision === "approve" ? "Approved" : "Denied")
+      : outcome.status === "failed" ? outcome.error
+      : outcome.status === "resolved_differently" ? outcome.message : "Outcome not confirmed");
+    outcomes.push({ item, ...outcome });
     $("approval-feedback").textContent = `${outcomes.length} of ${items.length} requests completed.`;
   }
-  // GitHub's existing resolver holds a global lock. Run its requests serially
-  // alongside the independent tool requests, without changing that boundary.
+  // The browser service runs one action at a time. Keep its approvals in order;
+  // unrelated tools and GitHub decisions can still run independently.
   await Promise.all([
-    ...items.filter(item => item.kind === "tool").map(run),
+    ...items.filter(item => item.kind === "tool" && item.tool_id !== "browser").map(run),
+    (async () => { for (const item of items.filter(item => item.kind === "tool" && item.tool_id === "browser")) await run(item); })(),
     (async () => { for (const item of items.filter(item => item.kind === "github_push")) await run(item); })(),
   ]);
   busy = false;
-  const failures = outcomes.filter(outcome => outcome.error);
-  $("approval-feedback").innerHTML = `<p>${items.length - failures.length} ${decision === "approve" ? "approved" : "denied"}${failures.length ? `, ${failures.length} failed` : ""}.</p>${failures.length ? `<ul>${failures.map(({ item, error }) => `<li>${esc(item.source)}: ${esc(item.summary)}. ${esc(error)}</li>`).join("")}</ul>` : ""}`;
+  const failures = outcomes.filter(outcome => outcome.status === "failed");
+  const resolvedDifferently = outcomes.filter(outcome => outcome.status === "resolved_differently");
+  const unconfirmed = outcomes.filter(outcome => outcome.status === "unconfirmed");
+  const completed = outcomes.length - failures.length - resolvedDifferently.length - unconfirmed.length;
+  $("approval-feedback").innerHTML = `<p>${completed} ${decision === "approve" ? "approved" : "denied"}${failures.length ? `, ${failures.length} failed` : ""}${resolvedDifferently.length ? `, ${resolvedDifferently.length} resolved differently` : ""}${unconfirmed.length ? `, ${unconfirmed.length} unconfirmed` : ""}.</p>${failures.length ? `<ul>${failures.map(({ item, error }) => `<li>${esc(item.source)}: ${esc(item.summary)}. ${esc(error)}</li>`).join("")}</ul>` : ""}${resolvedDifferently.length ? `<ul>${resolvedDifferently.map(({ item, message }) => `<li>${esc(item.source)}: ${esc(item.summary)}. ${esc(message)}</li>`).join("")}</ul>` : ""}${unconfirmed.length ? `<p>Could not confirm the outcome for ${unconfirmed.length} request${unconfirmed.length === 1 ? "" : "s"}. Check History before taking further action.</p>` : ""}`;
   await refreshApprovals();
 }
 
@@ -208,3 +249,5 @@ document.addEventListener("toggle", async event => {
     delete details.dataset.loaded;
   }
 }, true);
+
+document.addEventListener("auto-policy-saved", () => refreshApprovals());

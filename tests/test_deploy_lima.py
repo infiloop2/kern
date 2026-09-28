@@ -218,6 +218,16 @@ class LimaNamingTests(unittest.TestCase):
 
 
 class LimaSmokeContractTests(unittest.TestCase):
+    def test_tcp_cleanup_check_accepts_ssh_output_newlines(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            smoke = LimaSmoke(Path(tmp) / "smoke")
+            with patch.object(smoke, "_ssh", side_effect=[
+                "admin TCP cleanup: old-rule stall reproduced\n",
+                "admin TCP cleanup: reconnect and UID boundary passed\n",
+            ]) as ssh:
+                smoke._check_admin_tcp_cleanup()
+            self.assertEqual(ssh.call_count, 2)
+
     def test_temp_home_leaves_room_for_lima_socket(self) -> None:
         instance_name = lima._instance_name("lima-smoke-2292317860")
         workdir = Path("/tmp") / f"{SMOKE_WORKDIR_PREFIX}{'x' * 16}"

@@ -2462,6 +2462,51 @@ class DeployUnitTests(unittest.TestCase):
         self.assertEqual(team.returncode, 0, team.stderr)
         self.assertEqual(json.loads(team.stdout)["account_id"], "team-1")
 
+    def test_grok_attestation_rejects_symlinked_credential_directories(self) -> None:
+        helper = Path("host/bootstrap/helpers/read-grok-account.sh").read_text()
+        python = helper.split("<<'ATTEST'\n", 1)[1].rsplit("\nATTEST", 1)[0]
+        # Exercise the exact privileged branch as this test user, with only
+        # disposable fixtures. No sudo, host credentials, or provider call.
+        stub = (
+            "import urllib.request\n"
+            "def unexpected_request(*args, **kwargs):\n"
+            "    raise AssertionError('attestation must not run')\n"
+            "urllib.request.urlopen = unexpected_request\n"
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            home = root / "agent-home"
+            home.mkdir()
+            outside = root / "other-user"
+            outside.mkdir()
+            (outside / "auth.json").write_text(json.dumps({
+                "https://auth.x.ai::client": {
+                    "oidc_issuer": "https://auth.x.ai", "key": "other-user-token",
+                },
+            }))
+            linked_home = root / "linked-home"
+            linked_home.symlink_to(home, target_is_directory=True)
+            for runtime in (".grok", ".grok-2"):
+                grok_home = home / runtime
+                grok_home.symlink_to(outside, target_is_directory=True)
+                for candidate in (grok_home, linked_home / runtime):
+                    if candidate.parent == linked_home:
+                        # Isolate the home symlink: the account directory
+                        # itself is ordinary in this second case.
+                        grok_home.unlink()
+                        grok_home.mkdir()
+                        (grok_home / "auth.json").write_text((outside / "auth.json").read_text())
+                    with self.subTest(candidate=candidate):
+                        result = subprocess.run(
+                            [sys.executable, "-c", stub + python],
+                            env=os.environ | {"GROK_HOME": str(candidate)},
+                            capture_output=True, text=True, check=False, timeout=2,
+                        )
+                        self.assertEqual(result.returncode, 1)
+                        self.assertEqual(result.stdout, "")
+                        self.assertIn("no Grok credentials to attest", result.stderr)
+                        self.assertNotIn("attestation must not run", result.stderr)
+
     def test_read_grok_account_rejects_special_auth_files(self) -> None:
         helper = Path("host/bootstrap/helpers/read-grok-account.sh").read_text()
         python = helper.split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]

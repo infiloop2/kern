@@ -2,19 +2,22 @@
 
 The admin API binds `127.0.0.1:7443` and is reached through an SSH port forward,
 the optional Cloudflare Tunnel, or both. The exact path classification, route
-matrix, and cookie/session invariants are specified in
-[Admin API Authentication and Request Boundary](admin-api-authentication.md).
-nftables admits new connections to
-that listener only from root, `kern-admin`, `kern-operator`, and `cloudflared`,
-then drops the port for every other local uid. This matters even on loopback:
-an egress-capable compromised tool or proxy service cannot forge
+matrix, and cookie/session invariants are specified in [Admin API Authentication
+and Request Boundary](admin-api-authentication.md). nftables admits new
+connections to that listener only from root, `kern-admin`, `kern-operator`, and
+`cloudflared`, then drops the port for every other local uid. This matters even
+on loopback: an egress-capable compromised tool or proxy service cannot forge
 `X-Forwarded-Proto`/`Cf-Connecting-Ip` and masquerade as the tunnel. The agent
-can reach only the proxy port. The admin login is the authentication boundary:
-the tunnel carries transport and Cloudflare's edge (DDoS) protection only, with
-no Cloudflare Access gate in front, so the login is hardened to stand alone
-(see [admin login sessions](#admin-login-sessions)). Static admin/app UI assets,
-the side-effect-free OAuth callback shell, and the non-secret public
-`GET /v1/login/status` enrollment bit are the only unauthenticated HTTP routes.
+can reach the proxy port and its reserved preview range `8000-8015`, but not the
+admin listener. The admin login is the authentication boundary: the tunnel
+carries transport and Cloudflare's edge (DDoS) protection only, with no
+Cloudflare Access gate in front, so the login is hardened to stand alone (see
+[admin login sessions](#admin-login-sessions)). Static admin/app UI assets, the
+side-effect-free OAuth callback shell, and the non-secret public `GET
+/v1/login/status` enrollment bit run before session authentication, as do the
+login ceremonies. Approved Instagram publishing has one further exception: a
+short-lived HTTPS media capability. See the [route
+map](admin-api-authentication.md#route-exposure).
 
 ## Admin login sessions
 
@@ -111,14 +114,15 @@ supervision threads.
 
 The same process also serves the workspace Unix socket on a daemon thread, so
 both listeners draw on one fd table. That server is bounded too, but it rejects
-at capacity instead of queueing: its peers are unauthenticated until a request
-line arrives, and a queued connection still costs a descriptor the operator API
-would need. The socket is `0660`, owned by the dedicated `kern-workspace-api`
-group. Only its `kern-admin` owner and the fixed Workspace service account belong
-to that group; agent and unrelated service uids therefore cannot connect.
+at capacity instead of queueing: peer credentials are checked before allocating
+a handler, and a queued connection would still cost a descriptor the operator
+API needs. The socket is `0660`, owned by the dedicated `kern-workspace-api`
+group. Only its `kern-admin` owner and the fixed Workspace service account
+belong to that group; agent and unrelated service uids therefore cannot connect.
 Peer credentials bind each request to that service, the fixed allowlist admits
-only host thread operations, and an idle timeout bounds accidental stalls. The unit's `LimitNOFILE`
-is raised for the same reason.
+only the runtime-status, thread, and conversation-history operations listed in
+[Local sockets](local-sockets.md), and an idle timeout bounds accidental stalls.
+The unit's `LimitNOFILE` is raised for the same reason.
 
 The Workspace service's browser endpoint is reached only through the admin
 API reverse proxy over `/run/kern-workspace/browser.sock`. The socket is group
@@ -152,9 +156,8 @@ either runtime.
 
 Each live-validation verdict is remembered in process memory, so validation
 generates provider traffic at most once per scheduled recheck even though
-loading or awaiting-login runtimes are polled every five seconds and Claude
-turns converge rotated credential metadata as they start (the full lifecycle is in
-[Agent provider lifecycle](agent-provider-lifecycle.md)). The operator refresh
+loading or awaiting-login runtimes are polled every five seconds (the full
+lifecycle is in [Agent provider lifecycle](agent-provider-lifecycle.md)). The operator refresh
 endpoint bypasses this memory and performs an immediate provider check. An
 authentication failure is final for automatic checks: the runtime stays
 `awaiting_login` with no background provider traffic until an explicit refresh
@@ -299,3 +302,28 @@ can only read `infiloop2/kern`'s main-branch `VERSION` file over HTTPS.
 The admin service validates and compares the result, then exposes it through
 `/v1/health`. A failed check preserves the last successful advisory result,
 does not degrade host health, and is retried from scratch on the next poll.
+
+## Automatic tool approvals
+
+Operator-only routes, using the ordinary authenticated admin session and CSRF
+header:
+
+| Method | Route | Body or query |
+| --- | --- | --- |
+| GET | `/v1/auto-approvals` | `page` (default 1), optional `outcome` |
+| PUT | `/v1/auto-approvals/policy` | `tool_id`, `action_id`, `instructions` (1 to 8,000 characters) |
+| DELETE | `/v1/auto-approvals/policy` | `tool_id`, `action_id` |
+
+The GET response contains the eligible action catalog, configured policies,
+provider availability, next review time, quiet-hours indicator and ten review
+records per page. Outcomes are `approved`, `left_pending`, `no_policy` and `failed`. Each history row includes the policy used, explanation,
+model, timestamp, original approval identity, current execution result and
+`approval_error` when the approval call failed or could not be confirmed.
+Ordinary approval summaries include `has_auto_policy` and the latest
+`auto_review` with its outcome, reason and check timestamp. No check is represented
+by an absent `auto_review`, not a persisted lifecycle state.
+
+The auto-approver calls the same tools decision path as manual approval and
+records its decision before that call. Call errors are stored separately from
+the decision and tool execution status. The tools service receives no auto-approval
+metadata. See [Host AI inference](host-ai-inference.md#auto-approval).

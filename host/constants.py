@@ -38,6 +38,7 @@ AGENT_PREVIEW_PORT_COUNT = 16
 # package (see host/runtime/__init__.py); the default paths live here so the
 # server, its clients, and the deploy verifier cannot drift apart. Servers and
 # clients honor the matching KERN_*_SOCKET environment override in tests.
+BROWSER_SOCKET_PATH = "/run/kern-browser/browser.sock"
 TOOLS_SOCKET_PATH = "/run/kern-tools/tools.sock"
 HOST_INFERENCE_SOCKET_PATH = "/run/kern-host-inference/host-inference.sock"
 WORKSPACE_AGENT_SOCKET_PATH = "/run/kern-workspace/agent.sock"
@@ -71,4 +72,5 @@ SERVICE_ACCOUNTS = {
     "kern-embedding": 47751,
     "kern-transcription": 47752,
     "kern-host-inference": 47753,
+    "kern-browser": 47754,
 }

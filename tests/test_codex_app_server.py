@@ -558,6 +558,55 @@ def parked_server() -> Any:
 
 
 class CodexAppServerTests(unittest.TestCase):
+    def test_session_size_uses_metadata_and_argv_in_the_matching_runtime(self) -> None:
+        session_id = "01900000-0000-7000-8000-000000000001"
+        for runtime in codex_app_server_module.CODEX_RUNTIME_TYPES:
+            with self.subTest(runtime=runtime):
+                server = MagicMock(runtime_type=runtime)
+                path = f"{codex_app_server_module.AGENT_CWD}/.{runtime}/sessions/2026/09/28/rollout-date-{session_id}.jsonl"
+                server.call.side_effect = [
+                    {"thread": {"id": session_id, "path": path}},
+                    {"exitCode": 0, "stdout": "104857600\n", "stderr": ""},
+                ]
+                self.assertEqual(codex_app_server_module.session_rollout_size(server, session_id), 104857600)
+                self.assertEqual(server.call.call_args_list[0].args, (
+                    "thread/read", {"threadId": session_id, "includeTurns": False},
+                ))
+                self.assertEqual(server.call.call_args_list[1].args[1]["command"], [
+                    "/usr/bin/stat", "--format=%s", "--", path,
+                ])
+                server.call.reset_mock(side_effect=True)
+                codex_app_server_module.delete_session(server, session_id)
+                server.call.assert_called_once_with("thread/delete", {"threadId": session_id}, timeout=10)
+
+    def test_session_size_rejects_other_homes_and_unexpected_files(self) -> None:
+        session_id = "01900000-0000-7000-8000-000000000001"
+        home = codex_app_server_module.AGENT_CWD
+        for path in (
+            f"{home}/.codex-2/sessions/rollout-{session_id}.jsonl",
+            f"{home}/.codex/sessions/../rollout-{session_id}.jsonl",
+            f"{home}/.codex/sessions/auth.json",
+        ):
+            with self.subTest(path=path):
+                server = MagicMock(runtime_type="codex")
+                server.call.return_value = {"thread": {"id": session_id, "path": path}}
+                with self.assertRaises(CodexAppServerError):
+                    codex_app_server_module.session_rollout_size(server, session_id)
+                self.assertEqual(server.call.call_count, 1)
+
+    def test_session_size_handles_unmaterialized_and_failed_stat(self) -> None:
+        session_id = "01900000-0000-7000-8000-000000000001"
+        server = MagicMock(runtime_type="codex")
+        server.call.return_value = {"thread": {"id": session_id, "path": None}}
+        self.assertEqual(codex_app_server_module.session_rollout_size(server, session_id), 0)
+        path = f"{codex_app_server_module.AGENT_CWD}/.codex/sessions/rollout-{session_id}.jsonl"
+        server.call.side_effect = [
+            {"thread": {"id": session_id, "path": path}},
+            {"exitCode": 1, "stdout": "", "stderr": "unavailable"},
+        ]
+        with self.assertRaisesRegex(CodexAppServerError, "Could not measure"):
+            codex_app_server_module.session_rollout_size(server, session_id)
+
     def test_steer_ack_deadline_precedes_workspace_backend_deadline(self) -> None:
         self.assertLess(
             codex_app_server_module.CODEX_STEER_TIMEOUT_SECONDS,

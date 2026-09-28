@@ -1,3 +1,4 @@
+import { browserPanel, refreshBrowserSessions } from "./browser_sessions.js";
 import { api } from "./api.js";
 import { $, badge, esc, inlineMessage, notice, replaceIntegrationRows, setHtml } from "./helpers.js";
 import { applyIntegrationDetailSelection } from "./network.js";
@@ -21,6 +22,7 @@ export async function refreshTools() {
   const response = await api("GET", "/v1/tools");
   tools = Array.isArray(response.tools) ? response.tools : [];
   renderTools();
+  if (expandedTools.has("browser")) await refreshBrowserSessions();
 }
 
 function renderTools() {
@@ -86,6 +88,7 @@ function renderToolRow(tool) {
           <div class="detail-card-head"><h3>Linked device</h3></div>
           ${renderLinkedDeviceConnection(tool)}
         </div>` : ""}
+        ${tool.tool_id === "browser" ? browserPanel(tool.enabled) : ""}
         ${tool.config.length ? `
         <div class="detail-card">
           <div class="detail-card-head"><h3>Configuration</h3></div>

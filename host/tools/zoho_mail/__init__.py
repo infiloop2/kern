@@ -5,10 +5,13 @@ from __future__ import annotations
 import html
 import json
 import re
+import socket
+import time
 import urllib.parse
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from html.parser import HTMLParser
-from typing import cast
+from typing import BinaryIO, cast
 
 from host.param_guard import (
     PARAM_GUARD_PROTECTION,
@@ -37,9 +40,13 @@ from host.tools.results import (
     ActionResult,
     ApprovalExecuted,
     ApprovalResult,
+    OpenedStreamingAsset,
+    StreamingAsset,
+    StreamingAssetError,
 )
 from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field, schema as _schema
+from host.tools.shared.media import MAX_MEDIA_BYTES
 from host.tools.shared.oauth2 import (
     IntegrationReconnectRequired,
     OAuth2CredentialStore,
@@ -56,6 +63,7 @@ from host.tools.shared.web import (
     encode_query,
     json_request,
     known_provider_transport_error,
+    open_response_stream,
     provider_warning,
     transport_or_unmapped_provider_error,
     unmapped_provider_error,
@@ -108,7 +116,10 @@ MAX_SUBJECT_CHARS = 500
 MAX_RECIPIENTS_PER_FIELD = 50
 MAX_LINK_URL_CHARS = 2_048
 MAX_APPROVAL_PAYLOAD_BYTES = 64 * 1024
+MAX_ATTACHMENTS = 50
+ATTACHMENT_TIMEOUT_SECONDS = 120
 ID_RE = re.compile(r"^[0-9]{1,30}$")
+MEDIA_TYPE_RE = re.compile(r"^[a-z0-9][a-z0-9!#$&^_.+-]{0,63}/[a-z0-9][a-z0-9!#$&^_.+-]{0,63}$")
 FOLDER_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]*$")
 EMAIL_RE = re.compile(r"^[^@\s,<>]+@[^@\s,<>]+\.[^@\s,<>]+$")
 HTML_TAG_RE = re.compile(r"<[A-Za-z][^>]*>")
@@ -188,8 +199,19 @@ READ_MESSAGE_OUTPUT_SCHEMA: JSONObject = outputs.obj(
                 "content_html_truncated": outputs.boolean(
                     "The original message content was longer than the HTML cap and was clipped."
                 ),
+                "attachments": outputs.array_of(
+                    outputs.obj(
+                        {
+                            "attachment_id": outputs.text("Zoho attachment id; pass to download_attachment."),
+                            "name": outputs.text("Attachment filename as sent."),
+                            "size_bytes": outputs.integer("Attachment size in bytes, 0 when Zoho omits it."),
+                        },
+                        ["attachment_id", "name", "size_bytes"],
+                    ),
+                    f"Non-inline attachments, up to {MAX_ATTACHMENTS}; empty when the message has none.",
+                ),
             },
-            [*MESSAGE_PROPERTIES, "content", "content_truncated", "content_html", "content_html_truncated"],
+            [*MESSAGE_PROPERTIES, "content", "content_truncated", "content_html", "content_html_truncated", "attachments"],
         ),
     },
     ["message", "zoho_message"],
@@ -372,11 +394,14 @@ MANIFEST = ToolManifest(
         ),
         ActionSpec(
             id="read_message",
-            description="Read one Zoho Mail message's metadata, plaintext body, and original HTML content using its folder and message ids.",
+            description=(
+                "Read one Zoho Mail message's metadata, plaintext body, original HTML content, and attachment list "
+                "using its folder and message ids."
+            ),
             data_policy=(
                 "Read-only. Sends only the folder and message ids to the connected Zoho Mail account. "
-                "The message metadata, plaintext body, and bounded original HTML enter active model context. "
-                "Runs directly with no approval."
+                "The message metadata, plaintext body, bounded original HTML, and attachment names and sizes "
+                "enter active model context. Runs directly with no approval."
             ),
             input_schema=_schema(
                 {
@@ -386,6 +411,24 @@ MANIFEST = ToolManifest(
                 ["folder_id", "message_id"],
             ),
             output_schema=READ_MESSAGE_OUTPUT_SCHEMA,
+        ),
+        ActionSpec(
+            id="download_attachment",
+            description="Download one attachment from a Zoho Mail message (up to 200 MB) into the agent workspace.",
+            data_policy=(
+                "Read-only. Sends only the folder, message, and attachment ids to the connected Zoho Mail account. "
+                "Saves the attachment bytes as a file in the agent workspace; they do not enter the action result. "
+                "Runs directly with no approval."
+            ),
+            input_schema=_schema(
+                {
+                    "folder_id": {"type": "string", "description": "Numeric folder id returned by a list or search action."},
+                    "message_id": {"type": "string", "description": "Numeric message id returned by a list or search action."},
+                    "attachment_id": {"type": "string", "description": "Numeric attachment id returned by read_message."},
+                },
+                ["folder_id", "message_id", "attachment_id"],
+            ),
+            returns_asset=True,
         ),
         ActionSpec(
             id="create_folder",
@@ -505,6 +548,11 @@ MANIFEST = ToolManifest(
         "read_message": {
             "folder_id": validated_input("1–30 decimal digits."),
             "message_id": validated_input("1–30 decimal digits."),
+        },
+        "download_attachment": {
+            "folder_id": validated_input("1–30 decimal digits."),
+            "message_id": validated_input("1–30 decimal digits."),
+            "attachment_id": validated_input("1–30 decimal digits."),
         },
         "create_folder": {
             "name": guarded_input(allow_identifiers=True),
@@ -648,12 +696,13 @@ MANIFEST = ToolManifest(
         "Use list_senders to discover the current default sender and verified aliases before setting from_address. "
         "Use list_folders before list_messages. read_message needs both folder_id and message_id from a list or search result. "
         "Its content_html field preserves the original message markup and URLs for comprehensive agent-side parsing. "
+        "Its attachments list gives attachment ids; download_attachment saves one attachment into the workspace. "
         "search_messages accepts Zoho syntax such as sender:alice@example.com::has:attachment. Sending defaults to safe HTML "
         "rendered from paragraph, heading, list, rich-text, link, and divider blocks; set mail_format to plaintext when needed. "
         "Use list_folders to obtain destination folder ids; create_folder also returns the new folder id. create_folder, "
         "move_messages, and archive_messages run directly without approval, so archive only after processing succeeds. "
         "Zoho filter creation has no documented Mail API, so recurring organization must be done by a schedule that searches, "
-        "moves, and archives messages. Raw HTML sending, attachments, "
+        "moves, and archives messages. Raw HTML sending, sending attachments, "
         "replies, drafts, and deletes are not implemented."
     ),
 )
@@ -1224,7 +1273,124 @@ def _read_message(access_token: str, data_center: str, tool_input: JSONObject, a
     summary["content_truncated"] = truncated
     summary["content_html"] = content_html[:MAX_MESSAGE_HTML_CHARS]
     summary["content_html_truncated"] = len(content_html) > MAX_MESSAGE_HTML_CHARS
+    attachments: list[JSONValue] = []
+    if summary["has_attachment"]:
+        attachments = cast(list[JSONValue], _attachments(access_token, data_center, base_path)[:MAX_ATTACHMENTS])
+    summary["attachments"] = attachments
     return {"message": "Zoho Mail message loaded.", "zoho_message": summary}
+
+
+def _attachments(access_token: str, data_center: str, message_path: str) -> list[JSONObject]:
+    response = _api_request(access_token, data_center, "GET", f"{message_path}/attachmentinfo", what="attachment info")
+    data = response.get("data")
+    records = data.get("attachments") if isinstance(data, dict) else None
+    if not isinstance(records, list):
+        raise RuntimeError("Zoho Mail attachment info returned invalid data.")
+    attachments: list[JSONObject] = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        attachment_id = _id_value(record.get("attachmentId"))
+        if not attachment_id:
+            continue
+        size = record.get("attachmentSize")
+        if isinstance(size, str) and size.isascii() and size.isdecimal():
+            size = int(size)
+        attachments.append({
+            "attachment_id": attachment_id,
+            "name": _plain(record.get("attachmentName"), 255),
+            "size_bytes": size if isinstance(size, int) and not isinstance(size, bool) and size >= 0 else 0,
+        })
+    return attachments
+
+
+def _attachment_filename(name: object, attachment_id: str) -> str:
+    cleaned = "".join(
+        "_" if character in "/\\" or ord(character) < 32 or ord(character) == 127 else character
+        for character in (name if isinstance(name, str) else "")
+    ).strip()
+    while len(cleaned.encode("utf-8")) > 255:
+        cleaned = cleaned[:-1]
+    return cleaned if cleaned not in {"", ".", ".."} else f"attachment-{attachment_id}"
+
+
+class _DeadlineBody:
+    """Read an attachment body under one whole-transfer deadline.
+
+    The HTTP timeout applies per socket operation, so a slow trickle could
+    otherwise hold the tools call slot indefinitely. Each read is limited to
+    the time left and returns at most one underlying socket read.
+    """
+
+    def __init__(self, source: BinaryIO, deadline: float) -> None:
+        self._source = source
+        self._deadline = deadline
+        raw = getattr(getattr(source, "fp", None), "raw", None)
+        sock = getattr(raw, "_sock", None)
+        self._socket = sock if isinstance(sock, socket.socket) else None
+
+    def read(self, size: int = -1) -> bytes:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise StreamingAssetError(
+                f"Zoho Mail attachment download exceeded {ATTACHMENT_TIMEOUT_SECONDS} seconds."
+            )
+        try:
+            if self._socket is not None:
+                self._socket.settimeout(remaining)
+            read1 = getattr(self._source, "read1", None)
+            return cast(bytes, read1(size)) if callable(read1) else self._source.read(size)
+        except (OSError, ValueError) as exc:
+            raise StreamingAssetError("Zoho Mail attachment download failed.") from exc
+
+
+def _open_attachment(access_token: str, data_center: str, tool_input: JSONObject, api: HostAPI) -> StreamingAsset:
+    folder_id = _required_id(tool_input, "folder_id")
+    message_id = _required_id(tool_input, "message_id")
+    attachment_id = _required_id(tool_input, "attachment_id")
+    message_path = f"/accounts/{_connected_account_id(api)}/folders/{folder_id}/messages/{message_id}"
+    attachment = next(
+        (item for item in _attachments(access_token, data_center, message_path) if item["attachment_id"] == attachment_id),
+        None,
+    )
+    if attachment is None:
+        raise ToolInputValidationError("That attachment id is not on this message; use read_message to list attachments.")
+    _, _, mail_base = _oauth_urls(data_center)
+    url = f"{mail_base}/api{message_path}/attachments/{attachment_id}"
+    filename = _attachment_filename(attachment["name"], attachment_id)
+
+    @contextmanager
+    def open_stream() -> Iterator[OpenedStreamingAsset]:
+        deadline = time.monotonic() + ATTACHMENT_TIMEOUT_SECONDS
+        try:
+            with open_response_stream(
+                "GET",
+                url,
+                headers={"authorization": f"Zoho-oauthtoken {access_token}", "accept": "application/octet-stream"},
+                failure_message="Zoho Mail attachment download request failed.",
+                timeout=ATTACHMENT_TIMEOUT_SECONDS,
+            ) as (source, headers):
+                raw_length = headers.get("content-length", "")
+                if not raw_length.isascii() or not raw_length.isdecimal():
+                    raise StreamingAssetError("Zoho Mail attachment download did not include a valid size.")
+                size_bytes = int(raw_length)
+                if not 1 <= size_bytes <= MAX_MEDIA_BYTES:
+                    raise StreamingAssetError("Zoho Mail attachment size is outside the supported range (1 byte to 200 MB).")
+                media_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
+                if not MEDIA_TYPE_RE.fullmatch(media_type):
+                    media_type = "application/octet-stream"
+                body = cast(BinaryIO, _DeadlineBody(source, deadline))
+                yield OpenedStreamingAsset(filename=filename, media_type=media_type, size_bytes=size_bytes, source=body)
+        except StreamingAssetError:
+            raise
+        except WebRequestError as exc:
+            if exc.status in {401, 403}:
+                raise StreamingAssetError("Zoho Mail rejected the attachment download; reconnect Zoho Mail if this persists.") from exc
+            if exc.status == 404:
+                raise StreamingAssetError("Zoho Mail could not find that attachment.") from exc
+            raise StreamingAssetError("Zoho Mail attachment download failed.") from exc
+
+    return StreamingAsset(open_stream)
 
 
 def _folder_by_id(access_token: str, data_center: str, account_id: str, folder_id: str) -> JSONObject:
@@ -1635,6 +1801,8 @@ class ZohoMailTool:
                 return ActionExecuted(_list_messages(access_token, data_center, tool_input, api))
             if action == "read_message":
                 return ActionExecuted(_read_message(access_token, data_center, tool_input, api))
+            if action == "download_attachment":
+                return _open_attachment(access_token, data_center, tool_input, api)
             if action == "create_folder":
                 return ActionExecuted(
                     _create_folder(

@@ -10,16 +10,19 @@ from http.server import ThreadingHTTPServer
 import os
 from pathlib import Path
 import pwd
+import re
 import socket
 import threading
+import time
 from typing import Any, cast
 
 from host.constants import TRANSCRIPTION_SOCKET_PATH
 from host.runtime.core.unix_socket_service import UnixSocketRequestHandler
 from host.runtime.transcription.client import MAX_REQUEST_BYTES, decode_audio
+from host.runtime.transcription import diagnostics
 
 MODEL_DIR = Path(os.environ.get("KERN_TRANSCRIPTION_MODEL_DIR",
-                               "/usr/local/share/kern-transcription-models/small.en"))
+                               "/usr/local/share/kern-transcription-models/base.en"))
 _model_instance: Any = None
 _inference_lock = threading.Lock()
 
@@ -77,27 +80,54 @@ class Handler(UnixSocketRequestHandler):
             self._send_json(503, {"error": "busy"})
             return
         try:
-            self._transcribe_request()
+            diagnostic = self._transcribe_request()
         finally:
             _inference_lock.release()
+        # The journald reporter may wait on a subprocess. Never hold
+        # inference capacity while emitting an observation.
+        if diagnostic is not None:
+            outcome, context = diagnostic
+            diagnostics.report("transcription.inference", outcome, context)
 
-    def _transcribe_request(self) -> None:
+    def _transcribe_request(self) -> tuple[str, dict[str, Any]] | None:
         length = self.bounded_content_length(MAX_REQUEST_BYTES)
         if length is None:
-            return
+            return None
         body = self.read_json_object_body(length)
         if body is None:
-            return
+            return None
         try:
             audio = decode_audio(body)
         except ValueError as exc:
             self._send_json(400, {"error": str(exc)})
-            return
+            return None
+        started = time.monotonic()
+        cpu_started = time.process_time()
+        outcome = "success"
+        request_id = self.headers.get("X-Kern-Dictation-Id", "")
+        context: dict[str, Any] = {
+            "request_id": request_id if re.fullmatch(r"[0-9a-f]{32}", request_id) else "",
+            "audio_ms": round(len(audio) / 32),
+            "model": MODEL_DIR.name,
+            "cpu_threads": 2,
+        }
         try:
-            self._send_json(200, {"text": transcribe(audio)})
-        except Exception:
+            text = transcribe(audio)
+        except Exception as exc:
             # Never log speech or its transcript, including library exceptions.
+            outcome = "inference_failure"
+            context["exception_type"] = type(exc).__name__
+            text = ""
+        elapsed = time.monotonic() - started
+        context.update(inference_ms=round(elapsed * 1000),
+                       cpu_ms=round((time.process_time() - cpu_started) * 1000))
+        if outcome == "success":
+            self._send_json(200, {"text": text})
+        else:
             self._send_json(503, {"error": "transcription failed"})
+        if outcome != "success" or elapsed >= diagnostics.SLOW_SECONDS:
+            return ("slow_inference" if outcome == "success" else outcome, context)
+        return None
 
 
 class ActivatedServer(ThreadingHTTPServer):
@@ -121,10 +151,12 @@ def main() -> int:
     def preload() -> None:
         try:
             load_model()
-        except Exception:
+        except Exception as exc:
             # A failed startup is restarted by systemd; never expose library
             # exceptions (which may contain host paths) to the browser.
             failed.set()
+            diagnostics.report("transcription.startup", "model_load_failure",
+                               {"model": MODEL_DIR.name, "exception_type": type(exc).__name__})
             server.shutdown()
 
     threading.Thread(target=preload, daemon=True).start()

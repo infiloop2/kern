@@ -27,3 +27,4 @@ from host.runtime.core.state.network import (
 from host.runtime.core.state.tools import _approval_id
 
 from host.runtime.core.state.usage import *
+from host.runtime.core.state.auto_approvals import *

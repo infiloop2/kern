@@ -10,10 +10,14 @@ It does not wait for completion.
 
 Kern prepends the same agent-message header used by `send_agent_message`, with
 the spawning thread's authenticated id and the reply command. The spawned
-agent is an ordinary Chat visible to the operator and can return its result or
+agent appears under Spawned agents with ordinary Chat controls and can return its result or
 blocking question through `send_agent_message`, but delegation never expands
 the operator's authority or task scope. There is no agent registry, completion
 queue, automatic retry, or separate reply operation.
+
+An idle spawned agent is archived after one day without activity. Its transcript
+stays readable, and the operator can restore it. While archived it cannot
+receive agent messages or operator messages.
 
 `send_agent_message` takes exactly `thread_id` and `message`. Discover Apps
 and model Schedules through their existing Workspace lists, including their

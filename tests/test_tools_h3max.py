@@ -8,8 +8,8 @@ import unittest
 from typing import Any
 from unittest.mock import patch
 
-from host.tools import h3max
-from host.tools.h3max import H3MaxTool
+from host.tools.fal_ai import h3max, media as fal_media
+from host.tools.fal_ai.h3max import H3MaxTool
 from host.tools.json_types import JSONObject
 from host.tools.results import ActionExecuted, ActionFailed, StreamingAsset
 from host.tools.shared import media as shared_media
@@ -21,10 +21,39 @@ REQUEST_ID = "764cabcf-b745-4b3e-ae38-1200304cf45b"
 
 
 def api_with_key() -> FakeHostAPI:
-    return FakeHostAPI(config={"H3MAX_FAL_KEY": "fal-key"})
+    api = FakeHostAPI(config={"FAL_API_KEY": "fal-key"})
+    for key, mime in (("i", "image/png"), ("e", "image/png"), ("v", "video/mp4"), ("a", "audio/wav")):
+        api.assets.add(key * 43, media_type=mime)
+    return api
 
 
 class H3MaxToolTests(unittest.TestCase):
+    def setUp(self):
+        upload = patch.object(fal_media, "upload", side_effect=lambda asset, *a: "https://v3.fal.media/" + asset)
+        self.upload = upload.start()
+        self.addCleanup(upload.stop)
+
+    def test_uploads_deduplicate_and_retain_sources_until_acceptance(self) -> None:
+        for response, success in (({}, False), ({"request_id": REQUEST_ID}, True)):
+            api = api_with_key()
+            self.upload.reset_mock()
+            with patch.object(h3max, "json_request", return_value=response) as request:
+                result = H3MaxTool().execute("generate_video", {"prompt": "wave", "image_asset_id": "i" * 43,
+                    "end_image_asset_id": "i" * 43}, api)
+            self.assertIsInstance(result, ActionExecuted if success else ActionFailed)
+            self.assertEqual(self.upload.call_count, 1)
+            self.assertEqual(request.call_count, 1)
+            self.assertEqual("i" * 43 in api.assets.records, not success)
+
+    def test_validation_finishes_before_upload(self) -> None:
+        for settings in ({"seed": "-1"}, {"duration_seconds": "16"}, {"aspect_ratio": "9:16"},
+                         {"end_image_asset_id": "v" * 43}, {"image_url": "https://example.com/frame.png"}):
+            with self.subTest(settings=settings), patch.object(h3max, "json_request") as request:
+                result = H3MaxTool().execute("generate_video", {"prompt": "wave", "image_asset_id": "i" * 43, **settings}, api_with_key())
+                self.assertIsInstance(result, ActionFailed)
+                request.assert_not_called()
+        self.upload.assert_not_called()
+
     def test_manifest_has_complete_privacy_and_cost_contract(self) -> None:
         tool = H3MaxTool()
         self.assertEqual(tool.manifest.connection, "enable_only")
@@ -34,7 +63,7 @@ class H3MaxToolTests(unittest.TestCase):
             ["generate_video", "get_task", "save_video"],
         )
         self.assertEqual(
-            [entry.key for entry in tool.manifest.config], ["H3MAX_FAL_KEY"]
+            [entry.key for entry in tool.manifest.config], ["FAL_API_KEY"]
         )
         guide = " ".join(
             card.description + " " + " ".join(point.text for point in card.points)
@@ -100,8 +129,8 @@ class H3MaxToolTests(unittest.TestCase):
                 "generate_video",
                 {
                     "prompt": "move from morning to night",
-                    "image_url": "https://media.example.com/start.webp",
-                    "end_image_url": "https://media.example.com/end.webp",
+                    "image_asset_id": "i" * 43,
+                    "end_image_asset_id": "e" * 43,
                     "duration_seconds": "10",
                     "resolution": "480P",
                     "prompt_expansion_mode": "quality",
@@ -111,8 +140,8 @@ class H3MaxToolTests(unittest.TestCase):
             )
         self.assertIsInstance(result, ActionExecuted)
         self.assertEqual(seen["url"], h3max._endpoint("image"))
-        self.assertEqual(seen["body"]["image_url"], "https://media.example.com/start.webp")
-        self.assertEqual(seen["body"]["end_image_url"], "https://media.example.com/end.webp")
+        self.assertEqual(seen["body"]["image_url"], "https://v3.fal.media/" + "i" * 43)
+        self.assertEqual(seen["body"]["end_image_url"], "https://v3.fal.media/" + "e" * 43)
         self.assertEqual(seen["body"]["duration"], 10)
         self.assertEqual(seen["body"]["resolution"], "480P")
         self.assertEqual(seen["body"]["prompt_expansion_mode"], "quality")
@@ -128,18 +157,18 @@ class H3MaxToolTests(unittest.TestCase):
 
         tool_input = {
             "prompt": "Image 1 enters with Video 1 motion and Audio 1 voice",
-            "reference_image_urls": ["https://media.example.com/person.png"],
-            "reference_video_urls": ["https://media.example.com/motion.mp4"],
-            "reference_audio_urls": ["https://media.example.com/voice.wav"],
+            "reference_image_asset_ids": ["i" * 43],
+            "reference_video_asset_ids": ["v" * 43],
+            "reference_audio_asset_ids": ["a" * 43],
             "aspect_ratio": "9:16",
         }
         with patch.object(h3max, "json_request", fake_request):
             result = H3MaxTool().execute("generate_video", tool_input, api_with_key())
         self.assertIsInstance(result, ActionExecuted)
         self.assertEqual(seen["url"], h3max._endpoint("reference"))
-        self.assertEqual(seen["body"]["reference_image_urls"], tool_input["reference_image_urls"])
-        self.assertEqual(seen["body"]["reference_video_urls"], tool_input["reference_video_urls"])
-        self.assertEqual(seen["body"]["reference_audio_urls"], tool_input["reference_audio_urls"])
+        self.assertEqual(seen["body"]["reference_image_urls"], ["https://v3.fal.media/" + "i" * 43])
+        self.assertEqual(seen["body"]["reference_video_urls"], ["https://v3.fal.media/" + "v" * 43])
+        self.assertEqual(seen["body"]["reference_audio_urls"], ["https://v3.fal.media/" + "a" * 43])
         self.assertEqual(seen["body"]["aspect_ratio"], "9:16")
 
     def test_reference_mode_defaults_adaptive_and_enforces_provider_limits(self) -> None:
@@ -147,31 +176,31 @@ class H3MaxToolTests(unittest.TestCase):
             api_with_key(),
             {
                 "prompt": "Image 1 walks",
-                "reference_image_urls": ["https://media.example.com/one.png"],
+                "reference_image_asset_ids": ["i" * 43],
             },
         )
         self.assertEqual(mode, "reference")
         self.assertEqual(body["aspect_ratio"], "adaptive")
 
         bad_inputs = [
-            {"prompt": "x", "reference_image_urls": []},
+            {"prompt": "x", "reference_image_asset_ids": []},
             {
                 "prompt": "x",
-                "reference_audio_urls": ["https://media.example.com/only.wav"],
+                "reference_audio_asset_ids": ["a" * 43],
             },
             {
                 "prompt": "x",
-                "reference_image_urls": [
-                    f"https://media.example.com/{index}.png" for index in range(13)
+                "reference_image_asset_ids": [
+                    "i" * 43 for index in range(13)
                 ],
             },
             {
                 "prompt": "x",
-                "reference_image_urls": [
-                    f"https://media.example.com/{index}.png" for index in range(7)
+                "reference_image_asset_ids": [
+                    "i" * 43 for index in range(7)
                 ],
-                "reference_video_urls": [
-                    f"https://media.example.com/{index}.mp4" for index in range(6)
+                "reference_video_asset_ids": [
+                    "v" * 43 for index in range(6)
                 ],
             },
         ]
@@ -195,18 +224,18 @@ class H3MaxToolTests(unittest.TestCase):
             {"prompt": "x", "prompt_expansion_mode": "off"},
             {"prompt": "x", "seed": "-1"},
             {"prompt": "x", "seed": "4294967296"},
-            {"prompt": "x", "end_image_url": "https://media.example.com/end.png"},
+            {"prompt": "x", "end_image_asset_id": "e" * 43},
             {
                 "prompt": "x",
-                "image_url": "https://media.example.com/start.png",
+                "image_asset_id": "i" * 43,
                 "aspect_ratio": "16:9",
             },
             {
                 "prompt": "x",
-                "image_url": "https://media.example.com/start.png",
-                "reference_image_urls": ["https://media.example.com/person.png"],
+                "image_asset_id": "i" * 43,
+                "reference_image_asset_ids": ["i" * 43],
             },
-            {"prompt": "x", "image_url": "http://media.example.com/start.png"},
+            {"prompt": "x", "image_asset_id": "http://media.example.com/start.png"},
             {"prompt": "x", "surprise": True},
         ]
         for tool_input in bad_inputs:

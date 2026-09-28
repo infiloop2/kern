@@ -11,11 +11,11 @@ operator—for example, by opening a link?
 
 ## Reviewed commits
 
-Latest reviewed commit: `6151eea5abb61590684c4cf667ae6f619d705231`.
+Latest reviewed commit: `a597a8d063d735d11c30d1f2b2f6b66e7479ceac`.
 
 | Commit | Reviewed by |
 | --- | --- |
-| `6151eea5abb61590684c4cf667ae6f619d705231` | gpt-5.6-sol; Claude Opus 5 |
+| `a597a8d063d735d11c30d1f2b2f6b66e7479ceac` | GPT-6 (Codex) |
 
 ## Findings
 
@@ -88,111 +88,78 @@ below names it.
 
 ## Collaborative review
 
-### `6151eea5abb61590684c4cf667ae6f619d705231`
+### `a597a8d063d735d11c30d1f2b2f6b66e7479ceac`
 
-Reviewed by: gpt-5.6-sol; Claude Opus 5
+Reviewed by: GPT-6 (Codex)
 
-Methodology: static, repository-level source-to-sink review of the complete
-parent Admin UI and its API/helper inputs. HTML, text, attribute, URL,
-navigation, clipboard, object-URL, and request sinks were grep-enumerated and
-then traced from agent-, provider-, tool-, GitHub-, process-, file-, and
-host-error-controlled values. File viewing and media delivery were followed
-through the privileged helper and browser lifecycle. Existing browser smoke
-fixtures were source-reviewed; no live browser or hostile-media run was
-performed.
+Methodology: inventoried browser sinks across the trusted parent modules and
+traced agent-controlled sources into rendering, link, file, and approval
+contexts. Read the relevant helpers and complete sensitive file/approval
+paths, with targeted source inspection elsewhere. Ran the Chromium desktop
+and mobile mock smoke, including hostile file fixtures. This is a source and
+fixture review, not an exhaustive browser fuzzer over every renderer.
 
 #### What was reviewed
 
-- `host/runtime/admin_api/admin_ui.html`, its CSS, and every parent module:
-  `api.js`, `app.js`, `connection_guide.js`, `files.js`, `health.js`,
-  `helpers.js`, `integration_catalog.js`, `logs.js`, `network.js`,
-  `passkeys.js`, `processes.js`, `threads.js`, and `tools.js`.
-- Parent renderers and browser actions for health/runtime state, threads,
-  provider/account errors, network events, tool approvals/results, GitHub
-  audits and pending pushes, host errors, process command lines, file names,
-  paths, text, images, and videos. Installed-app frame content and its bridge
-  were deliberately left to axis 05.
-- `host/runtime/admin_api/service.py` and
-  `host/bootstrap/helpers/read-agent-file.sh`: authenticated file list/read
-  routes, dirfd and `O_NOFOLLOW` path walking, open-fd regular-file checks,
-  byte/type bounds, fixed media types, response security headers, text
-  decoding, object-URL publication, and cleanup.
-- Static asset mapping and module closure, CSP/cache/referrer/MIME/framing
-  headers, login-screen separation, polling/re-render behavior, logout, and
-  the malicious-string/file fixtures in the Playwright smoke suite.
+- `host/runtime/admin_api/admin_ui/`: shell/API helpers, login/passkey,
+  runtime/provider, network, tools/approvals, logs, processes, files, health,
+  diagnostics and service worker. Searched HTML, attributes, style/URL sinks,
+  navigation, popups, clipboard, object URLs, workers and module loading.
+- Text/quoted-attribute escaping in `helpers.js`; approval summaries, exact
+  payloads and results in `approvals.js`; filenames/media and download flows
+  in `files.js`; network/process/log/provider error rendering; static asset
+  exposure and response policy in `admin_api/service.py`.
+- `read-agent-file`, upload handling and Admin file routes, including fixed
+  MIME/disposition, byte bounds, regular-file rules and download-only handling
+  for active document formats. Workspace rich text and generated UI are
+  reviewed separately in axis 05.
 
-#### Coverage and confidence
+#### Outcome and coverage
 
-- Checklists 1–4: every parent sink and relative API request was enumerated,
-  and agent-influenceable values were traced to their final context.
-  Untrusted text is escaped or assigned through DOM text APIs; values used in
-  quoted attributes are currently constrained enums, validated identifiers,
-  or trusted manifests. `badge()` remains a latent quote-unsafe helper
-  contract, already recorded as UI-CONTENT-002. No agent-controlled value was
-  found selecting a browser destination or privileged action. An independent
-  sink sweep agreed: one document (`admin_ui.html`, also served at
-  `/oauth/callback`) and thirteen modules, with no `srcdoc`, `document.write`,
-  `eval`, `new Function`, `window.open`, dynamic `import()`, service worker, or
-  inline event-handler attribute anywhere, and no unquoted attribute
-  (`data-page`, `colspan`, `stroke-dasharray`, `<progress value>` all take
-  numbers). Login and passkey screens contain no HTML sink at all — every
-  string is `textContent`.
-- Checklist 4, verified negative worth recording because it was tested as a
-  candidate finding and rejected: the OAuth login anchor
-  (`admin_ui/health.js:404,414`) interpolates `esc(login.login_url)` into a
-  quoted `href`, and `esc()` does not escape `"`. This is not separately
-  reportable. The line is byte-identical to `f28b50e87b61`'s
-  `admin_ui.js:501,509`, so it is the sink UI-CONTENT-002 was already filed
-  against and examined at. More importantly it is unreachable for this axis's
-  adversary: the URL comes from the provider's device-code/OAuth endpoint over
-  proxied TLS, and both login processes are spawned by root helpers that build
-  the environment themselves and exec root-owned binaries with `chattr +i`
-  harness configuration, so a malicious agent does not influence the value.
-  Every other external link in the UI carries `rel="noopener noreferrer"`;
-  this one does not, which is ADM-002's subject, not this axis's.
-- Checklist 5: file delivery rejects traversal/symlink swaps, non-regular and
-  oversized files, unsupported or mismatched media, SVG, and HTML. Responses
-  use fixed JPEG/PNG/WebP/MP4/MOV types, `nosniff`, no-store, and sandbox
-  headers; text uses replacement decoding and blob URLs are revoked on
-  selection/reset. Confidence is lower for decompression/dimension behavior
-  because no hostile-media corpus or live decoder test was run.
-- Checklist 6: the parent asset map and imports are fixed and same-origin,
-  with no CDN, analytics, remote font/import, prefetch, or service worker.
-  CSP, `base-uri`, frame/object restrictions, referrer policy, cache policy,
-  and MIME headers provide defense in depth.
-- Checklist 7: authentication views, 401 transitions, polling updates, lazy
-  payload rendering, navigation, and logout/reload were traced. Agent data
-  does not persist active content or trigger an authenticated mutation in the
-  reviewed paths.
-- Checklist 8: existing smoke fixtures cover quote/markup filenames,
-  script-looking text, image decoding, and desktop/mobile overflow, but were
-  read rather than rerun. They are not an exhaustive malicious fixture matrix
-  for every renderer, window/download/clipboard path, CSP report, object-URL
-  lifetime, or media edge case. Confidence is high for static source/sink
-  containment and medium for browser/media implementation edges. Neither
-  reviewer could run them: there is no live Kern host and loopback TCP is
-  blocked in the review sandbox, so `tests/smoke-ui/` (Playwright against
-  `run_admin_ui_mock.py`) did not execute, and no claim on this axis rests on
-  observed DOM, network log, CSP report, object-URL lifetime, clipboard, or
-  mobile layout. One concrete test-coverage gap: the suite's login fixtures are
-  benign `https://` URLs only (`run_admin_ui_mock.py:1650-1664`), so the OAuth
-  `href` sink discussed above has no hostile-fixture coverage even though it is
-  the UI's one externally-sourced attribute value.
-- Checklist 3, unmitigated but not a finding: Unicode bidi/RLO and other
-  formatting controls are stripped or annotated nowhere, so agent-chosen text
-  (a process command line, a network-log target, a tool approval summary) can
-  render visually reordered beside trusted labels. No scenario was found in
-  which this crosses a table cell or forges a specific trusted control — each
-  agent string is confined to its own cell — so it is recorded here rather than
-  in the register. Producer-side caps that bound the exposure were confirmed:
-  1 MiB file read, 500-byte approval summary, 64 KiB payloads,
-  `MAX_CHANGED_PATHS`, `ACTIVITY_TEXT_BYTES`.
-- Checklist 5, additional verified negatives on the file viewer: a file that
-  grows between `fstat` and the copy is truncated to the announced
-  `Content-Length`, and one that shrinks leaves `remaining > 0`, kills the
-  helper, and sets `close_connection`. An over-long or unterminated header
-  line, non-JSON, missing/out-of-range `size_bytes`, or a `media_type` mismatch
-  all abort before headers are committed. Because `_authenticate()` requires
-  the `X-Kern-Csrf` header, `/v1/agent-files/content` cannot be reached by a
-  top-level navigation at all, so hostile HTML/SVG/polyglot content cannot be
-  rendered as a same-origin document regardless of the type checks.
+No new parent-UI execution or automatic-disclosure defect was confirmed.
+The existing quote-escaping remediation remains present. File bytes with
+HTML/SVG behavior are delivered through the explicit download path; the
+Chromium smoke passed hostile filename/content, unchanged download-byte and
+navigation checks.
+
+- Checklist 1: enumerated parent modules and sink categories with a repository
+  search, then inspected sensitive dynamic templates and DOM construction.
+  Module/worker sources are host-owned release assets; dynamic agent values
+  are not used as module specifiers.
+- Checklists 2–3: traced filenames, paths, process lines, network denials,
+  error text, account metadata, Git push/repository descriptions and tool
+  approval JSON into escaping or `textContent`. Approval action ids use
+  encoded routing and escaped attributes. No new unsafe text-to-markup
+  crossing was found. Not every Unicode/bidi/size-limit combination was
+  browser-tested in every view.
+- Checklist 4: inspected intentional link, copy and download construction,
+  including URL validation and opener/referrer handling. Agent text is not
+  allowed to assign arbitrary active HTML, form actions, or asset sources.
+  Copy controls intentionally copy displayed data after operator interaction.
+- Checklist 5: traced confined file reads and bounded response handling to
+  the browser. Media object URLs are explicitly created/revoked; active
+  document types do not receive an inline executable preview. Existing
+  helper/unit and actual Chromium download tests ran. Browser media decoder
+  vulnerabilities and an exhaustive polyglot corpus were not tested.
+- Checklist 6: reviewed local asset imports, CSP, `base-uri`, frame/object
+  policy, MIME/referrer/cache headers and service-worker behavior. The worker
+  removes old caches and does not cache private API responses. The mock
+  smoke checks normal browser requests; it is not evidence of real
+  Cloudflare header delivery.
+- Checklist 7: inspected text-only error paths, authentication-view
+  separation and polling/navigation state guards; exercised existing stale
+  response and overload recovery smoke cases. No forged approval control or
+  trusted-dialog overlay was reproduced.
+- Checklist 8: Chromium desktop/mobile smoke ran successfully through core
+  and Workspace checks, including navigation, overload recovery and malicious
+  file fixtures. The combined command then failed at the optional WebKit
+  canary because the browser is absent. Installation was denied by Kern's
+  proxy (`host_not_allowed` for `cdn.playwright.dev` and
+  `playwright.download.prss.microsoft.com`); no alternate download route was
+  used. CI's browser job supplies WebKit. Exhaustive malicious fixtures in
+  every parent renderer, clipboard/window instrumentation, and every maximum
+  size/partial-update case were not performed.
+
+Confidence is strongest for escaping and the tested file/download behavior,
+with remaining limitations in renderer fuzz coverage and untested browser
+versions. No deployed operator session or private browser data was used.

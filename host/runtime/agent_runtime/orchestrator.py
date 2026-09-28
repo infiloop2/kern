@@ -873,13 +873,14 @@ def _provider_ready(turn: _Turn) -> bool:
 
 def launch_turn(
     turn: _Turn, prepared_turn_message: str, provider_session_id: str | None,
+    *, task_context: str,
 ) -> None:
     """Run an admitted turn on its own thread. Called after the admitting
     mutation commits, so its user message and durable running state exist
     before the worker starts."""
     if turn.runtime_type != "script":
         swarm_annotations.enqueue_task(
-            turn.thread_id, turn.run_number, prepared_turn_message, turn.current_message,
+            turn.thread_id, turn.run_number, task_context,
         )
     worker = threading.Thread(
         target=_run_turn, args=(turn, prepared_turn_message, provider_session_id), daemon=True
@@ -1003,15 +1004,6 @@ def _run_turn(turn: _Turn, input_message: str, provider_session_id: str | None) 
     # would stay fenced with no terminal event.
     server: Any = None
     try:
-        # A harness may rotate its credential independently. Converge the
-        # proxy pin before its process starts; if the refresh makes the
-        # runtime non-active, that transition stops this turn.
-        if adapter.refresh_before_turn:
-            refresh_runtime_status(runtime_type)
-            with turn.delivery_lock:
-                active = turn.phase == ExecutionPhase.STARTING
-            if not active:
-                return
         with turn.delivery_lock:
             if turn.phase != ExecutionPhase.STARTING:
                 return
@@ -1068,7 +1060,8 @@ def _run_turn(turn: _Turn, input_message: str, provider_session_id: str | None) 
                     )
                 turn.provider_session_id = None
             return
-        _finish_turn(turn, provider_session_id=new_provider_session_id)
+        if _finish_turn(turn, provider_session_id=new_provider_session_id):
+            _rotate_large_codex_session(turn, server)
     except Exception as exc:
         # The callback is the primary persistence path. The attribute is only
         # a defensive fallback for an adapter exception at the exact boundary
@@ -1077,6 +1070,36 @@ def _run_turn(turn: _Turn, input_message: str, provider_session_id: str | None) 
         _finish_turn(turn, error_message=str(exc), provider_session_id=last_session_id)
     finally:
         _close_turn(turn, server)
+
+
+def _rotate_large_codex_session(turn: _Turn, server: Any) -> None:
+    """Retire a large session after success, while the live fence is held.
+
+    Detach durably before asking Codex to delete: a timeout or partial deletion
+    must never leave the next firing trying to resume a retired session. There
+    is no retry queue; cleanup failures are host diagnostics, not turn errors.
+    """
+    session_id = turn.provider_session_id
+    if turn.runtime_type not in codex_app_server.CODEX_RUNTIME_TYPES or not session_id:
+        return
+    try:
+        size = codex_app_server.session_rollout_size(server, session_id)
+        if size < codex_app_server.SESSION_ROLLOUT_MAX_BYTES:
+            return
+        with turn.delivery_lock:
+            if turn.phase != ExecutionPhase.FINISHING:
+                return
+            with state.mutation() as cur:
+                state.clear_thread_provider_session(
+                    cur, turn.thread_id, turn.run_number, session_id,
+                )
+            turn.provider_session_id = None
+        codex_app_server.delete_session(server, session_id)
+    except Exception as exc:
+        host_errors.report_unexpected(
+            "agent_runtime.codex_session_rotation", exc,
+            context={"thread_id": turn.thread_id, "runtime": turn.runtime_type},
+        )
 
 
 def stop_thread_turn(thread_id: str) -> bool:
@@ -1102,8 +1125,6 @@ def stop_thread_turn(thread_id: str) -> bool:
             run_number=turn.run_number,
         )
         after_commit.append(partial(_mark_finishing, turn))
-        if turn.runtime_type != "script":
-            after_commit.append(partial(swarm_annotations.enqueue_needs_human, thread_id, turn.run_number))
         server = turn.server
     if server is not None:
         _interrupt_turn(server)
@@ -1179,8 +1200,6 @@ def _record_turn_finished(
         )
     state.finish_thread_run(cur, turn.thread_id, turn.run_number)
     after_commit.append(partial(_mark_finishing, turn, accepted_session_id))
-    if turn.runtime_type != "script":
-        after_commit.append(partial(swarm_annotations.enqueue_needs_human, turn.thread_id, turn.run_number))
 
 
 def _finish_turn(
@@ -1188,7 +1207,8 @@ def _finish_turn(
     *,
     provider_session_id: str | None = None,
     error_message: str | None = None,
-) -> None:
+) -> bool:
+    """Finalize the turn; return True only for a newly recorded success."""
     provider_session_id = _normalized_provider_session_id(provider_session_id)
     after_commit: list[Callable[[], None]] = []
     with turn.delivery_lock, state.mutation(after_commit=after_commit) as cur:
@@ -1209,7 +1229,7 @@ def _finish_turn(
                 after_commit.append(
                     partial(_publish_provider_session, turn, provider_session_id)
                 )
-            return
+            return False
         _record_turn_finished(
             cur,
             after_commit,
@@ -1217,6 +1237,7 @@ def _finish_turn(
             provider_session_id=provider_session_id,
             error_message=error_message,
         )
+    return error_message is None
 
 
 def _provider_module(runtime_type: str | None = None) -> Any:

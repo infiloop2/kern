@@ -6,6 +6,15 @@ boundaries, but it depends on specific CLI protocols, auth files, and network
 request shapes from those harnesses. This document lists the expectations that
 can break when a harness package is upgraded.
 
+## Contents
+
+- [Current harnesses](#current-harnesses)
+- [Shared expectations](#shared-expectations)
+- [Codex harness expectations](#codex-harness-expectations)
+- [Claude Code harness expectations](#claude-code-harness-expectations)
+- [Hermes harness expectations](#hermes-harness-expectations)
+- [Upgrade review checklist](#upgrade-review-checklist)
+
 ## Current harnesses
 
 | Harness | Package | Pinned version | Runtime id | Adapter |
@@ -79,6 +88,9 @@ Expected methods:
 | `account/login/start` | Accepts `{"type": "chatgptDeviceCode"}` and returns `type`, `loginId`, `verificationUrl`, and `userCode`. |
 | `thread/start` | Accepts `cwd`, `approvalPolicy`, `sandbox`, developer instructions, and the selected `model`. Kern supplies the same short host developer instruction to every thread; the release-owned Workspace contract lives in the immutable agent-home instructions. Returns `thread.id`. |
 | `thread/resume` | Accepts `threadId`, `cwd`, the selected `model`, and refreshed developer instructions. Returns a resumed `thread.id`, or fails when the thread cannot be resumed. |
+| `thread/read` | Metadata-only reads (`includeTurns: false`) return the persisted rollout `path` for size checks after successful turns. |
+| `command/exec` | Runs an argv vector as the agent without a model turn. Rotation uses `/usr/bin/stat` on the rollout path, with a one-second command timeout, and reads `exitCode` and `stdout`. |
+| `thread/delete` | Permanently deletes a persisted thread and its native Codex descendants, including rollout files and associated metadata. Kern detaches its resume mapping before calling this. |
 | `turn/start` | Accepts `threadId`, text input, and the selected `model` and `effort`. Returns `turn.id`. It may emit notifications before the response. |
 | `turn/steer` | Accepts `threadId`, `expectedTurnId`, and text input. The submitting API request waits for its JSON-RPC response; `no active turn` is returned to the caller as a retryable `409`, not retained by a host mailbox. |
 
@@ -356,11 +368,24 @@ Expected stdout messages:
 | --- | --- |
 | `type == "assistant"` | Assistant text is read from `message.content[]` blocks where `type == "text"`. |
 | `type == "result"` | Ends one submitted user message when `subtype == "success"` and `is_error` is not true. |
+| `type == "command_lifecycle"` | Reports a submitted user message's `state` (`queued`, `started`, `completed`) by its `command_uuid`; any state after `queued` marks a steer as started. |
 | `session_id` | May appear on assistant or result messages; the final turn must provide a session id so Kern can resume future turns. |
 
-Steering is implemented by writing more user messages to the same stream while
-the process is running. The adapter waits for one successful `result` per user
-message submitted to that process, including steers.
+Steering is implemented by writing more uuid-stamped user messages to the same
+stream while the process is running, with no control `interrupt`. Claude Code
+queues such a message and starts it at its next safe point: after the in-flight
+tool calls return, or as a follow-up query once the current query has produced
+its `result`. It reports each message's progress as `command_lifecycle` frames
+(`queued`, `started`, `completed`) whose `command_uuid` is the message uuid.
+The adapter ends the host turn on a successful `result` only when every
+delivered steer was reported started before it; a steer still queued at that
+`result` is answered by a later one.
+
+Kern deliberately never interrupts to steer. An `interrupt` control request
+aborts in-flight tools, and Claude Code reports each one to the model as a user
+rejection that tells it to stop and wait, so a message delivery would read as
+an operator stop and discard the tools' work. Stopping a turn is the separate
+process teardown path.
 
 ### Auth and account identity
 
@@ -401,9 +426,7 @@ metadata is available immediately after login. A steady-token authentication
 failure becomes `awaiting_login`; another steady probe failure becomes `error`.
 
 The probe's verdict is memoized per token hash. Active runtimes are rechecked
-every five minutes, and each Claude turn enters the same refresh before spawn
-to converge local credential metadata. Only a refresh whose memo has expired
-runs the probe, so turn-start convergence is normally memory-only. An
+every five minutes; turns do not refresh before spawning. An
 `awaiting_login` verdict never expires: that token is rejected and no
 background retry can fix it. An explicit refresh probes once; an operator login
 (which mints a new token) or an account reset replaces the credential. An

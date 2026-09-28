@@ -1,18 +1,20 @@
 # Code Layout
 
-The host control-plane Python runtime uses only the standard library.
-PostgreSQL is reached through the in-repo wire client rather than a third-party
-driver, and a unit test rejects non-standard-library control-plane imports. The
-isolated `kern-embedding` service is the deliberate exception: its dedicated
-venv contains pinned FastEmbed/ONNX dependencies and cannot access the network
-or database.
+The host control-plane Python runtime uses only the standard library. PostgreSQL
+is reached through the in-repo wire client rather than a third-party driver, and
+a unit test rejects non-standard-library control-plane imports. The isolated
+`kern-embedding` and `kern-transcription` services are deliberate exceptions:
+their dedicated venvs contain pinned local inference dependencies and neither
+service can access the network or database. External agent harnesses and the
+WhatsApp Node gateway have their own pinned dependencies.
 
 ```text
 host/
   bootstrap/
     agent-home/             # immutable runtime instructions and harness settings
     helpers/                # root-owned fixed sudo helpers installed on the host
-    user_data.sh            # minimal first-boot operator/deploy-key setup
+    user_data_ssh.sh        # first-boot operator/deploy-key setup
+    user_data_github.sh     # detached pinned-source provisioning
     bootstrap.sh            # full host bootstrap run over SSH as root
     verify_deploy.py        # root end-of-deploy verification of the provisioned state
   cli/                      # operator-side lifecycle and power commands
@@ -29,6 +31,9 @@ host/
     workspace/             # kern-workspace: Chat, Web Apps, global resources,
                             # agent API socket
     embeddings/            # kern-embedding service + bounded stdlib clients
+    transcription/         # kern-transcription local dictation + admin client
+    host_inference/        # kern-host-inference remote provider adapters
+    host_diagnostics_collector/ # journal-to-database diagnostics
     agent_shim/             # kern-agent: stdio MCP shim, client-side only
     core/                   # shared socketless libraries: db, pgclient, state,
                             # secretbox, network_policy
@@ -53,7 +58,7 @@ Important source areas and the context that runs them:
 | --- | --- | --- |
 | `host/cli/` | Operator machine | Parses and dispatches lifecycle commands; isolated AWS and Lima modules own provider resources, while shared helpers render and run bootstrap. `operation_lock.py` supplies the ephemeral same-user guard for both providers. |
 | `host/config.py` | Operator machine and host services | Validates lifecycle input and the stored/runtime network policy. |
-| `host/bootstrap/user_data.sh` | root through EC2 user data | Creates the operator account and installs only the single-use deploy SSH key. |
+| `host/bootstrap/user_data_ssh.sh` | root through EC2 user data | Creates the operator account and installs only the single-use deploy SSH key. |
 | `host/bootstrap/bootstrap.sh` | root through lifecycle SSH | Runs the ordered provisioning phases: mounts volumes, installs pinned dependencies, creates fixed users, configures PostgreSQL/nftables/systemd, applies migrations, writes trusted host files, and ends by running `verify_deploy`. |
 | `host/bootstrap/verify_deploy.py` | root at the end of bootstrap | Independently re-checks accounts, path permissions, sockets, listeners, services, database peer auth, and live firewall behavior in both directions; any mismatch fails the deploy. |
 | `host/bootstrap/helpers/` | root through exact `kern-admin` sudo rules | Launches runtimes as the agent user, reads or clears narrow agent-auth state, reads bounded agent files, reboots, and performs GitHub operations that need root egress. |
@@ -82,5 +87,5 @@ Important source areas and the context that runs them:
 | `host/runtime/admin_api/github_*.py` | `kern-admin`, with fixed root helpers for egress | Converges the GitHub credential, derives repository warnings, and resolves operator decisions for queued `.github` pushes. Direct-main rejection stays entirely in the proxy and creates no queue item. |
 
 Develop and run unit CI against Python 3.11. Production uses Ubuntu 22.04's
-system Python 3.10; the runtime stays standard-library-only and fresh AWS smoke
+system Python 3.10; the control-plane runtime stays standard-library-only and fresh AWS smoke
 tests exercise that exact host environment.

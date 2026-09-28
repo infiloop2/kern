@@ -16,6 +16,7 @@ let copyFeedbackTimer = null;
 let copyFeedbackGeneration = 0;
 
 const INTEGRATION_LOGOS = {
+  "tool:browser": `<svg viewBox="0 0 32 32"><rect x="3" y="5" width="26" height="22" rx="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 12h26" stroke="currentColor" stroke-width="2"/><circle cx="7" cy="8.5" r="1" fill="currentColor"/><circle cx="11" cy="8.5" r="1" fill="currentColor"/><path d="m13 17 7 4-7 3Z" fill="currentColor"/></svg>`,
   "tool:elevenlabs": `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M5 2h5v20H5zM14 2h5v20h-5z"/></svg>`,
   "tool:upwork": `<span class="integration-logo-word">Up</span>`,
   "tool:vercel_analytics": `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M12 3 24 23H0Z"/></svg>`,
@@ -33,7 +34,7 @@ const INTEGRATION_LOGOS = {
   "tool:gmail": `<svg viewBox="0 0 32 32"><path class="gmail-blue" d="M4 10v15h5V14.3Z"/><path class="gmail-red" d="M4 10 8 7l8 6.2L24 7l4 3v15h-5V14.2L16 20 9 14.3V25H4Z"/><path class="gmail-yellow" d="m24 7 4 3-5 4.2V8Z"/><path class="gmail-green" d="M23 14.2 28 10v15h-5Z"/></svg>`,
   "tool:google_calendar": `<svg viewBox="0 0 32 32"><path class="calendar-blue" d="M6 5h20v22H6z"/><path class="calendar-green" d="M6 5h14v7H6z"/><path class="calendar-yellow" d="M6 12h7v15H6z"/><path class="calendar-red" d="M20 5h6v7h-6z"/><path fill="#fff" d="M13 14h6.3c3.1 0 4.7 1.6 4.7 3.7 0 1.5-.9 2.7-2.3 3.1v.1c1.7.3 2.7 1.5 2.7 3.2 0 .5-.1 1-.2 1.4H20c.2-.4.3-.8.3-1.3 0-1.3-.9-2.1-2.5-2.1h-1.5v-2.7h1.4c1.4 0 2.2-.7 2.2-1.8 0-1-.8-1.7-2.1-1.7H13V14Z"/></svg>`,
   "tool:google_search_console": `<svg viewBox="0 0 32 32"><path fill="#4285f4" d="M5 5h5v22H5z"/><path fill="#34a853" d="M12 17h5v10h-5z"/><path fill="#fbbc04" d="M19 12h5v15h-5z"/><path fill="#ea4335" d="M26 8h2v19h-2z"/><path fill="none" stroke="#4285f4" stroke-width="2.4" stroke-linecap="round" d="m8 15 6-5 5 3 7-8"/></svg>`,
-  "tool:h3max": `<svg viewBox="0 0 32 32"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" d="M5 7h22v18H5z"/><path fill="currentColor" d="m13 11 9 5-9 5V11Z"/><path d="M8 4v3m16-3v3M8 25v3m16-3v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`,
+  "tool:fal_ai": `<svg viewBox="0 0 32 32"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" d="M5 7h22v18H5z"/><path fill="currentColor" d="m13 11 9 5-9 5V11Z"/><path d="M8 4v3m16-3v3M8 25v3m16-3v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`,
   "tool:ibkr": `<svg viewBox="0 0 775 1511"><path fill="currentColor" d="M.3 1510.2V775.3l668 734.9Z"/><circle cx="574.2" cy="954.4" r="200.2" fill="currentColor"/><path fill="currentColor" d="M668.3.4.3 1510.2V775.3Z"/></svg>`,
   "tool:instagram": `<svg viewBox="0 0 448 512"><path fill="currentColor" d="M224.3 141a115 115 0 1 0-.6 230 115 115 0 1 0 .6-230Zm-.6 40.4a74.6 74.6 0 1 1 .6 149.2 74.6 74.6 0 1 1-.6-149.2Zm93.4-45.1a26.8 26.8 0 1 1 53.6 0 26.8 26.8 0 1 1-53.6 0Zm129.7 27.2c-1.7-35.9-9.9-67.7-36.2-93.9-26.2-26.2-58-34.4-93.9-36.2-37-2.1-147.9-2.1-184.9 0-35.8 1.7-67.6 9.9-93.9 36.1S3.5 127.5 1.7 163.4c-2.1 37-2.1 147.9 0 184.9 1.7 35.9 9.9 67.7 36.2 93.9s58 34.4 93.9 36.2c37 2.1 147.9 2.1 184.9 0 35.9-1.7 67.7-9.9 93.9-36.2 26.2-26.2 34.4-58 36.2-93.9 2.1-37 2.1-147.8 0-184.8ZM399 388c-7.8 19.6-22.9 34.7-42.6 42.6-29.5 11.7-99.5 9-132.1 9s-102.7 2.6-132.1-9c-19.6-7.8-34.7-22.9-42.6-42.6-11.7-29.5-9-99.5-9-132.1s-2.6-102.7 9-132.1c7.8-19.6 22.9-34.7 42.6-42.6 29.5-11.7 99.5-9 132.1-9s102.7-2.6 132.1 9c19.6 7.8 34.7 22.9 42.6 42.6 11.7 29.5 9 99.5 9 132.1s2.7 102.7-9 132.1Z"/></svg>`,
   "tool:instagram_discovery": `<svg viewBox="0 0 32 32"><rect x="4" y="4" width="20" height="20" rx="6" fill="none" stroke="currentColor" stroke-width="2.4"/><circle cx="14" cy="14" r="4.5" fill="none" stroke="currentColor" stroke-width="2.4"/><circle cx="21" cy="7.8" r="1.4" fill="currentColor"/><circle cx="23.5" cy="23.5" r="4.5" fill="#111722" stroke="#fff" stroke-width="2"/><path d="m27 27 3 3" stroke="#fff" stroke-width="2.5" stroke-linecap="round"/></svg>`,
@@ -43,7 +44,6 @@ const INTEGRATION_LOGOS = {
   "tool:reddit": `<svg viewBox="0 0 32 32"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m18 9 1.4-5 4.4 1.1"/><circle cx="25.3" cy="5.5" r="2" fill="none" stroke="currentColor" stroke-width="2"/><ellipse cx="16" cy="18" rx="10.5" ry="8" fill="none" stroke="currentColor" stroke-width="2"/><path fill="currentColor" d="M12.5 16.5a1.8 1.8 0 1 1-3.6 0 1.8 1.8 0 0 1 3.6 0Zm10.6 0a1.8 1.8 0 1 1-3.6 0 1.8 1.8 0 0 1 3.6 0Z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M11.5 21c2.6 2 6.4 2 9 0"/></svg>`,
   "tool:reddit_scrapecreators": `<svg viewBox="0 0 32 32"><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" d="m18 9 1.4-5 4.4 1.1"/><circle cx="25.3" cy="5.5" r="2" fill="none" stroke="currentColor" stroke-width="2"/><ellipse cx="16" cy="18" rx="10.5" ry="8" fill="none" stroke="currentColor" stroke-width="2"/><path fill="currentColor" d="M12.5 16.5a1.8 1.8 0 1 1-3.6 0 1.8 1.8 0 0 1 3.6 0Zm10.6 0a1.8 1.8 0 1 1-3.6 0 1.8 1.8 0 0 1 3.6 0Z"/><path fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" d="M11.5 21c2.6 2 6.4 2 9 0"/></svg>`,
   "tool:runway": `<span class="integration-logo-word integration-logo-word-runway">R</span>`,
-  "tool:seedance": `<svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="11" fill="none" stroke="currentColor" stroke-width="2.2"/><path fill="currentColor" d="M13 10.5 22 16l-9 5.5v-11Z"/></svg>`,
   "tool:twitter": `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M18.2 2h3.7l-8.1 9.3L23.3 22h-7.5l-5.9-7.7L3.2 22H-.5l8.7-9.9L-.9 2h7.7l5.3 7 6.1-7Zm-1.3 18.1h2L5.7 3.8H3.5l13.4 16.3Z"/></svg>`,
   "tool:web_fetch": `<svg viewBox="0 0 32 32"><circle cx="14" cy="16" r="10" fill="none" stroke="currentColor" stroke-width="2"/><path d="M4 16h20M14 6c3 2.8 4.5 6.1 4.5 10S17 23.2 14 26M14 6c-3 2.8-4.5 6.1-4.5 10S11 23.2 14 26M20 8h7v7M27 8l-8 8" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round" stroke-width="2"/></svg>`,
   "tool:twitterapi_io": `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M18.2 2h3.7l-8.1 9.3L23.3 22h-7.5l-5.9-7.7L3.2 22H-.5l8.7-9.9L-.9 2h7.7l5.3 7 6.1-7Zm-1.3 18.1h2L5.7 3.8H3.5l13.4 16.3Z"/></svg>`,
@@ -143,7 +143,7 @@ function toolGuide(tool) {
       codeName: true,
       description: action.description,
       approval: action.approval,
-      costDescription: action.cost_description || "",
+      costDescription: tool.reports_cost ? action.cost_description : "",
       inputSchema: action.input_schema || {},
       inputProtections: action.input_protections || {},
       outputSchema: action.output_schema || {},
@@ -369,7 +369,7 @@ function renderCapability(capability) {
     <div class="guide-capability">
       <div class="guide-capability-head"><h4>${capability.codeName ? `<code>${esc(capability.name)}</code>` : esc(capability.name)}</h4>${approval}</div>
       <p>${esc(capability.description)}</p>
-      ${capability.codeName ? `<p class="muted guide-action-cost"><strong>Cost:</strong> ${esc(capability.costDescription || "Not tracked.")}</p>` : ""}
+      ${capability.codeName && capability.costDescription ? `<p class="muted guide-action-cost"><strong>Cost:</strong> ${esc(capability.costDescription)}</p>` : ""}
       ${renderActionContract(capability)}
       ${capability.linkUrl ? `<a href="${esc(capability.linkUrl)}" target="_blank" rel="noopener noreferrer">${esc(capability.linkLabel)}</a>` : ""}
     </div>`;

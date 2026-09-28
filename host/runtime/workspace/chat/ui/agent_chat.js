@@ -49,6 +49,7 @@ let selectedThreadArchived = false;
 let selectedThreadScheduleId = null;
 let selectedThreadHasSession = false;
 let showingArchivedThreads = false;
+let showingSpawnedThreads = false;
 let showingActivity = false;
 let activityToggleSequence = 0;
 let sessionOptions = {};
@@ -294,6 +295,7 @@ function clearDeferredRefreshError() {
 async function refresh() {
   const sequence = ++refreshSequence;
   const archivedView = showingArchivedThreads;
+  const spawnedView = showingSpawnedThreads;
   const scheduledViewThreadId = selectedThreadScheduleId !== null
     ? selectedThreadId
     : null;
@@ -309,7 +311,7 @@ async function refresh() {
     // any model or effort the operator picked in the meantime alone.
     const firstLoad = !Object.keys(sessionOptions).length;
     const optionResponse = await api("GET", "/session-options");
-    if (sequence !== refreshSequence || archivedView !== showingArchivedThreads || indexChanged()) return;
+    if (sequence !== refreshSequence || archivedView !== showingArchivedThreads || spawnedView !== showingSpawnedThreads || indexChanged()) return;
     if (!optionResponse.session_options || typeof optionResponse.session_options !== "object") {
       throw new Error("Agent Chat returned invalid session options");
     }
@@ -333,9 +335,11 @@ async function refresh() {
     }
     const indexPath = scheduledViewThreadId !== null
       ? "/scheduled-agents"
-      : archivedView ? "/threads?archived=true" : "/threads";
+      : spawnedView
+        ? `/threads?spawned=true&archived=${archivedView}`
+        : archivedView ? "/threads?archived=true" : "/threads";
     const response = await api("GET", indexPath);
-    if (sequence !== refreshSequence || archivedView !== showingArchivedThreads || indexChanged()) return;
+    if (sequence !== refreshSequence || archivedView !== showingArchivedThreads || spawnedView !== showingSpawnedThreads || indexChanged()) return;
     threads = response.threads || [];
     const selectedThread = threads.find(thread => thread.thread_id === selectedThreadId);
     if (selectedThread) {
@@ -374,30 +378,30 @@ async function refresh() {
     if (selectedThreadId) {
       const refreshedThreadId = selectedThreadId;
       const rendered = await refreshSelectedThread();
-      if (sequence !== refreshSequence || archivedView !== showingArchivedThreads || indexChanged()) return;
+      if (sequence !== refreshSequence || archivedView !== showingArchivedThreads || spawnedView !== showingSpawnedThreads || indexChanged()) return;
       const visibleThread = threads.find(thread => thread.thread_id === refreshedThreadId);
       if (rendered && selectedThreadId === refreshedThreadId && visibleThread) {
         markSelectedThreadSeen(visibleThread);
       }
     }
-    if (sequence !== refreshSequence || archivedView !== showingArchivedThreads || indexChanged()) return;
+    if (sequence !== refreshSequence || archivedView !== showingArchivedThreads || spawnedView !== showingSpawnedThreads || indexChanged()) return;
     clearDeferredRefreshError();
     setStatus("", "refresh");
   } catch (error) {
-    if (sequence === refreshSequence && archivedView === showingArchivedThreads && !indexChanged()) {
+    if (sequence === refreshSequence && archivedView === showingArchivedThreads && spawnedView === showingSpawnedThreads && !indexChanged()) {
       deferRefreshError(error.message);
     }
   }
 }
 
 function renderThreads() {
-  const key = JSON.stringify([selectedThreadId, showingArchivedThreads, threads]);
+  const key = JSON.stringify([selectedThreadId, showingArchivedThreads, showingSpawnedThreads, threads]);
   if (key === renderedThreadsKey) return;
   renderedThreadsKey = key;
   if (!threads.length) {
     $("threads").innerHTML = showingArchivedThreads
       ? `<div class="sidebar-empty">No archived threads.</div>`
-      : `<div class="sidebar-empty">No threads yet. Send a message below to start one.</div>`;
+      : `<div class="sidebar-empty">${showingSpawnedThreads ? "No spawned agents yet." : "No threads yet. Send a message below to start one."}</div>`;
     return;
   }
   $("threads").innerHTML = threads.map(thread => {
@@ -407,7 +411,7 @@ function renderThreads() {
       ? `<span class="thread-dot running" role="img" aria-label="Agent running"></span>`
       : failed ? `<span class="thread-dot error" role="img" aria-label="Agent error"></span>` : "";
     return `
-    <button class="thread-item${thread.thread_id === selectedThreadId ? " selected" : ""}" data-thread-id="${escAttr(thread.thread_id)}" data-name="${escAttr(thread.name)}" data-runtime="${escAttr(thread.agent_runtime)}" data-model="${escAttr(thread.model)}" data-effort="${escAttr(thread.effort)}" data-status="${escAttr(thread.status || "idle")}" data-archived="${thread.archived ? "true" : "false"}" data-schedule-id="${escAttr(thread.schedule_id ?? "")}" data-has-session="${thread.has_session ? "true" : "false"}">
+    <button class="thread-item${thread.thread_id === selectedThreadId ? " selected" : ""}" data-thread-id="${escAttr(thread.thread_id)}" data-name="${escAttr(thread.name)}" data-runtime="${escAttr(thread.agent_runtime)}" data-model="${escAttr(thread.model)}" data-effort="${escAttr(thread.effort)}" data-status="${escAttr(thread.status || "idle")}" data-archived="${thread.archived ? "true" : "false"}" data-schedule-id="${escAttr(thread.schedule_id ?? "")}" data-has-session="${thread.has_session ? "true" : "false"}" data-spawned="${thread.spawned_by_thread_id ? "true" : "false"}">
       <span class="thread-name"><span>${esc(thread.name)}</span>${dot}</span>
       <span class="thread-meta">${esc(runtimeLabel(thread.agent_runtime))} &middot; ${esc(modelLabel(thread.agent_runtime, thread.model))}</span>
       <span class="thread-meta">${esc(relativeTime(thread.last_used_at))}</span>
@@ -418,13 +422,14 @@ function renderThreads() {
 function updateComposer() {
   const hasThread = selectedThreadId !== null;
   const scriptTranscript = hasThread && selectedThreadRuntime === "script";
-  const readOnly = showingArchivedThreads || selectedThreadArchived || scriptTranscript;
+  const readOnly = showingArchivedThreads || selectedThreadArchived || scriptTranscript
+    || (!hasThread && showingSpawnedThreads);
   const running = hasThread && selectedThreadStatus === "running";
   $("thread-title").textContent = hasThread
     ? selectedThreadName || selectedThreadId
     : showingArchivedThreads
       ? "Archived threads"
-      : "New thread";
+      : showingSpawnedThreads ? "Spawned agents" : "New thread";
   const subtitle = hasThread
     ? `${runtimeLabel(selectedThreadRuntime)} · ${modelLabel(selectedThreadRuntime, selectedThreadModel)} · ${optionLabel(selectedThreadEffort)}`
     : "";
@@ -449,7 +454,7 @@ function updateComposer() {
   $("composer").hidden = readOnly;
   $("composer-hint").hidden = readOnly;
   $("composer-dock").classList.toggle("readonly", readOnly);
-  $("new-thread").hidden = showingArchivedThreads;
+  $("new-thread").hidden = showingArchivedThreads || showingSpawnedThreads;
   $("archived-toggle").textContent = showingArchivedThreads ? "Show active" : "Show archived";
   // Configuration is chosen on the first message and may be changed on the
   // next idle send. The thread id itself is backend-generated, never typed.
@@ -793,6 +798,7 @@ async function showThread(
   archived,
   scheduleId = null,
   hasSession = true,
+  spawned = false,
 ) {
   saveComposerDraft();
   saveSelectedThreadView();
@@ -801,6 +807,7 @@ async function showThread(
   selectedRefreshSequence += 1;
   if (threadId !== selectedThreadId) composerContextSequence += 1;
   selectedThreadId = threadId;
+  showingSpawnedThreads = spawned;
   selectedThreadName = name;
   selectedThreadRuntime = runtime;
   selectedThreadModel = model;
@@ -1093,6 +1100,8 @@ function renderThreadHistory() {
           <h2>Archived threads</h2>
           <p>Select a thread to read it, or return to active threads.</p>
         </div>`
+      : showingSpawnedThreads
+        ? `<div class="chat-hero"><h2>Spawned agents</h2><p>Select an agent to read or message it.</p></div>`
       : `<div class="chat-hero">
           <h2>What should the agent work on?</h2>
           <p>Messages continue in the same agent session. Supported agents can also receive another message while working.</p>
@@ -1459,6 +1468,7 @@ function clearSelectedThread() {
 
 function startNewThread() {
   showingArchivedThreads = false;
+  showingSpawnedThreads = false;
   clearSelectedThread();
   // A new thread is unconfigured, so its composer opens on the first offered
   // configuration. Leaving the selectors as the previously opened thread left
@@ -1554,6 +1564,7 @@ chatRoot.addEventListener("click", event => {
       thread.dataset.archived === "true",
       thread.dataset.scheduleId ? Number(thread.dataset.scheduleId) : null,
       thread.dataset.hasSession === "true",
+      thread.dataset.spawned === "true",
     ).catch(error => setStatus(error.message));
     return;
   }
@@ -1678,6 +1689,7 @@ setSidebarOpen(false);
 window.KernChat = {
   newThread(prompt = "") {
     showingArchivedThreads = false;
+    showingSpawnedThreads = false;
     if (selectedThreadId === null && sendingMessage) {
       delete composerDrafts[composerDraftKey()];
       persistComposerDrafts();
@@ -1706,6 +1718,7 @@ window.KernChat = {
       Boolean(thread.archived),
       thread.schedule_id,
       thread.has_session === true,
+      Boolean(thread.spawned_by_thread_id),
     );
   },
   refresh,

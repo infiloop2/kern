@@ -4,11 +4,12 @@ Kern has two operator-facing control planes with different authority.
 
 ## Operator plane
 
-The operator plane is the local deployment environment plus AWS and configured
-operator access. It has AWS credentials for the deploy IAM policy, any SSH
-private key matching configured SSH endpoints, any Cloudflare Tunnel token used
-for configured Cloudflare endpoints, and the local deploy or reconfigure result
-file containing the cleartext admin password. This is the highest-authority
+The operator plane is the local deployment environment, the AWS account or
+local Lima installation, and configured operator access. It holds AWS deploy
+credentials when using AWS, any private SSH key matching a configured endpoint,
+and any Cloudflare Tunnel token used for remote access. The operator keeps the
+admin password separately; lifecycle commands accept only its SHA-256 digest
+and never include the password in their result JSON. This is the highest-authority
 plane: it can create and destroy the EC2 instance, replace the root drive,
 attach or delete preserved data drives, run bootstrap as root through temporary
 SSH, inspect or repair host files, reconfigure the admin password and operator

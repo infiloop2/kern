@@ -32,8 +32,8 @@ class RunwayToolTests(unittest.TestCase):
         self.assertEqual(
             [spec.id for spec in tool.manifest.actions],
             [
-                "generate_video", "edit_video", "generate_image", "generate_speech",
-                "get_task", "save_video", "save_audio",
+                "upscale_image", "upscale_video", "generate_video", "edit_video", "generate_image", "generate_speech",
+                "get_task", "save_video", "save_image", "save_audio",
             ],
         )
         image_action = next(spec for spec in tool.manifest.actions if spec.id == "generate_image")
@@ -94,6 +94,8 @@ class RunwayToolTests(unittest.TestCase):
         self.assertNotIn("promptImage", body)
 
     def test_generate_video_with_image_routes_to_image_endpoint_and_gen4_turbo(self) -> None:
+        api = api_with_key()
+        asset = api.assets.add(media_type="image/png")
         seen: dict[str, Any] = {}
 
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
@@ -101,17 +103,18 @@ class RunwayToolTests(unittest.TestCase):
             seen["body"] = kwargs["body"]
             return {"id": "task-456"}
 
-        with patch.object(runway, "json_request", fake_json_request):
+        with patch.object(runway, "_upload_staged_asset", return_value="runway://source"), patch.object(runway, "json_request", fake_json_request):
             result = RunwayTool().execute(
                 "generate_video",
-                {"prompt": "animate this", "image_url": "https://example.com/frame.jpg"},
-                api_with_key(),
+                {"prompt": "animate this", "image_asset_id": asset},
+                api,
             )
         assert isinstance(result, ActionExecuted)
         self.assertEqual(seen["url"], runway.IMAGE_TO_VIDEO_ENDPOINT)
         body = seen["body"]
         self.assertEqual(body["model"], "gen4_turbo")
-        self.assertEqual(body["promptImage"], "https://example.com/frame.jpg")
+        self.assertEqual(body["promptImage"], "runway://source")
+
 
     def test_generate_video_streams_a_staged_image_to_runway(self) -> None:
         api = api_with_key()
@@ -178,7 +181,7 @@ class RunwayToolTests(unittest.TestCase):
         )
         assert isinstance(both, ActionFailed)
         assert isinstance(wrong_type, ActionFailed)
-        self.assertIn("at most one", both.error)
+        self.assertIn("unsupported", both.error)
         self.assertIn("does not refer to a staged image", wrong_type.error)
 
     def test_generate_video_rejects_image_only_model_without_image(self) -> None:
@@ -245,6 +248,8 @@ class RunwayToolTests(unittest.TestCase):
         for model, duration in (("seedance2_5", "30"), ("h3_max", "15")):
             for image_url in (None, "https://example.com/portrait.png"):
                 with self.subTest(model=model, image_url=image_url):
+                    api = api_with_key()
+                    asset = api.assets.add(media_type="image/png")
                     tool_input: JSONObject = {
                         "prompt": "the brain mascot waves", "model": model,
                         "duration_seconds": duration, "seed": "42",
@@ -260,15 +265,16 @@ class RunwayToolTests(unittest.TestCase):
                         expected["ratio"] = "720:1280"
                     endpoint = runway.TEXT_TO_VIDEO_ENDPOINT
                     if image_url:
-                        tool_input["image_url"] = image_url
-                        expected["promptImage"] = image_url
+                        tool_input["image_asset_id"] = asset
+                        expected["promptImage"] = "runway://source"
                         endpoint = runway.IMAGE_TO_VIDEO_ENDPOINT
-                    with patch.object(runway, "json_request", return_value={"id": "task-new-model"}) as request:
-                        result = RunwayTool().execute("generate_video", tool_input, api_with_key())
+                    with patch.object(runway, "_upload_staged_asset", return_value="runway://source"), patch.object(runway, "json_request", return_value={"id": "task-new-model"}) as request:
+                        result = RunwayTool().execute("generate_video", tool_input, api)
                     assert_matches_output_schema(self, runway.MANIFEST, "generate_video", result)
                     self.assertIsInstance(result, ActionExecuted)
                     self.assertEqual(request.call_args.args, ("POST", endpoint))
                     self.assertEqual(request.call_args.kwargs["body"], expected)
+
 
     def test_new_video_model_defaults_and_lower_duration_bounds(self) -> None:
         for model, minimum in (("seedance2_5", 4), ("h3_max", 5)):
@@ -336,6 +342,8 @@ class RunwayToolTests(unittest.TestCase):
         self.assertIn("no task id", result.error)
 
     def test_edit_video_builds_video_to_video_body(self) -> None:
+        api = api_with_key()
+        asset = api.assets.add(media_type="video/mp4")
         seen: dict[str, Any] = {}
 
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
@@ -343,18 +351,19 @@ class RunwayToolTests(unittest.TestCase):
             seen["body"] = kwargs["body"]
             return {"id": "task-789"}
 
-        with patch.object(runway, "json_request", fake_json_request):
+        with patch.object(runway, "_upload_staged_asset", return_value="runway://source"), patch.object(runway, "json_request", fake_json_request):
             result = RunwayTool().execute(
                 "edit_video",
-                {"video_url": "https://example.com/clip.mp4", "prompt": "make it night time"},
-                api_with_key(),
+                {"video_asset_id": asset, "prompt": "make it night time"},
+                api,
             )
         assert isinstance(result, ActionExecuted)
         self.assertEqual(seen["url"], runway.VIDEO_TO_VIDEO_ENDPOINT)
         body = seen["body"]
         self.assertEqual(body["model"], "aleph2")
-        self.assertEqual(body["videoUri"], "https://example.com/clip.mp4")
+        self.assertEqual(body["videoUri"], "runway://source")
         self.assertEqual(body["promptText"], "make it night time")
+
 
     def test_edit_video_streams_staged_asset_to_runway_ephemeral_upload(self) -> None:
         api = api_with_key()

@@ -248,6 +248,10 @@ class ToolManifest:
     # lifecycle follows enablement. The host invokes only the small ToolService
     # contract and does not know which provider or child process implements it.
     service: str = ""
+    # Name of a separately provisioned host service required by this tool.
+    # Unlike service, this is not started in the tools process and has no
+    # operator route through the generic Tool API.
+    host_service_dependency: str = ""
     reports_cost: bool = False
     config: tuple[ConfigRequirement, ...] = ()
     # Short, concrete safeguards for the summary popover and full guide.
@@ -283,6 +287,10 @@ class ToolManifest:
             raise ValueError(
                 f"ToolManifest.service must be a module:attribute reference for {self.tool_id}."
             )
+        if self.host_service_dependency and not re.fullmatch(r"kern-[a-z0-9-]+\.service", self.host_service_dependency):
+            raise ValueError(f"ToolManifest.host_service_dependency must name a Kern systemd service for {self.tool_id}.")
+        if self.service and self.host_service_dependency:
+            raise ValueError(f"ToolManifest cannot declare both service and host_service_dependency for {self.tool_id}.")
         if self.connection == "whatsapp_linked_device" and not self.service:
             raise ValueError(
                 f"ToolManifest.service is required for {self.tool_id}'s WhatsApp linked-device flow."

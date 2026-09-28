@@ -56,12 +56,11 @@ def thread_events(thread_id: str) -> list[tuple[Any, ...]]:
 
 
 class MemoryRecallQueryTests(unittest.TestCase):
-    def test_recall_compacts_repetition_and_keeps_later_task_words(self) -> None:
-        self.assertEqual(memory._recall_query("browser " * 120 + "screenshot"), "browser screenshot")
-        self.assertEqual(memory._recall_query("  Can you please check token usage? "), "check token usage")
-        self.assertLessEqual(len(memory._recall_query("界" * 400).encode()), 1000)
-        self.assertLessEqual(len(memory._recall_query("ΐ" * 500).encode()), 1000)
-        self.assertEqual(memory._recall_query("\ud800hello"), "")
+    def test_recall_preserves_prose_with_a_utf8_byte_budget(self) -> None:
+        from host.memory_recall import task_query
+        self.assertEqual(task_query("  Can you please check token usage? "), "Can you please check token usage?")
+        self.assertLessEqual(len(task_query("界" * 400).encode()), 1000)
+        self.assertLessEqual(len(task_query("ΐ" * 500).encode()), 1000)
 
     def test_ordinary_search_still_rejects_queries_over_200_bytes(self) -> None:
         for search in (memory.search_pages, memory.search_swarm_pages):
@@ -79,9 +78,8 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
         self.addCleanup(db.close_pool)
-        judge_patch = patch.object(memory, "judge", return_value=None)
-        judge_patch.start()
-        self.addCleanup(judge_patch.stop)
+        # Retrieval tests use control; reranker tests cover provider assignments.
+        self.enterContext(patch.object(memory.random, "choice", return_value=None))
 
     def test_onboarding_status_is_derived_from_live_resources(self) -> None:
         active = patch.object(
@@ -269,7 +267,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             cur.execute("SELECT SUM(strong_top_hit_count) FROM memory_pages")
             self.assertEqual(int(cur.fetchone()[0]), 165)
 
-    def test_turn_recall_excludes_popular_pages_and_weak_matches(self) -> None:
+    def test_turn_recall_finds_partial_topic_matches_without_popular_injection(self) -> None:
         memory.save_page(
             "playwright-browser",
             {
@@ -303,8 +301,28 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             )
 
         self.assertEqual(
-            [page["page_id"] for page in recalled["pages"]], []
+            [page["page_id"] for page in recalled["pages"]], ["playwright-browser"]
         )
+
+    def test_english_keyword_search_handles_stemming_stopwords_and_literal_syntax(self) -> None:
+        memory.save_page("job-guide", {"description": "Recurring jobs", "content": "Schedule a job safely.", "expected_revision": 0}, actor="agent")
+        memory.save_page("noise", {"description": "Other guidance", "content": "The and you.", "expected_revision": 0}, actor="agent")
+        with patch.object(memory.embedding_client, "embed_texts", side_effect=memory.embedding_client.EmbeddingError("offline")):
+            # Alternatives come from PostgreSQL lexemes, not hand-picked words or
+            # user-supplied Boolean operators. Singular/plural forms share a stem.
+            recalled = memory.recall_pages({"thread_id": "thread-8", "message": 'the AND you missing "jobs"'})
+            self.assertEqual([p["page_id"] for p in recalled["pages"]], ["job-guide"])
+            self.assertEqual(memory.recall_pages({"thread_id": "thread-8", "message": "the and you"})["pages"], [])
+            self.assertEqual([p["page_id"] for p in memory.search_swarm_pages({"q": ["recurring job"]})["pages"]], ["job-guide"])
+        with db.transaction() as cur:
+            self.assertEqual([r[0] for r in memory._weak_search_rows(cur, "missing jobs", scope="swarm")], ["job-guide"])
+            self.assertEqual(memory._weak_search_rows(cur, "the and you", scope="swarm"), [])
+
+    def test_workspace_cannot_read_inference_provider_configuration(self) -> None:
+        for columns in ("provider, enabled", "api_key_encrypted"):
+            with self.subTest(columns=columns), self.assertRaises(memory.pgclient.Error), db.transaction() as cur:
+                cur.execute('SET LOCAL ROLE "kern-workspace"')
+                cur.execute(f"SELECT {columns} FROM host_inference_providers")
 
     def test_turn_recall_uses_relevant_terms_after_byte_200(self) -> None:
         for page_id, description in (
@@ -322,9 +340,9 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         ) as embed:
             message = "browser " * 120 + "screenshot"
             recalled = memory.recall_pages({"thread_id": "thread-8", "message": message})
-        embed.assert_called_once_with(["browser screenshot"], kind="query")
+        embed.assert_called_once_with([message], kind="query")
         self.assertEqual(
-            [page["page_id"] for page in recalled["pages"]], ["z-browser-screenshot"]
+            [page["page_id"] for page in recalled["pages"]], ["z-browser-screenshot", "a-browser"]
         )
 
     def test_turn_recall_treats_or_acronym_as_a_literal_with_embeddings_offline(self) -> None:
@@ -332,7 +350,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             memory.save_page(page_id, {"description": description, "content": "Workflow", "expected_revision": 0}, actor="agent")
         with patch.object(memory.embedding_client, "embed_texts", side_effect=memory.embedding_client.EmbeddingError("offline")):
             recalled = memory.recall_pages({"thread_id": "thread-8", "message": "Debug OR operator"})
-        self.assertEqual([page["page_id"] for page in recalled["pages"]], ["or-guide"])
+        self.assertEqual([page["page_id"] for page in recalled["pages"]], ["or-guide", "a-noise"])
 
     def test_turn_recall_unicode_spelling_with_embeddings_offline(self) -> None:
         memory.save_page("routing-guide", {"description": "Fix Straße routing", "content": "Workflow", "expected_revision": 0}, actor="agent")
@@ -345,6 +363,28 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         with patch.object(memory.embedding_client, "embed_texts", side_effect=memory.embedding_client.EmbeddingError("offline")):
             recalled = memory.recall_pages({"thread_id": "thread-8", "message": "FIX LOGIN OR BILLING"})
         self.assertEqual([page["page_id"] for page in recalled["pages"]], ["billing-guide"])
+
+    def test_bounded_history_retrieves_followup_and_topic_change_without_ai(self) -> None:
+        from host.runtime.admin_api import threads
+        for page_id, description in (("aira-audio", "Aira video Grok audio guidance"),
+                                     ("billing", "SnowBid billing guidance"),
+                                     ("unrelated", "Gardening tips")):
+            memory.save_page(page_id, {"description": description, "content": "Notes", "expected_revision": 0}, actor="agent")
+        history = [{"event_type": "thread.message", "payload": {
+            "source": "user", "message": "Generate an Aira video with native Grok audio",
+        }}]
+        with patch.object(threads.state, "page_thread_events", return_value=history), \
+             patch.object(memory.embedding_client, "embed_texts", side_effect=memory.embedding_client.EmbeddingError("offline")):
+            followup_query = threads._memory_task_query("thread-8", "how did you choose the voice?")
+            followup = memory.recall_pages({"thread_id": "thread-8", "message": followup_query})
+            self.assertEqual([p["page_id"] for p in followup["pages"]], ["aira-audio"])
+            fresh_query = threads._memory_task_query("thread-8", "Investigate SnowBid billing")
+            fresh = memory.recall_pages({"thread_id": "thread-8", "message": fresh_query})
+            self.assertEqual({p["page_id"] for p in fresh["pages"]}, {"billing", "aira-audio"})
+            self.assertIn("lexical_fallback", fresh["diagnostics"])
+            # Explicit search retains AND semantics; recall alone uses alternatives.
+            explicit = memory.search_swarm_pages({"q": ["SnowBid Aira"]})
+            self.assertEqual(explicit["match_mode"], "weak")
 
     def test_turn_recall_keeps_self_when_swarm_search_changes(self) -> None:
         memory.save_page(
@@ -1057,7 +1097,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             fallback["popular_pages"][0]["page_id"], "popular-one"
         )
 
-    def test_agent_memory_weak_search_treats_or_as_a_literal_acronym(self) -> None:
+    def test_agent_memory_weak_search_uses_english_stopwords(self) -> None:
         memory.save_page(
             "operating-room",
             {
@@ -1068,13 +1108,10 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             actor="agent",
         )
 
-        # Exercise the weak query directly with another term that does not
-        # match. PostgreSQL may recover a standalone OR as a lexeme, while an
-        # unquoted OR in this expression is ambiguous with the Boolean operator.
+        # English treats OR as a stopword even when capitalized.
         with db.transaction() as cur:
             rows = memory._weak_search_rows(cur, "missing OR", scope="swarm")
-
-        self.assertEqual([row[0] for row in rows], ["operating-room"])
+        self.assertEqual(rows, [])
 
     def test_memory_delete_and_operator_restore_are_forward_revisions(self) -> None:
         created = memory.save_page(
@@ -1327,6 +1364,40 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                     peer_thread_id=peer_thread_id,
                 )
                 self.assertEqual(created["body"]["page"]["page_id"], peer_thread_id)
+
+    def test_spawned_chat_keeps_thread_identity_and_uses_origin_for_its_section(self) -> None:
+        user_id = chat._reserve_generated_thread_id()
+        spawned_id = chat._reserve_generated_thread_id(spawned_by_thread_id=user_id)
+        self.assertEqual((user_id, spawned_id), ("thread-1", "thread-2"))
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT thread_id, spawned_by_thread_id FROM chat_threads ORDER BY thread_id"
+            )
+            self.assertEqual(cur.fetchall(), [(user_id, None), (spawned_id, user_id)])
+
+        summaries = {"threads": [
+            {
+                "thread_id": thread_id, "agent_runtime": "codex", "model": "gpt-6-sol",
+                "effort": "high", "status": "idle", "last_used_at": "2026-09-27T12:00:00Z",
+            }
+            for thread_id in (user_id, spawned_id)
+        ]}
+        with (
+            patch.object(chat, "call_admin_api", return_value=summaries),
+            patch.object(chat.seen, "add_to_items"),
+        ):
+            user_threads = chat.list_chat_threads()["threads"]
+            spawned_threads = chat.list_chat_threads(spawned=True)["threads"]
+        self.assertEqual([item["thread_id"] for item in user_threads], [user_id])
+        self.assertEqual([item["thread_id"] for item in spawned_threads], [spawned_id])
+        self.assertEqual(spawned_threads[0]["spawned_by_thread_id"], user_id)
+
+        created = agent_api.dispatch_call(
+            "PUT", "/agent/self/memory",
+            {"description": "Spawned context", "content": "Private", "expected_revision": 0},
+            peer_thread_id=spawned_id,
+        )
+        self.assertEqual(created["body"]["page"]["page_id"], spawned_id)
 
     def test_self_memory_rejects_missing_schedule_and_unrecognized_identities(self) -> None:
         for peer_thread_id in (
@@ -2126,16 +2197,6 @@ class MemorySearchPagingTests(unittest.TestCase):
             "2026-07-01T00:00:00Z",
             "2026-07-01T00:00:00Z",
             1.0 - index / 10000,
-        )
-
-    def test_weak_search_ignores_stopwords(self) -> None:
-        self.assertEqual(
-            memory._weak_search_tokens("How should we undo a broken launch?"),
-            ["undo", "broken", "launch"],
-        )
-        self.assertEqual(
-            memory._weak_search_tokens("Reset IT password for US CAN MAY"),
-            ["reset", "it", "password", "us", "can", "may"],
         )
 
     def test_paging_reaches_lexical_matches_below_the_fusion_window(self) -> None:

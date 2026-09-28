@@ -11,11 +11,13 @@ system traffic. The dedicated `kern-proxy` uid has outbound access only so
 it can make policy-approved upstream connections on behalf of the agent. The
 separate `kern-tools` uid has DNS and HTTPS access for bundled tool
 packages; tool calls follow each action's data policy and approval contract,
-not the agent's domain policy. When a
+not the agent's domain policy. The separate `kern-host-inference` service
+also has direct DNS/HTTPS egress for its fixed host-owned provider calls;
+see [Host AI inference](../architecture/host-ai-inference.md). When a
 Cloudflare Tunnel operator endpoint is configured, the dedicated `cloudflared` uid
 has outbound access only for DNS, TCP `443`, and TCP/UDP `7844`. The host does
 not install or configure the AWS SSM agent, and snapd is stopped and masked
-during bootstrap. Root, proxy, tools, and optional `cloudflared` egress are still
+during bootstrap. Root, proxy, tools, host-inference, and optional `cloudflared` egress are still
 bounded by the EC2 security group, which keeps TCP/UDP `7844` open only when a
 `cloudflare_tunnel` operator endpoint is configured. That `7844` rule is
 outbound-only and nftables allows it only for the `cloudflared` uid, not for the
@@ -87,6 +89,18 @@ boundary in the first place.
 
 This is separate from bundled tool-call filtering and does not apply to
 integrations that use provider-specific request controls.
+
+## Contents
+
+- [Reserved Managed Domains](#reserved-managed-domains)
+- [OpenAI Integration](#openai-integration)
+- [Claude Integration](#claude-integration)
+- [xAI Integration](#xai-integration)
+- [AWS Bedrock Integration](#aws-bedrock-integration)
+- [GitHub Integration](#github-integration)
+- [Python Packages Integration](#python-packages-integration)
+- [NPM Packages Integration](#npm-packages-integration)
+- [Domain Rule](#domain-rule)
 
 ## Reserved Managed Domains
 
@@ -162,12 +176,15 @@ can run after Claude OAuth login. The Claude integration directly enforces:
 
 The managed bundle opens only `platform.claude.com` OAuth paths plus
 `api.anthropic.com`; `claude.ai` stays closed unless a future Claude Code
-version proves, by a live denial, that it requires it. The host verifies `claude auth status`, infers
-the Claude account metadata from the agent user's Claude config, stores only
-account metadata plus a SHA-256 hash of the OAuth access token, and denies
-`api.anthropic.com` data-plane requests until the presented bearer token
-matches that stored hash. The unauthenticated `/api/hello` readiness probe
-remains available for Claude Code startup.
+version proves, by a live denial, that it requires it. The host verifies `claude
+auth status`, infers the Claude account metadata from the agent user's Claude
+config, and anchors the account with provider attestation. The proxy hashes each
+presented bearer and uses a bounded cache of provider-attested account
+identities; a cache miss triggers a fixed-endpoint profile check. Data-plane
+requests pass only when the attested account matches the operator-approved
+account. Raw tokens are never cached or logged. See [provider
+lifecycle](../architecture/agent-provider-lifecycle.md). The unauthenticated
+`/api/hello` readiness probe remains available for Claude Code startup.
 
 ## xAI Integration
 
@@ -260,8 +277,9 @@ Allowed hosted declarations:
 - **Image generation** (`image_generation`) — an xAI Responses tool that runs
   on xAI servers. Kern requires `action: "generate"`; `auto`, `edit`, external
   input fields, and unknown options are denied. Grok Build 1.0.5 does not yet
-  declare or decode it, so this is a policy allowance rather than a usable
-  runtime feature today.
+  declare or decode it in the original capture; that observation does not
+  establish support in later harness versions. The policy allowance remains
+  separate from the Imagine REST flow.
 - **Video generation** (`video_generation`) — reserved for an xAI-hosted
   declaration. Grok Build Imagine video uses the S3-backed REST flow on `api.x.ai`,
   not this hosted tool. Only the bare declaration is
@@ -395,7 +413,7 @@ and `.github` approval toggle:
 ```
 
 Only the three domains where writes are possible carry the repo guard. The
-other five are `GET`/`HEAD`-only, so no write can ever reach them and there is
+remaining download hosts are `GET`/`HEAD`-only, so no write can ever reach them and there is
 nothing for a repo guard to gate: the archive and raw-blob hosts serve reads
 of any repository, and the signed-URL domains have no owner/repo in their
 presigned S3 paths anyway — access control there is the signed URL itself,

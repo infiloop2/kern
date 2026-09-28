@@ -307,6 +307,7 @@ class NetworkIntrospectionTests(unittest.TestCase):
                 "recent_network_denials",
                 "stage_image",
                 "stage_video",
+                "stage_audio",
                 "search_conversation_history",
                 "read_thread_history",
                 "send_agent_message",

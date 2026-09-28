@@ -97,6 +97,14 @@ class AgentChatBackendTests(unittest.TestCase):
         self.assertEqual(body, expected)
         listed.assert_called_once_with()
 
+    def test_spawned_agents_have_a_separate_chat_index_route(self) -> None:
+        expected = {"threads": [{"thread_id": "thread-7"}]}
+        with patch.object(backend, "list_chat_threads", return_value=expected) as listed:
+            status, body = self._request("GET", "/threads?spawned=true")
+        self.assertEqual(status, 200)
+        self.assertEqual(body, expected)
+        listed.assert_called_once_with(archived=False, spawned=True)
+
     def test_event_page_reserves_bridge_space_for_metadata(self) -> None:
         text_budget = backend.THREAD_EVENT_PAGE * backend.THREAD_EVENT_MESSAGE_BYTES
         self.assertLessEqual(
@@ -352,7 +360,7 @@ class AgentChatBackendTests(unittest.TestCase):
                 {"action": "accepted", "thread_id": "thread-4"},
             )
 
-        reserve.assert_called_once_with()
+        reserve.assert_called_once_with(spawned_by_thread_id=None)
         require.assert_called_once_with("thread-4")
         admin_call.assert_called_once_with(
             "POST",
@@ -585,8 +593,73 @@ class AgentChatBackendTests(unittest.TestCase):
                 self.assertEqual(backend._reserve_generated_thread_id(), expected)
             insert_args, _kwargs = cursor.execute.call_args
             self.assertIn("ON CONFLICT (thread_id) DO NOTHING", insert_args[0])
-            self.assertEqual(insert_args[1], (expected,))
+            self.assertEqual(insert_args[1], (expected, None))
             cursor.reset_mock()
+
+    def test_spawned_thread_shares_the_chat_id_sequence_and_records_parent(self) -> None:
+        cursor = unittest.mock.MagicMock()
+        transaction = unittest.mock.MagicMock()
+        transaction.__enter__.return_value = cursor
+        cursor.fetchall.return_value = [("thread-99",), ("thread-2",), ("thread-7",)]
+        cursor.fetchone.return_value = ("thread-100",)
+        with patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction):
+            self.assertEqual(
+                backend._reserve_generated_thread_id(spawned_by_thread_id="app-3"),
+                "thread-100",
+            )
+        self.assertEqual(cursor.execute.call_args.args[1], ("thread-100", "app-3"))
+
+    def test_spawned_index_selects_only_spawned_chats(self) -> None:
+        cursor = unittest.mock.MagicMock()
+        transaction = unittest.mock.MagicMock()
+        transaction.__enter__.return_value = cursor
+        cursor.fetchall.return_value = [
+            ("thread-3", "Research", None, None, None, None, None, None, "thread-2"),
+        ]
+        summaries = {"threads": [{
+            "thread_id": "thread-3", "agent_runtime": "codex", "model": "gpt-6-sol",
+            "effort": "high", "last_used_at": "2026-09-27T12:00:00Z", "status": "idle",
+        }]}
+        with (
+            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
+            patch("host.runtime.workspace.chat.backend.call_admin_api", return_value=summaries) as host,
+            patch.object(backend.seen, "add_to_items"),
+        ):
+            listed = backend.list_chat_threads(spawned=True)["threads"]
+        self.assertEqual([item["thread_id"] for item in listed], ["thread-3"])
+        self.assertEqual(listed[0]["spawned_by_thread_id"], "thread-2")
+        self.assertIn("spawned_by_thread_id IS NOT NULL", cursor.execute.call_args.args[0])
+        self.assertEqual(cursor.execute.call_args.args[1], (False,))
+        self.assertEqual(host.call_args.args[1], "/v1/threads?limit=100&prefix=thread-")
+
+    def test_idle_spawned_agents_archive_but_running_agents_remain_active(self) -> None:
+        cursor = unittest.mock.MagicMock()
+        transaction = unittest.mock.MagicMock()
+        transaction.__enter__.return_value = cursor
+        cursor.fetchall.return_value = [("thread-1",), ("thread-2",), ("thread-3",)]
+        cursor.fetchone.side_effect = [
+            (1,), ("thread-1", True),
+        ]
+        summaries = {"threads": [
+            {"thread_id": "thread-1", "status": "idle", "last_used_at": "2020-01-01T00:00:00Z"},
+            {"thread_id": "thread-2", "status": "running", "last_used_at": "2020-01-01T00:00:00Z"},
+            {"thread_id": "thread-3", "status": "idle", "last_used_at": "2099-01-01T00:00:00Z"},
+        ]}
+        def host_call(method, path):
+            if path.startswith("/v1/threads?"):
+                return summaries
+            self.assertEqual((method, path), ("GET", "/v1/threads/thread-1"))
+            return {"thread": summaries["threads"][0]}
+        with (
+            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
+            patch.object(backend, "call_admin_api", side_effect=host_call) as host,
+        ):
+            archived = backend.archive_idle_spawned_agents()
+        self.assertEqual(archived, 1)
+        self.assertEqual(host.call_count, 2)
+        updates = [call for call in cursor.execute.call_args_list
+                   if "UPDATE chat_threads SET archived = %s" in call.args[0]]
+        self.assertEqual([call.args[1] for call in updates], [(True, "thread-1")])
 
     def test_generated_thread_creation_stops_at_durable_quota(self) -> None:
         cursor = unittest.mock.MagicMock()
@@ -628,8 +701,8 @@ class AgentChatBackendTests(unittest.TestCase):
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
         cursor.fetchall.return_value = [
-            ("thread-1", "Customer launch", None, None, None, None, None, None),
-            ("thread-2", "thread-2", None, None, None, None, None, None),
+            ("thread-1", "Customer launch", None, None, None, None, None, None, None),
+            ("thread-2", "thread-2", None, None, None, None, None, None, None),
         ]
         host_summaries = {
             "threads": [
@@ -696,7 +769,7 @@ class AgentChatBackendTests(unittest.TestCase):
         cursor = unittest.mock.MagicMock()
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
-        cursor.fetchall.return_value = [("thread-1", "thread-1", None, None, None, None, None, None)]
+        cursor.fetchall.return_value = [("thread-1", "thread-1", None, None, None, None, None, None, None)]
         summaries = {
             "threads": [{
                 "thread_id": "thread-1",
@@ -728,7 +801,7 @@ class AgentChatBackendTests(unittest.TestCase):
         active_row = (
             "schedule-7", "Morning review", 7, "codex",
             "gpt-6-astra", "high", "2026-07-18T09:00:00Z",
-            "2026-07-17T09:00:00Z",
+            "2026-07-17T09:00:00Z", None,
         )
         cursor.fetchall.return_value = [active_row]
 
@@ -806,7 +879,7 @@ class AgentChatBackendTests(unittest.TestCase):
         cursor = unittest.mock.MagicMock()
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
-        cursor.fetchall.return_value = [("thread-1", "thread-1", None, None, None, None, None, None)]
+        cursor.fetchall.return_value = [("thread-1", "thread-1", None, None, None, None, None, None, None)]
         summaries = {
             "threads": [
                 {
@@ -832,7 +905,7 @@ class AgentChatBackendTests(unittest.TestCase):
         cursor = unittest.mock.MagicMock()
         transaction = unittest.mock.MagicMock()
         transaction.__enter__.return_value = cursor
-        cursor.fetchall.return_value = [("thread-1", "thread-1", None, None, None, None, None, None)]
+        cursor.fetchall.return_value = [("thread-1", "thread-1", None, None, None, None, None, None, None)]
         summaries = {
             "threads": [{
                 "thread_id": "thread-1",

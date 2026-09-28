@@ -142,6 +142,7 @@ def attach_recording_steer_server(
     turn: "orchestrator._Turn",
     _message: str,
     _provider_session_id: str | None,
+    *, task_context: str,
 ) -> None:
     turn.server = RecordingSteerServer()
     turn.phase = orchestrator.ExecutionPhase.RUNNING
@@ -1204,9 +1205,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
             + f"Content-Length: {len(garbage)}\r\n\r\n".encode()
             + garbage
         )
-        for request in (empty, malformed):
+        for request, expected_status in ((empty, b" 415 "), (malformed, b" 401 ")):
             for _ in range(admin_api.admin_auth.MAX_FAILURES_PER_CLIENT):
-                self.assertIn(b" 401 ", self.raw_request(request))
+                self.assertIn(expected_status, self.raw_request(request))
         # No attempt was consumed: the correct password still logs in.
         status, headers, body = self.login()
         self.assertEqual(status, 200)
@@ -2289,7 +2290,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             })
         with patch.object(orchestrator, "launch_turn") as launch:
             self.request("POST", "/v1/threads/thread-t1/messages", {"message": "?"})
-        self.mock_memory_recall.assert_called_once_with("thread-t1", "fix token usage analytics")
+        self.mock_memory_recall.assert_called_once_with("thread-t1", "?\n\nFix token usage analytics")
         self.assertIn("--- CURRENT USER MESSAGE ---\n?\n--- END CURRENT USER MESSAGE ---",
                       launch.call_args.args[1])
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
@@ -2323,7 +2324,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             )
 
         self.mock_memory_recall.assert_called_once_with(
-            "thread-t1", "take mobile screenshots"
+            "thread-t1", "Take mobile screenshots"
         )
         launch_message = launch.call_args.args[1]
         self.assertIn("Kern host context", launch_message)
@@ -6334,11 +6335,11 @@ class ToolRoutesTests(unittest.TestCase):
         self.assertIn("maps vendor responses to fixed fields", " ".join(discovery["technical_details"]))
         # Tools whose parameters are guarded carry the shared parameter-guard
         # description; tools without guarded request fields have none.
-        for tool_id in ("runway", "twitter"):
+        for tool_id in ("instagram", "runway", "twitter"):
             self.assertIn(
                 "parameter guard", " ".join(self.tool_entry(body, tool_id)["technical_details"]).lower()
             )
-        for tool_id in ("ibkr", "instagram", "linkedin"):
+        for tool_id in ("ibkr", "linkedin"):
             self.assertEqual(self.tool_entry(body, tool_id)["technical_details"], [])
 
         # agent_notes is the one manifest field the operator never sees:

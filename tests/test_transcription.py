@@ -4,14 +4,18 @@ import base64
 from http import HTTPStatus
 import json
 from pathlib import Path
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
 from host.runtime.admin_api.errors import ApiError
-from host.runtime.transcription import client, service
+from host.runtime.transcription import client, diagnostics, service
 
 
 class TranscriptionTests(unittest.TestCase):
+    def setUp(self):
+        self.report = self.enterContext(patch.object(diagnostics, "report"))
+
     def test_accepts_only_bounded_pcm(self):
         audio = bytes(client.MAX_AUDIO_BYTES)
         self.assertEqual(client.decode_audio({"audio": base64.b64encode(audio).decode()}), audio)
@@ -64,7 +68,7 @@ class TranscriptionTests(unittest.TestCase):
         unit = script.split("cat > /etc/systemd/system/kern-transcription.service", 1)[1].split("\nUNIT", 1)[0]
         for setting in ("PrivateNetwork=yes", "ProtectSystem=strict", "MemoryMax=2G", "CPUQuota=200%", "HF_HUB_OFFLINE=1"):
             self.assertIn(setting, unit)
-        self.assertIn("TRANSCRIPTION_MODEL_TAG=model-faster-whisper-small.en-1", script)
+        self.assertIn("TRANSCRIPTION_MODEL_TAG=model-faster-whisper-base.en-1", script)
         from host.bootstrap.render import _render_bootstrap
         rendered = _render_bootstrap()
         self.assertIn('transcription_model_base="https://github.com/infiloop2/kern/releases/download/${TRANSCRIPTION_MODEL_TAG}"', rendered)
@@ -81,6 +85,67 @@ class TranscriptionTests(unittest.TestCase):
                 client.transcribe({'audio': 'AAA='})
         self.assertEqual(raised.exception.status, HTTPStatus.SERVICE_UNAVAILABLE)
         connection.close.assert_called_once()
+        args = self.report.call_args.args
+        self.assertEqual(args[:2], ("admin_api.dictation", "timeout"))
+        self.assertEqual(args[2]["exception_type"], "TimeoutError")
+        self.assertEqual(args[2]["timeout_seconds"], 60)
+        self.assertNotIn("socket timed out", str(args))
+        request_id = connection.request.call_args.args[3]["X-Kern-Dictation-Id"]
+        self.assertEqual(args[2]["request_id"], request_id)
+
+    def test_slow_worker_records_wall_and_cpu_time_without_payloads(self):
+        handler = object.__new__(service.Handler)
+        handler.path = "/transcribe"
+        handler.headers = {"X-Kern-Dictation-Id": "a" * 32}
+        handler.bounded_content_length = MagicMock(return_value=40)
+        handler.read_json_object_body = MagicMock(return_value={"audio": "AAA="})
+        with (patch.object(service, "transcribe", return_value="private words"),
+              patch.object(service.Handler, "_peer", return_value=(10, 20)),
+              patch.object(service, "allowed_uid", return_value=20),
+              patch.object(service, "_model_instance", object()),
+              patch.object(service.time, "monotonic", side_effect=[10, 25]),
+              patch.object(service.time, "process_time", side_effect=[1, 3.5]),
+              patch.object(service.Handler, "_send_json") as send):
+            self.report.side_effect = lambda *args: self.assertFalse(service._inference_lock.locked())
+            handler.do_POST()
+        send.assert_called_once_with(200, {"text": "private words"})
+        component, outcome, context = self.report.call_args.args
+        self.assertEqual((component, outcome), ("transcription.inference", "slow_inference"))
+        self.assertEqual(context["inference_ms"], 15000)
+        self.assertEqual(context["cpu_ms"], 2500)
+        self.assertEqual(context["request_id"], "a" * 32)
+        self.assertNotIn("private words", str(context))
+        self.assertNotIn("AAA=", str(context))
+
+    def test_worker_failure_records_only_exception_class_and_safe_request_id(self):
+        handler = object.__new__(service.Handler)
+        handler.path = "/transcribe"
+        handler.headers = {"X-Kern-Dictation-Id": "secret-untrusted-header"}
+        handler.bounded_content_length = MagicMock(return_value=40)
+        handler.read_json_object_body = MagicMock(return_value={"audio": "AAA="})
+        with (patch.object(service, "transcribe", side_effect=RuntimeError("private speech and /host/path")),
+              patch.object(service.Handler, "_peer", return_value=(10, 20)),
+              patch.object(service, "allowed_uid", return_value=20),
+              patch.object(service, "_model_instance", object()),
+              patch.object(service.Handler, "_send_json") as send):
+            handler.do_POST()
+        send.assert_called_once_with(503, {"error": "transcription failed"})
+        component, outcome, context = self.report.call_args.args
+        self.assertEqual((component, outcome), ("transcription.inference", "inference_failure"))
+        self.assertEqual(context["exception_type"], "RuntimeError")
+        self.assertEqual(context["request_id"], "")
+        self.assertNotIn("private speech", str(context))
+        self.assertNotIn("/host/path", str(context))
+
+    def test_fast_success_is_not_a_diagnostic(self):
+        response = MagicMock(status=200)
+        response.read.return_value = b'{"text":"Hello"}'
+        connection = MagicMock()
+        connection.getresponse.return_value = response
+        with (patch.object(client, "_Connection", return_value=connection),
+              patch.object(client.time, "monotonic", side_effect=[0, 1])):
+            client.transcribe({"audio": "AAA="})
+        self.report.assert_not_called()
 
     def test_worker_rejects_non_admin_peer_before_reading_audio(self):
         handler = object.__new__(service.Handler)
@@ -154,3 +219,50 @@ class TranscriptionTests(unittest.TestCase):
               patch.object(service, "transcribe", side_effect=lambda audio: calls.append("transcribe") or "")):
             exec(code, {})
         self.assertEqual(calls, ["load", "transcribe"])
+
+
+class DiagnosticRateLimitTests(unittest.TestCase):
+    def test_slow_warnings_are_bounded_without_hiding_failures(self):
+        with (patch.object(diagnostics, "_last_report", {}),
+              patch.object(diagnostics.time, "monotonic", side_effect=[0, 1, 2, 60]),
+              patch.object(diagnostics.threading, "Thread") as thread):
+            diagnostics.report("transcription.inference", "slow_inference", {"request_id": "first"})
+            diagnostics.report("transcription.inference", "slow_inference", {"request_id": "second"})
+            diagnostics.report("transcription.inference", "inference_failure", {})
+            diagnostics.report("transcription.inference", "slow_inference", {"request_id": "third"})
+        self.assertEqual(thread.call_count, 3)
+        contexts = [call.kwargs["kwargs"]["context"] for call in thread.call_args_list]
+        self.assertEqual(contexts[0]["request_id"], "first")
+        self.assertEqual(contexts[1]["outcome"], "inference_failure")
+        self.assertEqual(contexts[2]["request_id"], "third")
+
+    def test_blocked_logger_does_not_delay_request_completion(self):
+        logging_started, release_logger, logging_finished = (threading.Event() for _ in range(3))
+        request_finished = threading.Event()
+
+        def blocked_logger(*args, **kwargs):
+            logging_started.set()
+            release_logger.wait(5)
+            logging_finished.set()
+
+        def request():
+            diagnostics.report("admin_api.dictation", "slow_request", {})
+            request_finished.set()
+
+        with (patch.object(diagnostics, "_last_report", {}),
+              patch.object(diagnostics.host_errors, "report_warning", side_effect=blocked_logger)):
+            caller = threading.Thread(target=request)
+            caller.start()
+            try:
+                self.assertTrue(logging_started.wait(1))
+                self.assertTrue(request_finished.wait(1), "request waited on the blocked logger")
+                self.assertFalse(logging_finished.is_set())
+            finally:
+                release_logger.set()
+                caller.join(2)
+                self.assertTrue(logging_finished.wait(2))
+
+    def test_reporter_start_failure_does_not_fail_dictation(self):
+        with (patch.object(diagnostics, "_last_report", {}),
+              patch.object(diagnostics.threading, "Thread", side_effect=RuntimeError("can't start thread"))):
+            diagnostics.report("admin_api.dictation", "slow_request", {})

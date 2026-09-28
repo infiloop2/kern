@@ -1,4 +1,4 @@
-"""Current AI fields and bounded text-free peer-delivery history."""
+"""Current task titles, approval state, and bounded peer-delivery history."""
 from __future__ import annotations
 
 from typing import Any
@@ -28,19 +28,31 @@ def swarm_snapshot(search: str = "") -> dict[str, Any]:
                 UNION ALL
                 SELECT thread_id, 'schedule', name, purpose, agent_runtime, model, next_run_at
                 FROM schedules WHERE deleted_at IS NULL AND agent_runtime <> 'script'
+            ), pending_approvals AS (
+                SELECT origin_thread_id AS thread_id, COUNT(*) AS approval_count
+                FROM (
+                    SELECT origin_thread_id FROM tool_approvals WHERE status = 'pending'
+                    UNION ALL
+                    SELECT origin_thread_id FROM pending_pushes WHERE status = 'pending'
+                ) AS approvals
+                WHERE origin_thread_id IS NOT NULL
+                GROUP BY origin_thread_id
             ), selected AS MATERIALIZED (
-                SELECT identity.*, session.run_status, session.run_number,
+                SELECT identity.*, COALESCE(pending_approvals.approval_count, 0) AS approval_count,
+                       session.run_status, session.run_number,
                        session.last_used_at, session.agent_runtime AS session_runtime,
                        session.model AS session_model
                 FROM identities AS identity
                 LEFT JOIN thread_sessions AS session USING (thread_id)
+                LEFT JOIN pending_approvals ON pending_approvals.thread_id = identity.thread_id
                 WHERE %s = '' OR strpos(lower(identity.name), lower(%s)) > 0
                     OR strpos(lower(identity.purpose), lower(%s)) > 0
                     OR EXISTS (SELECT 1 FROM swarm_agent_ai AS ai_search
                                WHERE ai_search.thread_id = identity.thread_id
                                  AND ai_search.run_number = session.run_number
                                  AND strpos(lower(ai_search.task), lower(%s)) > 0)
-                ORDER BY CASE WHEN session.run_status = 'running' THEN 0 ELSE 1 END,
+                ORDER BY CASE WHEN pending_approvals.approval_count > 0 THEN 0 ELSE 1 END,
+                         CASE WHEN session.run_status = 'running' THEN 0 ELSE 1 END,
                          COALESCE(session.last_used_at, '') DESC, identity.thread_id
                 LIMIT %s
             )
@@ -48,14 +60,16 @@ def swarm_snapshot(search: str = "") -> dict[str, Any]:
                    COALESCE(selected.agent_runtime, selected.session_runtime, ''),
                    COALESCE(selected.model, selected.session_model, ''),
                    COALESCE(selected.run_status, 'idle'), selected.next_run_at,
-                   ai.task, ai.needs_human,
+                   ai.task, selected.approval_count,
                    (SELECT event_type FROM agent_events
                     WHERE agent_events.thread_id = selected.thread_id
                     ORDER BY seq DESC LIMIT 1)
             FROM selected
             LEFT JOIN swarm_agent_ai AS ai ON ai.thread_id = selected.thread_id
                 AND ai.run_number = selected.run_number
-            ORDER BY selected.kind, lower(selected.name), selected.thread_id
+            ORDER BY CASE WHEN selected.approval_count > 0 THEN 0 ELSE 1 END,
+                     CASE WHEN selected.run_status = 'running' THEN 0 ELSE 1 END,
+                     COALESCE(selected.last_used_at, '') DESC, selected.thread_id
         """, (search, search, search, search, _AGENT_PAGE_LIMIT + 1))
         rows = cur.fetchall()
         has_more = len(rows) > _AGENT_PAGE_LIMIT
@@ -64,9 +78,9 @@ def swarm_snapshot(search: str = "") -> dict[str, Any]:
              "agent_runtime": runtime, "model": model,
              "state": "busy" if run_status == "running" else "failed" if latest_event_type == "thread.error" else "idle",
              "next_run_at": next_run_at,
-             "task": task, "needs_human": needs_human if run_status != "running" else None}
+             "task": task, "pending_approval_count": approval_count}
             for thread_id, kind, name, purpose, runtime, model, run_status,
-                next_run_at, task, needs_human, latest_event_type in rows[:_AGENT_PAGE_LIMIT]
+                next_run_at, task, approval_count, latest_event_type in rows[:_AGENT_PAGE_LIMIT]
         ]
     return {"generated_at": utc_now(), "agents": agents, "has_more": has_more}
 
@@ -108,36 +122,9 @@ def reset_swarm_ai(cur: Any, thread_id: str, run_number: int) -> None:
     cur.execute(
         "INSERT INTO swarm_agent_ai (thread_id, run_number) VALUES (%s, %s)"
         " ON CONFLICT (thread_id) DO UPDATE SET run_number = EXCLUDED.run_number,"
-        " task = NULL, needs_human = NULL",
+        " task = NULL",
         (thread_id, run_number),
     )
-
-
-def swarm_ai_context(thread_id: str, run_number: int) -> dict[str, Any] | None:
-    """Current turn only, with both ends of 24 recent messages/errors."""
-    with db.transaction() as cur:
-        cur.execute(
-            "SELECT session.run_status FROM thread_sessions AS session"
-            " JOIN swarm_agent_ai AS ai USING (thread_id, run_number)"
-            " WHERE session.thread_id = %s AND session.run_number = %s",
-            (thread_id, run_number),
-        )
-        row = cur.fetchone()
-        if row is None:
-            return None
-        cur.execute(
-            "SELECT source, CASE WHEN char_length(COALESCE(message, error_message, '')) > 2000"
-            " THEN LEFT(COALESCE(message, error_message, ''), 990)"
-            " || E'\\n[Middle omitted.]\\n'"
-            " || RIGHT(COALESCE(message, error_message, ''), 990)"
-            " ELSE COALESCE(message, error_message, '') END"
-            " FROM agent_events WHERE thread_id = %s AND run_number = %s"
-            " AND event_type IN ('thread.message', 'thread.error')"
-            " ORDER BY seq DESC LIMIT 24",
-            (thread_id, run_number),
-        )
-        history = [{"source": source or "host", "text": text} for source, text in reversed(cur.fetchall())]
-    return {"run_status": row[0], "messages": history}
 
 
 def save_swarm_task(thread_id: str, run_number: int, task: str) -> None:
@@ -145,16 +132,4 @@ def save_swarm_task(thread_id: str, run_number: int, task: str) -> None:
         cur.execute(
             "UPDATE swarm_agent_ai SET task = %s WHERE thread_id = %s AND run_number = %s",
             (task, thread_id, run_number),
-        )
-
-
-def save_swarm_needs_human(thread_id: str, run_number: int, needs_human: bool) -> None:
-    with db.transaction() as cur:
-        cur.execute(
-            "UPDATE swarm_agent_ai AS ai SET needs_human = %s"
-            " WHERE ai.thread_id = %s AND ai.run_number = %s"
-            " AND EXISTS (SELECT 1 FROM thread_sessions AS session"
-            " WHERE session.thread_id = ai.thread_id AND session.run_number = ai.run_number"
-            " AND session.run_status = 'idle')",
-            (needs_human, thread_id, run_number),
         )

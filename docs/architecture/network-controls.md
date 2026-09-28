@@ -4,17 +4,16 @@ Defense in depth, fail closed at each layer:
 
 1. **nftables**: inbound is dropped except loopback, established traffic, and
    SSH port 22 when SSH operator access is configured. Outbound is dropped for
-   everyone except root, `kern-proxy`, `kern-tools` (DNS and
-   HTTPS only, for the bundled tool packages' third-party APIs — see
+   everyone except root, `kern-proxy`, `kern-tools`, `kern-host-inference` (DNS and
+   HTTPS only, for bundled tools and host-owned AI providers — see
    [tools host integration](tools/host-integration.md); `kern-admin` has
    no egress at all), optional `cloudflared`, `systemd-resolved`, and
    `systemd-timesyncd`, with narrow
    loopback exceptions: the agent may reach the proxy port and the agent
    preview port range (`8000-8015`, its own HTTP servers — see
-   [agent-preview-ports.md](agent-preview-ports.md)), `kern-admin` may reach the
-   fixed Workspace browser port, and `kern-workspace` may answer established
-   connections. Agent `workspace_api` calls use a Unix socket rather than
-   TCP; see
+   [agent-preview-ports.md](agent-preview-ports.md)). Admin-to-Workspace browser
+   traffic and agent `workspace_api` calls use separate peer-authenticated Unix
+   sockets rather than TCP; see
    [workspace-agent-api.md](workspaces/workspace-agent-api.md). The agent has no
    direct network path off the host:
    its only loopback egress is the proxy port and its own preview range, where
@@ -25,7 +24,7 @@ Defense in depth, fail closed at each layer:
    preview server or answer a connection the agent opened.
    Non-root DNS is blocked even toward the local `systemd-resolved` stub (DNS
    lookups are an exfiltration channel); only `systemd-resolved`, the proxy,
-   tools service, and optional `cloudflared` may query upstream DNS. If the
+   tools service, host-inference service, and optional `cloudflared` may query upstream DNS. If the
    proxy is down, the agent simply has no connectivity.
 2. **Proxy environment**: agent processes run with `HTTP_PROXY`/`HTTPS_PROXY`/
    `ALL_PROXY` pointing at the local proxy and trust its CA via the system
@@ -146,14 +145,15 @@ forwarded, so two instances would let the upstream act on a meaning the guards
 never saw.
 
 The host firewall accepts outbound traffic from root, the dedicated
-`kern-proxy` and `kern-tools` uids, and the optional `cloudflared`
+`kern-proxy`, `kern-tools`, and `kern-host-inference` uids, and optional `cloudflared`
 uid. Root egress covers bootstrap/package installation, security updates, and
 ordinary root-owned system traffic. The host does not install or configure the
 AWS SSM agent, and
 snapd is explicitly stopped and masked during bootstrap. Proxy egress is limited
 to DNS and TCP 80/443, and only after a request has passed policy. Tools-service
 egress is limited to DNS and TCP 443 for the bundled packages' third-party
-calls. Cloudflare Tunnel egress is limited to DNS, TCP 443, and TCP/UDP 7844,
+calls. Host-inference egress is limited to DNS and TCP 443 for its fixed
+provider adapters. Cloudflare Tunnel egress is limited to DNS, TCP 443, and TCP/UDP 7844,
 and the EC2 security group keeps TCP/UDP 7844 open only when a
 `cloudflare_tunnel` operator endpoint
 is configured. That 7844 allowance is outbound-only and paired with nftables uid
@@ -161,19 +161,17 @@ checks: it is usable by the `cloudflared` connector, not by the agent, admin
 API, or proxy users. It does not expose an inbound EC2 port.
 
 Loopback is also uid-scoped. The agent can open new loopback TCP connections
-only to the network proxy port and to its own preview range (`8000-8015`),
-where it runs and tests its own HTTP servers. That range is default-deny: only
-the agent and the operator's SSH forward are allowed, and destination- and
+only to the network proxy port and to its own preview range (`8000-8015`), where
+it runs and tests its own HTTP servers. That range is default-deny: only the
+agent and the operator's SSH forward are allowed, and destination- and
 source-port drops deny every other principal both directions, so no service
 account reaches a preview server or answers a connection the agent opened, and
 the agent still cannot originate from a preview source port. See
-[agent-preview-ports.md](agent-preview-ports.md). The fixed Workspace port is
-opened only to `kern-admin`; a port-specific drop
-blocks all other local users before the general loopback accept. The
-`kern-workspace` user may send established loopback responses for proxied
-requests but may not initiate connections to the proxy, browser-facing admin
-API, or other local listeners. The agent — a non-root user with no sudo — only inherits
-root's blanket path by first escalating to root.
+[agent-preview-ports.md](agent-preview-ports.md). Workspace has no browser TCP
+listener: `kern-admin` reaches its browser Unix socket through filesystem and
+peer-uid checks. `kern-workspace` may not initiate TCP connections to the proxy,
+browser-facing admin API, or other local listeners. The agent — a non-root user
+with no sudo — only inherits root's blanket path by first escalating to root.
 
 Decisions are logged to the `network_events` database table, which the proxy
 writes under its own narrow database role. A denied `CONNECT` (no inner
@@ -204,7 +202,7 @@ Each network integration is a package under
 
 The registry is hand-written, not discovered: `registry.py` maps integration
 ids to manifests and `runtime.py` maps them to guards. This is deliberately
-the opposite of apps and bundled tools, which auto-discover — integration
+different from bundled tools, which auto-discover — integration
 code runs inside the proxy with the proxy's privileges and sees every
 request including bearer credentials, so adding one is a reviewed edit to a
 registry a security reviewer can read top to bottom, never a drop-in. Unit
@@ -320,7 +318,7 @@ resolve, because any difference between what the guard matches and what the
 server serves is a bypass:
 
 - **Percent-decoding** defeats encoding differentials. GitHub decodes
-  `%XX` escapes before routing, so `/repos/infiloop2/%74rustyclaw` reaches
+  `%XX` escapes before routing, so `/repos/infiloop2/%6bern` reaches
   the same resource as `/repos/infiloop2/kern`; a raw-string
   comparison would let an encoded spelling dodge (or dress up) the repo
   match.

@@ -1,7 +1,9 @@
 # Philosophy
 
 I made Kern because of a set of beliefs and hypotheses about running
-AI agents. They also guide its design and evolution.
+AI agents. They also guide its design and evolution. These are design goals, not a
+list of guarantees already implemented. For current behavior and boundaries,
+see the [architecture reference](docs/architecture/index.md).
 
 - **Rigor at the boundary, freedom inside.** The host, its tools, and the
   internet connection should get proper software engineering: review,

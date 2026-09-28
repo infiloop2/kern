@@ -7,6 +7,25 @@ document is the authoritative design of the provider boundary and the local
 Lima host; `tests/test_deploy_lima.py` enforces its contracts. The operator
 setup is in the [README](../../README.md#quick-start-run-kern-on-your-computer).
 
+## Contents
+
+- [Decision](#decision)
+- [Goals](#goals)
+- [Non-goals](#non-goals)
+- [Invariants](#invariants)
+- [Architecture](#architecture)
+- [Source layout](#source-layout)
+- [Inputs and configuration](#inputs-and-configuration)
+- [Operation matrix](#operation-matrix)
+- [Failure and cleanup contract](#failure-and-cleanup-contract)
+- [Guest storage handoff](#guest-storage-handoff)
+- [AWS provider](#aws-provider)
+- [Lima provider](#lima-provider)
+- [Security-group continuity](#security-group-continuity)
+- [Result contract](#result-contract)
+- [Testing](#testing)
+- [Lima references](#lima-references)
+
 ## Decision
 
 Kern supports more than one infrastructure provider without creating more than
@@ -21,7 +40,7 @@ identified is shared:
 - systemd services;
 - nftables and the network proxy;
 - apps and tools;
-- Codex, Claude Code, and Hermes integrations;
+- Codex, Claude Code, Grok, and Hermes integrations;
 - deployment verification;
 - SSH operator access and previews; and
 - the optional Cloudflare Tunnel connector.
@@ -155,7 +174,7 @@ host/
 ```
 
 Provider modules run only on the operator machine. No provider adds files
-under `host/runtime`, `host/apps`, or `host/tools`, and guest services never
+under `host/runtime/` or `host/tools/`, and guest services never
 import them. Provider selection is a fixed two-way branch on `--provider`,
 not plugin discovery: loading arbitrary provider code would make the
 lifecycle and its destructive operations harder to audit. `lifecycle.py`

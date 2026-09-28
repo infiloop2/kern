@@ -97,6 +97,14 @@ class Credentials(Protocol):
         """Delete this tool's stored credential. A no-op if absent."""
         ...
 
+    def save_if_current(self, loaded: StoredCredential, credential: StoredCredential) -> bool:
+        """Atomically replace only the loaded account id and secret; never recreate a disconnected slot."""
+        ...
+
+    def clear_if_current(self, loaded: StoredCredential) -> bool:
+        """Atomically delete only the loaded account id and secret."""
+        ...
+
 
 class Secrets(Protocol):
     """One private JSON object per tool definition, at most 16 KiB.

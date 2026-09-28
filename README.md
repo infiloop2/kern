@@ -5,7 +5,7 @@ time.**
 
 Kern gives your AI agents a permanent home where they can work continuously,
 remember what they learn, and build on past experience, all within one
-fail-closed, auditable network boundary you control. Codex, Claude Code, and
+fail-closed, auditable network boundary you control. Codex, Claude Code, Grok, and
 Hermes are supported. Kern is the host, not the harness: it does not replace
 your agents or decide how they reason; bring the agents and the subscriptions
 you already pay for. Learn more at [kernai.cloud](https://kernai.cloud), and
@@ -13,13 +13,14 @@ read the thinking behind the design on
 [the Kern blog](https://kernai.cloud/blog).
 
 Read the [Kern documentation](https://docs.kernai.cloud) for setup guides,
-core concepts, and day-to-day use.
+core concepts, and day-to-day use. For repository references and contributor
+workflows, use the [repository documentation index](docs/README.md).
 
 **Why agents need a home:**
 
 - **Persistent and always on:** agents keep working after you close the laptop
   and come back to work already in progress, whether the host runs in the
-  cloud or on your own machine.
+  cloud or on a local machine that remains powered on and awake.
 - **Improving through memory:** the whole swarm shares one memory that each
   agent searches before it starts and writes back to when it learns something
   worth keeping; files, projects, and past threads stay on durable volumes,
@@ -28,11 +29,12 @@ core concepts, and day-to-day use.
 - **Governed by a hard boundary:** agents run with no permission prompts as
   unprivileged Linux users behind one fail-closed network policy: anything
   not listed is denied by default, every request is audited with the rule
-  that decided it, and the host injects provider credentials in transit so
-  reusable secrets never live with an agent.
+  that decided it. GitHub and Bedrock credentials stay outside the agent and
+  are injected in transit; runtime OAuth credentials remain in agent-owned
+  provider homes and are constrained by account guards.
 - **Controlled tools:** bundled packages (Gmail, Google Calendar, Brave
   Search, X/Twitter, LinkedIn, Instagram, Polymarket, Interactive Brokers,
-  Runway and Seedance media generation, and more) connect agents to
+  Runway media generation, and more) connect agents to
   third-party services through deterministic data paths, with consequential
   actions such as sending email or publishing a post held for your approval
   before they run.
@@ -424,9 +426,10 @@ result file schema.
 ### Recovering From Lost Passkeys
 
 If you enable passkey login for the admin UI and later lose every enrolled
-passkey, you can still recover from the operator plane; passkeys are
-optional convenience credentials, and the admin password remains a valid way
-in. Run `reconfigure` with `--reset-admin-passkeys`:
+passkey, recover through the operator plane. Once enrolled, the passkey is
+required alongside the password on public HTTPS. SSH-forwarded access still
+uses the SSH key and admin password. To reset public passkey access, run
+`reconfigure` with `--reset-admin-passkeys`:
 
 ```bash
 python3 -m host.cli.reconfigure \

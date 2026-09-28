@@ -18,10 +18,10 @@ from host.tools.results import (
     StreamingAsset,
 )
 from host.tools.host_api import ApprovalRecord, HostAPI
-from host.tools.runway import options, costs
+from host.tools.runway import options, costs, upscale
 from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError
-from host.tools.shared.media import open_downloaded_audio, open_downloaded_video
+from host.tools.shared.media import open_downloaded_audio, open_downloaded_image, open_downloaded_video
 from host.tools.shared.web import (
     UnmappedProviderError,
     WebRequestError,
@@ -163,6 +163,8 @@ TASK_CREATED_OUTPUT_SCHEMA: JSONObject = outputs.obj(
         "task_status": outputs.text("Always PENDING for a task this call just created."),
         "model": outputs.text("Runway model the task runs on."),
         "output_kind": outputs.text("video, image, or audio; pass the same value to get_task."),
+        "estimated_cost_usd": outputs.text("Magnific published-rate cost estimate recorded at submission; not a final invoice."),
+        "cost_estimate_basis": outputs.text("Pricing date and supplied metadata or conservative fallback assumptions. Actual billing/refunds are not reconciled."),
     },
     ["message", "task_id", "task_status", "model", "output_kind"],
 )
@@ -184,15 +186,15 @@ MANIFEST = ToolManifest(
     tool_id="runway",
     reports_cost=True,
     display_name="Runway Media Generation",
-    description="Connect Runway and let your agent generate images, speech, and short videos, and edit videos.",
+    description="Connect Runway and let your agent generate images, speech, and short videos, edit videos, and upscale images/videos with Magnific.",
     connection="enable_only",
-    actions=protect_inputs((
+    actions=(*upscale.actions(TASK_CREATED_OUTPUT_SCHEMA), *protect_inputs((
         ActionSpec(
             id="generate_video",
             cost_description='Reports the calculated generation charge when Runway accepts the task, at $0.01 per credit using model, duration, resolution and format pricing. Unknown media duration or an explicit Seedance audio setting produces no report. Later provider refunds are not reconciled.',
             description=(
                 "Start an async Runway video generation task from a text prompt and optional "
-                "media from public URLs, existing Runway uploads, or the agent workspace. Supports keyframes and model-specific references. Returns a "
+                "staged media from the agent workspace. Supports keyframes and model-specific references. Returns a "
                 "task_id to poll with get_task; renders "
                 "typically take one to three minutes. This runs immediately, spends Runway "
                 "credits, and creates no public post."
@@ -208,8 +210,7 @@ MANIFEST = ToolManifest(
                         "enum": list(SUPPORTED_VIDEO_MODELS),
                         "description": "Default: gen4.5 (or gen4_turbo with image inputs). gen4_turbo is image-to-video only. Select the model explicitly to follow operator preferences.",
                     },
-                    "image_url": {"type": "string", "description": "Optional public HTTPS image URL used as the first frame (image-to-video)."},
-                    "image_asset_id": {"type": "string", "description": "Built-in reference for a JPEG, PNG, or WebP from the agent workspace. Use at most one of image_url or image_asset_id."},
+                    "image_asset_id": {"type": "string", "description": "Built-in reference for a JPEG, PNG, or WebP from the agent workspace. Use at most one of image_asset_id or prompt_images."},
                     "ratio": options.choice_schema(options.ALL_VIDEO_RATIOS, "Output dimensions, default 1280:720. Seedance 2.5: 480p/720p/1080p (portrait 480:854, 720:1280, 1080:1920); 2.0 also 4K; Fast only 480p/720p. Gen-4 text: landscape/portrait 720p; image also other listed Gen-4 shapes. Veo: portrait/landscape 720p or 1080p. Omit for h3_max; use resolution and a first frame for framing."),
                     "duration_seconds": {"type": "string", "description": "Gen-4: 2-10; Seedance 2.0/Fast: 4-15; Seedance 2.5: 4-30; H3 Max: 5-15 (default 5). Seedance also accepts auto, billed at the maximum up front with unused credits refunded. Veo: 4, 6, or 8 (default 4)."},
                     "seed": {"type": "string", "description": "Optional integer seed. H3 Max prompt_expansion_mode=disabled is also needed for repeatability."},
@@ -224,7 +225,7 @@ MANIFEST = ToolManifest(
             cost_description='Uses paid Runway credits. Cost reporting is not available because the input video duration is unavailable.',
             description=(
                 "Start an async Runway video-editing task (Aleph 2): restyle or modify an "
-                "existing video from a public HTTPS URL or the agent workspace. Returns a "
+                "existing staged video from the agent workspace. Returns a "
                 "task_id to poll with get_task. A workspace video is uploaded to Runway only "
                 "when this action runs. This spends Runway credits "
                 "and creates no public post."
@@ -232,10 +233,9 @@ MANIFEST = ToolManifest(
             data_policy=RUNWAY_EDIT_POLICY,
             input_schema={
                 "type": "object",
-                "required": [],
+                "required": ["video_asset_id"],
                 "properties": {
-                    "video_url": {"type": "string", "description": "Public HTTPS URL of the source video to edit."},
-                    "video_asset_id": {"type": "string", "description": "Built-in reference for an MP4 or MOV from the agent workspace. Use exactly one of video_url or video_asset_id."},
+                    "video_asset_id": {"type": "string", "description": "Built-in reference for an MP4 or MOV from the agent workspace. Required staged source video."},
                     "prompt": {"type": "string", "description": "Optional editing instruction, e.g. 'make it night time'. Uses allow_longer_text: up to 5 KB (5120 UTF-8 bytes)."},
                     "seed": {"type": "string", "description": "Optional integer seed for reproducible output."},
                     **options.EDIT_PROPERTIES,
@@ -327,6 +327,13 @@ MANIFEST = ToolManifest(
             returns_asset=True,
         ),
         ActionSpec(
+            id="save_image", cost_description="No separate poll or download charge.",
+            description="Save a completed Runway JPEG, PNG, or WebP image to the workspace, up to 200 MB.",
+            data_policy="Looks up the task and streams the authoritative image URL into a private workspace asset.",
+            input_schema=outputs.obj({"task_id": outputs.text("Completed image task id.")}, ["task_id"]),
+            returns_asset=True,
+        ),
+        ActionSpec(
             id="save_audio",
             cost_description='No separate poll or download charge.',
             description=(
@@ -348,20 +355,18 @@ MANIFEST = ToolManifest(
         "generate_video": {
             "prompt": guarded_input(allow_longer_text=True),
             "model": validated_input("One of the listed choices."),
-            "image_url": guarded_input(),
             "image_asset_id": validated_input("Staged image reference; tool ownership, expiry and supported image format checked."),
             "ratio": validated_input("One of the listed choices."),
-            **{key: (guarded_input() if key in {"prompt_images", "reference_images", "reference_videos", "reference_audio", "video_url", "negative_prompt"}
+            **{key: (guarded_input() if key == "negative_prompt"
                      else validated_input("Validated for the selected model; workspace references also check media type."))
                for key in options.VIDEO_PROPERTIES},
             "duration_seconds": validated_input("Integer within the selected model’s documented duration range or fixed choices."),
             "seed": validated_input("Integer from 0 to 4294967295."),
         },
         "edit_video": {
-            "video_url": guarded_input(),
             "video_asset_id": validated_input("Staged video reference; tool ownership, expiry and supported video format checked."),
             "prompt": guarded_input(allow_longer_text=True),
-            **{key: (guarded_input() if key == "keyframes" else validated_input("Validated Aleph setting."))
+            **{key: (validated_input("Staged media reference or validated Aleph setting."))
                for key in options.EDIT_PROPERTIES},
             "seed": validated_input("Integer from 0 to 4294967295."),
         },
@@ -383,13 +388,14 @@ MANIFEST = ToolManifest(
             "task_id": validated_input("1–128 ASCII letters, digits, dots, underscores, colons or hyphens."),
             "output_kind": validated_input("One of the listed choices."),
         },
+        "save_image": {"task_id": validated_input("1–128 ASCII letters, digits, dots, underscores, colons or hyphens.")},
         "save_audio": {
             "task_id": validated_input("1–128 ASCII letters, digits, dots, underscores, colons or hyphens."),
         },
         "save_video": {
             "task_id": validated_input("1–128 ASCII letters, digits, dots, underscores, colons or hyphens."),
         },
-    }),
+    })),
     config=(ConfigRequirement(key="RUNWAY_API_SECRET", description="Runway Developer API key (org-scoped) from the dev.runwayml.com dashboard."),),
     protections=(
         "Your Runway key stays in write-only tool config. Inputs are bounded, and local images and videos are uploaded to Runway only when used as inputs.",
@@ -421,8 +427,8 @@ MANIFEST = ToolManifest(
             DataSummaryCard(
                 title="What leaves this host",
                 points=(
-                    DataSummaryPoint(label="Generation requests", text="The prompt or speech text, generation options (including model, dimensions, duration, audio, output format, quality, voice, and seed), and image/video/audio input URLs go to Runway. These free-text values (prompt, speech text, external media URL) first pass the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before anything is sent."),
-                    DataSummaryPoint(label="Workspace media", text="When an image or video file from the agent workspace is used as an input, its bytes and original filename upload to Runway. Its local workspace path is not sent. Audio references use public HTTPS URLs or existing Runway upload URIs; workspace audio staging is not available."),
+                    DataSummaryPoint(label="Generation requests", text="The prompt or speech text, generation options (including model, dimensions, duration, audio, output format, quality, voice, and seed) go to Runway along with selected staged image/video/audio bytes. Free-text prompts and speech first pass the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before anything is sent."),
+                    DataSummaryPoint(label="Workspace media", text="When an image, video or audio file from the agent workspace is used as an input, its bytes and original filename upload to Runway. Its local workspace path is not sent. All source media must be staged for Runway; caller-supplied URLs and URIs are rejected."),
                 ),
             ),
             DataSummaryCard(
@@ -430,6 +436,7 @@ MANIFEST = ToolManifest(
                 points=(
                     DataSummaryPoint(label="Runway models", text="Every request first goes to Runway. Gen-4.5, Gen-4 Turbo, and Aleph 2 generations use Runway's own models."),
                     DataSummaryPoint(label="Third-party video models", text="When the agent explicitly selects Google Veo 3.1, ByteDance Seedance 2.0/2.5, or fal's MiniMax H3 Max, Runway sends that provider the prompt, generation settings, and any supplied keyframes or reference images, videos, and audio. Kern does not let Runway silently choose one of these models."),
+                    DataSummaryPoint(label="Magnific enhancement", text="Upscaling sends the source image or video and enhancement controls through Runway to Magnific. These actions spend Runway API credits."),
                     DataSummaryPoint(label="Image and speech models", text="For image generation, Runway sends the prompt, ratio, and quality to OpenAI's GPT Image 2.5 Sunburst or Flare. For speech generation, Runway sends the speech text, selected voice, and optional delivery settings to ElevenLabs Multilingual v2 or Eleven v3."),
                 ),
             ),
@@ -462,12 +469,13 @@ MANIFEST = ToolManifest(
         ),
     ),
     agent_notes=(
-        "Video inputs use shared {uri or asset_id} media objects. prompt_images adds position first/last; "
+        "Magnific: upscale_image uses precision v2 (sublime for artwork); upscale_video uses creative upscaling for clips up to 30 seconds. Save completed images with save_image. Magnific records published-rate estimates at submission. Supply measured image source_width/source_height or estimated_output_frames for video; unknown metadata uses conservative high estimates. Read estimated_cost_usd and cost_estimate_basis. These estimates are not reconciled to actual bills or refunds. "
+        "Media inputs use staged {asset_id} objects; caller-supplied URLs and URIs are rejected. prompt_images adds position first/last; "
         "Seedance unpositioned images use reference mode. Choose Seedance resolution with ratio pixel dimensions; "
         "H3 Max uses resolution 480p/768p and no ratio. New model-specific options are omitted unless selected. "
-        "Seedance video input uses generate_video; Aleph uses edit_video. Public URL media dimensions and "
-        "combined durations are validated by Runway. Prompt fields use allow_longer_text (5 KB/5120 UTF-8 bytes); other free text/URLs keep the 1024-byte guard. "
-        "Use staged workspace files instead of inline base64. get_task.output_urls returns every artifact; "
+        "Seedance video input uses generate_video; Aleph uses edit_video. Media dimensions and "
+        "combined durations are validated by Runway. Prompt fields use allow_longer_text (5 KB/5120 UTF-8 bytes); other free text fields keep the 1024-byte guard. "
+        "Download external media to the workspace first, then stage it. get_task.output_urls returns every artifact; "
         "save_video handles MP4/MOV, not ZIP frame sequences. Non-MP4 output formats can cost extra."
     ),
 )
@@ -545,13 +553,13 @@ def _generation_request(
     api: HostAPI, tool_input: JSONObject, uploads: dict[str, str]
 ) -> tuple[str, JSONObject]:
     """Validate the entire request before uploading any workspace media."""
-    allowed = {"prompt", "model", "image_url", "image_asset_id", "ratio", "duration_seconds", "seed", *options.VIDEO_PROPERTIES}
+    allowed = {"prompt", "model", "image_asset_id", "ratio", "duration_seconds", "seed", *options.VIDEO_PROPERTIES}
     if set(tool_input) - allowed:
         raise ToolInputValidationError("Runway generate_video received unsupported fields.")
-    image_keys = [k for k in ("image_url", "image_asset_id", "prompt_images") if tool_input.get(k) is not None]
+    image_keys = [k for k in ("image_asset_id", "prompt_images") if tool_input.get(k) is not None]
     if len(image_keys) > 1:
-        raise ToolInputValidationError("Runway generate_video supports at most one of image_url, image_asset_id, or prompt_images.")
-    video_keys = [k for k in ("video_url", "video_asset_id") if tool_input.get(k) is not None]
+        raise ToolInputValidationError("Runway generate_video supports at most one of image_asset_id or prompt_images.")
+    video_keys = [k for k in ("video_asset_id",) if tool_input.get(k) is not None]
     if len(video_keys) > 1 or (video_keys and image_keys):
         raise ToolInputValidationError("Runway video input cannot be combined with image keyframes or a second video source.")
     has_image = bool(image_keys)
@@ -559,7 +567,7 @@ def _generation_request(
     seedance = model in options.SEEDANCE_MODELS
     veo = model in {"veo3.1", "veo3.1_fast"}
     if not has_image and model in IMAGE_ONLY_VIDEO_MODELS:
-        raise ToolInputValidationError(f"Runway model {model} is image-to-video only; supply image_url, image_asset_id, or prompt_images.")
+        raise ToolInputValidationError(f"Runway model {model} is image-to-video only; supply image_asset_id or prompt_images.")
     if video_keys and not seedance:
         raise ToolInputValidationError("Runway generate_video video input requires a Seedance model; use edit_video for Aleph.")
     mode = None
@@ -619,10 +627,10 @@ def _generation_request(
                 raise ToolInputValidationError("Runway H3 Max last frame requires a first frame.")
             body["promptImage"] = cast(list, frames)
         else:
-            body["promptImage"] = options.media_uri({"uri": tool_input.get("image_url"), "asset_id": tool_input.get("image_asset_id")}, "image", api, uploads)
+            body["promptImage"] = options.media_uri({"asset_id": tool_input.get("image_asset_id")}, "image", api, uploads)
     if video_keys:
         endpoint = VIDEO_TO_VIDEO_ENDPOINT
-        body["promptVideo"] = options.media_uri({"uri": tool_input.get("video_url"), "asset_id": tool_input.get("video_asset_id")}, "video", api, uploads)
+        body["promptVideo"] = options.media_uri({"asset_id": tool_input.get("video_asset_id")}, "video", api, uploads)
     for key, wire, kind in (("reference_images", "references", "image"), ("reference_videos", "referenceVideos", "video"), ("reference_audio", "referenceAudio", "audio")):
         if key not in tool_input:
             continue
@@ -641,13 +649,13 @@ def _generation_request(
 
 
 def _edit_request(api: HostAPI, tool_input: JSONObject, uploads: dict[str, str]) -> JSONObject:
-    if set(tool_input) - {"video_url", "video_asset_id", "prompt", "seed", *options.EDIT_PROPERTIES}:
+    if set(tool_input) - {"video_asset_id", "prompt", "seed", *options.EDIT_PROPERTIES}:
         raise ToolInputValidationError("Runway edit_video received unsupported fields.")
-    if (tool_input.get("video_url") is None) == (tool_input.get("video_asset_id") is None):
-        raise ToolInputValidationError("Runway edit_video requires exactly one of video_url or video_asset_id.")
+    if tool_input.get("video_asset_id") is None:
+        raise ToolInputValidationError("Runway edit_video requires video_asset_id from workspace staging.")
     body: JSONObject = {
         "model": EDIT_MODEL,
-        "videoUri": options.media_uri({"uri": tool_input.get("video_url"), "asset_id": tool_input.get("video_asset_id")}, "video", api, uploads),
+        "videoUri": options.media_uri({"asset_id": tool_input.get("video_asset_id")}, "video", api, uploads),
     }
     if "prompt" in tool_input:
         body["promptText"] = options.text(tool_input["prompt"], "prompt", api, allow_longer_text=True)
@@ -885,7 +893,7 @@ def _save_media(task_id: str, headers: dict[str, str], api: HostAPI, *, kind: st
     if not output_url or not _is_public_https_url(output_url):
         return ActionFailed(f"Runway reported success but returned no valid {kind} URL.")
     def open_media():
-        download = open_downloaded_audio if kind == "audio" else open_downloaded_video
+        download = {"audio": open_downloaded_audio, "image": open_downloaded_image, "video": open_downloaded_video}[kind]
         return download(
             output_url,
             provider="Runway",
@@ -906,7 +914,7 @@ class RunwayTool:
         return None
 
     def _create_task(
-        self, endpoint: str, body: JSONObject, headers: dict[str, str], model: str, output_kind: str, api: HostAPI
+        self, endpoint: str, body: JSONObject, headers: dict[str, str], model: str, output_kind: str, api: HostAPI, cost_estimate: tuple[str, str] | None = None
     ) -> ActionResult:
         response = json_request(
             "POST",
@@ -918,16 +926,20 @@ class RunwayTool:
         )
         task_id = response.get("id")
         valid_task_id = task_id if isinstance(task_id, str) and TASK_ID_RE.fullmatch(task_id) else None
-        costs.submitted(api, valid_task_id, body)
+        if cost_estimate is None:
+            costs.submitted(api, valid_task_id, body)
+        elif valid_task_id is not None:
+            api.costs.record(cost_estimate[0], charge_id=f"task:{valid_task_id}")
         if valid_task_id is None:
             return ActionFailed("Runway API returned no task id.")
         return ActionExecuted(
             {
-                                "message": f"Runway task created. Poll get_task with output_kind={output_kind} until it succeeds.",
+                "message": f"Runway task created. Poll get_task with output_kind={output_kind} until it succeeds.",
                 "task_id": valid_task_id,
                 "task_status": "PENDING",
                 "model": model,
                 "output_kind": output_kind,
+                **({"estimated_cost_usd": cost_estimate[0], "cost_estimate_basis": cost_estimate[1]} if cost_estimate else {}),
             }
         )
 
@@ -938,28 +950,34 @@ class RunwayTool:
                 "authorization": f"Bearer {api_key}",
                 "x-runway-version": RUNWAY_API_VERSION,
             }
-            if action in {"generate_video", "edit_video"}:
+            if action in {"generate_video", "edit_video", "upscale_image", "upscale_video"}:
                 uploads: dict[str, str] = {}
-                if action == "generate_video":
+                cost_estimate = None
+                output_kind = "image" if action == "upscale_image" else "video"
+                if action.startswith("upscale_"):
+                    endpoint = f"{RUNWAY_API_BASE}/v1/{output_kind}_upscale"
+                    body = upscale.request(output_kind, tool_input, api, uploads)
+                    cost_estimate = upscale.estimate(output_kind, tool_input, body)
+                elif action == "generate_video":
                     endpoint, body = _generation_request(api, tool_input, uploads)
                 else:
                     endpoint, body = VIDEO_TO_VIDEO_ENDPOINT, _edit_request(api, tool_input, uploads)
                 uploaded = {asset_id: _upload_staged_asset(asset_id, headers, api, kind=kind)
                             for asset_id, kind in uploads.items()}
                 body = cast(JSONObject, options.replace_assets(body, uploaded))
-                result = self._create_task(endpoint, body, headers, cast(str, body["model"]), "video", api)
+                result = self._create_task(endpoint, body, headers, cast(str, body["model"]), output_kind, api, cost_estimate)
                 if isinstance(result, ActionExecuted):
                     for asset_id in uploads:
                         api.assets.delete(asset_id)
                 return result
-            if action in {"save_video", "save_audio"}:
+            if action in {"save_video", "save_audio", "save_image"}:
                 if set(tool_input) != {"task_id"} or not isinstance(tool_input.get("task_id"), str):
                     raise ToolInputValidationError(
                         f"Runway {action} requires exactly one string task_id."
                     )
                 return _save_media(
                     cast(str, tool_input["task_id"]), headers, api,
-                    kind="audio" if action == "save_audio" else "video",
+                    kind=action.removeprefix("save_"),
                 )
             if action == "generate_image":
                 body = _image_request(api, tool_input)
