@@ -16,6 +16,9 @@ another host implementation of the same contract.
   the agent-facing MCP surface, the local sockets involved, the operator UI, and
   the state model.
 
+- [Outbound parameter filtering](outbound-request-filtering.md) describes the
+  shared input guard, its exceptions, and its limits.
+
 Tool-specific documentation lives on each admin UI **Home > Integrations** page
 and is rendered from the guide content owned by each package under `host/tools/`. Those
 guides are the source of truth for what an integration does, setup, protections,

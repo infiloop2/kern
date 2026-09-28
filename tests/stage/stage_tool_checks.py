@@ -19,20 +19,6 @@ from tests.stage.stage_support import (
 )
 
 
-# Every way a stage account can lack the Seedance entitlement rather than be
-# broken: ModelArk answers 401 for an invalid key, 403 when the key cannot reach
-# video generation, and 404 when the model is not activated for the account. All
-# three mean "no credential to test", which skips the suite instead of failing
-# it. These are substrings of messages the tool composes, so
-# test_tools_seedance pins them against the real mapper — a reworded message
-# must not quietly turn a skip into a hard stage failure.
-SEEDANCE_UNAVAILABLE_MARKERS = (
-    "rejected the configured api key",
-    "denied the request",
-    "activate seedance 2.5 for this account",
-)
-
-
 _SENSITIVE_ARGUMENT_KEYS = frozenset(
     {
         "access_token",
@@ -367,12 +353,13 @@ class StageToolChecks:
             "apify": self._check_apify_live,
             "apify_developer": self._check_apify_developer_live,
             "brave_search": self._check_brave_live,
+            "browser": self._check_browser_live,
             "cloudwatch_logs": self._check_cloudwatch_logs_live,
             "elevenlabs": self._check_elevenlabs_live,
             "gmail": self._check_gmail_live,
             "google_calendar": self._check_calendar_live,
             "google_search_console": self._check_search_console_live,
-            "h3max": self._check_h3max_live,
+            "fal_ai": self._check_fal_ai_live,
             "instagram_discovery": self._check_instagram_discovery_live,
             "polymarket": self._check_polymarket_live,
             "reddit": self._check_reddit_live,
@@ -384,7 +371,6 @@ class StageToolChecks:
             "whatsapp": self._check_whatsapp_live,
             "openai_images": self._check_openai_images_live,
             "runway": self._check_runway_live,
-            "seedance": self._check_seedance_live,
             "zoho_mail": self._check_zoho_mail_live,
         }.get(tool_id)
         if specialized is not None:
@@ -515,6 +501,15 @@ class StageToolChecks:
         rows = chats.get("chats")
         count = len(rows) if isinstance(rows, list) else 0
         return f"linked-device status and bounded local chat cache read completed ({count} chat(s))"
+
+    def _check_browser_live(self) -> str:
+        status = self._successful_tool_call("browser_x_connection_status", {})
+        accounts = status.get("accounts")
+        if not isinstance(accounts, list) or not any(
+            isinstance(item, dict) and item.get("state") == "connected" for item in accounts
+        ):
+            raise CredentialUnavailable("X browser is not connected")
+        return f"browser account metadata read completed ({len(accounts)} saved account(s))"
 
     def _check_gmail_live(self) -> str:
         unique_title = f"Kern stage check {os.urandom(4).hex()}"
@@ -1008,41 +1003,19 @@ class StageToolChecks:
             )
         return "authenticated missing-task probe completed without generation spend"
 
-    def _check_seedance_live(self) -> str:
-        # Same no-spend shape as Runway: a real generation would bill ModelArk
-        # tokens, so the probe only proves the key authenticates against a task
-        # id that cannot exist.
-        name = "seedance_get_task"
-        result, text = self._shim_tool_response(
-            name, {"task_id": "cgt-00000000000000-kernstage"}
-        )
-        lowered = text.lower()
-        if any(marker in lowered for marker in SEEDANCE_UNAVAILABLE_MARKERS):
-            raise CredentialUnavailable(f"{name}: {text}")
-        if not result.get("isError") or "not found" not in lowered:
-            raise AssertionError(
-                f"Seedance authenticated task probe was unexpected: "
-                f"isError={result.get('isError')}, message={text}"
-            )
-        return "authenticated missing-task probe completed without generation spend"
 
-    def _check_h3max_live(self) -> str:
-        # A completed render spends account credit; a syntactically valid UUID
-        # that cannot exist proves the API key reaches fal's queue without spend.
-        name = "h3max_get_task"
-        result, text = self._shim_tool_response(
-            name,
-            {"task_id": "text_00000000-0000-4000-8000-000000000000"},
-        )
-        lowered = text.lower()
-        if "rejected the configured api key" in lowered or "denied the request" in lowered:
-            raise CredentialUnavailable(f"{name}: {text}")
-        if not result.get("isError") or "not found" not in lowered:
-            raise AssertionError(
-                f"H3 Max authenticated task probe was unexpected: "
-                f"isError={result.get('isError')}, message={text}"
+    def _check_fal_ai_live(self) -> str:
+        # Both engines share one key; probe each pinned queue without paid work.
+        for prefix in ("text", "topaz_image"):
+            result, text = self._shim_tool_response(
+                "fal_ai_get_task", {"task_id": f"{prefix}_00000000-0000-4000-8000-000000000000"},
             )
-        return "authenticated missing-task probe completed without generation spend"
+            lowered = text.lower()
+            if any(message in lowered for message in ("rejected fal_api_key", "rejected the configured api key", "denied this request", "denied the request")):
+                raise CredentialUnavailable(f"fal_ai_get_task: {text}")
+            if not result.get("isError") or "not found" not in lowered:
+                raise AssertionError(f"falAI authenticated task probe was unexpected: {text}")
+        return "authenticated H3 Max and Topaz probes completed without generation or enhancement spend"
 
     def _check_elevenlabs_live(self) -> str:
         result = self._successful_tool_call("elevenlabs_list_voices", {"page_size": 1})

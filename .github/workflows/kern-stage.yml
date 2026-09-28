@@ -12,13 +12,14 @@ on:
           - all_runtimes
           - apify
           - apify_developer
+          - browser
           - brave_search
           - cloudwatch_logs
           - elevenlabs
           - gmail
           - google_calendar
           - google_search_console
-          - h3max
+          - fal_ai
           - ibkr
           - instagram
           - instagram_discovery
@@ -29,7 +30,6 @@ on:
           - reddit
           - reddit_scrapecreators
           - runway
-          - seedance
           - twitter
           - upwork
           - web_fetch
@@ -244,7 +244,7 @@ jobs:
           KERN_STAGE_CLOUDWATCH_LOGS_AWS_SECRET_ACCESS_KEY: ${{ secrets.KERN_STAGE_CLOUDWATCH_LOGS_AWS_SECRET_ACCESS_KEY }}
           KERN_STAGE_CLOUDWATCH_LOGS_AWS_REGION: ${{ secrets.KERN_STAGE_CLOUDWATCH_LOGS_AWS_REGION }}
           KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP: ${{ secrets.KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP }}
-          KERN_STAGE_H3MAX_FAL_KEY: ${{ secrets.KERN_STAGE_H3MAX_FAL_KEY }}
+          KERN_STAGE_FAL_API_KEY: ${{ secrets.KERN_STAGE_FAL_API_KEY }}
           KERN_STAGE_IBKR_OAUTH_CONSUMER_KEY: ${{ secrets.KERN_STAGE_IBKR_OAUTH_CONSUMER_KEY }}
           KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN: ${{ secrets.KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN }}
           KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN_SECRET: ${{ secrets.KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN_SECRET }}
@@ -260,7 +260,6 @@ jobs:
           KERN_STAGE_RUNWAY_API_SECRET: ${{ secrets.KERN_STAGE_RUNWAY_API_SECRET }}
           KERN_STAGE_ELEVENLABS_API_KEY: ${{ secrets.KERN_STAGE_ELEVENLABS_API_KEY }}
           KERN_STAGE_OPENAI_API_KEY: ${{ secrets.KERN_STAGE_OPENAI_API_KEY }}
-          KERN_STAGE_SEEDANCE_ARK_API_KEY: ${{ secrets.KERN_STAGE_SEEDANCE_ARK_API_KEY }}
           KERN_STAGE_VERCEL_ACCESS_TOKEN: ${{ secrets.KERN_STAGE_VERCEL_ACCESS_TOKEN }}
           KERN_STAGE_TWITTERAPI_IO_API_KEY: ${{ secrets.KERN_STAGE_TWITTERAPI_IO_API_KEY }}
         run: |

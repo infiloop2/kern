@@ -31,6 +31,10 @@ def post(
             raw = response.read(max_bytes + 1)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(f"{label} failed with HTTP {exc.code}") from exc
+    except urllib.error.URLError as exc:
+        if isinstance(exc.reason, TimeoutError):
+            raise TimeoutError(f"{label} timed out") from exc
+        raise
     if len(raw) > max_bytes:
         raise ValueError(f"{label} response is too large")
     return raw

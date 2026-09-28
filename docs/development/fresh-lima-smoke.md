@@ -3,12 +3,13 @@
 `tests/smoke/smoke_lima.py` boots a real local Kern host and exercises the
 Lima provider end to end. It uses a unique agent name, a temporary `LIMA_HOME`,
 an ephemeral operator key, and exact-name teardown. It needs no secret, cloud
-account, model-provider login, or manual `/smoke` authorization.
+account, or model-provider login. Local runs need no GitHub authorization;
+pull request and manual workflow runs require a repository-admin request.
 
 The smoke verifies:
 
 - fresh deploy into a real Ubuntu 22.04 VM;
-- the generated 4-CPU / 4-GiB plain-mode definition, with no host mounts,
+- the generated 2-CPU / 2-GiB plain-mode definition, with no host mounts,
   dynamic forwards, lifecycle secrets, or checkout path;
 - both independently named data disks, their filesystem labels and mounts,
   their backing-file identities across every compute replacement, and durable

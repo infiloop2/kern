@@ -42,6 +42,8 @@ _AGENT_RUNTIME_DIAGNOSTIC_ROUTES = frozenset({
 
 def request_group(method: str, path: str) -> str:
     # Never record URL parameters, resource ids, file paths, or capability tokens.
+    if path in {"/v1/dictation/ready", "/v1/dictation/transcribe"}:
+        return f"{method} {path}"
     if path in _AGENT_RUNTIME_DIAGNOSTIC_ROUTES:
         return f"{method} {path}"
     for prefix in ("/v1/workspace/chat", "/v1/workspace/web-apps", "/v1/workspace/memory",

@@ -3,13 +3,15 @@
 | User | Purpose | Privileges |
 | --- | --- | --- |
 | `kern-operator` | Human SSH login. | Full passwordless sudo, and therefore intentionally equivalent to root once logged in. |
-| `kern-admin` | Runs the admin API; owns admin state (the `kern_admin` database role, full access). | sudo for exactly fifteen root helpers (below). No internet egress at all. |
-| `kern-tools` | Runs the bundled tool packages in the dedicated tools service; owns the agent-facing tools socket. | No sudo. Postgres role scoped to the five tool tables plus read access to `secret_keys`. DNS and outbound HTTPS (443) for tool third-party APIs; explicitly blocked from the loopback admin listener. |
+| `kern-admin` | Runs the admin API; owns admin state (the `kern_admin` database role, full access). | sudo only for the fixed root helpers listed below. No internet egress at all. |
+| `kern-tools` | Runs the bundled tool packages in the dedicated tools service; owns the agent-facing tools socket. | No sudo. Postgres role scoped to explicit tool-state tables plus read access to `secret_keys`. DNS and outbound HTTPS (443) for tool third-party APIs; explicitly blocked from the loopback admin listener. |
 | `kern-agent-network` | Runs the network-introspection service and owns its agent-facing socket. | No sudo, secrets, or egress. Postgres role has SELECT-only access to network policy and decision-log tables. |
 | `kern-proxy` | Runs the policy proxy; owns proxy TLS and Git quarantine files. | No sudo. A narrow Postgres role reads enforcement inputs and the working token/key, inserts network and pending-push records, and prunes network events. Only nftables-approved DNS and TCP 80/443 egress; explicitly blocked from the loopback admin listener. |
 | `kern-agent` | Runs Codex, Claude Code, Grok, and Hermes runtime processes. | None. No sudo, no database role, no direct network off the host. Its only loopback egress is the policy-proxy port and its own preview range `8000-8015` (its own HTTP servers). That range is default-deny — only the agent and the operator's SSH forward are allowed, both directions dropped for everyone else — so no other principal reaches a preview server or answers a connection the agent opened. See [agent-preview-ports.md](agent-preview-ports.md). |
-| `kern-workspace` | Runs Chat, Web Apps, global Memory/Schedules, and the agent-facing Workspace API socket. | No sudo, secrets, or egress. Its database role has DML only on eight Workspace tables and five sequences in `public`, with no DDL or access to other admin state. It may answer the admin-only loopback port and call allowlisted host thread routes over the peer-authenticated admin socket. |
+| `kern-workspace` | Runs Chat, Web Apps, global Memory/Schedules, and the agent-facing Workspace API socket. | No sudo, secrets, or egress. Its database role has explicit grants on Workspace tables and their sequences in `public`, with no DDL or general access to admin state. It serves the admin-only browser Unix socket and calls allowlisted host routes over the peer-authenticated admin socket. See [storage grants](admin-state-storage.md#access-control). |
 | `kern-embedding` | Runs the socket-activated local ONNX text encoder. | No sudo, database role, secrets, home, or network namespace. It reads only the root-owned model/runtime and accepts bounded requests from `kern-admin` and `kern-workspace` through a mode-`0660` systemd socket. |
+| `kern-transcription` | Runs the resident local speech recognizer. | No sudo, database role, secrets, home, or external network. A mode-`0660` socket admits only `kern-admin`; audio stays in memory. See [dictation](../development/dictation.md). |
+| `kern-host-inference` | Runs host-owned remote AI adapters. | No sudo. Fixed peer-authenticated provider routes admit admin, Workspace, and tools. DNS/HTTPS egress; read-only provider credentials and key grants, plus metering writes to `host_inference_usage`. |
 | `cloudflared` | Runs the optional Cloudflare Tunnel connector. | No sudo, no database role. Only nftables-approved DNS, TCP 443, and TCP/UDP 7844 egress; one of the four trusted uids allowed to connect to the loopback admin listener. |
 | `postgres` | Runs the admin-state Postgres. | Database superuser over the local socket; no sudo, no network egress. |
 
@@ -19,7 +21,8 @@ The service accounts use fixed numeric IDs: `kern-admin` is
 before the PostgreSQL packages would assign a dynamic id),
 `kern-tools` is `47746`, `kern-agent-network` is `47748`, the Workspace
 admin-socket group is `47749`, `kern-workspace` is `47750`, and
-`kern-embedding` is `47751`. Stable IDs keep durable root-volume and
+`kern-embedding` is `47751`, `kern-transcription` is `47752`, and
+`kern-host-inference` is `47753`. Stable IDs keep durable-volume and
 Postgres ownership valid when `/etc/passwd` is replaced. Bootstrap deletes the
 retired dynamic app accounts; their UID range had no durable filesystem
 ownership and is not reserved.
@@ -41,7 +44,7 @@ guards. If a helper or sudoers entry were writable by a service user, that user
 could turn the sudo rule into arbitrary root execution, so these files stay on
 the root volume as root-owned code.
 
-`kern-admin`'s sudoers entry allows only fifteen fixed helpers in
+`kern-admin`'s sudoers entry allows only the following fixed helpers in
 `/usr/local/lib/kern-host/`:
 
 - `reboot-host` — runs `systemctl reboot`.
@@ -72,6 +75,15 @@ the root volume as root-owned code.
   existence/size oracle. The raw token never leaves the helper process; only
   the attested account uuid, optional email/organization uuid, and the token
   hash are printed.
+- `run-grok` — starts a Grok Build ACP process as `kern-agent` with the
+  selected account home, proxy environment, and per-thread scope.
+- `read-grok-account` — its read mode demotes to `kern-agent`; `--attest`
+  runs as root and verifies the current token with the fixed xAI account
+  endpoint. The root read opens the agent home and selected `.grok` or
+  `.grok-2` directory with `O_DIRECTORY | O_NOFOLLOW`, then opens `auth.json`
+  relative to that descriptor with `O_NOFOLLOW | O_NONBLOCK`. A regular-file
+  check and byte cap bound the read. Neither a credential symlink nor a
+  symlinked account directory can redirect the privileged read.
 - `run-hermes` — starts one Hermes query as `kern-agent`, passes the
   prompt over stdin, and uses the same dummy AWS and agent-slice boundary.
 - `run-agent-script` — runs one scheduled bash script as `kern-agent` in the
@@ -98,6 +110,8 @@ the root volume as root-owned code.
   `agent-home`, rejects symlinks, bounds directory scan work, and lists
   directories, returns bounded text previews, or streams one bounded regular
   file to the authenticated Files viewer or download response.
+- `upload-agent-file` — streams a bounded operator upload into `user-files/`
+  after demoting to `kern-agent`, then publishes it atomically.
 - `check-for-upgrade` — fetches only the public
   `infiloop2/kern` main-branch `VERSION` file over HTTPS, with strict
   connection, transfer-time, and response-size limits. It accepts no input.
@@ -178,9 +192,11 @@ Admin state adds one more boundary with the same shape: the database accepts
 Unix-socket connections only, authenticated by OS identity (`peer`), with a role
 for `kern-admin` (full admin state), narrowly scoped roles for
 `kern-proxy` (enforcement inputs, working events/pushes, and its token),
-`kern-tools` (the five tool tables plus the shared encryption key),
+`kern-tools` (explicit tool-state tables plus the shared encryption key),
 `kern-agent-network` (SELECT-only policy and network-event state),
-`kern-workspace` (DML-only on eight named tables), `postgres` for operators, and an
+`kern-workspace` (explicit Workspace-table grants),
+`kern-host-inference` (provider credential reads and usage writes),
+`postgres` for operators, and an
 explicit reject for everyone else, so
 the agent user cannot read or write admin state, and a compromised tools, proxy,
 or Workspace service reaches only its granted tables, even though the socket

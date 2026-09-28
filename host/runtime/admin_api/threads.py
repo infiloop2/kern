@@ -11,9 +11,9 @@ import time
 from typing import Any, Callable
 
 from host.config import AGENT_RUNTIMES
-from host.memory_recall import query_continues, task_query
-from host.memory_recall_rules import HISTORY_EVENT_LIMIT, RELEVANT_PAGE_LIMIT
-from host.runtime.agent_runtime import agent_activity, orchestrator
+from host.memory_recall import bound_query, task_query
+from host.memory_recall_rules import HISTORY_EVENT_LIMIT, MAX_QUERY_BYTES, RELEVANT_PAGE_LIMIT
+from host.runtime.agent_runtime import agent_activity, codex_app_server, orchestrator
 from host.runtime.admin_api import workspace_proxy
 from host.runtime.admin_api.errors import ApiError
 from host.runtime.admin_api.request_params import clip_json_encoded_text as _clip_json_encoded_text, one as _one
@@ -243,8 +243,10 @@ def send_thread_message(
         else:
             recalled_pages: list[dict[str, Any]] = []
             recall_details = ""
+            task_context = ""
             if agent_runtime != SCRIPT_RUNTIME:
-                recalled_pages, recall_details = _recalled_memory_pages(thread_id, message)
+                task_context = _memory_task_query(thread_id, message)
+                recalled_pages, recall_details = _recalled_memory_pages(thread_id, task_context)
             after_commit: list[Callable[[], None]] = []
             with state.mutation(after_commit=after_commit) as cur:
                 # Re-read inside the admission transaction. The send lock keeps
@@ -362,7 +364,7 @@ def send_thread_message(
                         },
                         run_number=turn.run_number,
                     )
-            orchestrator.launch_turn(turn, launch_message, provider_session_id)
+            orchestrator.launch_turn(turn, launch_message, provider_session_id, task_context=task_context)
     return {
         "status": "accepted",
         "thread": _public_thread(thread_id, agent_runtime, model, effort),
@@ -371,10 +373,11 @@ def send_thread_message(
 
 def _memory_task_query(thread_id: str, message: str) -> str:
     query = task_query(message)
-    if not query_continues(message):
+    if not query or len(query.encode("utf-8")) >= MAX_QUERY_BYTES:
         return query
-    # A vague continuation uses the latest substantive user request, not an
-    # assistant answer. Never cross an explicit working-memory clear.
+    # The same bounded history applies to every request. Each paragraph is one
+    # user message: current first, then newest to oldest. No assistant answers
+    # or phrase-based continuation classification; never cross a memory clear.
     try:
         history = state.page_thread_events(
             thread_id, None, HISTORY_EVENT_LIMIT, event_types=("thread.message", "thread.memory_cleared"),
@@ -389,19 +392,22 @@ def _memory_task_query(thread_id: str, message: str) -> str:
         if payload.get("source") == "user":
             previous_message = payload.get("message", "")
             previous_query = task_query(previous_message)
-            query = task_query(f"{query} {previous_query}")
-            if previous_query and not query_continues(previous_message):
+            if not previous_query:
+                continue
+            combined = f"{query}\n\n{previous_query}"
+            query = bound_query(combined)
+            if len(combined.encode("utf-8")) >= MAX_QUERY_BYTES:
                 break
     return query
 
 
 def _recalled_memory_pages(
     thread_id: str,
-    message: str,
+    query: str,
 ) -> tuple[list[dict[str, Any]], str]:
     started = time.monotonic()
     try:
-        response = workspace_proxy.recall_memory(thread_id, _memory_task_query(thread_id, message))
+        response = workspace_proxy.recall_memory(thread_id, query)
     except ApiError as exc:
         _report_degraded_recall(thread_id, exc)
         return [], "Recall unavailable; see Host diagnostics."
@@ -525,6 +531,50 @@ def stop_thread(thread_id: str) -> dict[str, str]:
     if not orchestrator.stop_thread_turn(thread_id):
         raise ApiError(HTTPStatus.CONFLICT, "the thread has no running work")
     return {"status": "accepted"}
+
+def sweep_archived_codex_sessions() -> int:
+    """Delete provider sessions for archived Chats; retain the Chats themselves.
+
+    No age or size cutoff. Each runtime uses one short-lived, agent-owned
+    app-server without resuming a thread or invoking a model. Restored chats
+    use the ordinary history handoff on their next message.
+    """
+    deleted = 0
+    for runtime in codex_app_server.CODEX_RUNTIME_TYPES:
+        candidates = state.archived_thread_session_ids(runtime)
+        if not candidates:
+            continue
+        server = codex_app_server.CodexAppServer(runtime_type=runtime)
+        try:
+            server.start(init_timeout=5)
+            for thread_id in candidates:
+                # Serialize the snapshot/detach with sends. The live fence
+                # also covers idle-in-the-database turns still tearing down.
+                with _thread_send_lock(thread_id):
+                    if thread_id in orchestrator.live_thread_ids():
+                        continue
+                    with state.mutation() as cur:
+                        session_id = state.detach_archived_thread_session(cur, thread_id, runtime)
+                if session_id is not None:
+                    # Detach commits first. A restore/send can now safely start
+                    # a different session even while this deletion is pending.
+                    codex_app_server.delete_session(server, session_id)
+                    deleted += 1
+        except Exception as exc:
+            # Stop this runtime's pass on a transport/delete failure so a dead
+            # app-server cannot detach all the remaining candidates needlessly.
+            host_errors.report_unexpected(
+                "admin_api.archived_codex_sweep", exc, context={"runtime": runtime},
+            )
+        finally:
+            try:
+                server.close()
+            except Exception as exc:
+                host_errors.report_unexpected(
+                    "admin_api.archived_codex_sweep.close", exc, context={"runtime": runtime},
+                )
+    return deleted
+
 
 def clear_thread_memory(thread_id: str) -> dict[str, str]:
     """Drop the thread's provider session so its next run starts fresh.

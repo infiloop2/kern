@@ -44,6 +44,7 @@ TOOLS_DIR = REPO_ROOT / "host/tools"
 VERSION = (REPO_ROOT / "VERSION").read_text().strip()
 UI_ASSETS = {
     "/": (ADMIN_UI_DIR / "index.html", "text/html; charset=utf-8"),
+    "/browser.html": (ADMIN_UI_DIR / "browser.html", "text/html; charset=utf-8"),
     "/oauth/callback": (ADMIN_UI_DIR / "index.html", "text/html; charset=utf-8"),
     "/admin_ui.css": (ADMIN_UI_DIR / "admin_ui.css", "text/css; charset=utf-8"),
     "/manifest.webmanifest": (ADMIN_UI_DIR / "manifest.webmanifest", "application/manifest+json"),
@@ -799,6 +800,16 @@ def seed_state() -> None:
             "started_min": 3,
             "completed_min": 2,
         },
+        {
+            "thread_id": "thread-6",
+            "agent_runtime": "codex",
+            "status": "completed",
+            "input_message": "Research the migration approach for a delegated task.",
+            "output_message": "Keep the Chat id and record its spawning thread in Workspace.",
+            "created_min": 30,
+            "started_min": 29,
+            "completed_min": 24,
+        },
     ]
     for spec in seed_turns:
         thread_id = spec["thread_id"]
@@ -1317,7 +1328,7 @@ def swarm_snapshot() -> dict[str, Any]:
             "agent_runtime": "codex", "model": "gpt-5.6-terra",
             "state": "busy" if index < 8 else "failed" if 13 <= index < 16 else "idle",
             "task": ["Prepare the next release", "Review customer invoices", "Draft launch copy", "Check deployment health"][index % 4],
-            "needs_human": None if index < 8 or index == 99 else index < 13,
+            "pending_approval_count": 1 if 8 <= index < 13 else 0,
             "next_run_at": ago(-90) if kind == "schedule" else None,
         })
     return {
@@ -1333,6 +1344,8 @@ def swarm_peer_messages() -> dict[str, Any]:
 
 
 def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dict[str, Any]:
+    if method == "POST" and path == "/v1/browser/list":
+        return {"accounts": []}
     if method == "GET" and path == "/v1/swarm":
         return swarm_snapshot()
     if method == "GET" and path == "/v1/swarm/peer-messages":

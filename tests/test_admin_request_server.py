@@ -13,6 +13,14 @@ from host.runtime.admin_api import request_server
 
 
 class RequestServerTests(unittest.TestCase):
+    def test_dictation_routes_are_identified_without_grouping_arbitrary_paths(self):
+        self.assertEqual(request_server.request_group("POST", "/v1/dictation/transcribe"),
+                         "POST /v1/dictation/transcribe")
+        self.assertEqual(request_server.request_group("GET", "/v1/dictation/ready"),
+                         "GET /v1/dictation/ready")
+        self.assertEqual(request_server.request_group("GET", "/v1/dictation/private-text"),
+                         "other admin request")
+
     def test_workspace_socket_snapshot_reports_presence_and_permissions(self):
         info = SimpleNamespace(st_mode=stat.S_IFSOCK | 0o660, st_uid=47750)
         with patch.object(request_server.Path, "stat", return_value=info):

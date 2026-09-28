@@ -20,7 +20,7 @@ load gate creates and indexes 24 near-limit memory pages on the production
 `t3.small` class, replaces four vectors, checks HNSW storage, service
 memory/tasks/restarts, and admin-health p95 latency during inference, then
 proves soft deletion removes the derived vectors. The remaining checks
-cover all three runtime status/account
+cover the configured runtime status/account
 records and real message admission, the Bedrock provider policy that governs
 Hermes, every Bedrock pre-credential denial
 (foreign access-key id, cross-region signature, presigned query, session token,

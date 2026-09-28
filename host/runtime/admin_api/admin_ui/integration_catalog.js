@@ -488,10 +488,10 @@ export const HOST_INFERENCE_INTEGRATIONS = {
     apiKeyPlaceholder: "sk-...",
     featureSettings: [],
     label: "OpenAI API",
-    summary: "Name agent tasks with an operator supplied OpenAI API key.",
+    summary: "Name agent tasks, rank relevant memories, and review requests against your auto-approval policies.",
     protections: [
       "The key stays encrypted in host state and is used only by the dedicated kern-host-inference service. Agents and agent-facing tools cannot read it or call this provider.",
-      "Kern chooses the OpenAI model separately for each host feature. There is no operator-wide model setting that can silently change every feature at once.",
+      "Kern uses GPT-6 Luna for task titles and memory reranking, and GPT-6 Sol for auto-approval policy reviews.",
     ],
     setupSteps: [
       { title: "Create an API key", description: "Create a project API key at platform.openai.com. This is separate from the ChatGPT account used by Codex." },
@@ -500,13 +500,15 @@ export const HOST_INFERENCE_INTEGRATIONS = {
       { title: "Check Swarm", description: "New turns receive short task titles when this connection is enabled. Without it, Task stays unavailable." },
     ],
     capabilities: [
+      { name: "Auto-approval", description: "Reviews pending tool requests against policies you save in Approvals. Clear matches are approved automatically; other requests stay pending with an explanation." },
       { name: "Swarm task titles", description: "Names each new agent task." },
+      { name: "Memory recall reranking", description: "Ranks candidate memory descriptions with GPT-6 Luna. Each recall has an equal chance of choosing Luna, Jev, or no reranking. If the chosen provider is disabled, the local ranking is kept." },
     ],
     dataSummary: {
       items: [
         {
           title: "What leaves this host",
-          description: "All data in Kern can leave this host for OpenAI when Host AI features use this connection.",
+          description: "All data in Kern can leave this host for OpenAI when Host AI features use this connection. Task titles and memory reranking use the same bounded text containing the current and recent user messages. Reranking also sends candidate descriptions, without memory page contents. Auto-approval sends your policy and the exact request, including action, account, summary and payload, through the shared credential redactor.",
           links: [
             { label: "OpenAI API data controls", url: "https://platform.openai.com/docs/guides/your-data" },
           ],
@@ -556,8 +558,7 @@ export const HOST_INFERENCE_INTEGRATIONS = {
     ],
     capabilities: [
       { name: "Approval risk annotations", description: "Scores likely financial commitments, sensitive data, and summary mismatches on new tool approval requests. The operator still makes every decision." },
-      { name: "Swarm human-input assessment", description: "Assesses whether the latest completed agent turn needs human input. This is advisory and never changes approvals." },
-      { name: "Memory recall reranking", description: "Ranks candidate memory page descriptions before recall when TypeSafe Jev is enabled." },
+      { name: "Memory recall reranking", description: "Ranks candidate memory descriptions before recall. Each recall has an equal chance of choosing Luna, Jev, or no reranking. If the chosen provider is disabled, the local ranking is kept." },
     ],
     dataSummary: {
       items: [
@@ -568,7 +569,7 @@ export const HOST_INFERENCE_INTEGRATIONS = {
         },
         {
           title: "Memory recall reranking data",
-          description: "When TypeSafe Jev is enabled, Kern sends the task query and up to 20 candidate page ids and descriptions. Page contents are not sent.",
+          description: "When TypeSafe Jev is enabled, Kern sends a task query containing the current and recent user messages (up to 1,000 UTF-8 bytes total), plus up to 20 candidate descriptions with local ids. Page contents are not sent.",
           links: [],
         },
         {

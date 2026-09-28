@@ -89,7 +89,7 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
         page.locator('#swarm-search').fill('Chat agent 100')
     expect(page.locator('.swarm-figure:visible')).to_have_count(1)
     page.locator('.swarm-figure:visible').click()
-    expect(page.locator('#swarm-detail')).to_contain_text('Human input: not assessed')
+    expect(page.locator('#swarm-detail')).not_to_contain_text('pending Kern approval')
     page.get_by_role('button', name='Close agent details', exact=True).click()
     page.locator('#swarm-search').fill('')
 
@@ -114,7 +114,7 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     page.unroute('**/v1/swarm/peer-messages*')
     page.unroute('**/v1/swarm')
 
-    # A failed runtime remains distinct from an affirmative human assessment.
+    # A failed runtime remains distinct from a pending approval.
     failed = page.locator('[data-swarm-filter="failed"]')
     failed.click()
     expect(page.locator('.swarm-figure:visible')).to_have_count(3)
@@ -123,7 +123,7 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     page.get_by_role('button', name='Close agent details', exact=True).click()
     failed.click()
     payload['agents'][0]['state'] = 'failed'
-    payload['agents'][0]['needs_human'] = True
+    payload['agents'][0]['pending_approval_count'] = 1
     apply_snapshot(payload)
     expect(first).to_have_attribute('data-pose', 'failed')
     expect(page.locator('#swarm-count-failed')).to_have_text('4')
@@ -135,13 +135,15 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     # Change the server snapshot: busy has priority, then return to idle.
     payload = page.request.get(url + 'v1/swarm', headers={'X-Kern-Csrf': '1'}).json()
     payload['agents'][0]['state'] = 'idle'
-    payload['agents'][0]['needs_human'] = True
+    payload['agents'][0]['pending_approval_count'] = 1
     payload['agents'][0]['task'] = '<img src=x onerror=alert(1)>'
     apply_snapshot(payload)
     expect(first).to_have_attribute('data-pose', 'needs-human')
     first.click()
     expect(page.locator('#swarm-detail')).to_contain_text('<img src=x onerror=alert(1)>')
     expect(page.locator('#swarm-detail img')).to_have_count(0)
+    expect(page.locator('#swarm-detail')).to_contain_text('1 pending Kern approval.')
+    expect(page.locator('#swarm-detail')).to_contain_text('View approvals')
     expect(page.locator('#swarm-agents-needs-human .swarm-figure')).to_have_count(6)
     page.unroute('**/v1/swarm')
 
@@ -166,13 +168,13 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
 
     page.emulate_media(reduced_motion='reduce')
     expect(first.locator('.critter-body')).to_have_css('animation-name', 'none')
-    # An unconfigured inference provider leaves absent annotations unknown.
+    # A missing task title does not imply a pending approval.
     for agent in payload['agents']:
         agent.pop('task', None)
-        agent.pop('needs_human', None)
+        agent['pending_approval_count'] = 0
     apply_snapshot(payload)
     expect(page.locator('#swarm-detail')).to_contain_text('No task title yet')
-    expect(page.locator('#swarm-detail')).to_contain_text('Human input: not assessed')
+    expect(page.locator('#swarm-detail')).not_to_contain_text('pending Kern approval')
     expect(page.locator('#swarm-agents-needs-human .swarm-figure')).to_have_count(0)
     expect(page.locator('#swarm-messages')).to_have_count(0)
     expect(page.locator('#swarm-bubbles')).not_to_contain_text('undefined')

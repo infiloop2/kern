@@ -247,6 +247,12 @@ class HostCredentials:
         return cast(StoredCredential, record) if record is not None else None
 
     def save(self, credential: StoredCredential) -> None:
+        self._save(credential)
+
+    def save_if_current(self, loaded: StoredCredential, credential: StoredCredential) -> bool:
+        return self._save(credential, expected=dict(loaded))
+
+    def _save(self, credential: StoredCredential, *, expected: dict[str, Any] | None = None) -> bool:
         if not self._connection.connection_id:
             raise ValueError("Cannot save a credential without a connection scope.")
         record = dict(credential)
@@ -264,12 +270,21 @@ class HostCredentials:
                 "This connection is already bound to a different provider account. "
                 "Add a new connection instead."
             )
-        state.put_tool_credential(self._tool_id, record, self._connection.connection_id)
+        return state.put_tool_credential(
+            self._tool_id, record, self._connection.connection_id, expected=expected
+        )
 
     def clear(self) -> None:
         if not self._connection.connection_id:
             return
         state.delete_tool_credential(self._tool_id, self._connection.connection_id)
+
+    def clear_if_current(self, loaded: StoredCredential) -> bool:
+        if not self._connection.connection_id:
+            return False
+        return state.delete_tool_credential(
+            self._tool_id, self._connection.connection_id, expected=dict(loaded)
+        )
 
 
 class HostSecrets:

@@ -2,9 +2,16 @@
 
 
 def run(page, url, log_in, runtime="grok-2", provider="xai"):
+    from datetime import datetime, timezone
+
     from playwright.sync_api import expect
 
-    page.clock.install()
+    # The app has a five-second background health tick. Freeze it between the
+    # explicit clock advances below so real elapsed time cannot add a GET to a
+    # request-count assertion while Playwright waits for a card or response.
+    clock_time = datetime(2026, 9, 28, tzinfo=timezone.utc)
+    page.clock.install(time=clock_time)
+    page.clock.pause_at(clock_time)
 
     def pending_runtime(route):
         response = route.fetch()
@@ -34,6 +41,9 @@ def run(page, url, log_in, runtime="grok-2", provider="xai"):
     page.route("**/v1/health", pending_runtime)
     page.route(f"**/v1/agent-runtime/{route_name}-oauth-login", oauth)
     log_in(page, url)
+    # Login starts an immediate asynchronous health tick; let it finish before
+    # opening the card, where it would otherwise race the first recovery read.
+    page.wait_for_load_state("networkidle")
 
     refresh = "() => import('/admin_ui/health.js').then(module => module.refreshHealth())"
     page.evaluate(refresh)
@@ -43,9 +53,11 @@ def run(page, url, log_in, runtime="grok-2", provider="xai"):
     page.evaluate(refresh)
     assert methods == ["GET"], methods
     page.clock.run_for(20000)
+    page.wait_for_load_state("networkidle")
     page.evaluate(refresh)
     assert methods == ["GET"], methods
     page.clock.run_for(11000)
+    page.wait_for_load_state("networkidle")
     page.evaluate(refresh)
     assert methods.count("GET") == 2, methods
 
@@ -61,11 +73,19 @@ def run(page, url, log_in, runtime="grok-2", provider="xai"):
     page.evaluate(refresh)
     assert methods.count("GET") == 3, methods
 
+    # A visible, successful login is eligible for a later health tick. This is
+    # the legitimate extra GET that made the old cumulative count race with the
+    # wall clock; advance to a settled tick before hiding the card.
+    page.clock.run_for(15000)
+    page.wait_for_load_state("networkidle")
+    assert methods.count("GET") == 4, methods
+
     # Leaving the integration suppresses reads even when the code exists.
     page.locator("#panel-network .home-back").click()
     page.clock.run_for(31000)
+    page.wait_for_load_state("networkidle")
     page.evaluate(refresh)
-    assert methods.count("GET") == 3, methods
+    assert methods.count("GET") == 4, methods
 
     # A reload still recovers a login started earlier (or in another tab).
     page.reload()

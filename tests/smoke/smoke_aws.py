@@ -123,6 +123,7 @@ STATIC_SHIM_TOOLS = [
     "recent_network_denials",
     "stage_image",
     "stage_video",
+    "stage_audio",
     "search_conversation_history",
     "read_thread_history",
     "send_agent_message",
@@ -240,6 +241,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         *((action, {"url": "https://example.com/"}) for action in ("fetch_page", "fetch_page_file", "head_url")),
         ("download_media", {"url": "https://www.python.org/static/community_logos/python-logo.png"}),
     ),
+    "browser": (("x_connection_status", {}), ("x_post_tweet", {"account_id": "acct_" + "a" * 32, "text": "Kern smoke never submitted"})),
     "whatsapp": (
         ("connection_status", {}),
         ("list_chats", {"limit": 1}),
@@ -310,7 +312,10 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
             },
         ),
     ),
-    "h3max": (
+    "fal_ai": (
+        ("upscale_image", {"image_asset_id": "$FAL_IMAGE"}),
+        ("upscale_video", {"video_asset_id": "$FAL_VIDEO"}),
+        ("save_image", {"task_id": "topaz_image_00000000-0000-4000-8000-000000000000"}),
         ("generate_video", {"prompt": "Kern smoke"}),
         ("get_task", {"task_id": "text_00000000-0000-4000-8000-000000000000"}),
         ("save_video", {"task_id": "text_00000000-0000-4000-8000-000000000000"}),
@@ -324,6 +329,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
     "instagram": (
         ("get_profile", {}),
         ("get_recent_media", {"limit": "1"}),
+        ("get_reel_insights", {"media_id": "1"}),
         ("get_publishing_limit", {}),
         ("post_image", {"image_asset_id": "$INSTAGRAM_IMAGE"}),
         ("post_carousel", {"image_asset_ids": ["$INSTAGRAM_IMAGE", "$INSTAGRAM_IMAGE_2"]}),
@@ -381,6 +387,9 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("generate_image", {"prompt": "Kern smoke"}),
     ),
     "runway": (
+        ("upscale_image", {"image_asset_id": "$RUNWAY_IMAGE"}),
+        ("upscale_video", {"video_asset_id": "$RUNWAY_VIDEO"}),
+        ("save_image", {"task_id": "kern-smoke-missing"}),
         ("generate_video", {"prompt": "Kern smoke", "image_asset_id": "$RUNWAY_IMAGE"}),
         ("edit_video", {"prompt": "Kern smoke", "video_asset_id": "$RUNWAY_VIDEO"}),
         ("generate_image", {"prompt": "Kern smoke"}),
@@ -388,11 +397,6 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("get_task", {"task_id": "kern-smoke-missing"}),
         ("save_video", {"task_id": "kern-smoke-missing"}),
         ("save_audio", {"task_id": "kern-smoke-missing"}),
-    ),
-    "seedance": (
-        ("generate_video", {"prompt": "Kern smoke"}),
-        ("get_task", {"task_id": "kern-smoke-missing"}),
-        ("save_video", {"task_id": "kern-smoke-missing"}),
     ),
     "twitter": (
         ("search_tweets", {"query": "Kern", "max_results": "10"}),
@@ -431,6 +435,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("list_senders", {}),
         ("list_messages", {"folder_id": "1", "limit": "1"}),
         ("read_message", {"folder_id": "1", "message_id": "1"}),
+        ("download_attachment", {"folder_id": "1", "message_id": "1", "attachment_id": "1"}),
         ("create_folder", {"name": "Kern Smoke"}),
         (
             "move_messages",
@@ -3569,6 +3574,29 @@ class AwsSmoke:
                     f"tools socket must reject {probe_user} on agent routes, got {peer_probe!r}"
                 )
 
+        # A browser profile and operator controls never become agent capabilities.
+        for probe_user, path, expected in (("kern-agent", "/actions/list", "closed"),
+                                           ("kern-tools", "/operator/frame", "403"),
+                                           ("kern-admin", "/actions/post_tweet", "403"),
+                                           ("kern-browser", "/operator/settings", "closed")):
+            script = (
+                "import http.client\n"
+                "from host.runtime.agent_shim.mcp_shim import UnixHTTPConnection\n"
+                "c = UnixHTTPConnection('/run/kern-browser/browser.sock')\n"
+                "try:\n"
+                f" c.request('POST', {path!r}, '{{}}', {{'Content-Type': 'application/json'}})\n"
+                " print(c.getresponse().status)\n"
+                "except (OSError, http.client.HTTPException):\n"
+                " print('closed')"
+            )
+            result = self._ssh_code(f"sudo -u {probe_user} env PYTHONPATH=/opt/kern-host python3 -c {shlex.quote(script)}")
+            if result.strip() != expected:
+                raise AssertionError(f"browser must deny {probe_user} on {path} with {expected}: {result!r}")
+        for probe_user in ("kern-agent", "kern-tools", "kern-admin"):
+            result = self._ssh_code(f"sudo -u {probe_user} test -r /mnt/kern-admin/browser-state && echo readable || echo private")
+            if result.strip() != "private":
+                raise AssertionError(f"browser profiles readable by {probe_user}")
+
         network_probe_script = (
             "from host.runtime.agent_shim.mcp_shim import UnixHTTPConnection; "
             "c = UnixHTTPConnection('/run/kern-agent-network/agent-network.sock'); "
@@ -3658,21 +3686,33 @@ class AwsSmoke:
         if missing_actions:
             raise AssertionError(f"describe_tool omitted bundled actions: {sorted(missing_actions)}")
 
-        # Exercise both local media uploads without provider config. The files
+        # Exercise local media uploads without provider config. The files
         # live in the agent workspace, are opened by the agent-side shim, and
         # are removed immediately after the private tool-scoped copies exist.
         media_root = "/mnt/kern-agent/agent-home"
         image_path = "/kern-smoke.jpg"
         video_path = "/kern-smoke.mp4"
+        audio_path = "/kern-smoke.mp3"
+        audio_local = f"{media_root}{audio_path}"
         image_local = f"{media_root}{image_path}"
         video_local = f"{media_root}{video_path}"
         create_media = (
             "umask 077; "
             f"dd if=/dev/zero of={shlex.quote(image_local)} bs=512 count=1 status=none; "
-            f"dd if=/dev/zero of={shlex.quote(video_local)} bs=512 count=1 status=none"
+            f"dd if=/dev/zero of={shlex.quote(video_local)} bs=512 count=1 status=none; "
+            f"dd if=/dev/zero of={shlex.quote(audio_local)} bs=512 count=1 status=none"
         )
         self._ssh_code(f"sudo -u kern-agent sh -c {shlex.quote(create_media)}")
         try:
+            extra_stages = {}
+            for label, kind, path, tool in (("$FAL_IMAGE", "image", image_path, "fal_ai"),
+                                           ("$FAL_VIDEO", "video", video_path, "fal_ai"),
+                                           ("$FAL_AUDIO", "audio", audio_path, "fal_ai"),
+                                           ("$RUNWAY_AUDIO", "audio", audio_path, "runway")):
+                _, staged = shim_tool_call("stage_" + kind, {"path": path, "for_tool": tool})
+                if not isinstance(staged, dict) or not staged.get(kind + "_asset_id"):
+                    raise AssertionError(f"{label} staging returned no asset id")
+                extra_stages[label] = staged[kind + "_asset_id"]
             _, image_stage = shim_tool_call(
                 "stage_image", {"path": image_path, "for_tool": "runway"}
             )
@@ -3691,7 +3731,7 @@ class AwsSmoke:
         finally:
             self._ssh_code(
                 "sudo -u kern-agent rm -f "
-                f"{shlex.quote(image_local)} {shlex.quote(video_local)}"
+                f"{shlex.quote(image_local)} {shlex.quote(video_local)} {shlex.quote(audio_local)}"
             )
         if (
             not isinstance(image_stage, dict)
@@ -3702,6 +3742,7 @@ class AwsSmoke:
         ):
             raise AssertionError("local media staging returned an invalid result")
         asset_ids = {
+            **extra_stages,
             "$RUNWAY_IMAGE": image_stage.get("image_asset_id"),
             "$INSTAGRAM_IMAGE": instagram_image_stage.get("image_asset_id"),
             "$INSTAGRAM_IMAGE_2": instagram_image_stage_2.get("image_asset_id"),
@@ -3746,7 +3787,7 @@ class AwsSmoke:
                 # Polymarket and Web Fetch need no credential or config. The
                 # three WhatsApp local-state reads are also valid while no
                 # account is linked; only its send must fail closed.
-                direct_without_connection = tool_id == "whatsapp" and action_id != "send_message"
+                direct_without_connection = (tool_id == "whatsapp" and action_id != "send_message") or (tool_id == "browser" and action_id == "x_connection_status")
                 if tool_id in ("polymarket", "web_fetch") or direct_without_connection:
                     if response.get("isError") or not isinstance(parsed, dict):
                         raise AssertionError(f"credential-free {name} failed: {response} {parsed}")
@@ -4031,17 +4072,18 @@ class AwsSmoke:
     def check_agent_steering(self) -> None:
         """Mid-turn steering through the admin API: a second message posted
         while the turn is running must be synchronously flushed to the runtime
-        as a steer."""
+        as a steer, without cancelling the turn's in-flight tool calls."""
         self._step(f"{self.agent_runtime} steering: redirect a running turn mid-turn")
         thread_id = f"smoke-steer-{self.thread_id_component(self.agent_runtime)}"
         if self.agent_runtime == "claude_code":
-            # Do not wait for activity: this pins cancel_queued handling when
-            # the initial message is still queued or pending dispatch.
+            # Do not wait for activity: this pins delivery while the initial
+            # message is still queued or pending dispatch. Claude answers the
+            # steer after the current query, so its reply ends the turn.
             startup_thread_id = f"{thread_id}-startup"
             startup_baseline = self._latest_thread_event_seq(startup_thread_id)
             startup = self.send_message(
                 startup_thread_id,
-                "Write a detailed 5000-word essay about distributed systems.",
+                "Write a 200-word essay about distributed systems.",
             )
             if startup.get("status") != "accepted":
                 raise AssertionError(
@@ -4090,8 +4132,8 @@ class AwsSmoke:
                 startup_done.get("output_message") or ""
             ).upper():
                 raise AssertionError(
-                    "immediate Claude startup steer did not supersede the "
-                    f"initial prompt: {startup_done}"
+                    "immediate Claude startup steer was not answered by the "
+                    f"turn's final reply: {startup_done}"
                 )
         baseline = self._latest_thread_event_seq(thread_id)
         slow_prompt = (
@@ -4123,9 +4165,8 @@ class AwsSmoke:
             )
         expected = "STEERED"
         if self.agent_runtime == "claude_code":
-            # Exercise the queue/abort race that a single steer cannot cover:
-            # the second pair may reach Claude before it has begun processing
-            # the first replacement message.
+            # Exercise two queued messages: the second may reach Claude before
+            # it has started the first one.
             second_started = time.monotonic()
             second = self.send_follow_up(
                 thread_id,
@@ -4148,6 +4189,14 @@ class AwsSmoke:
             raise AssertionError(f"steered turn ended {done['status']}: {self._thread_failure_detail(thread_id)}")
         if expected not in (done.get("output_message") or "").upper():
             raise AssertionError(f"steer did not take effect, output: {done.get('output_message')!r}")
+        # Delivering a message is not a stop: the running `sleep` must finish
+        # rather than come back to the model as a user rejection.
+        rejected = [
+            event for event in self._thread_events(thread_id, since=baseline)
+            if "doesn't want to proceed" in json.dumps(event)
+        ]
+        if rejected:
+            raise AssertionError(f"steer cancelled an in-flight tool call: {rejected}")
         self._ok(
             f"{self.agent_runtime} steer redirected the running turn "
             f"(delivered in {steer_elapsed:.2f}s)"

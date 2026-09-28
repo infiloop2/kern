@@ -52,3 +52,9 @@ row. The panel is display-only.
 This is a curated diagnostic view, not a replacement for the system journal.
 Ordinary validation failures, user denials, and successful operational events
 remain in their existing product and audit surfaces.
+
+Dictation reports slow requests/inference and contained failures through this
+same pipeline, with bounded durations, process CPU time and random request IDs.
+It emits no speech, transcripts or library exception messages. See
+[dictation diagnostics](../development/dictation.md#host-diagnostics) for timing
+boundaries and per-outcome rate limits.

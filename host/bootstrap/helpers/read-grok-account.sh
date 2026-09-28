@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 # Reads the Grok login's account identity for the admin API, which has no
-# access to the agent home itself. It runs as kern-agent (never as root), but
-# the root runuser parent cannot rely on the admin service's timeout to stop a
+# access to the agent home itself. The read mode runs as kern-agent; --attest
+# runs as root. The runuser parent cannot rely on the admin service's timeout to stop a
 # child blocked on an agent-planted special file. The final path is therefore
 # opened without following symlinks, in nonblocking mode, then bounded after an
 # fstat regular-file check.
@@ -31,7 +31,7 @@ if [[ "${mode}" == "attest" ]]; then
   # reject the very token being attested, and the admin uid has no egress,
   # while root egress is open. Root needs the raw token to make the request --
   # the admin caller only ever holds its sha256 -- so root opens the file
-  # itself, with the same hardening as the unprivileged read below. The token
+  # itself, rejecting symlinks in both the account directory and final file. The token
   # never leaves this process.
   GROK_HOME="$grok_home" \
   exec /usr/bin/python3 - <<'ATTEST'
@@ -49,6 +49,7 @@ ISSUER = "https://auth.x.ai"
 MAX_AUTH_BYTES = 256 * 1024
 NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 NONBLOCK = getattr(os, "O_NONBLOCK", 0)
+DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 # The identity endpoint on the subscription chat proxy. Verified against a
 # live Grok 1.0.5 personal login: bearer authentication alone is sufficient,
 # and the response is a flat object carrying the fields below.
@@ -66,11 +67,24 @@ def first_string(value, keys):
 
 
 def read_auth():
-    path = Path(os.environ["GROK_HOME"], "auth.json")
+    grok_home = Path(os.environ["GROK_HOME"])
     try:
-        fd = os.open(path, os.O_RDONLY | NOFOLLOW | NONBLOCK)
+        # O_NOFOLLOW on auth.json alone does not constrain its agent-writable
+        # parent: .grok or .grok-2 could point at another user's auth.json.
+        # Keep both directories pinned while opening the final regular file.
+        home_fd = os.open(grok_home.parent, os.O_RDONLY | DIRECTORY | NOFOLLOW)
+        try:
+            grok_fd = os.open(
+                grok_home.name, os.O_RDONLY | DIRECTORY | NOFOLLOW, dir_fd=home_fd
+            )
+            try:
+                fd = os.open("auth.json", os.O_RDONLY | NOFOLLOW | NONBLOCK, dir_fd=grok_fd)
+            finally:
+                os.close(grok_fd)
+        finally:
+            os.close(home_fd)
     except OSError as exc:
-        if exc.errno in (errno.ENOENT, errno.ELOOP):
+        if exc.errno in (errno.ENOENT, errno.ELOOP, errno.ENOTDIR):
             return {}
         raise
     try:

@@ -21,23 +21,24 @@ by app id so late results from one app cannot update another.
 
 Generated markup is not trusted product code. HTML and CSS pass strict
 sanitizers with byte, node, nesting, and CSS-rule complexity limits and render
-inside a nested ShadowRoot. Sanitized CSS uses a constructed stylesheet when
-the browser supports ShadowRoot adoption and a CSP-authorized blob stylesheet
+inside a nested ShadowRoot. Sanitized CSS uses a constructed stylesheet when the
+browser supports ShadowRoot adoption and a CSP-authorized blob stylesheet
 otherwise; generated markup cannot create either form. Safe HTML is committed
-before style installation so a browser-specific stylesheet failure cannot
-leave the canvas on an obsolete Loading placeholder. Generated JavaScript runs
-in a Worker inside an opaque sandbox iframe whose CSP denies network access and
+before style installation so a browser-specific stylesheet failure cannot leave
+the canvas on an obsolete Loading placeholder. Generated JavaScript runs in a
+Worker inside an opaque sandbox iframe whose CSP denies network access and
 dynamic evaluation. The broker exposes only bounded rendering, JSON mutation,
-notification, and ask-agent capabilities. Worker calls remain pinned to the
-app and revisions that created the Worker. Each turn has a five-second total
-deadline from run creation, covering startup, generated execution, and network
-waits. Startup, execution, and trusted-render failures are reported distinctly.
+notification, and ask-agent capabilities. Worker calls remain pinned to the app
+and revisions that created the Worker. After the browser sandbox starts (with
+its separate 15-second startup limit), each generated turn has a five-second
+total deadline covering worker startup, execution, and brokered host requests.
+Startup, execution, and trusted-render failures are reported distinctly.
 Independent reads and collection queries can run concurrently; their waits
-overlap without extending the deadline. Brokered writes apply in issue order against
-the revision the previous write produced. An interaction that arrives during
-a running turn is queued (newest wins) and starts when the turn completes.
-When a turn times out or fails, the frame records a short runtime report
-naming the action, the elapsed time, and the host requests it waited on,
+overlap without extending the deadline. Brokered writes apply in issue order
+against the revision the previous write produced. An interaction that arrives
+during a running turn is queued (newest wins) and starts when the turn
+completes. When a turn times out or fails, the frame records a short runtime
+report naming the action, the elapsed time, and the host requests it waited on,
 and appends it to the operator's next composer message so the agent sees the
 actual cause.
 

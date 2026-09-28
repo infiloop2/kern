@@ -1,10 +1,11 @@
 # Filesystem Layout
 
-The host uses three EBS volumes: the EC2 root volume plus two durable data
-volumes. Runtime code uses these mounted paths directly. The durable data
-volume mount roots are root-owned and mode 711, so service users can traverse
-to their own private subtrees without being able to list or rewrite the mount
-root.
+On AWS, the host uses three EBS volumes: the EC2 root volume plus two durable
+data volumes. Lima uses a disposable VM root disk and two independent data disks
+with the same guest mount paths and ownership boundaries. Runtime code uses
+these mounted paths directly. The durable data volume mount roots are root-owned
+and mode 711, so service users can traverse to their own private subtrees
+without being able to list or rewrite the mount root.
 
 ## Root volume
 
@@ -25,8 +26,9 @@ directory below. Those writable locations are not trusted code or policy inputs.
 | Path | Access | Contents |
 | --- | --- | --- |
 | `/opt/kern-host` | root-owned, `a+rX`, not service-writable | Host runtime Python package imported by the services. |
-| `/usr/local/bin`, `/usr/local/lib/node_modules` | root-owned, readable/executable, not service-writable | Node.js, Codex CLI, and Claude Code CLI. |
+| `/usr/local/bin`, `/usr/local/lib/node_modules` | root-owned, readable/executable, not service-writable | Node.js, Codex CLI, Claude Code CLI, and Grok Build CLI. |
 | `/usr/local/lib/kern-host/*` | root-owned, `755`, not service-writable | Fixed sudo helpers for runtime launch, account reads, auth clearing, agent-home file reads, reboot, GitHub App token minting/audits, and `.github` push approval. |
+| `/usr/local/lib/kern-{embedding,transcription}-venv/`, `/usr/local/share/kern-{embedding,transcription}-models/` | root-owned, readable/executable, not service-writable | Pinned local inference environments and models. |
 | `/etc/sudoers.d/kern-host` | root-owned, `440`, not service-writable | Exact helper allowlist for `kern-admin`. |
 | `/etc/systemd/system/kern*` | root-owned system config, not service-writable | Postgres, admin API, network proxy, tools, workspaces, optional Cloudflare Tunnel service units, and resource-slice definitions. |
 | `/etc/kern/cloudflared.token` | root-owned, `0640`, group `cloudflared` | Cloudflare Tunnel token for the optional `cloudflared` service. Directly readable only by root and `cloudflared`; the SSH operator can deliberately cross that boundary with unrestricted sudo. |
@@ -71,6 +73,7 @@ redeploys.
 | `/mnt/kern-admin/proxy-state/github-quarantine/` | proxy only | Bare per-repository Git mirrors and `refs/pending/...` objects for `.github` pushes held for operator approval. At most ten pushes may be pending, and each operator approve/reject deletes its refs and immediately runs `git gc` under the shared quarantine lock. |
 | `/mnt/kern-admin/tools-state/assets/` | tools only | Bounded temporary image/video copies for tool calls. Cleared on tools-service start; expired files are swept hourly. |
 | `/mnt/kern-admin/tools-state/whatsapp/` | tools only, mode 0700 | WhatsApp's fixed private directory for linked-device keys and its bounded text cache. The tool owns the internal format; no storage path is exposed through its manifest or the generic host API. |
+| `/mnt/kern-admin/bootstrap-cache/` | root only | Verified, bounded package/model download cache. Runtime services cannot access it; deleting it only loses download savings. See [deployment](deployment.md). |
 | `/mnt/kern-admin/admin-home/` | admin only | Admin service home directory. |
 
 ## Agent volume

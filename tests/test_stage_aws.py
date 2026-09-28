@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from urllib.parse import urlsplit
 
 from host.network_integrations.xai import guard as xai_guard
@@ -42,6 +42,16 @@ from tests.stage.stage_support import (
 
 
 class StageOrchestrationTests(unittest.TestCase):
+    def test_topaz_stage_checks_credentials_without_paid_submission(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        with patch.object(stage, "_shim_tool_response", return_value=({"isError": True}, "fal task or media was not found; it may have expired.")) as call:
+            self.assertIn("without generation or enhancement spend", stage._check_tool_provider("fal_ai"))
+            self.assertEqual(call.call_count, 2)
+            call.assert_any_call("fal_ai_get_task", {"task_id": "topaz_image_00000000-0000-4000-8000-000000000000"})
+        with patch.object(stage, "_shim_tool_response", return_value=({"isError": True}, "fal rejected FAL_API_KEY.")):
+            with self.assertRaises(CredentialUnavailable):
+                stage._check_tool_provider("fal_ai")
+
     def test_app_stage_wait_uses_flat_events_and_durable_status(self) -> None:
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
         statuses = iter(("running", "idle"))
@@ -442,6 +452,12 @@ import tests.stage.stage_aws
         with patch.object(stage, "_successful_tool_call", return_value={"result_text": "partial", "truncated": True}):
             with self.assertRaisesRegex(AssertionError, "invalid accounts"):
                 stage._check_upwork_live()
+
+    def test_browser_stage_reads_status_without_requesting_a_post(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        with patch.object(stage, "_successful_tool_call", return_value={"accounts": [{"state": "connected"}]}) as call:
+            self.assertIn("1 saved account", stage._check_tool_provider("browser"))
+        call.assert_called_once_with("browser_x_connection_status", {})
 
     def test_vercel_stage_checks_personal_and_all_team_project_pages(self) -> None:
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
@@ -905,7 +921,9 @@ import tests.stage.stage_aws
         )
         self.assertEqual((stage.passed, stage.total), (1, 1))
 
-    def test_claude_stage_exercises_two_rapid_steers(self) -> None:
+    def _run_claude_stage_steering(
+        self, steered_events: list[dict[str, object]],
+    ) -> tuple[StageAwsSmoke, Mock]:
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
         stage.total = 0
         stage.passed = 0
@@ -914,6 +932,7 @@ import tests.stage.stage_aws
             patch.object(stage, "_latest_thread_event_seq", return_value=0),
             patch.object(stage, "send_message", return_value={"status": "accepted"}),
             patch.object(stage, "_wait_for_turn_activity"),
+            patch.object(stage, "_thread_events", return_value=steered_events),
             # Nine seconds elapse between the rejected STARTING attempt and
             # the accepted attempt, but the accepted POST itself takes 0.1s.
             # Startup waiting must not be reported as steering latency.
@@ -949,11 +968,26 @@ import tests.stage.stage_aws
             ),
         ):
             stage.check_agent_steering()
+        return stage, follow_up
+
+    def test_claude_stage_exercises_two_rapid_steers(self) -> None:
+        stage, follow_up = self._run_claude_stage_steering([
+            {"event_type": "thread.activity", "payload": {"output": "done"}},
+        ])
 
         self.assertEqual(follow_up.call_count, 4)
         self.assertIn("STARTUP_STEERED", follow_up.call_args_list[1].args[1])
         self.assertIn("DOUBLE_STEERED", follow_up.call_args_list[3].args[1])
         self.assertEqual((stage.passed, stage.total), (1, 1))
+
+    def test_claude_stage_fails_when_a_steer_rejects_an_in_flight_tool(self) -> None:
+        with self.assertRaisesRegex(AssertionError, "cancelled an in-flight tool call"):
+            self._run_claude_stage_steering([{
+                "event_type": "thread.activity",
+                "payload": {
+                    "output": "The user doesn't want to proceed with this tool use.",
+                },
+            }])
 
     def test_smoke_package_check_uses_the_venv_pip(self) -> None:
         stage = StageAwsSmoke.__new__(StageAwsSmoke)

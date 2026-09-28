@@ -101,7 +101,7 @@ on the other end of the socket:
   originated — which is what would otherwise let a prompt-injected agent POST
   workspace data straight to an egress-capable service (`kern-tools` holds
   outbound HTTPS) and exfiltrate it around the policy proxy. Agent↔Web App
-  communication remains only the journaled `workspace_api` path. Because the policy
+  communication remains only the peer-authenticated `workspace_api` path. Because the policy
   is default-deny rather than an enumeration, adding a service account or user
   later cannot silently open a hole.
 
@@ -109,7 +109,7 @@ And what the agent still cannot do, verbatim unchanged:
 
 - **Reach any non-loopback destination.** Both new rules are `oif lo`;
   external egress still goes only through the network policy proxy.
-- **Reach any loopback service outside the range.** The general
+- **Reach other loopback services outside the range and policy-proxy port.** The general
   `oif lo meta skuid "kern-agent" drop` still follows the accepts.
 - **Originate from a preview source port.** The sport rule requires
   established/related state; the first packet of an agent-originated flow is

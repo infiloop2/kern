@@ -1,13 +1,23 @@
 """Task-focused recall and its diagnostic evidence."""
 from contextlib import ExitStack
 import json
+import os
+import tempfile
+import threading
+import urllib.error
 import re
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from host.memory_recall import bound_query, task_query
 from host.runtime.admin_api import conversation_history, threads
-from host.runtime.host_inference import typesafe
+from host.runtime.host_inference import api, provider_http, providers, typesafe, openai, client
 from host.runtime.workspace import memory
+
+
+TEXT_SETTINGS = {"instructions": "Return a JSON object that matches the supplied schema.",
+                 "reasoning_effort": "none", "max_output_tokens": 400}
+OPENAI_SETTINGS = {"model": "gpt-6-luna", **TEXT_SETTINGS}
 
 
 def row(page_id):
@@ -15,6 +25,23 @@ def row(page_id):
 
 
 class MemoryRecallDiagnosticsTests(unittest.TestCase):
+    def test_both_rerankers_have_the_same_short_client_timeout(self):
+        # Both rerankers return or fall back within the same socket timeout.
+        # Admission leaves room for local search and memory loading.
+        with patch.object(threads.workspace_proxy, "_proxy") as proxy:
+            threads.workspace_proxy.recall_memory("thread-1", "Fix login")
+        with patch.object(client, "_request") as inference:
+            client.openai_text_completion("prompt", {}, "memory_recall", timeout_seconds=memory.RECALL_RERANK_TIMEOUT_SECONDS, **OPENAI_SETTINGS)
+        luna_timeout = inference.call_args.args[2]
+        with patch.object(client, "_request") as inference:
+            client.typesafe_jev_judgment({}, {"q0": {}}, timeout_seconds=memory.RECALL_RERANK_TIMEOUT_SECONDS)
+        self.assertEqual(luna_timeout, 1.2)
+        self.assertEqual(inference.call_args.args[2], luna_timeout)
+        self.assertEqual(proxy.call_args.kwargs["timeout_seconds"], 3)
+        with patch.object(client, "_request") as title:
+            client.openai_text_completion("prompt", {}, "swarm_task", timeout_seconds=20, **OPENAI_SETTINGS)
+        self.assertEqual(title.call_args.args[2], 20)
+
     def test_diagnostics_preserve_ranking_and_do_not_add_inference(self):
         direct, linked = row('direct-guide'), row('linked-guide')
         with ExitStack() as stack:
@@ -46,7 +73,8 @@ class MemoryRecallDiagnosticsTests(unittest.TestCase):
         self.assertIn('linked-guide r1; memory relevance 0.008197 — graph rank 1', trace)
 
     def test_admission_keeps_diagnostics_out_of_search_and_model_input(self):
-        with patch.object(threads.workspace_proxy, 'recall_memory', return_value={'pages': [], 'diagnostics': 'Current query: test'}) as recall:
+        with patch.object(threads.state, 'page_thread_events', return_value=[]), \
+             patch.object(threads.workspace_proxy, 'recall_memory', return_value={'pages': [], 'diagnostics': 'Current query: test'}) as recall:
             pages, details = threads._recalled_memory_pages('thread-1', 'test')
         recall.assert_called_once_with('thread-1', 'test')
         self.assertIn('Current query: test', details)
@@ -76,35 +104,80 @@ class MemoryRecallDiagnosticsTests(unittest.TestCase):
 
 class TaskRecallTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.judge_patch = patch.object(memory, "judge", return_value=None)
-        self.judge_patch.start()
-        self.addCleanup(self.judge_patch.stop)
+        # Retrieval tests use control; reranker tests cover provider assignments.
+        self.enterContext(patch.object(memory.random, "choice", return_value=None))
 
-    def test_vague_followup_uses_user_task_but_thanks_does_not_search(self):
+    def test_every_request_uses_bounded_user_context_newest_first(self):
         history = [
-            {"event_type": "thread.message", "payload": {"source": "user", "message": "Fix token usage analytics"}},
+            {"event_type": "thread.message", "payload": {"source": "user", "message": "Generate an Aira video with Grok audio"}},
             {"event_type": "thread.message", "payload": {"source": "agent", "message": "Unrelated outreach"}},
-            {"event_type": "thread.message", "payload": {"source": "user", "message": "thanks"}},
+            {"event_type": "thread.message", "payload": {"source": "user", "message": "Use a quieter voice"}},
         ]
         with patch.object(threads.state, "page_thread_events", return_value=history) as read:
-            self.assertEqual(threads._memory_task_query("thread-1", "?"), "fix token usage analytics")
-            self.assertEqual(threads._memory_task_query("thread-1", "can you do that"), "fix token usage analytics")
-            self.assertEqual(threads._memory_task_query("thread-1", "ok well observe wit this thanks"), "observe wit fix token usage analytics")
-            read.reset_mock()
-            self.assertEqual(threads._memory_task_query("thread-1", "thanks!"), "")
-            self.assertEqual(threads._memory_task_query("thread-1", "SnowBid"), "snowbid")
-            read.assert_not_called()
-            self.assertEqual(threads._memory_task_query("thread-1", "scheduled agents"), "scheduled agents")
+            # No phrase classifier: typos, acronyms, topic changes and ordinary
+            # follow-ups all use the same input contract.
+            for message in ("?", "go ahead", "how did you choose the voice?", "whyd that voic?",
+                            "Investigate SnowBid billing", "Review PLS model"):
+                with self.subTest(message=message):
+                    query = threads._memory_task_query("thread-1", message)
+                    self.assertEqual(query.split("\n\n"), [
+                        message, "Use a quieter voice", "Generate an Aira video with Grok audio",
+                    ])
+            read.assert_called_with("thread-1", None, 12,
+                                    event_types=("thread.message", "thread.memory_cleared"))
 
-    def test_continuation_does_not_cross_working_memory_clear(self):
+    def test_context_stops_at_memory_clear(self):
         history = [
             {"event_type": "thread.message", "payload": {"source": "user", "message": "Old task"}},
             {"event_type": "thread.memory_cleared", "payload": {}},
+            {"event_type": "thread.message", "payload": {"source": "user", "message": "New task"}},
         ]
         with patch.object(threads.state, "page_thread_events", return_value=history):
-            self.assertEqual(threads._memory_task_query("thread-1", "continue"), "")
+            self.assertEqual(threads._memory_task_query("thread-1", "continue"), "continue\n\nNew task")
+            history.append({"event_type": "thread.memory_cleared", "payload": {}})
+            self.assertEqual(threads._memory_task_query("thread-1", "continue"), "continue")
 
-    def test_task_words_beat_incidental_body_matches_without_dropping_semantic_matches(self):
+    def test_current_message_consumes_budget_before_any_history(self):
+        with patch.object(threads.state, "page_thread_events") as read:
+            self.assertEqual(threads._memory_task_query("thread-1", "a" * 1200), "a" * 1000)
+            read.assert_not_called()
+        history = [{"event_type": "thread.message", "payload": {"source": "user", "message": m}}
+                   for m in ("Old task", "界" * 600)]
+        with patch.object(threads.state, "page_thread_events", return_value=history):
+            query = threads._memory_task_query("thread-1", "Current request")
+        self.assertTrue(query.startswith("Current request\n\n界"))
+        self.assertLessEqual(len(query.encode()), 1000)
+        self.assertNotIn("Old task", query)
+        self.assertNotIn("�", query)
+
+    def test_empty_current_message_does_not_recall_old_work(self):
+        with patch.object(threads.state, "page_thread_events") as read:
+            self.assertEqual(threads._memory_task_query("thread-1", "   "), "")
+            read.assert_not_called()
+
+    def test_message_boundaries_and_negation_survive(self):
+        previous = "Don't deploy billing.\n\nUse staging first."
+        history = [{"event_type": "thread.message", "payload": {"source": "user", "message": previous}}]
+        with patch.object(threads.state, "page_thread_events", return_value=history):
+            query = threads._memory_task_query("thread-1", "Review PLS\nmodel")
+        self.assertEqual(query, "Review PLS model\n\nDon't deploy billing. Use staging first.")
+        self.assertEqual(bound_query(query), query)
+
+    def test_routing_envelopes_removed_from_current_and_prior_messages(self):
+        from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX, LEGACY_AUTOMATED_TRIGGER_PREFIX
+        from host.runtime.workspace.agent_messages import MESSAGE_HEADER
+        for prefix in (AUTOMATED_TRIGGER_PREFIX, LEGACY_AUTOMATED_TRIGGER_PREFIX,
+                       MESSAGE_HEADER.format(sender="schedule-38"),
+                       MESSAGE_HEADER.replace("---\n\n", "").format(sender="schedule-38")):
+            history = [{"event_type": "thread.message", "payload": {"source": "user", "message": prefix + "Review Aira video"}}]
+            with self.subTest(prefix=prefix), patch.object(threads.state, "page_thread_events", return_value=history):
+                self.assertEqual(threads._memory_task_query("thread-1", prefix + "Follow up"),
+                                 "Follow up\n\nReview Aira video")
+        # Quoted headers and ordinary paragraph dividers remain content.
+        self.assertIn("Sender thread", task_query("Explain this header:\n" + prefix))
+        self.assertEqual(task_query("Review Aira\n\n---\n\nvideo feedback"), "Review Aira --- video feedback")
+
+    def test_recall_preserves_hybrid_order_without_a_provider(self):
         pages = [
             {"page_id": "kern-repo-dev-guidelines", "description": "Repository conventions", "revision": 1},
             {"page_id": "scheduled-agents-model", "description": "Creating or debugging schedules", "revision": 1},
@@ -119,16 +192,16 @@ class TaskRecallTests(unittest.TestCase):
              patch.object(memory, "_popular_rows") as popular:
             result = memory.recall_pages({"thread_id": "thread-1", "message": "scheduled agents"})
         self.assertEqual([p["page_id"] for p in result["pages"]],
-                         ["thread-1", "scheduled-agents-model", "kern-repo-dev-guidelines", "synonym-guide"])
+                         ["thread-1", "kern-repo-dev-guidelines", "scheduled-agents-model", "synonym-guide"])
         self.assertFalse(search.call_args.kwargs["include_graph"])
         popular.assert_not_called()
 
-    def test_empty_task_query_keeps_self_without_search(self):
+    def test_empty_message_keeps_self_without_search(self):
         page = {"page_id": "thread-1", "description": "Self", "content": "My notes", "revision": 1}
         with patch.object(memory, "load_page", return_value=page), \
              patch.object(memory, "_search_pages") as search, \
              patch.object(memory, "_popular_rows") as popular:
-            result = memory.recall_pages({"thread_id": "thread-1", "message": "thanks"})
+            result = memory.recall_pages({"thread_id": "thread-1", "message": "   "})
         self.assertEqual(result["pages"], [{**page, "scope": "self"}])
         search.assert_not_called()
         popular.assert_not_called()
@@ -156,345 +229,240 @@ class TaskRecallTests(unittest.TestCase):
         with patch.object(threads.state, "page_thread_events", side_effect=OSError("unavailable")), \
              patch.object(threads, "_report_degraded_recall") as report, \
              patch.object(threads.workspace_proxy, "recall_memory", return_value={"pages": []}) as recall:
-            threads._recalled_memory_pages("thread-1", "?")
-        recall.assert_called_once_with("thread-1", "")
+            threads._recalled_memory_pages("thread-1", threads._memory_task_query("thread-1", "?"))
+        recall.assert_called_once_with("thread-1", "?")
         report.assert_called_once()
 
-    def test_automated_header_is_not_part_of_task_query(self):
-        from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX
-        self.assertEqual(memory._recall_query(AUTOMATED_TRIGGER_PREFIX + "Review SnowBid inventory"),
-                         "review snowbid inventory")
-
-    def test_schedule_preamble_does_not_crowd_out_later_topic(self):
-        from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX
-        message = ("Check UTC weekday FIRST. On Saturday or Sunday, skip all work and return "
-                   "the weekend-skip outcome without reading or writing Apps.\n\n"
-                   "Operate TraderHand CEO using canonical app instructions.")
-        self.assertIn("traderhand", memory._recall_query(AUTOMATED_TRIGGER_PREFIX + message))
-
-    def test_greetings_and_empty_messages_do_not_recall_an_old_task(self):
-        with patch.object(threads.state, "page_thread_events") as read:
-            for message in ("hello", "hi!", "HELLO", "thanks", "ok", "", "..."):
-                with self.subTest(message=message):
-                    self.assertEqual(threads._memory_task_query("thread-1", message), "")
-            read.assert_not_called()
-
-    def test_acronyms_and_language_names_survive_both_query_normalizations(self):
-        from host.memory_recall import task_query
-        for message in ("IT", "US", "OR", "CAN", "MAY", "Debug C++ templates", "Debug C# templates"):
-            with self.subTest(message=message), patch.object(threads.state, "page_thread_events") as read:
-                query = threads._memory_task_query("thread-1", message)
-                self.assertTrue(query)
-                self.assertEqual(task_query(query), query)
-                self.assertEqual(memory._recall_query(query), query)
-                read.assert_not_called()
-        self.assertIn("C++", task_query("Debug C++ templates"))
-        self.assertIn("C#", task_query("Debug C# templates"))
-        self.assertNotEqual(task_query("Debug C++ templates"), task_query("Debug C# templates"))
-
-    def test_automated_header_does_not_make_a_new_topic_refer_back(self):
-        from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX, LEGACY_AUTOMATED_TRIGGER_PREFIX
-        with patch.object(threads.state, "page_thread_events") as read:
-            for prefix in (AUTOMATED_TRIGGER_PREFIX, LEGACY_AUTOMATED_TRIGGER_PREFIX):
-                self.assertEqual(threads._memory_task_query("schedule-1", prefix + "Audit invoices"),
-                                 "audit invoices")
-            read.assert_not_called()
-
-    def test_followup_qualifiers_are_kept_before_the_previous_task(self):
-        history = [{"event_type": "thread.message", "payload": {
-            "source": "user", "message": "Fix token usage analytics",
-        }}]
-        with patch.object(threads.state, "page_thread_events", return_value=history):
-            self.assertEqual(threads._memory_task_query("thread-1", "deploy it to production"),
-                             "deploy production fix token usage analytics")
-            self.assertEqual(threads._memory_task_query("thread-1", "do that in staging"),
-                             "staging fix token usage analytics")
-            self.assertEqual(threads._memory_task_query("thread-1", "please continue"),
-                             "fix token usage analytics")
-
-    def test_plural_and_capitalized_followups_keep_the_task(self):
-        history = [{"event_type": "thread.message", "payload": {
-            "source": "user", "message": "Fix token usage analytics",
-        }}]
-        with patch.object(threads.state, "page_thread_events", return_value=history):
-            for message in ("DO THAT", "CAN YOU DEPLOY IT", "COULD YOU TEST IT", "do so", "please do so", "deploy it in staging tomorrow", "deploy them", "deploy those in staging", "fix these", "test those", "DO IT", "DEPLOY IT", "DO IT IN STAGING", "CAN YOU DO THAT", "THAT", "CONTINUE", "YES"):
-                with self.subTest(message=message):
-                    query = threads._memory_task_query("thread-1", message)
-                    self.assertTrue({"fix", "token", "usage", "analytics"} <= set(query.casefold().split()))
-
-    def test_chained_followups_keep_the_original_task_and_each_qualifier(self):
-        history = [{"event_type": "thread.message", "payload": {
-            "source": "user", "message": message,
-        }} for message in ("Fix token usage analytics", "deploy it", "do that in staging")]
-        with patch.object(threads.state, "page_thread_events", return_value=history):
-            self.assertEqual(threads._memory_task_query("thread-1", "continue"),
-                             "staging deploy fix token usage analytics")
-        history.insert(1, {"event_type": "thread.memory_cleared", "payload": {}})
-        with patch.object(threads.state, "page_thread_events", return_value=history):
-            self.assertEqual(threads._memory_task_query("thread-1", "continue"), "staging deploy")
-
-    def test_go_is_a_task_topic_except_in_a_bare_go_ahead(self):
-        self.assertEqual(memory._recall_query("Debug Go concurrency"), "debug go concurrency")
-        self.assertEqual(memory._recall_query("Migrate service from Python to Go"), "migrate service python go")
-        history = [{"event_type": "thread.message", "payload": {
-            "source": "user", "message": "Debug Go concurrency",
-        }}]
-        with patch.object(threads.state, "page_thread_events", return_value=history):
-            self.assertEqual(threads._memory_task_query("thread-1", "go ahead"), "debug go concurrency")
-
-    def test_title_cased_names_survive_repeated_normalization(self):
-        from host.memory_recall import task_query
-        for message, name in (("Review May sales report", "May"), ("Contact Will about invoices", "Will")):
-            query = task_query(message)
-            self.assertIn(name, query.split())
-            self.assertEqual(task_query(query), query)
-
-    def test_it_acronym_in_a_new_task_does_not_load_unrelated_history(self):
-        with patch.object(threads.state, "page_thread_events") as read:
-            self.assertEqual(threads._memory_task_query("thread-1", "Audit IT"), "audit IT")
-            self.assertEqual(threads._memory_task_query("thread-1", "Fix IT systems"), "fix IT systems")
-            self.assertEqual(threads._memory_task_query("thread-1", "AUDIT IT"), "AUDIT IT")
-            self.assertEqual(threads._memory_task_query("thread-1", "FIX IT SYSTEMS"), "FIX IT SYSTEMS")
-            read.assert_not_called()
-
-    def test_repetition_and_filler_do_not_consume_query_budget(self):
-        for preamble in ("browser " * 125, "please " * 200):
-            self.assertIn("screenshot", memory._recall_query(preamble + "screenshot").split())
-
-    def test_continuation_words_do_not_expand_a_fully_specified_task(self):
-        with patch.object(threads.state, "page_thread_events") as read:
-            for message in ("Continue investigating login failures", "Proceed with invoice audit", "Go ahead with login repair", "Proceed using Terraform to migrate billing", "Audit this quarter's invoices", "Review this month sales"):
-                with self.subTest(message=message):
-                    self.assertTrue(threads._memory_task_query("thread-1", message))
-            read.assert_not_called()
-
-    def test_sentence_initial_function_words_are_not_names(self):
-        for message, expected in (("Can you fix authentication?", "fix authentication"),
-                                  ("How do I deploy?", "deploy"),
-                                  ("What broke billing?", "broke billing"),
-                                  ("Will you fix authentication?", "fix authentication"),
-                                  ("May I review billing?", "review billing")):
-            self.assertEqual(memory._recall_query(message), expected)
-
-    def test_qualified_continuations_retain_task_and_qualifier(self):
-        history = [{"event_type": "thread.message", "payload": {
-            "source": "user", "message": "Fix token usage analytics",
-        }}]
-        with patch.object(threads.state, "page_thread_events", return_value=history):
-            self.assertEqual(threads._memory_task_query("thread-1", "continue in staging"), "staging fix token usage analytics")
-            self.assertEqual(threads._memory_task_query("thread-1", "proceed in production"), "production fix token usage analytics")
-
-    def test_apostrophes_do_not_create_fragment_terms(self):
-        for message, expected in (("Don't deploy billing", "deploy billing"),
-                                  ("Can't reproduce auth", "reproduce auth"),
-                                  ("SnowBid's inventory", "snowbid inventory"),
-                                  ("SnowBid’s inventory", "snowbid inventory")):
-            self.assertEqual(memory._recall_query(message), expected)
-
-    def test_query_budget_keeps_complete_terms(self):
-        from host.memory_recall import task_query
-        terms = [f"term{index:04d}suffix" for index in range(100)]
-        query = task_query(" ".join(terms))
-        self.assertLessEqual(len(query.encode()), 1000)
-        self.assertEqual(query.split(), terms[:len(query.split())])
-        self.assertEqual(task_query(query), query)
-
-    def test_all_caps_requests_filter_grammar_but_preserve_it(self):
-        self.assertEqual(memory._recall_query("CAN YOU FIX AUTHENTICATION"), "FIX AUTHENTICATION")
-        self.assertEqual(memory._recall_query("CAN YOU FIX IT SYSTEMS"), "FIX IT SYSTEMS")
-
-    def test_all_caps_can_bus_remains_distinct(self):
-        self.assertEqual(memory._recall_query("DEBUG CAN BUS"), "DEBUG CAN BUS")
-
-    def test_unicode_spelling_is_not_casefold_transliterated(self):
-        self.assertEqual(memory._recall_query("Fix Straße routing"), "fix straße routing")
-        query = memory._recall_query("Deploy İstanbul")
-        self.assertEqual(query, "deploy İstanbul")
-        self.assertEqual(memory._recall_query(query), query)
-
-    def test_jev_adds_a_complete_score_set_for_all_candidates(self):
+    def test_topic_switch_uses_hybrid_order_without_a_provider(self):
         candidates = [
-            {
-                "page_id": f"guide-{index}",
-                "description": f"Guide {index}",
-                "revision": 1,
-                "content": f"private content {index}",
-                "memory_relevance_score": 0.01 * (index + 1),
-            }
-            for index in range(6)
+            {"page_id": "video-guide", "description": "Aira video Grok audio", "revision": 1},
+            {"page_id": "billing-guide", "description": "SnowBid billing", "revision": 1},
         ]
-        probabilities = {
-            "guide-0": 0.01,
-            "guide-1": 0.20,
-            "guide-2": 0.30,
-            "guide-3": 0.40,
-            "guide-4": 0.50,
-            "guide-5": 0.60,
-        }
-        captured = {}
-
-        def judge(state, questions, *, timeout_seconds):
-            captured.update(
-                state=state,
-                questions=questions,
-                timeout_seconds=timeout_seconds,
-            )
-            return {
-                "model": "jev-latest",
-                "answers": {
-                    f"q{index}": {"type": "noul", "noul": probabilities[page["page_id"]]}
-                    for index, page in enumerate(candidates)
-                },
-            }
-
-        details = []
-        with patch.object(memory, "judge", side_effect=judge):
-            memory._add_jev_relevance_scores(
-                candidates,
-                query="repair authentication",
-                details=details,
-            )
-
-        self.assertEqual(
-            [page["jev_score"] for page in candidates],
-            [0.01, 0.20, 0.30, 0.40, 0.50, 0.60],
-        )
-        self.assertEqual(captured["timeout_seconds"], 1.2)
-        self.assertEqual(
-            set(captured["state"]),
-            {"task_query", "candidates"},
-        )
-        self.assertEqual(
-            [candidate["id"] for candidate in captured["state"]["candidates"]],
-            list(captured["questions"]),
-        )
-        self.assertNotIn("page_id", json.dumps(captured["state"]))
-        self.assertNotIn("private content", json.dumps(captured["state"]))
-        self.assertEqual(len(details), 7)
-        self.assertEqual(details[0], "Jev response model: jev-latest.")
-        self.assertIn("memory relevance 0.010000; Jev score 0.010", details[1])
-        self.assertIn("memory relevance 0.060000; Jev score 0.600", details[-1])
-
-    def test_jev_questions_bind_each_candidate_through_provider_transport(self):
-        candidates = [
-            {
-                "page_id": f"guide-{index}",
-                "description": f"Guidance for task {index}",
-                "content": "Private memory body",
-            }
-            for index in range(memory.CANDIDATE_LIMIT)
-        ]
-        outgoing = {}
-        original_questions = {}
-
-        def transport(_method, _url, **kwargs):
-            outgoing.update(json.loads(kwargs["data"]))
-            return json.dumps({
-                "model": "jev-latest",
-                "answers": {
-                    candidate["id"]: {"type": "noul", "noul": index / 100}
-                    for index, candidate in enumerate(outgoing["state"]["candidates"])
-                },
-            }).encode()
-
-        def judge(state, questions, *, timeout_seconds):
-            original_questions.update(questions)
-            return typesafe.judge(
-                api_key="test-key", model="jev-latest", state=state,
-                questions=questions, timeout_seconds=timeout_seconds, transport=transport,
-            )
-
-        with patch.object(memory, "judge", side_effect=judge):
-            memory._add_jev_relevance_scores(candidates, query="repair a service", details=[])
-
-        self.assertEqual(outgoing["questions"], original_questions)
-        self.assertEqual(outgoing["state"]["task_query"], "repair a service")
-        for index, candidate in enumerate(outgoing["state"]["candidates"]):
-            with self.subTest(candidate=candidate["id"]):
-                question = outgoing["questions"][candidate["id"]]
-                self.assertEqual(question["type"], "noul")
-                self.assertEqual(re.findall(r"\bq\d+\b", question["instructions"]), [candidate["id"]])
-                self.assertIn("state.candidates", question["instructions"])
-                self.assertIn("state.task_query", question["instructions"])
-                self.assertEqual(candidate["description"], candidates[index]["description"])
-                self.assertEqual(candidates[index]["jev_score"], index / 100)
-        self.assertNotIn("Private memory body", json.dumps(outgoing))
-        self.assertNotIn("page_id", json.dumps(outgoing))
-
-    def test_jev_scores_select_top_five_and_invalid_results_use_local_order(self):
-        candidates = [
-            {
-                "page_id": f"guide-{index}",
-                "description": f"Guide {index}",
-                "revision": 1,
-                "memory_relevance_score": 0.01 * (6 - index),
-            }
-            for index in range(6)
-        ]
-
-        def load(page_id):
-            if page_id == "thread-1":
-                return {
-                    "page_id": page_id,
-                    "description": "Self",
-                    "content": "Notes",
-                    "revision": 1,
-                }
-            return {
-                **next(page for page in candidates if page["page_id"] == page_id),
-                "content": "Guidance",
-            }
-
-        answers = {
-            f"q{index}": {"type": "noul", "noul": index / 10}
-            for index in range(6)
-        }
-        with (
-            patch.object(memory, "load_page", side_effect=load),
-            patch.object(memory, "_search_pages", return_value={"pages": candidates}),
-            patch.object(
-                memory,
-                "judge",
-                return_value={"model": "jev-latest", "answers": answers},
-            ),
-        ):
-            result = memory.recall_pages(
-                {"thread_id": "thread-1", "message": "read guides"}
-            )
-        self.assertEqual(
-            [page["page_id"] for page in result["pages"]],
-            ["thread-1", "guide-5", "guide-4", "guide-3", "guide-2", "guide-1"],
-        )
-        self.assertIn("Jev selection: guide-5, guide-4, guide-3, guide-2, guide-1.", result["diagnostics"])
-
-        fallback_candidates = [dict(page) for page in candidates]
-        details = []
-        with patch.object(memory, "judge", return_value={"answers": {}}):
-            memory._add_jev_relevance_scores(
-                fallback_candidates,
-                query="read guides",
-                details=details,
-            )
-        self.assertTrue(all("jev_score" not in page for page in fallback_candidates))
-        self.assertEqual(
-            details,
-            ["Jev scores unavailable; existing recall order used."],
-        )
-
-    def test_metadata_reranking_retains_best_search_match_at_cutoff(self):
-        candidates = [{"page_id": "login-guide", "description": "Login troubleshooting", "revision": 1}]
-        candidates += [{"page_id": f"repair-{i}", "description": "Repair guide", "revision": 1} for i in range(5)]
         def load(page_id):
             if page_id == "thread-1":
                 return {"page_id": page_id, "description": "Self", "content": "Notes", "revision": 1}
             return {**next(p for p in candidates if p["page_id"] == page_id), "content": "Guidance"}
-        with patch.object(memory, "load_page", side_effect=load), patch.object(memory, "_search_pages", return_value={"pages": candidates}):
-            result = memory.recall_pages({"thread_id": "thread-1", "message": "repair authentication"})
-        ids = [p["page_id"] for p in result["pages"]]
-        self.assertEqual(len(ids), 6)
-        self.assertIn("login-guide", ids)
-        self.assertEqual(ids[1], "repair-0")
+        query = "Investigate SnowBid billing\n\nGenerate an Aira video with Grok audio"
+        with patch.object(memory, "load_page", side_effect=load), \
+             patch.object(memory, "_search_pages", return_value={"pages": candidates}) as search:
+            result = memory.recall_pages({"thread_id": "thread-1", "message": query})
+        self.assertEqual([p["page_id"] for p in result["pages"]],
+                         ["thread-1", "video-guide", "billing-guide"])
+        self.assertEqual(search.call_args.args[0], {"q": [query], "limit": ["20"]})
+        self.assertTrue(search.call_args.kwargs["keyword_alternatives"])
 
-    def test_all_caps_conjunction_keeps_websearch_operator(self):
-        self.assertEqual(memory._recall_query("FIX LOGIN OR BILLING"), "FIX LOGIN OR BILLING")
-        self.assertEqual(memory._recall_query("Debug OR operator"), 'debug "OR" operator')
+    def test_recall_context_reaches_embedding_and_lexical_channels(self):
+        guide = row("aira-guide")
+        query = "How did you choose the voice?\n\nGenerate an Aira video with Grok audio"
+        with ExitStack() as stack:
+            for name, value in (("load_page", {"page_id": "thread-1", "revision": 1, "content": "Notes"}),
+                                ("_memory_search_generation", "fixed"),
+                                ("_search_pages_exact", []), ("_lexical_page_id_tail", []),
+                                ("_search_pages_semantic", [guide + (.8,)]),
+                                ("_current_page_rows", [guide])):
+                stack.enter_context(patch.object(memory, name, return_value=value))
+            lexical = stack.enter_context(patch.object(memory, "_search_pages_lexical", return_value=[guide + (.5,)]))
+            embed = stack.enter_context(patch.object(memory.embedding_client, "embed_texts", return_value=[[1.0]]))
+            append = stack.enter_context(patch.object(memory, "_append_recalled_pages"))
+            memory.recall_pages({"thread_id": "thread-1", "message": query})
+        embed.assert_called_once_with([query], kind="query")
+        self.assertEqual(lexical.call_args.args[0], query)
+        self.assertTrue(lexical.call_args.kwargs["alternatives"])
+        self.assertEqual(append.call_args.args[2], 5)
+
+    def test_nonempty_stopwords_or_punctuation_still_reach_semantic_search(self):
+        for query in ("the and you", "?", "IT", "May"):
+            with self.subTest(query=query), ExitStack() as stack:
+                for name, value in (("load_page", {"page_id": "thread-1", "revision": 1, "content": "Notes"}),
+                                    ("_memory_search_generation", 1), ("_search_pages_exact", []),
+                                    ("_search_pages_lexical", []), ("_lexical_page_id_tail", []),
+                                    ("_search_pages_semantic", [row("guide") + (.8,)]),
+                                    ("_current_page_rows", [row("guide")])):
+                    stack.enter_context(patch.object(memory, name, return_value=value))
+                embed = stack.enter_context(patch.object(memory.embedding_client, "embed_texts", return_value=[[1.0]]))
+                append = stack.enter_context(patch.object(memory, "_append_recalled_pages"))
+                memory.recall_pages({"thread_id": "thread-1", "message": query})
+                embed.assert_called_once_with([query], kind="query")
+                self.assertEqual(append.call_args.args[1][0]["page_id"], "guide")
+
+
+class RecallRerankingTests(unittest.TestCase):
+    def setUp(self):
+        self.pages = [{"page_id": f"guide-{i}", "description": f"Task guidance {i}",
+                       "revision": i + 1, "content": "PRIVATE BODY",
+                       "memory_relevance_score": .1 / (i + 1)} for i in range(6)]
+        self.scores = {f"q{i}": i / 10 for i in range(6)}
+        self.draw = self.enterContext(patch.object(memory.random, "choice", return_value="openai"))
+        self.config_read = self.enterContext(patch.object(memory.state, "host_inference_provider_is_enabled", side_effect=AssertionError("Workspace must not read provider settings")))
+        self.complete = self.enterContext(patch.object(memory, "openai_text_completion", return_value=self.scores))
+        self.judge = self.enterContext(patch.object(memory, "judge", return_value={
+            "model": "jev-latest", "answers": {k: {"type": "noul", "noul": v} for k, v in self.scores.items()}}))
+
+    def rerank(self, pages=None):
+        details = []
+        memory._rerank_recall(self.pages if pages is None else pages,
+                              query="Fix login\n\nDo not deploy", details=details)
+        return json.loads(details[-1].removeprefix("Rerank experiment: "))
+
+    def test_enabled_provider_matrix_and_equal_random_assignment(self):
+        for enabled in ([], ["openai"], ["typesafe"], ["openai", "typesafe"]):
+            for choice in (None, "openai", "typesafe"):
+                with self.subTest(enabled=enabled, choice=choice):
+                    def response(provider, value):
+                        if provider not in enabled:
+                            raise client.HostInferenceError("disabled", reason="provider_disabled")
+                        return value
+                    self.complete.side_effect = lambda *a, **kw: response("openai", self.scores)
+                    self.judge.side_effect = lambda *a, **kw: response("typesafe", self.judge.return_value)
+                    self.complete.reset_mock(); self.judge.reset_mock()
+                    pages = [dict(p) for p in self.pages]
+                    with patch.object(memory.random, "choice", return_value=choice) as draw:
+                        result = self.rerank(pages)
+                    self.config_read.assert_not_called()
+                    self.assertNotIn("enabled", result)
+                    self.assertEqual(result["provider"], choice)
+                    self.assertEqual(result["version"], 4)
+                    self.assertEqual(result["probability"], 1 / 3)
+                    self.assertEqual(self.complete.call_count, int(choice == "openai"))
+                    self.assertEqual(self.judge.call_count, int(choice == "typesafe"))
+                    draw.assert_called_once_with([None, "openai", "typesafe"])
+                    succeeded = choice in enabled
+                    self.assertEqual(result["outcome"], "success" if succeeded else
+                                     "control" if choice is None else "provider_disabled")
+                    self.assertEqual(result["fallback"], choice is not None and not succeeded)
+                    if not succeeded:
+                        self.assertTrue(all(c["score"] is None for c in result["candidates"]))
+                    expected = list(reversed(self.pages)) if succeeded else self.pages
+                    self.assertEqual(pages, expected)
+                    self.assertEqual(result["selection"], [p["page_id"] for p in expected[:5]])
+                    self.assertEqual(result["candidates"][0]["hybrid_rank"], 1)
+                    self.assertEqual(result["candidates"][0]["final_rank"], 6 if succeeded else 1)
+                    self.assertIn("elapsed_ms", result)
+
+    def test_complete_valid_scores_required_and_no_second_provider_on_failure(self):
+        bad_values = [None, {}, {"q0": .5}, {**self.scores, "extra": .5}]
+        bad_values += [{**self.scores, "q0": v} for v in (True, "0.5", -1, 2, float("nan"), float("inf"))]
+        for provider in ("openai", "typesafe"):
+            for values in bad_values:
+                with self.subTest(provider=provider, values=values):
+                    self.complete.reset_mock(); self.judge.reset_mock()
+                    self.complete.return_value = values
+                    self.judge.return_value = {"model": "jev-latest", "answers":
+                        {k: {"type": "noul", "noul": v} for k, v in values.items()} if isinstance(values, dict) else values}
+                    with patch.object(memory.random, "choice", return_value=provider):
+                        result = self.rerank()
+                    self.assertTrue(result["fallback"])
+                    self.assertEqual([p["page_id"] for p in self.pages], [f"guide-{i}" for i in range(6)])
+                    self.assertTrue(all(c["score"] is None for c in result["candidates"]))
+                    self.assertEqual(self.complete.call_count + self.judge.call_count, 1)
+
+    def test_errors_ties_and_empty_candidates(self):
+        self.complete.side_effect = TimeoutError("private response")
+        with patch.object(memory.host_errors, "report_warning"):
+            result = self.rerank()
+        self.assertEqual(result["outcome"], "timeout")
+        self.assertEqual(result["error_type"], "TimeoutError")
+        self.assertNotIn("private response", json.dumps(result))
+        self.complete.side_effect = None
+        self.complete.return_value = {k: .5 for k in self.scores}
+        result = self.rerank()
+        self.assertEqual(result["selection"], [f"guide-{i}" for i in range(5)])
+        self.config_read.reset_mock(); self.complete.reset_mock()
+        self.assertEqual(self.rerank([])["outcome"], "no_candidates")
+        self.config_read.assert_not_called(); self.complete.assert_not_called()
+
+    def test_socket_timeouts_keep_assignment_and_hybrid_order_for_both_providers(self):
+        connection = MagicMock()
+        connection.getresponse.side_effect = TimeoutError("private network detail")
+        for provider in ("openai", "typesafe"):
+            with self.subTest(provider=provider), \
+                 patch.object(memory.random, "choice", return_value=provider), \
+                 patch.object(memory, "openai_text_completion", client.openai_text_completion), \
+                 patch.object(memory, "judge", client.typesafe_jev_judgment), \
+                 patch.object(client, "_HostInferenceConnection", return_value=connection) as connect, \
+                 patch.object(memory.host_errors, "report_warning"):
+                result = self.rerank()
+            connect.assert_called_once_with(1.3)
+            self.assertEqual(result["provider"], provider)
+            self.assertEqual(result["probability"], 1 / 3)
+            self.assertEqual(result["timeout_seconds"], 1.2)
+            self.assertEqual(result["outcome"], "timeout")
+            self.assertTrue(result["fallback"])
+            self.assertEqual(result["selection"], [f"guide-{i}" for i in range(5)])
+            self.assertTrue(all(c["score"] is None for c in result["candidates"]))
+            self.assertNotIn("private network detail", json.dumps(result))
+            self.assertIn("elapsed_ms", result)
+
+    def test_provider_outcomes_cross_the_real_socket_into_recall_diagnostics(self):
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = directory + "/host-inference.sock"
+            server = api.HostInferenceServer(socket_path, frozenset({os.getuid()}))
+            worker = threading.Thread(target=server.serve_forever,
+                                      kwargs={"poll_interval": .01}, daemon=True)
+            worker.start()
+            try:
+                for provider in ("openai", "typesafe"):
+                    for error in (None, TimeoutError("private timeout"),
+                                  urllib.error.URLError(TimeoutError("private timeout"))):
+                        with self.subTest(provider=provider, error=type(error).__name__), \
+                             patch.object(memory.random, "choice", return_value=provider), \
+                             patch.object(memory, "openai_text_completion", client.openai_text_completion), \
+                             patch.object(memory, "judge", client.typesafe_jev_judgment), \
+                             patch.object(client, "SOCKET_PATH", socket_path), \
+                             patch.object(providers.state, "enabled_host_inference_provider",
+                                          return_value={"api_key": "test-key"} if error else None), \
+                             patch.object(provider_http._OPENER, "open", side_effect=error) as request, \
+                             patch.object(memory.host_errors, "report_warning"):
+                            result = self.rerank()
+                        self.assertEqual(result["outcome"], "timeout" if error else "provider_disabled")
+                        self.assertEqual(request.call_count, int(error is not None))
+                        self.assertEqual(result["provider"], provider)
+                        self.assertEqual(result["probability"], 1 / 3)
+                        self.assertTrue(result["fallback"])
+                        self.assertEqual(result["selection"], [f"guide-{i}" for i in range(5)])
+                        self.assertNotIn("private timeout", json.dumps(result))
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join()
+
+    def test_both_provider_transports_receive_only_bounded_context_and_descriptions(self):
+        pages = [{**self.pages[0], "page_id": f"guide-{i}", "description": "Use token sk-proj-abcdefghijklmnopqrstuv"}
+                 for i in range(memory.CANDIDATE_LIMIT)]
+        for provider in ("openai", "typesafe"):
+            captured = {}
+            self.draw.return_value = provider
+            def transport(_url, **kwargs):
+                captured.update(json.loads(kwargs["data"]))
+                values = {f"q{i}": i / 100 for i in range(len(pages))}
+                if provider == "openai":
+                    return json.dumps({"choices": [{"message": {"content": json.dumps(values)}}]}).encode()
+                return json.dumps({"model": "jev-latest", "answers":
+                    {k: {"type": "noul", "noul": v} for k, v in values.items()}}).encode()
+            def complete(prompt, schema, name, *, timeout_seconds, **settings):
+                self.assertEqual(timeout_seconds, 1.2)
+                return openai.complete(api_key="test-key", prompt=prompt,
+                                       schema=schema, schema_name=name, transport=transport, **settings)
+            def judge(state, questions, *, timeout_seconds):
+                return typesafe.judge(api_key="test-key", model="jev-latest", state=state,
+                                      questions=questions, transport=transport)
+            with patch.object(memory, "openai_text_completion", side_effect=complete), \
+                 patch.object(memory, "judge", side_effect=judge):
+                result = self.rerank([dict(p) for p in pages])
+            self.assertEqual(result["outcome"], "success")
+            payload = json.dumps(captured)
+            self.assertNotIn("PRIVATE BODY", payload)
+            self.assertNotIn("guide-", payload)
+            self.assertNotIn("sk-proj-abcdefghijklmnopqrstuv", payload)
+            self.assertIn("<redacted>", payload)
+            self.assertIn("Do not deploy", payload)
+            self.assertIn("not to override a new task", payload)
+
+    def test_recall_loads_reranked_top_five_and_records_actual_selection(self):
+        def load(page_id):
+            return {"page_id": "thread-1", "revision": 1, "content": "Self"} if page_id == "thread-1" else next(p for p in self.pages if p["page_id"] == page_id)
+        with patch.object(memory, "load_page", side_effect=load), \
+             patch.object(memory, "_search_pages", return_value={"pages": self.pages}):
+            result = memory.recall_pages({"thread_id": "thread-1", "message": "Fix login"})
+        self.assertEqual([p["page_id"] for p in result["pages"]], ["thread-1", "guide-5", "guide-4", "guide-3", "guide-2", "guide-1"])
+        self.assertIn("Selected guide-5 r6", result["diagnostics"])

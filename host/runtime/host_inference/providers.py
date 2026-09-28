@@ -8,21 +8,23 @@ Jev judgment have different inputs, guarantees, and feature ownership.
 from __future__ import annotations
 
 from collections.abc import Callable
+from functools import partial
 from typing import Any
 
 from host.runtime.core import host_errors, state
-from host.runtime.host_inference import openai, typesafe, usage
+from host.runtime.host_inference import openai, provider_http, typesafe, usage
 
 
 TextAdapter = Callable[..., dict[str, Any]]
 JudgmentAdapter = Callable[..., dict[str, Any]]
 
-# Models are reviewed host implementation details. A feature names its purpose;
-# the operator never has to choose a model or coordinate model changes.
-OPENAI_MODEL_BY_PURPOSE = {
-    "swarm_task": "gpt-6-luna",
-}
+OPENAI_MAX_TIMEOUT_SECONDS = 60.0
+JEV_MAX_TIMEOUT_SECONDS = 2.0
 TYPESAFE_JEV_MODEL = "jev-latest"
+
+
+class ProviderDisabledError(RuntimeError):
+    """The owning inference service has no enabled configuration."""
 
 
 def openai_text_completion(
@@ -30,30 +32,41 @@ def openai_text_completion(
     schema: dict[str, Any],
     schema_name: str,
     *,
-    purpose: str,
+    model: str,
+    instructions: str,
+    reasoning_effort: str,
+    max_output_tokens: int,
+    timeout_seconds: float,
     adapter: TextAdapter = openai.complete,
 ) -> dict[str, Any] | None:
-    """Run one bounded OpenAI completion for a known host feature purpose."""
+    """Run one bounded OpenAI completion using caller-selected settings."""
     try:
-        model = OPENAI_MODEL_BY_PURPOSE[purpose]
         configured = state.enabled_host_inference_provider("openai")
         if configured is None:
-            return None
+            raise ProviderDisabledError("OpenAI is disabled")
         return adapter(
             api_key=configured["api_key"],
             model=model,
+            instructions=instructions,
+            reasoning_effort=reasoning_effort,
+            max_output_tokens=max_output_tokens,
             prompt=prompt,
             schema_name=schema_name,
             schema=schema,
+            transport=partial(provider_http.post, timeout=timeout_seconds),
             usage_recorder=usage.record_openai_response,
         )
+    except ProviderDisabledError:
+        raise
     except Exception as exc:
         host_errors.report_warning(
             "host_inference.openai_text_completion",
             exc,
-            context={"provider": "openai", "purpose": purpose},
+            context={"provider": "openai"},
             kind="provider_failure",
         )
+        if isinstance(exc, TimeoutError):
+            raise
         return None
 
 
@@ -68,15 +81,17 @@ def typesafe_jev_judgment(
     try:
         configured = state.enabled_host_inference_provider("typesafe")
         if configured is None:
-            return None
+            raise ProviderDisabledError("TypeSafe is disabled")
         return adapter(
             api_key=configured["api_key"],
             model=TYPESAFE_JEV_MODEL,
             state=state_value,
             questions=questions,
-            timeout_seconds=timeout_seconds,
+            transport=partial(provider_http.post, timeout=timeout_seconds),
             usage_recorder=usage.record_typesafe_response,
         )
+    except ProviderDisabledError:
+        raise
     except Exception as exc:
         host_errors.report_warning(
             "host_inference.typesafe_jev_judgment",
@@ -84,4 +99,6 @@ def typesafe_jev_judgment(
             context={"provider": "typesafe"},
             kind="provider_failure",
         )
+        if isinstance(exc, TimeoutError):
+            raise
         return None

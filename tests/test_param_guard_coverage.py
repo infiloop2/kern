@@ -25,11 +25,13 @@ from unittest.mock import patch
 import host.tools
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL, ParamGuardDenied
 from host.tools.results import ActionFailed
+from host.tools.shared.inputs import ToolInputValidationError
 from test_tools import FakeHostAPI
 
 # (tool_id, action_id, field) -> guarded free-text parameter. The tool's
 # package test and the behavioral tests below exercise each.
 GUARDED_FIELDS = {
+    ("instagram", "get_recent_media", "after"),
     ("cloudwatch_logs", "filter_log_events", "request_id"),
     ("cloudwatch_logs", "filter_log_events", "search_text"),
     ("cloudwatch_logs", "filter_log_events", "next_token"),
@@ -110,12 +112,7 @@ GUARDED_FIELDS = {
     ("gmail", "list_drafts", "page_token"),
     ("gmail", "list_drafts", "query"),
     ("google_search_console", "inspect_url", "inspection_url"),
-    ("h3max", "generate_video", "prompt"),
-    ("h3max", "generate_video", "image_url"),
-    ("h3max", "generate_video", "end_image_url"),
-    ("h3max", "generate_video", "reference_image_urls"),
-    ("h3max", "generate_video", "reference_video_urls"),
-    ("h3max", "generate_video", "reference_audio_urls"),
+    ("fal_ai", "generate_video", "prompt"),
     ("instagram_discovery", "search_reels", "query"),
     ("instagram_discovery", "search_hashtag", "hashtag"),
     ("instagram_discovery", "get_reels_by_audio", "cursor"),
@@ -124,20 +121,10 @@ GUARDED_FIELDS = {
     ("polymarket", "search", "query"),
     ("polymarket", "get_market", "slug"),
     ("runway", "generate_video", "prompt"),
-    ("runway", "generate_video", "image_url"),
-    ("runway", "generate_video", "video_url"),
-    ("runway", "generate_video", "prompt_images"),
-    ("runway", "generate_video", "reference_images"),
-    ("runway", "generate_video", "reference_videos"),
-    ("runway", "generate_video", "reference_audio"),
     ("runway", "generate_video", "negative_prompt"),
     ("runway", "edit_video", "prompt"),
-    ("runway", "edit_video", "video_url"),
-    ("runway", "edit_video", "keyframes"),
     ("runway", "generate_image", "prompt"),
     ("runway", "generate_speech", "text"),
-    ("seedance", "generate_video", "prompt"),
-    ("seedance", "generate_video", "image_url"),
     ("reddit", "get_subreddit_posts", "subreddit"),
     ("reddit", "search_posts", "query"),
     ("reddit", "search_posts", "subreddit"),
@@ -159,6 +146,58 @@ APPROVAL_GATED = "approval-gated content: the operator approval is the control"
 TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning"
 
 EXEMPT_FIELDS = {
+    ("browser", "x_post_tweet", "text"): APPROVAL_GATED,
+    ("browser", "x_post_tweet", "account_id"): "Stable local browser profile lookup; not sent to a website.",
+    ("browser", "x_post_tweet", "in_reply_to_tweet_id"): TYPED,
+    ("fal_ai", "generate_video", "image_asset_id"): TYPED,
+    ("fal_ai", "generate_video", "end_image_asset_id"): TYPED,
+    ("fal_ai", "generate_video", "reference_image_asset_ids"): TYPED,
+    ("fal_ai", "generate_video", "reference_video_asset_ids"): TYPED,
+    ("fal_ai", "generate_video", "reference_audio_asset_ids"): TYPED,
+    ("runway", "generate_video", "prompt_images"): TYPED,
+    ("runway", "generate_video", "reference_images"): TYPED,
+    ("runway", "generate_video", "reference_videos"): TYPED,
+    ("runway", "generate_video", "reference_audio"): TYPED,
+    ("runway", "edit_video", "keyframes"): TYPED,
+    ("fal_ai", "upscale_image", "image_asset_id"): TYPED,
+    ("fal_ai", "upscale_image", "model"): TYPED,
+    ("fal_ai", "upscale_image", "upscale_factor"): TYPED,
+    ("fal_ai", "upscale_image", "output_format"): TYPED,
+    ("fal_ai", "upscale_image", "face_enhancement"): TYPED,
+    ("fal_ai", "upscale_image", "sharpen"): TYPED,
+    ("fal_ai", "upscale_image", "denoise"): TYPED,
+    ("fal_ai", "upscale_image", "fix_compression"): TYPED,
+    ("fal_ai", "upscale_video", "video_asset_id"): TYPED,
+    ("fal_ai", "upscale_video", "model"): TYPED,
+    ("fal_ai", "upscale_video", "upscale_factor"): TYPED,
+    ("fal_ai", "upscale_video", "target_fps"): TYPED,
+    ("fal_ai", "upscale_video", "compression"): TYPED,
+    ("fal_ai", "upscale_video", "noise"): TYPED,
+    ("fal_ai", "upscale_video", "halo"): TYPED,
+    ("fal_ai", "upscale_video", "grain"): TYPED,
+    ("fal_ai", "upscale_video", "recover_detail"): TYPED,
+    ("fal_ai", "upscale_video", "softness"): TYPED,
+    ("fal_ai", "upscale_video", "h264_output"): TYPED,
+    ("fal_ai", "get_task", "task_id"): TYPED,
+    ("fal_ai", "save_image", "task_id"): TYPED,
+    ("fal_ai", "save_video", "task_id"): TYPED,
+    ("runway", "upscale_image", "source_width"): TYPED,
+    ("runway", "upscale_image", "source_height"): TYPED,
+    ("runway", "upscale_video", "estimated_output_frames"): TYPED,
+    ("runway", "upscale_image", "image_asset_id"): TYPED,
+    ("runway", "upscale_image", "scale_factor"): TYPED,
+    ("runway", "upscale_image", "flavor"): TYPED,
+    ("runway", "upscale_image", "sharpen"): TYPED,
+    ("runway", "upscale_image", "smart_grain"): TYPED,
+    ("runway", "upscale_image", "ultra_detail"): TYPED,
+    ("runway", "upscale_video", "video_asset_id"): TYPED,
+    ("runway", "upscale_video", "resolution"): TYPED,
+    ("runway", "upscale_video", "flavor"): TYPED,
+    ("runway", "upscale_video", "creativity"): TYPED,
+    ("runway", "upscale_video", "fps_boost"): TYPED,
+    ("runway", "upscale_video", "sharpen"): TYPED,
+    ("runway", "upscale_video", "smart_grain"): TYPED,
+    ("runway", "save_image", "task_id"): TYPED,
     ("cloudwatch_logs", "filter_log_events", "log_group"): TYPED,
     ("cloudwatch_logs", "filter_log_events", "start_time"): TYPED,
     ("cloudwatch_logs", "filter_log_events", "end_time"): TYPED,
@@ -313,18 +352,17 @@ EXEMPT_FIELDS = {
     ("google_search_console", "inspect_url", "language_code"): TYPED,
     ("google_search_console", "submit_sitemap", "site_url"): TYPED,
     ("google_search_console", "submit_sitemap", "sitemap_url"): APPROVAL_GATED,
-    ("h3max", "generate_video", "resolution"): TYPED,
-    ("h3max", "generate_video", "aspect_ratio"): TYPED,
-    ("h3max", "generate_video", "duration_seconds"): TYPED,
-    ("h3max", "generate_video", "prompt_expansion_mode"): TYPED,
-    ("h3max", "generate_video", "seed"): TYPED,
-    ("h3max", "get_task", "task_id"): TYPED,
-    ("h3max", "save_video", "task_id"): TYPED,
+    ("fal_ai", "generate_video", "resolution"): TYPED,
+    ("fal_ai", "generate_video", "aspect_ratio"): TYPED,
+    ("fal_ai", "generate_video", "duration_seconds"): TYPED,
+    ("fal_ai", "generate_video", "prompt_expansion_mode"): TYPED,
+    ("fal_ai", "generate_video", "seed"): TYPED,
     ("ibkr", "get_positions", "account_id"): TYPED,
     ("ibkr", "get_account_summary", "account_id"): TYPED,
     ("ibkr", "get_trades", "account_id"): TYPED,
     ("ibkr", "get_trades", "days"): TYPED,
     ("instagram", "get_recent_media", "limit"): TYPED,
+    ("instagram", "get_reel_insights", "media_id"): TYPED,
     ("instagram", "post_image", "image_asset_id"): TYPED,
     ("instagram", "post_image", "caption"): APPROVAL_GATED,
     ("instagram", "post_carousel", "image_asset_ids"): TYPED,
@@ -419,13 +457,6 @@ EXEMPT_FIELDS = {
     ("runway", "get_task", "output_kind"): TYPED,
     ("runway", "save_video", "task_id"): TYPED,
     ("runway", "save_audio", "task_id"): TYPED,
-    ("seedance", "generate_video", "resolution"): TYPED,
-    ("seedance", "generate_video", "ratio"): TYPED,
-    ("seedance", "generate_video", "duration_seconds"): TYPED,
-    ("seedance", "generate_video", "generate_audio"): TYPED,
-    ("seedance", "generate_video", "seed"): TYPED,
-    ("seedance", "get_task", "task_id"): TYPED,
-    ("seedance", "save_video", "task_id"): TYPED,
     ("twitter", "search_tweets", "max_results"): TYPED,
     ("twitter", "search_tweets", "start_time"): TYPED,
     ("twitter", "search_tweets", "since_id"): TYPED,
@@ -459,6 +490,9 @@ EXEMPT_FIELDS = {
     ("zoho_mail", "list_messages", "limit"): TYPED,
     ("zoho_mail", "read_message", "folder_id"): TYPED,
     ("zoho_mail", "read_message", "message_id"): TYPED,
+    ("zoho_mail", "download_attachment", "folder_id"): TYPED,
+    ("zoho_mail", "download_attachment", "message_id"): TYPED,
+    ("zoho_mail", "download_attachment", "attachment_id"): TYPED,
     ("zoho_mail", "create_folder", "parent_folder_id"): TYPED,
     ("zoho_mail", "move_messages", "message_ids"): TYPED,
     ("zoho_mail", "move_messages", "destination_folder_id"): TYPED,
@@ -587,6 +621,15 @@ class BehavioralDenialTest(unittest.TestCase):
 
         result = BUNDLED_TOOL.execute(
             "search_web", {"query": "verify AKIAIOSFODNN7EXAMPLE now"}, FakeHostAPI()
+        )
+        self.assert_denied(result, "credential")
+
+    def test_instagram_paging_cursor_denied(self) -> None:
+        from host.tools import instagram
+        from test_tools_instagram import connected_api
+
+        result = instagram.BUNDLED_TOOL.execute(
+            "get_recent_media", {"after": "AKIAIOSFODNN7EXAMPLE"}, connected_api()
         )
         self.assert_denied(result, "credential")
 
@@ -722,36 +765,23 @@ class BehavioralDenialTest(unittest.TestCase):
         with self.assertRaises(ParamGuardDenied):
             runway._speech_request(FakeHostAPI(), {"text": "my password is hunter2secret"})
 
-    def test_runway_external_url_is_guarded(self) -> None:
+    def test_runway_external_urls_are_rejected(self) -> None:
         from host.tools import runway
 
         api = FakeHostAPI()
-        # A clean public https URL passes the guard unchanged.
+        # Even a clean public URL is rejected; source media must be staged.
         clean = "https://images.example.com/cat.jpg"
-        self.assertEqual(runway.options.media_uri({"uri": clean}, "image", api, {}), clean)
+        with self.assertRaises(ToolInputValidationError):
+            runway.options.media_uri({"uri": clean}, "image", api, {})
         # A secret/identifier encoded into the URL is denied.
-        with self.assertRaises(ParamGuardDenied):
+        with self.assertRaises(ToolInputValidationError):
             runway.options.media_uri(
                 {"uri": "https://x.example.com/c?d=alice@example.com"}, "image", api, {}
             )
 
-    def test_seedance_prompt_and_reference_url_denied(self) -> None:
-        from host.tools import seedance
-
-        api = FakeHostAPI()
-        with self.assertRaises(ParamGuardDenied):
-            seedance._generation_request(api, {"prompt": "ssn 219-09-9999 poster"})
-        # A clean public https reference URL passes the guard unchanged.
-        clean = "https://images.example.com/cat.jpg"
-        self.assertEqual(seedance._https_url({"image_url": clean}, "image_url", api), clean)
-        # A secret/identifier encoded into the URL is denied.
-        with self.assertRaises(ParamGuardDenied):
-            seedance._https_url(
-                {"image_url": "https://x.example.com/c?d=alice@example.com"}, "image_url", api
-            )
 
     def test_h3max_prompt_and_every_reference_url_are_denied(self) -> None:
-        from host.tools import h3max
+        from host.tools.fal_ai import h3max
 
         api = FakeHostAPI()
         with self.assertRaises(ParamGuardDenied):
@@ -763,7 +793,7 @@ class BehavioralDenialTest(unittest.TestCase):
             "reference_video_urls",
             "reference_audio_urls",
         ):
-            with self.subTest(field=field), self.assertRaises(ParamGuardDenied):
+            with self.subTest(field=field), self.assertRaises(ToolInputValidationError):
                 if field == "end_image_url":
                     tool_input = {
                         "prompt": "x",
@@ -788,7 +818,7 @@ class BehavioralDenialTest(unittest.TestCase):
 
         # Nested decoding of query/path values must not turn an apparently
         # harmless public URL into a secret-bearing provider fetch.
-        with self.assertRaises(ParamGuardDenied):
+        with self.assertRaises(ToolInputValidationError):
             h3max._generation_request(
                 api,
                 {

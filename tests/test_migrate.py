@@ -51,6 +51,22 @@ class MigrateRunnerTests(unittest.TestCase):
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
             return {row[0] for row in cur.fetchall()}
 
+    def test_spawned_chat_migration_refuses_data_losing_rollback(self) -> None:
+        self.assertIn(74, {item.version for item in migrate.load_migrations()})
+        migrate.up(target=74, quiet=True)
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO chat_threads (thread_id, archived, spawned_by_thread_id)"
+                " VALUES ('thread-2', FALSE, 'thread-1')"
+            )
+        with self.assertRaisesRegex(Exception, "cannot roll back spawned Chat origin"):
+            migrate.down(target=73, quiet=True)
+        with db.transaction() as cur:
+            cur.execute("SELECT spawned_by_thread_id FROM chat_threads WHERE thread_id = 'thread-2'")
+            self.assertEqual(cur.fetchone(), ("thread-1",))
+            cur.execute("DELETE FROM chat_threads WHERE thread_id = 'thread-2'")
+        self.assertEqual(migrate.down(target=73, quiet=True), [74])
+
     def test_grok_4_7_migration_preserves_history_and_rolls_back_settings(self) -> None:
         migrate.up(target=71, quiet=True)
         with db.transaction() as cur:
@@ -1664,7 +1680,7 @@ class MigrateRunnerTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         {str(row[0]) for row in cur.fetchall()},
-                        {"thread_id", "archived", "name"},
+                        {"thread_id", "archived", "name", "spawned_by_thread_id"},
                     )
                     cur.execute(
                         "SELECT column_name FROM information_schema.columns"

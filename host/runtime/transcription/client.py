@@ -8,10 +8,13 @@ import http.client
 from http import HTTPStatus
 import json
 import socket
+import time
 from typing import Any
+import uuid
 
 from host.constants import TRANSCRIPTION_SOCKET_PATH
 from host.runtime.admin_api.errors import ApiError
+from host.runtime.transcription import diagnostics
 
 SAMPLE_RATE = 16000
 MAX_AUDIO_BYTES = SAMPLE_RATE * 2 * 12
@@ -53,9 +56,14 @@ class _Connection(http.client.HTTPConnection):
 def _request(method: str, path: str, body: Any = None, *, timeout: int = TIMEOUT_SECONDS) -> dict[str, Any]:
     conn = _Connection()
     conn.timeout = timeout
+    started = time.monotonic()
+    request_id = uuid.uuid4().hex
+    outcome = "success"
+    context: dict[str, Any] = {"request_id": request_id, "operation": path,
+                               "timeout_seconds": timeout}
     try:
         conn.request(method, path, json.dumps(body).encode() if body is not None else None,
-                     {"Content-Type": "application/json"})
+                     {"Content-Type": "application/json", "X-Kern-Dictation-Id": request_id})
         response = conn.getresponse()
         raw = response.read(MAX_RESPONSE_BYTES + 1)
         if len(raw) > MAX_RESPONSE_BYTES:
@@ -64,17 +72,29 @@ def _request(method: str, path: str, body: Any = None, *, timeout: int = TIMEOUT
         if not isinstance(result, dict):
             raise ValueError("Invalid transcription response")
         if response.status != 200:
+            code = result.get("error")
+            outcome = code if code in ("model_not_ready", "busy", "transcription failed") else "worker_failure"
+            context["http_status"] = response.status
             message = {
                 "model_not_ready": "Transcription model isn't loaded yet. Click the mic to retry.",
                 "busy": "Transcription is busy. Your audio is saved; click the mic to retry.",
             }.get(str(result.get("error")), "Transcription is unavailable. Click the mic to retry.")
             raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, message)
+        if path == "/transcribe" and not isinstance(result.get("text"), str):
+            raise ValueError("Invalid transcription text")
         return result
     except (OSError, http.client.HTTPException, ValueError) as exc:
+        outcome = ("timeout" if isinstance(exc, TimeoutError) else
+                   "invalid_response" if isinstance(exc, ValueError) else "transport_failure")
+        context["exception_type"] = type(exc).__name__
         raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE,
                        "Transcription is unavailable. Click the mic to retry.") from exc
     finally:
         conn.close()
+        elapsed = time.monotonic() - started
+        context["request_ms"] = round(elapsed * 1000)
+        if outcome != "success" or elapsed >= diagnostics.SLOW_SECONDS:
+            diagnostics.report("admin_api.dictation", "slow_request" if outcome == "success" else outcome, context)
 
 
 def readiness() -> dict[str, bool]:
@@ -90,6 +110,4 @@ def transcribe(body: Any) -> dict[str, str]:
     except ValueError as exc:
         raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
     result = _request("POST", "/transcribe", body)
-    if not isinstance(result.get("text"), str):
-        raise ApiError(HTTPStatus.SERVICE_UNAVAILABLE, "The host returned an unreadable response. Click the mic to retry.")
     return {"text": result["text"]}

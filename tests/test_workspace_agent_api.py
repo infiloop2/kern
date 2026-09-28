@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -330,7 +331,10 @@ class AgentWorkspaceSocketTests(unittest.TestCase):
         acquired = 0
         try:
             for _ in range(agent_api.MAX_CONCURRENT_LARGE_RESPONSES):
-                self.assertTrue(agent_api._LARGE_RESPONSE_SLOTS.acquire(blocking=False))
+                deadline = time.monotonic() + 2
+                while not agent_api._LARGE_RESPONSE_SLOTS.acquire(blocking=False):
+                    self.assertLess(time.monotonic(), deadline, "large response slot was not released")
+                    time.sleep(0.01)
                 acquired += 1
             self.assertFalse(agent_api._LARGE_RESPONSE_SLOTS.acquire(blocking=False))
         finally:

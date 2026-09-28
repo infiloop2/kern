@@ -178,6 +178,16 @@
         <div id="scheduled-agents-nav-items" class="workspace-nav-items"></div>
       </div>
       <div class="sidebar-divider" aria-hidden="true"></div>
+      <div class="sidebar-section workspace-nav-section" aria-labelledby="spawned-agents-nav-title">
+        <div class="workspace-nav-head">
+          <span id="spawned-agents-nav-title" class="sidebar-section-title">Spawned agents</span>
+          <div class="workspace-nav-head-actions">
+            <button class="workspace-nav-archived" data-action="show-spawned-archive" aria-pressed="false">Archived</button>
+          </div>
+        </div>
+        <div id="spawned-agents-nav-items" class="workspace-nav-items"></div>
+      </div>
+      <div class="sidebar-divider" aria-hidden="true"></div>
       <div class="sidebar-section" aria-label="Workspace knowledge and automation">
         <button id="tab-workspace-memory" class="tab-button" data-action="open-workspace-global" data-resource="memory">
           <svg width="19" height="19" viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4.5h8.5A1.5 1.5 0 0 1 15 6v9.5l-3-1.8-3 1.8V6H5v9.5" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"/></svg>
@@ -198,7 +208,7 @@
           <div class="swarm-toolbar">
             <div class="swarm-counts" aria-label="Filter agents by state">
               <button data-action="swarm-filter" data-swarm-filter="busy" aria-pressed="false"><i></i><strong>0</strong> Busy</button>
-              <button data-action="swarm-filter" data-swarm-filter="needs-human" aria-pressed="false"><i></i><strong>0</strong> Needs you</button>
+              <button data-action="swarm-filter" data-swarm-filter="needs-human" aria-pressed="false"><i></i><strong>0</strong> Approvals</button>
               <button data-action="swarm-filter" data-swarm-filter="failed" aria-pressed="false"><i></i><strong>0</strong> Failed</button>
               <button data-action="swarm-filter" data-swarm-filter="idle" aria-pressed="false"><i></i><strong>0</strong> Idle</button>
             </div>
@@ -212,7 +222,7 @@
             </div>
             <div class="swarm-house-sign"><span>THE COMMONS</span><span>App <i class="key-app"></i> · Chat <i class="key-chat"></i> · Schedule <i class="key-schedule"></i></span></div>
             <section id="swarm-zone-busy" class="swarm-zone zone-busy"><h2>At work <span id="swarm-count-busy">0</span></h2><p class="swarm-zone-note">Tasks in motion.</p><div id="swarm-agents-busy" class="swarm-agents"></div><p id="swarm-empty-busy" class="swarm-zone-empty">A quiet moment at the desks.</p></section>
-            <section id="swarm-zone-needs-human" class="swarm-zone zone-needs-human"><h2>By the door <span id="swarm-count-needs-human">0</span></h2><p class="swarm-zone-note">A little help from you.</p><div id="swarm-agents-needs-human" class="swarm-agents"></div><p id="swarm-empty-needs-human" class="swarm-zone-empty">No one is asking for you.</p></section>
+            <section id="swarm-zone-needs-human" class="swarm-zone zone-needs-human"><h2>By the door <span id="swarm-count-needs-human">0</span></h2><p class="swarm-zone-note">Pending Kern approvals.</p><div id="swarm-agents-needs-human" class="swarm-agents"></div><p id="swarm-empty-needs-human" class="swarm-zone-empty">No agents have pending approvals.</p></section>
             <section id="swarm-zone-failed" class="swarm-zone zone-failed"><h2>A rough moment <span id="swarm-count-failed">0</span></h2><p class="swarm-zone-note">Stopped with an error.</p><div id="swarm-agents-failed" class="swarm-agents"></div><p id="swarm-empty-failed" class="swarm-zone-empty">No failed agents.</p></section>
             <section id="swarm-zone-idle" class="swarm-zone zone-idle"><h2>The lounge <span id="swarm-count-idle">0</span></h2><p class="swarm-zone-note">Resting together. Filter Idle to explore.</p><div id="swarm-agents-idle" class="swarm-agents"></div><p id="swarm-empty-idle" class="swarm-zone-empty">Everyone is out of the lounge.</p></section>
           </div>
@@ -307,6 +317,8 @@
         </div>
         <p id="approval-updates" class="muted" hidden>New activity is available. Refresh to update this page.</p>
         <div id="approval-feedback" role="status" aria-live="polite"></div>
+        <div id="auto-approval-page" hidden></div>
+        <dialog id="auto-policy-dialog" class="auto-policy-dialog" aria-label="Auto-approval policy"></dialog>
         <div id="approval-list" aria-label="Approval requests"></div>
         <nav id="approval-pagination" class="approval-pagination" aria-label="Approval pages"></nav>
       </section>

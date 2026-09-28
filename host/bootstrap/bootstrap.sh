@@ -15,14 +15,15 @@ GROK_CLI_VERSION=1.0.40
 HERMES_AGENT_VERSION=0.18.2
 FASTEMBED_VERSION=0.8.0
 FASTER_WHISPER_VERSION=1.2.1
-# Vendored Systran/faster-whisper-small.en revision
-# d1d751a5f8271d482d14ca55d9e2deeebbae577f; update the release tag and
+BROWSER_PLAYWRIGHT_VERSION=1.60.0
+# Vendored Systran/faster-whisper-base.en revision
+# 3d3d5dee26484f91867d81cb899cfcf72b96be6c; update the release tag and
 # pinned digests together when deliberately changing the model.
-TRANSCRIPTION_MODEL_TAG=model-faster-whisper-small.en-1
-TRANSCRIPTION_MODEL_DIR=/usr/local/share/kern-transcription-models/small.en
+TRANSCRIPTION_MODEL_TAG=model-faster-whisper-base.en-1
+TRANSCRIPTION_MODEL_DIR=/usr/local/share/kern-transcription-models/base.en
 TRANSCRIPTION_MODEL_SHA256="\
-666a9605530ac1f61fa8177f3702b4dacec9966749e42610839fcc32661d5fae  config.json
-62b2a45b05ee59acb4a5341b33ee35e041395d378d418a18acfe4c9e768ee37a  model.bin
+f3bc3821e9fc76a27bae538e11ae5b677dcdd352b4600429ce7951d398569aeb  config.json
+2a166925539a16005f14ff328359f9b9adb9dc4fb631bb3b227526862e93e2ef  model.bin
 929c5252409436dce1b38a75d1abbcb5e132d170d8e324e4e04ed915fa2d22df  tokenizer.json
 ff77588746d3a2595d32ab5b69ffd7b95ce2441ac57533cb66fc3eb575a115cf  vocabulary.txt"
 PGVECTOR_DEB_VERSION=0.8.6-1.pgdg22.04+1
@@ -211,6 +212,7 @@ ensure_group kern-proxy "$KERN_PROXY_GID"
 ensure_group kern-agent "$KERN_AGENT_GID"
 ensure_group cloudflared "$CLOUDFLARED_GID"
 ensure_group kern-tools "$KERN_TOOLS_GID"
+ensure_group kern-browser "$KERN_BROWSER_GID"
 ensure_group kern-agent-network "$KERN_AGENT_NETWORK_GID"
 ensure_group kern-workspace-api "$KERN_WORKSPACE_API_GID"
 ensure_group kern-workspace "$KERN_WORKSPACE_GID"
@@ -224,6 +226,7 @@ ensure_user cloudflared "$CLOUDFLARED_UID" cloudflared /nonexistent
 # The tools service holds no durable state of its own (its state lives in the
 # tool tables, reached with a scoped Postgres role), so it needs no home.
 ensure_user kern-tools "$KERN_TOOLS_UID" kern-tools /nonexistent
+ensure_user kern-browser "$KERN_BROWSER_UID" kern-browser /mnt/kern-admin/browser-state
 # The agent-network service serves read-only policy introspection with no
 # filesystem state or egress.
 ensure_user kern-agent-network "$KERN_AGENT_NETWORK_UID" kern-agent-network /nonexistent
@@ -307,6 +310,7 @@ for directory in (
     # a symlink that a later root write follows.
     admin_state,
     admin_mount / "admin-home",
+    admin_mount / "browser-state",
     admin_mount / "postgres",
     pgdata.parent,
     pgdata,
@@ -1056,6 +1060,13 @@ load_model()
 transcribe(bytes(32000))
 PYTHON
 chmod -R a+rX /usr/local/lib/kern-transcription-venv /usr/local/share/kern-transcription-models
+# Private browser runtime. Saved auth state stays on the admin volume;
+# Chromium working files are temporary. Binaries are replaced on deploy.
+uv venv --python /usr/bin/python3 /usr/local/lib/kern-browser-venv
+uv pip install --python /usr/local/lib/kern-browser-venv/bin/python "playwright==${BROWSER_PLAYWRIGHT_VERSION}"
+PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/kern-browsers \
+  /usr/local/lib/kern-browser-venv/bin/python -m playwright install --with-deps chromium --only-shell
+chmod -R a+rX /usr/local/lib/kern-browser-venv /usr/local/share/kern-browsers
 # npm inherits the script's umask 077, which would leave the CLI root-only;
 # the agent user must be able to run it.
 chmod -R a+rX /usr/local/lib/node_modules
@@ -1305,6 +1316,7 @@ DURABLE_PATH_OWNERSHIP="
 /mnt/kern-admin/proxy-state/generated-certs kern-proxy:kern-proxy 700
 /mnt/kern-admin/proxy-state/network_proxy_ca.key kern-proxy:kern-proxy 600
 /mnt/kern-admin/proxy-state/network_proxy_ca.crt kern-proxy:kern-proxy 644
+/mnt/kern-admin/browser-state kern-browser:kern-browser 700
 /mnt/kern-admin/tools-state kern-tools:kern-tools 700
 /mnt/kern-admin/tools-state/assets kern-tools:kern-tools 700
 /mnt/kern-admin/tools-state/whatsapp kern-tools:kern-tools 700
@@ -1470,6 +1482,15 @@ $(cat /tmp/kern_cloudflare_rules)
     meta skuid "kern-proxy" udp dport 53 accept
     meta skuid "kern-proxy" tcp dport 53 accept
     meta skuid "kern-proxy" tcp dport { 80, 443 } accept
+    # Browser DNS matches kern-tools, including local resolvers. Other traffic
+    # may reach public HTTPS only. Block internal and metadata destinations
+    # before established-flow and broad loopback rules.
+    meta skuid "kern-browser" udp dport 53 accept
+    meta skuid "kern-browser" tcp dport 53 accept
+    meta skuid "kern-browser" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 } drop
+    meta skuid "kern-browser" ip6 daddr != 2000::/3 drop
+    meta skuid "kern-browser" tcp dport 443 accept
+    meta skuid "kern-browser" drop
     meta skuid "kern-tools" udp dport 53 accept
     meta skuid "kern-tools" tcp dport 53 accept
     meta skuid "kern-tools" tcp dport 443 accept
@@ -1701,6 +1722,47 @@ RestartSec=3
 WantedBy=multi-user.target
 UNIT
 
+cat > /etc/systemd/system/kern-browser.service <<'UNIT'
+[Unit]
+Description=Kern Private Browser Sessions
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=kern-browser
+Group=kern-browser
+Slice=kern_workspace.slice
+RuntimeDirectory=kern-browser
+RuntimeDirectoryMode=0755
+UMask=0077
+Environment=PYTHONPATH=/opt/kern-host
+Environment=PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/kern-browsers
+Environment=HOME=/tmp
+Environment=XDG_CACHE_HOME=/tmp/cache
+Environment=XDG_CONFIG_HOME=/tmp/config
+ExecStart=/usr/local/lib/kern-browser-venv/bin/python -m host.runtime.browser.service
+ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-browser
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectHome=yes
+ProtectSystem=strict
+ReadWritePaths=/mnt/kern-admin/browser-state
+InaccessiblePaths=/mnt/kern-agent /mnt/kern-admin/admin-state /mnt/kern-admin/admin-home /mnt/kern-admin/proxy-state /mnt/kern-admin/tools-state /mnt/kern-admin/postgres /run/postgresql
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+CPUQuota=100%
+CPUWeight=25
+IOWeight=25
+MemoryMax=2G
+TasksMax=256
+KillMode=mixed
+TimeoutStopSec=180
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+
 cat > /etc/systemd/system/kern-transcription.socket <<'UNIT'
 [Unit]
 Description=Kern English Dictation Socket
@@ -1866,6 +1928,7 @@ start_services() {
 systemctl daemon-reload
 systemctl enable --now kern-network-proxy.service
 systemctl enable --now kern-host-errors.service
+systemctl enable --now kern-browser.service
 systemctl enable --now kern-tools.service
 systemctl enable --now kern-host-inference.service
 systemctl enable --now kern-agent-network.service

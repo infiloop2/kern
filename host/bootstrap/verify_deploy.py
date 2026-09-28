@@ -46,6 +46,7 @@ from host.constants import (
     PROXY_PORT,
     SERVICE_ACCOUNTS,
     TOOLS_SOCKET_PATH,
+    BROWSER_SOCKET_PATH,
 )
 
 Runner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
@@ -60,6 +61,7 @@ CORE_UNITS = (
     "kern-postgres.service",
     "kern-network-proxy.service",
     "kern-tools.service",
+    "kern-browser.service",
     "kern-host-inference.service",
     "kern-agent-network.service",
     "kern-host-errors.service",
@@ -120,6 +122,9 @@ PATH_FACTS: tuple[PathFact, ...] = (
         0o644,
         False,
     ),
+    ("/mnt/kern-admin/browser-state", "kern-browser", "kern-browser", 0o700, True),
+    ("/usr/local/lib/kern-browser-venv", "root", "root", 0o755, True),
+    ("/usr/local/share/kern-browsers", "root", "root", 0o755, True),
     ("/mnt/kern-admin/tools-state", "kern-tools", "kern-tools", 0o700, True),
     (
         "/mnt/kern-admin/tools-state/assets",
@@ -173,6 +178,7 @@ CLOUDFLARE_PATH_FACTS: tuple[PathFact, ...] = (
 # socket path -> owning service account
 SOCKET_OWNERS = {
     TOOLS_SOCKET_PATH: "kern-tools",
+    BROWSER_SOCKET_PATH: "kern-browser",
     HOST_INFERENCE_SOCKET_PATH: "kern-host-inference",
     WORKSPACE_AGENT_SOCKET_PATH: "kern-workspace",
     AGENT_NETWORK_SOCKET_PATH: "kern-agent-network",
@@ -320,6 +326,14 @@ def check_services_active(units: tuple[str, ...], run: Runner = _run) -> list[st
     return failures
 
 
+def check_browser_ready(run: Runner = _run) -> list[str]:
+    result = run([
+        "runuser", "-u", "kern-admin", "--", "env", "PYTHONPATH=/opt/kern-host",
+        "python3", "-c", "from host.runtime.browser.client import request; assert request('/operator/ready')['ready']",
+    ])
+    return [] if result.returncode == 0 else ["browser: sandboxed Chromium failed its private-service startup probe"]
+
+
 def check_transcription_ready(run: Runner = _run) -> list[str]:
     # Type=simple becomes active before the background model loader finishes.
     # Probe as the real socket peer, and let deployment's bounded readiness
@@ -381,6 +395,9 @@ def enforced_probes() -> list[Probe]:
     out, and a down or filtered network also times out, so a healthy deploy
     can never false-fail here. The one "reachable" expectation is loopback."""
     return [
+        ("kern-browser", "127.0.0.1", ADMIN_API_PORT, "blocked", "browser to admin API"),
+        ("kern-browser", "169.254.169.254", 80, "blocked", "browser to instance metadata"),
+        ("kern-browser", "10.0.0.1", 443, "blocked", "browser to private network"),
         # The agent's entire network world is the loopback proxy port.
         ("kern-agent", "127.0.0.1", PROXY_PORT, "reachable", "agent to egress proxy"),
         ("kern-agent", "127.0.0.1", ADMIN_API_PORT, "blocked", "agent to admin API"),
@@ -483,6 +500,7 @@ def run_all_checks(cloudflare_enabled: bool, run: Runner = _run) -> list[str]:
         + check_tcp_listeners()
         + check_services_active(units, run)
         + check_transcription_ready(run)
+        + check_browser_ready(run)
     )
     failures += check_firewall_ruleset(run)
     failures += retry_until_clean(lambda: check_reachability(enforced_probes(), run))

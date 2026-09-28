@@ -37,9 +37,6 @@ class HarnessAdapter(Protocol):
     def steerable(self) -> bool: ...
 
     @property
-    def refresh_before_turn(self) -> bool: ...
-
-    @property
     def collect_login_before_probe(self) -> bool: ...
 
     @property

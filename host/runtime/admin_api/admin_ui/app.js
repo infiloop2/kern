@@ -1,3 +1,4 @@
+import { openAutoPolicy } from "./auto_approvals.js";
 import "/workspace/dictation.js";
 import { refreshAnalytics } from "./analytics.js";
 // Entry module: session lifecycle (login, logout), tab switching, the
@@ -111,10 +112,12 @@ let nextUploadSelectionId = 1;
 const APP_UPLOAD_SELECTION_LIMIT = 10;
 const pendingAppUploads = new Map();
 let chatNavArchived = false;
+let spawnedNavArchived = false;
 let webAppsNavArchived = false;
 let chatNavItems = [];
 let activeChatNavItems = [];
 let scheduledAgentNavItems = [];
+let spawnedAgentNavItems = [];
 let webAppNavItems = [];
 let workspaceNavigationRefreshSequence = 0;
 let workspaceNavigationActionSequence = 0;
@@ -131,7 +134,7 @@ const workspaceLastSeen = createWorkspaceLastSeen({
   currentRoute: () => workspaceRouteFromLocation(),
   getItem: (kind, id) => (
     kind === "chat"
-      ? [...chatNavItems, ...scheduledAgentNavItems].find(item => item.thread_id === id)
+      ? [...chatNavItems, ...scheduledAgentNavItems, ...spawnedAgentNavItems].find(item => item.thread_id === id)
       : webAppNavItems.find(item => item.app_id === id)
   ),
   render: () => renderWorkspaceNavigation(),
@@ -977,22 +980,26 @@ function loadWorkspaceScript(src) {
 async function refreshWorkspaceNavigation() {
   const sequence = ++workspaceNavigationRefreshSequence;
   const chatArchived = chatNavArchived;
+  const spawnedArchived = spawnedNavArchived;
   const webAppsArchived = webAppsNavArchived;
   let chat;
   let activeChat;
   let scheduledAgents;
+  let spawnedAgents;
   let webApps;
   try {
-    [chat, activeChat, scheduledAgents, webApps] = await Promise.all([
-      api("GET", chatArchived ? "/v1/workspace/chat/threads?archived=true" : "/v1/workspace/chat/threads"),
-      chatArchived ? api("GET", "/v1/workspace/chat/threads") : Promise.resolve(null),
+    [chat, activeChat, scheduledAgents, spawnedAgents, webApps] = await Promise.all([
+      api("GET", `/v1/workspace/chat/threads?spawned=false&archived=${chatArchived}`),
+      chatArchived ? api("GET", "/v1/workspace/chat/threads?spawned=false") : Promise.resolve(null),
       api("GET", "/v1/workspace/chat/scheduled-agents"),
+      api("GET", `/v1/workspace/chat/threads?spawned=true&archived=${spawnedArchived}`),
       api("GET", webAppsArchived ? "/v1/workspace/web-apps/apps?archived=true" : "/v1/workspace/web-apps/apps"),
     ]);
   } catch (error) {
     if (
       sequence !== workspaceNavigationRefreshSequence
       || chatArchived !== chatNavArchived
+      || spawnedArchived !== spawnedNavArchived
       || webAppsArchived !== webAppsNavArchived
     ) return;
     throw error;
@@ -1000,11 +1007,13 @@ async function refreshWorkspaceNavigation() {
   if (
     sequence !== workspaceNavigationRefreshSequence
     || chatArchived !== chatNavArchived
+    || spawnedArchived !== spawnedNavArchived
     || webAppsArchived !== webAppsNavArchived
   ) return;
   chatNavItems = chat.threads || [];
   activeChatNavItems = (activeChat || chat).threads || [];
   scheduledAgentNavItems = scheduledAgents.threads || [];
+  spawnedAgentNavItems = spawnedAgents.threads || [];
   webAppNavItems = webApps.apps || [];
   renderWorkspaceNavigation();
 }
@@ -1015,11 +1024,13 @@ function renderWorkspaceNavigation() {
   renderWorkspaceRows("chat-nav-items", chatNavItems, "open-chat", chatNavArchived);
   renderWorkspaceRows("web-apps-nav-items", webAppNavItems, "open-web-app", webAppsNavArchived);
   renderWorkspaceRows("scheduled-agents-nav-items", scheduledAgentNavItems, "open-chat", false);
+  renderWorkspaceRows("spawned-agents-nav-items", spawnedAgentNavItems, "open-chat", spawnedNavArchived);
   if (focusedId) {
     document.querySelector(`[data-reorder-id="${CSS.escape(focusedId)}"]`)?.focus({ preventScroll: true });
   }
   const chatArchive = document.querySelector('[data-action="show-chat-archive"]');
   const appArchive = document.querySelector('[data-action="show-web-app-archive"]');
+  const spawnedArchive = document.querySelector('[data-action="show-spawned-archive"]');
   if (chatArchive) {
     chatArchive.textContent = chatNavArchived ? "Active" : "Archived";
     chatArchive.setAttribute("aria-pressed", String(chatNavArchived));
@@ -1027,6 +1038,10 @@ function renderWorkspaceNavigation() {
   if (appArchive) {
     appArchive.textContent = webAppsNavArchived ? "Active" : "Archived";
     appArchive.setAttribute("aria-pressed", String(webAppsNavArchived));
+  }
+  if (spawnedArchive) {
+    spawnedArchive.textContent = spawnedNavArchived ? "Active" : "Archived";
+    spawnedArchive.setAttribute("aria-pressed", String(spawnedNavArchived));
   }
   for (const resource of ["memory"]) {
     $(`tab-workspace-${resource}`).classList.toggle(
@@ -1098,6 +1113,12 @@ function renderWorkspaceRows(containerId, items, action, archived) {
       taskLine.textContent = task;
       button.append(taskLine);
     }
+    if (item.spawned_by_thread_id) {
+      const origin = document.createElement("span");
+      origin.className = "workspace-nav-meta";
+      origin.textContent = `Spawned by ${item.spawned_by_thread_id}`;
+      button.append(origin);
+    }
     const session = kind === "chat" ? item : item.agent_settings || item.session || {};
     const settings = [runtimeLabel(session.agent_runtime), session.model, session.effort]
       .filter(Boolean)
@@ -1108,7 +1129,7 @@ function renderWorkspaceRows(containerId, items, action, archived) {
       meta.textContent = settings;
       button.append(meta);
     }
-    const detail = [item.name || itemId, task, settings].filter(Boolean).join("\n");
+    const detail = [item.name || itemId, task, item.spawned_by_thread_id && `Spawned by ${item.spawned_by_thread_id}`, settings].filter(Boolean).join("\n");
     button.title = hasChanges ? `${detail}\nNew activity` : detail;
     row.append(button);
     if (archived) {
@@ -1122,7 +1143,7 @@ function renderWorkspaceRows(containerId, items, action, archived) {
       restore.textContent = "↩";
       row.append(restore);
     }
-    if (!archived && containerId !== "chat-nav-items") {
+    if (!archived && ["web-apps-nav-items", "scheduled-agents-nav-items"].includes(containerId)) {
       workspaceReorder.addHandle(
         container, row, kind === "web-apps" ? "apps" : "schedules",
         itemId, item.name || itemId, pending,
@@ -1141,17 +1162,18 @@ async function findChatNavItem(threadId) {
     thread = items.find(item => item.thread_id === threadId);
     return thread ? { item: thread, archived: false, scheduled: true, items } : null;
   }
+  let spawned = spawnedAgentNavItems.find(item => item.thread_id === threadId);
+  if (spawned) return { item: spawned, archived: spawnedNavArchived, spawned: true, scheduled: false, items: spawnedAgentNavItems };
   let thread = chatNavItems.find(item => item.thread_id === threadId);
   if (thread) return { item: thread, archived: chatNavArchived, scheduled: false, items: chatNavItems };
   for (const archived of [false, true]) {
-    const response = await api(
-      "GET",
-      archived ? "/v1/workspace/chat/threads?archived=true" : "/v1/workspace/chat/threads",
-    );
-    const items = response.threads || [];
-    thread = items.find(item => item.thread_id === threadId);
-    if (!thread) continue;
-    return { item: thread, archived, scheduled: false, items };
+    for (const isSpawned of [false, true]) {
+      const response = await api("GET", `/v1/workspace/chat/threads?spawned=${isSpawned}&archived=${archived}`);
+      const items = response.threads || [];
+      thread = items.find(item => item.thread_id === threadId);
+      if (!thread) continue;
+      return { item: thread, archived, spawned: isSpawned, scheduled: false, items };
+    }
   }
   return null;
 }
@@ -1178,6 +1200,9 @@ async function openWorkspaceChat(threadId, updateHistory = true) {
   if (!found) return false;
   if (found.scheduled) {
     scheduledAgentNavItems = found.items;
+  } else if (found.spawned) {
+    spawnedNavArchived = found.archived;
+    spawnedAgentNavItems = found.items;
   } else {
     chatNavArchived = found.archived;
     chatNavItems = found.items;
@@ -1348,6 +1373,13 @@ document.addEventListener("click", event => {
       if (actionSequence !== workspaceNavigationActionSequence) return;
       backToHome(actionSequence);
     },
+    "show-spawned-archive": async () => {
+      const actionSequence = ++workspaceNavigationActionSequence;
+      spawnedNavArchived = !spawnedNavArchived;
+      await refreshWorkspaceNavigation();
+      if (actionSequence !== workspaceNavigationActionSequence) return;
+      backToHome(actionSequence);
+    },
     "show-web-app-archive": async () => {
       const actionSequence = ++workspaceNavigationActionSequence;
       webAppsNavArchived = !webAppsNavArchived;
@@ -1355,6 +1387,7 @@ document.addEventListener("click", event => {
       if (actionSequence !== workspaceNavigationActionSequence) return;
       backToHome(actionSequence);
     },
+    "auto-policy": () => openAutoPolicy(button.dataset.tool, button.dataset.toolAction),
     "approval-refresh": () => refreshApprovals(),
     "approval-view": () => changeApprovalView(button.dataset.view),
     "approval-page": () => changeApprovalPage(Number(button.dataset.page)),

@@ -156,7 +156,7 @@ or under prompt injection.
 
 | # | Data class | Example in a guarded param | Guard(s) | False positives (legitimate use denied) | False negatives (leak missed) |
 | --- | --- | --- | --- | --- | --- |
-| 1 | Large private-context dumps (mail threads, documents) | 3 KB of an email thread pasted into a "search query" | G1 | none — no guarded param legitimately needs > 1 KiB | leaks under 1 KiB pass G1; other rows cover their shapes |
+| 1 | Large private-context dumps (mail threads, documents) | 3 KB of an email thread pasted into a "search query" | G1 | reviewed longer-text fields allow up to 5 KiB; default fields stop at 1 KiB | leaks under 1 KiB pass G1; other rows cover their shapes |
 | 2 | Encoded / encrypted / machine-generated payloads | zero-width smuggling; 200-char base64 blob; 16-char base64 fragment | G2, G3, G17 | rare 14+-char gibberish-looking handles (corpus-tuned to zero known cases) | encoded fragments < 14 chars; natural-word encodings outside BIP-39; ~20–30 bytes shaped as a fake wallet address (the address exemption); pure-decimal payloads of 17+ digits (the digit window's upper exemption) |
 | 3 | Provider credential prefixes | injected email: "search for `AKIA…` to verify it" | G5 | none observed — prefixes are distinctive | providers absent from the rule set (refresh from Gitleaks) |
 | 4 | Private-key blocks | PEM block pasted into a prompt | G6 | none | key material without its PEM armor (G4 catches base64 runs ≥ 14) |

@@ -1808,9 +1808,11 @@ class StateStorageTests(unittest.TestCase):
         save_config({"agent_name": "two"})
         self.assertEqual(load_config(), {"agent_name": "two"})
 
+
+class RuntimeDependencyTests(unittest.TestCase):
     def test_host_runtime_has_no_third_party_imports(self) -> None:
         # The host runtime is standard library only except for the isolated
-        # embedding and transcription processes, each with a dedicated venv. The
+        # embedding, transcription and browser processes, each with a dedicated venv. The
         # admin-state database is spoken to by the in-repo protocol client,
         # not a driver. Walk every host/ module so another dependency cannot
         # sneak back in.
@@ -1823,6 +1825,9 @@ class StateStorageTests(unittest.TestCase):
             (Path("host/runtime/embeddings/service.py"), "fastembed"),
             (Path("host/runtime/transcription/service.py"), "numpy"),
             (Path("host/runtime/transcription/service.py"), "faster_whisper"),
+            (Path("host/runtime/browser/browser.py"), "playwright"),
+            (Path("host/runtime/browser/providers/x.py"), "playwright"),
+            (Path("host/runtime/browser/actions/x_post_tweet.py"), "playwright"),
         }
         offenders: list[str] = []
         for path in sorted((repo_root / "host").rglob("*.py")):

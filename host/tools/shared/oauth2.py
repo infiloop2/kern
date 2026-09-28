@@ -4,7 +4,7 @@ The Google tools carry their own credential store (`shared/google.py`); this
 module holds the pieces every OAuth 2.0 tool (Google, X, LinkedIn, Instagram)
 shares: the HMAC-signed `state` value (which can carry flow data such as a PKCE
 verifier through the provider round trip), token freshness checks, and the
-compare-before-write credential guards that keep a slow network call from
+atomic credential guards that keep a slow network call from
 clobbering an operator disconnect/reconnect that happened meanwhile.
 """
 
@@ -197,25 +197,14 @@ def save_if_still_connected(
     operator disconnect or reconnect during the network round trip must win:
     fail closed and let a retry run against the current credential. This
     matters doubly for providers with single-use rotating refresh tokens,
-    where a stale save would store an already-spent token."""
-    current = api.credentials.load()
-    if (
-        current is None
-        or current["account"]["id"] != loaded["account"]["id"]
-        or current["secret"] != loaded["secret"]
-    ):
+    where a stale save would store an already-spent token. The store compares
+    and writes in one transaction; a separate load/check/save is racy."""
+    if not api.credentials.save_if_current(loaded, credential):
         raise IntegrationReconnectRequired(reconnect_message)
-    api.credentials.save(credential)
 
 
 def clear_if_still_loaded(api: HostAPI, loaded: StoredCredential) -> None:
     """Clear only the credential this call actually inspected, so a stale
     failure (e.g. an invalid_grant from a token the operator already rotated
     by reconnecting) cannot delete a fresh connection."""
-    current = api.credentials.load()
-    if (
-        current is not None
-        and current["account"]["id"] == loaded["account"]["id"]
-        and current["secret"] == loaded["secret"]
-    ):
-        api.credentials.clear()
+    api.credentials.clear_if_current(loaded)

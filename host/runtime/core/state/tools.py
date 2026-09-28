@@ -165,14 +165,36 @@ def tool_connections(tool_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def _credential_is_current(
+    cur: Any, tool_id: str, connection_id: str, expected: dict[str, Any]
+) -> bool:
+    # Hold the row until the dependent write commits. A separate load/compare
+    # lets a disconnect or reconnect land between that comparison and an
+    # unconditional upsert/delete, resurrecting or erasing the connection.
+    cur.execute(
+        "SELECT account_id, secret FROM tool_credentials"
+        " WHERE tool_id = %s AND connection_id = %s FOR UPDATE",
+        (tool_id, connection_id),
+    )
+    row = cur.fetchone()
+    return (
+        row is not None
+        and row[0] == expected["account"]["id"]
+        and json.loads(secretbox.decrypt(row[1])) == expected["secret"]
+    )
+
+
 def put_tool_credential(
-    tool_id: str, value: dict[str, Any], connection_id: str
-) -> None:
+    tool_id: str, value: dict[str, Any], connection_id: str,
+    *, expected: dict[str, Any] | None = None,
+) -> bool:
     """Store a StoredCredential in its columns. Only the provider token
     material is a secret: it is serialized and secretbox-encrypted; the
     connected-account fields and tool bookkeeping are non-secret by contract
     (host/tools/host_api.py) and stored as plain columns. Malformed records
-    are rejected rather than stored partially."""
+    are rejected rather than stored partially. When expected is supplied, the
+    comparison and write share a row lock; a stale/missing connection returns
+    False without recreating or replacing it."""
     account = value.get("account")
     secret = value.get("secret")
     metadata = value.get("metadata")
@@ -187,6 +209,8 @@ def put_tool_credential(
     ):
         raise ValueError(f"malformed stored credential for tool {tool_id}")
     with mutation() as cur:
+        if expected is not None and not _credential_is_current(cur, tool_id, connection_id, expected):
+            return False
         cur.execute(
             "SELECT connection_id FROM tool_credentials"
             " WHERE tool_id = %s AND account_id = %s AND connection_id <> %s",
@@ -220,14 +244,20 @@ def put_tool_credential(
             raise ValueError(
                 f"Connection {connection_id} is already bound to a different {tool_id} account."
             )
+        return True
 
 
-def delete_tool_credential(tool_id: str, connection_id: str) -> None:
+def delete_tool_credential(
+    tool_id: str, connection_id: str, *, expected: dict[str, Any] | None = None
+) -> bool:
     with mutation() as cur:
+        if expected is not None and not _credential_is_current(cur, tool_id, connection_id, expected):
+            return False
         cur.execute(
             "DELETE FROM tool_credentials WHERE tool_id = %s AND connection_id = %s",
             (tool_id, connection_id),
         )
+        return True
 
 
 # -- tool audit log ------------------------------------------------------------

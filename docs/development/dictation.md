@@ -39,7 +39,7 @@ have a badge, explanatory text and recovery actions, not color alone.
 
 ## Host and latency
 
-Recognition uses CPU int8 faster-whisper small.en, English forced. The model
+Recognition uses CPU int8 faster-whisper base.en, English forced. The model
 loads at service startup and stays resident. Before opening the microphone,
 the browser checks the operator-only GET /v1/dictation/ready endpoint. A loading
 or unavailable model fails promptly, with a retry message. Transcription
@@ -54,7 +54,7 @@ CPU limits. Deployment waits for model readiness and fails if it never becomes
 ready. Audio and transcripts are never written to host disk or logs.
 
 Weights are revision- and SHA-256-pinned. Provisioning downloads roughly
-500 MB from the public Kern release `model-faster-whisper-small.en-1`.
+148 MB from the public Kern release `model-faster-whisper-base.en-1`.
 Bootstrap verifies the files against SHA-256 digests pinned in source;
 inference uses local files without network access.
 The service is installed through normal Kern deployment.
@@ -62,12 +62,47 @@ The service is installed through normal Kern deployment.
 Silence ends a phrase; continuous speech is split after eight seconds.
 Recognition must keep up with speech for a smooth experience. Keeping the
 model resident removes repeated loading, but does not guarantee inference
-speed: a limited CPU test took 6.45 seconds for an eight-second segment and
-5.51 seconds for a 4.256-second segment with the model loaded. These are
-synthetic speech samples, not an accent or long-dictation benchmark. CPU load,
-speech and hardware affect latency. The browser pauses capture at roughly
+speed. A September 2026 comparison in the agent's resource-limited environment
+on a two-logical-CPU host used the four-second public speech fixture after
+warming each model. Two serial small.en inferences took 8.18 and 8.65 seconds;
+base.en took 1.54 and 1.49 seconds. Two concurrent base.en inferences with one
+thread each took 3.30 seconds overall, versus 3.04 seconds for the serial pair
+with two threads. This small shared-host sample does not establish production
+throughput or accent accuracy; the base model also changed the fixture's
+"ask" to "asked". Keep serial inference and measure real speech after deployment.
+CPU load, speech and hardware affect latency. The browser pauses capture at roughly
 one minute of backlog. Review technical words and phrase boundaries before
 sending; test real speech on the intended host before relying on long dictation.
+
+### Host diagnostics
+
+Dictation uses the existing structured journald reporter and Host diagnostics
+panel; the collector already includes both admin and transcription services.
+`admin_api.dictation` records failed requests and requests taking at least three
+seconds. It includes the socket request duration, timeout, operation and a
+fixed failure category (busy, model not ready, timeout, invalid response,
+worker failure or transport failure).
+
+`transcription.inference` records failed inference and inference taking at least
+three seconds, including audio duration, inference wall time, process CPU time,
+model and thread count. CPU time sums CPU consumed across the worker's threads;
+it is not a percentage or a CloudWatch measurement. A random request ID links
+the admin and worker observations when both are recorded. Model-load failures
+are recorded under `transcription.startup`. Error details contain exception
+class names only; never exception messages, audio or transcripts.
+
+Each component/outcome warns at most once per minute, independently of other
+outcomes. These are sampled anomalies, not exhaustive per-request traces or
+an exact failure count. Reporting happens after inference capacity is released,
+on a daemon thread admitted by the rate limit, so a slow journald writer cannot
+hold up the browser reply. Reporter thread-start failure drops the observation.
+The existing admin stall diagnostic also names the two dictation routes.
+
+Compare request time with inference time to locate host-side delays. Browser
+chunk formation, IndexedDB persistence, pending-chunk queue time and the browser
+network path are outside these timers. A large wall/CPU difference suggests
+waiting or contention but does not alone identify its cause. The five-second
+finish window described above remains a separate browser deadline.
 
 ## Verification
 

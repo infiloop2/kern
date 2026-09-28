@@ -44,7 +44,10 @@ ALLOWED_IMAGE_TYPES = {
     "image/png": frozenset({".png"}),
     "image/webp": frozenset({".webp"}),
 }
-AssetKind = Literal["video", "image"]
+ALLOWED_AUDIO_TYPES = {"audio/mpeg": frozenset({".mp3"}), "audio/wav": frozenset({".wav"})}
+MAX_AUDIO_BYTES = 200_000_000
+MIN_AUDIO_BYTES = 512
+AssetKind = Literal["video", "image", "audio"]
 
 
 class AssetError(ValueError):
@@ -124,10 +127,10 @@ class ToolAssetStore:
         size_bytes: int,
         source: BinaryIO,
     ) -> AssetMetadata:
-        allowed_types = ALLOWED_VIDEO_TYPES if kind == "video" else ALLOWED_IMAGE_TYPES
+        allowed_types = {"video": ALLOWED_VIDEO_TYPES, "image": ALLOWED_IMAGE_TYPES, "audio": ALLOWED_AUDIO_TYPES}[kind]
         allowed_suffixes = allowed_types.get(media_type)
         if allowed_suffixes is None:
-            supported = "an MP4 or MOV file" if kind == "video" else "a JPEG, PNG, or WebP file"
+            supported = {"video": "an MP4 or MOV file", "image": "a JPEG, PNG, or WebP file", "audio": "an MP3 or WAV file"}[kind]
             raise AssetError(f"{kind.title()} must be {supported}.")
         safe_filename = Path(filename).name
         if not safe_filename or Path(safe_filename).suffix.lower() not in allowed_suffixes:
@@ -136,8 +139,8 @@ class ToolAssetStore:
             ord(character) < 32 or ord(character) == 127 for character in safe_filename
         ):
             raise AssetError(f"{kind.title()} filename is invalid or too long.")
-        minimum = MIN_VIDEO_BYTES if kind == "video" else MIN_IMAGE_BYTES
-        maximum = MAX_VIDEO_BYTES if kind == "video" else MAX_IMAGE_BYTES
+        minimum = {"video": MIN_VIDEO_BYTES, "image": MIN_IMAGE_BYTES, "audio": MIN_AUDIO_BYTES}[kind]
+        maximum = {"video": MAX_VIDEO_BYTES, "image": MAX_IMAGE_BYTES, "audio": MAX_AUDIO_BYTES}[kind]
         if not minimum <= size_bytes <= maximum:
             raise AssetError(
                 f"{kind.title()} size must be between {minimum} bytes and {maximum} bytes."

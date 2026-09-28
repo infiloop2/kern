@@ -16,6 +16,7 @@ import pg_harness
 
 import host.tools as tool_packages
 from host.runtime.core import db, state
+from host.runtime.core.state import tools as tool_state
 from host.runtime.tools import tools_host
 from host.tools import (
     ActionExecuted,
@@ -268,14 +269,15 @@ class ToolRegistryTests(unittest.TestCase):
 
     def test_released_tool_ids_remain_installed(self) -> None:
         # These ids key persisted config, credentials, approvals, and audit
-        # records. New packages need no edit here; released ids may not vanish.
+        # records. New packages need no edit here. h3max was explicitly retired
+        # in favor of fal_ai; operators reconnect with a new key.
         self.assertTrue(
             {
                 "brave_search",
                 "gmail",
                 "google_calendar",
                 "google_search_console",
-                "h3max",
+                "fal_ai",
                 "ibkr",
                 "instagram",
                 "instagram_discovery",
@@ -283,7 +285,6 @@ class ToolRegistryTests(unittest.TestCase):
                 "linkedin_discovery",
                 "polymarket",
                 "runway",
-                "seedance",
                 "twitter",
                 "zoho_mail",
             }.issubset(tools_host.BUNDLED_TOOLS)
@@ -304,7 +305,7 @@ class ToolRegistryTests(unittest.TestCase):
     # Tools whose destination is chosen per call (an agent-named public
     # website) have no fixed third party whose privacy policy could be
     # linked; their data-summary cards state destination-dependence instead.
-    NO_FIXED_PROVIDER_TOOL_IDS = frozenset({"web_fetch"})
+    NO_FIXED_PROVIDER_TOOL_IDS = frozenset({"web_fetch", "browser"})
 
     def test_bundled_tools_have_complete_operator_guides(self) -> None:
         for tool_id, tool in tools_host.BUNDLED_TOOLS.items():
@@ -428,6 +429,70 @@ class ToolsHostTestCase(unittest.TestCase):
 
 
 class HostCredentialsTests(ToolsHostTestCase):
+    def test_conditional_mutations_preserve_disconnect_and_new_tokens(self) -> None:
+        credentials = tools_host.HostCredentials("fake_notes", _connection())
+        loaded: StoredCredential = {
+            "account": _fake_account(), "secret": {"access_token": "old"}, "metadata": {},
+        }
+        refreshed: StoredCredential = {
+            **loaded, "secret": {"access_token": "refreshed"},
+        }
+        reconnected: StoredCredential = {
+            **loaded, "secret": {"access_token": "reconnected"},
+        }
+        credentials.save(loaded)
+        credentials.clear()
+        self.assertFalse(credentials.save_if_current(loaded, refreshed))
+        self.assertFalse(credentials.clear_if_current(loaded))
+        self.assertIsNone(credentials.load())
+
+        # Reconnecting the same account must still defeat stale token work.
+        credentials.save(reconnected)
+        self.assertFalse(credentials.save_if_current(loaded, refreshed))
+        self.assertFalse(credentials.clear_if_current(loaded))
+        self.assertEqual(credentials.load(), reconnected)
+        self.assertTrue(credentials.save_if_current(reconnected, refreshed))
+        self.assertEqual(credentials.load(), refreshed)
+        self.assertFalse(credentials.clear_if_current(reconnected))
+        self.assertTrue(credentials.clear_if_current(refreshed))
+        self.assertIsNone(credentials.load())
+
+    def test_conditional_mutations_hold_the_row_against_another_database_session(self) -> None:
+        credentials = tools_host.HostCredentials("fake_notes", _connection())
+        loaded: StoredCredential = {
+            "account": _fake_account(), "secret": {"access_token": "old"}, "metadata": {},
+        }
+        refreshed: StoredCredential = {**loaded, "secret": {"access_token": "new"}}
+        compare = tool_state._credential_is_current
+
+        def compare_then_disconnect(cur, tool_id, connection_id, expected):
+            matches = compare(cur, tool_id, connection_id, expected)
+            self.assertTrue(matches)
+            # A separate session bypasses the in-process mutation lock. Its
+            # disconnect must not commit between comparison and save/clear.
+            with self.assertRaises(db.pgclient.Error) as blocked:
+                with db.transaction() as other:
+                    other.execute("SET LOCAL lock_timeout = '100ms'")
+                    other.execute(
+                        "DELETE FROM tool_credentials WHERE tool_id = %s AND connection_id = %s",
+                        (tool_id, connection_id),
+                    )
+            self.assertEqual(blocked.exception.sqlstate, "55P03")
+            return matches
+
+        for operation in ("save", "clear"):
+            with self.subTest(operation=operation):
+                credentials.save(loaded)
+                with patch.object(tool_state, "_credential_is_current", compare_then_disconnect):
+                    if operation == "save":
+                        self.assertTrue(credentials.save_if_current(loaded, refreshed))
+                    else:
+                        self.assertTrue(credentials.clear_if_current(loaded))
+                self.assertEqual(credentials.load(), refreshed if operation == "save" else None)
+                # A disconnect that runs after the transaction still wins.
+                credentials.clear()
+                self.assertIsNone(credentials.load())
+
     def test_round_trip_and_partition_isolation(self) -> None:
         credentials = tools_host.HostCredentials("fake_notes", _connection())
         self.assertIsNone(credentials.load())
@@ -940,6 +1005,16 @@ class ApprovalLifecycleTests(ToolsHostTestCase):
             }
         )
         return tools_host.execute_action("fake_notes", "write_note", {"text": text}, origin_thread_id=None)["approval_id"]
+
+    def test_disabled_tool_cannot_execute_pending_approval(self) -> None:
+        approval_id = self.queue_write("hello")
+        with state.mutation() as cur:
+            state.set_tool_enabled(cur, "fake_notes", False)
+        with patch.object(FakeTool, "execute_approved") as publish:
+            decision = tools_host.decide_approval(approval_id, "approve", public_hostname=None)
+        self.assertEqual(decision["approval"]["status"], "failed")
+        self.assertIn("not enabled", decision["result"]["error"])
+        publish.assert_not_called()
 
     def test_approved_execution_must_report_one_message(self) -> None:
         # execute_approved reports a user-visible message or a failure. Any

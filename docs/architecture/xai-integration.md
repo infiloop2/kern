@@ -9,7 +9,24 @@ adapter used by Chat, Apps, and Schedules.
 
 Everything below about the CLI's protocol, flags, files and wire format was
 originally verified against `@xai-official/grok@1.0.5` running on a real host with a real
-subscription login, not read off documentation.
+subscription login. Those versioned observations are historical evidence;
+current host policy is defined by the guards and adapter in this checkout.
+See [current harness pins](harness-dependencies.md#current-harnesses).
+
+## Contents
+
+- [The harness this exists for](#the-harness-this-exists-for)
+- [What is opened](#what-is-opened)
+- [Account anchoring and the proxy pin](#account-anchoring-and-the-proxy-pin)
+- [Server-side tools](#server-side-tools)
+- [Grok web search](#grok-web-search)
+- [Denial reasons](#denial-reasons)
+- [Stored state](#stored-state)
+- [Admin UI](#admin-ui)
+- [Testing](#testing)
+- [The CLI as it actually behaves](#the-cli-as-it-actually-behaves)
+- [Turn lifecycle](#turn-lifecycle)
+- [Upgrade review checklist](#upgrade-review-checklist)
 
 ## The harness this exists for
 
@@ -29,8 +46,7 @@ Two properties of the harness matter to this integration specifically:
 - **It does not use the system CA store.** The client is built against
   `rustls-tls` with bundled webpki roots, so `SSL_CERT_FILE` and
   `NODE_EXTRA_CA_CERTS` are ignored. The proxy's MITM CA must be supplied
-  through `GROK_EXTRA_CA_BUNDLE`, which the launcher will set when the runtime
-  lands. Without it, every request fails TLS rather than bypassing the proxy —
+  through `GROK_EXTRA_CA_BUNDLE`, which the root-owned launcher sets. Without it, every request fails TLS rather than bypassing the proxy —
   the failure mode is closed.
 
 ## What is opened
@@ -105,11 +121,12 @@ denials are decisions rather than omissions:
 | Remaining `api.x.ai` paths | Chat completions, tokenize-text, and anything other than Imagine image generation, image edits, video generation, and video poll. Those are the metered developer API. Opening them would let a misconfigured runtime spend console credits on inference. |
 | `imgen.x.ai` | Not used by Grok Build 1.0.5 Imagine stills (the image is in the JSON body). |
 | `code.grok.com` | A second session and workspace sync surface. Note that closing this host is *not* what keeps conversation state local. The chat proxy's own session routes are, and they are denied by the path allowlist above. |
-| `api.mixpanel.com` | Product analytics. Not under an owned apex, so it is denied by the default policy; the managed config will also disable telemetry at the harness. |
+| `api.mixpanel.com` | Product analytics. Not under an owned apex, so it is denied by the default policy; the managed config also disables telemetry at the harness. |
 
-Because the apexes are reserved, none of these can be reopened through a
-custom-domain rule — a custom rule naming a managed apex is rejected at config
-parse time, enabled or not.
+Because the xAI apexes are reserved, their denied hosts and paths cannot be
+reopened through a custom-domain rule. The unrelated analytics host is not
+reserved and follows ordinary custom-domain policy. A custom rule naming a
+managed apex is rejected at config parse time, enabled or not.
 
 ## Account anchoring and the proxy pin
 
@@ -229,10 +246,10 @@ closed.
 
 ### The three allowed declarations
 
-| Tool | What is allowed | Current runtime support |
+| Tool | What is allowed | Observed harness support |
 | --- | --- | --- |
-| `x_search` | xAI executes keyword, semantic, user, and thread search against X data. The host sends the query and surrounding inference context only to `cli-chat-proxy.grok.com`; xAI performs the X-side work. | **Usable now.** Grok Build 1.0.5 emits this declaration when `supports_backend_search = true`. |
-| `image_generation` | xAI's Responses image-generation tool runs on xAI servers and returns generated image data in the response. Kern requires `action: "generate"`; the default `auto` and `edit` shapes are denied because editing can make xAI fetch an input image URL. | **Policy-ready, not surfaced.** xAI documents the tool, but Grok Build 1.0.5 neither declares it nor decodes its result type. |
+| `x_search` | xAI executes keyword, semantic, user, and thread search against X data. The host sends the query and surrounding inference context only to `cli-chat-proxy.grok.com`; xAI performs the X-side work. | Grok Build 1.0.5 emitted this declaration when `supports_backend_search = true`. |
+| `image_generation` | xAI's Responses image-generation tool runs on xAI servers and returns generated image data in the response. Kern requires `action: "generate"`; the default `auto` and `edit` shapes are denied because editing can make xAI fetch an input image URL. | The original Grok Build 1.0.5 capture neither declared it nor decoded its result type; this is a policy allowance, not a promise about every harness version. |
 | `video_generation` | Only the bare declaration is reserved for the corresponding xAI-hosted family. Any option is denied until its destination semantics are reviewed. | **Not used.** Grok Build Imagine video is the S3-backed REST flow on `api.x.ai`, not this hosted tool. |
 
 Grok Build Imagine uses pinned OAuth on `api.x.ai`: image generation, image
@@ -628,11 +645,8 @@ video credentials live separately and do not create network rules.
 
 `web_search` is not among the accepted keys, which is the ordinary
 `reject_extra` behaviour every integration already has rather than anything
-added for xAI. Nothing has ever stored that key -- this integration has not
-shipped -- so there is no old policy to stay compatible with. It matters only
-for whoever adds an option later: give it a row, because a key with nowhere to
-live survives parsing and is then dropped by the policy round-trip the proxy
-reads, which reads to the operator as an opt-in that silently does nothing.
+added for xAI. Future options must add storage and policy round-trip coverage in the same
+change, so an accepted setting cannot disappear before the proxy reads it.
 
 ### Video storage settings
 
@@ -739,7 +753,7 @@ ring replaces the note with no further change.
 ## The CLI as it actually behaves
 
 The version and model must move together. `grok 1.0.3` advertises only
-`grok-4.5` in its ACP `initialize` response, while this host offers
+`grok-4.5` in its ACP `initialize` response, while the release being tested offered
 `grok-4.6`; submitting that newer model through the older client left the
 prompt in flight without an ACP completion. The historically tested `grok 1.0.5` advertised
 `grok-4.6` and completes the same terminal-tool and resumed-session turns.
@@ -753,7 +767,7 @@ The properties below are verified against `grok 1.0.5` by running it:
 | `--disable-web-search` | A **top-level** option. `grok agent ... stdio --disable-web-search` is rejected as an unexpected argument; it must precede the `agent` subcommand. |
 | `--always-approve` | An **`agent` subcommand** option and required on every autonomous launcher invocation. ACP `_meta.yoloMode` applies when `session/new` creates a session; the process flag also holds on `session/load`, overrides agent-writable user config, and prevents a resumed session from requesting an unavailable local approval channel. |
 | `supports_backend_search = true` | Enables the distinct hosted `x_search` declaration. Live testing through the managed MITM proxy showed that `--disable-web-search` independently removes the client `web_search`/`web_fetch` tools, so X search can be enabled without reopening web search. |
-| Media tools | Grok Build 1.0.5 has no `image_generation` or `video_generation` hosted-tool variant and no decoder for their call items. The proxy allows those exact declaration names for a future compatible release, but the current runtime cannot invoke them. |
+| Media tools | Grok Build 1.0.5 has no `image_generation` or `video_generation` hosted-tool variant and no decoder for their call items. The proxy allows those exact declaration names for a future compatible release, but that tested version could not invoke them. |
 | `GROK_LOGIN_DEVICE_FLOW=1` | Required for ACP login on a remote host. Without it Grok 1.0.5 advertises a loopback callback URL that the operator's browser cannot reach. |
 | Access token | A **JWT**, stored as the `key` field of an `auth.json` session keyed by `"<issuer>::<client_id>"`. Its claims carry `sub`, `principal_id`, `principal_type`, `team_id` and `tier`, and on a personal login `sub == principal_id == user_id`. |
 | Binary location | The npm package is a Node trampoline that decompresses the real binary into `$GROK_HOME/bin` — inside the agent's own home. Bootstrap decompresses it to a root-owned `/usr/local/bin/grok` instead, so the version pin and the launcher's flags are not agent-editable. |

@@ -11,11 +11,11 @@ operator?
 
 ## Reviewed commits
 
-Latest reviewed commit: `6151eea5abb61590684c4cf667ae6f619d705231`.
+Latest reviewed commit: `a597a8d063d735d11c30d1f2b2f6b66e7479ceac`.
 
 | Commit | Reviewed by |
 | --- | --- |
-| `6151eea5abb61590684c4cf667ae6f619d705231` | gpt-5.6-sol; Claude Opus 5 |
+| `a597a8d063d735d11c30d1f2b2f6b66e7479ceac` | GPT-6 (Codex) |
 
 ## Findings
 
@@ -121,84 +121,88 @@ binding; report any in-scope defect even if no item names it.
 
 ## Collaborative review
 
-### `6151eea5abb61590684c4cf667ae6f619d705231`
+### `a597a8d063d735d11c30d1f2b2f6b66e7479ceac`
 
-Reviewed by: gpt-5.6-sol; Claude Opus 5
+Reviewed by: GPT-6 (Codex)
 
-Methodology: static, repository-level trust-boundary review of every installed
-and deprecated app package, the generated host identities and services, all
-three app communication paths, the iframe/CSP/parent bridge, and both stable
-app implementations. The real manifest loader was executed against the tree,
-targeted unit/contract tests were run, and browser sinks were traced by source
-and grep. No live-host cross-uid probe, browser exploit, or load test was run.
+Methodology: re-established the architecture from the current source rather
+than applying the old installed-app inventory unchanged. Kern now has one
+fixed Workspace backend and browser shell, with generated Web App JavaScript
+running inside a restricted worker and sanitized output rendered by trusted
+code. Reviewed authority crossings and ran unit and Chromium Workspace smoke
+coverage, including generated-worker and navigation fixtures.
 
 #### What was reviewed
 
-- `host/runtime/core/app_platform.py` and every `host/apps/*/manifest.json`:
-  package/path validation, stable slots and derived users/roles/schemas/ports,
-  active versus deprecated packages, agent API and worker declarations, and
-  static UI asset confinement. The validator loaded Agent Chat at slot 0,
-  Agentic Web App at slot 6, and five migration-only deprecated packages at
-  their reserved slots.
-- `host/bootstrap/render.py`, `host/bootstrap/verify_deploy.py`, and
-  `host/runtime/deploy/app_migrate.py`: Unix and PostgreSQL identities,
-  migrations, systemd units/slices, loopback/nftables reachability, file
-  ownership, restart behavior, and end-of-deploy assertions.
-- `host/runtime/admin_api/app_api_proxy.py`,
-  `host/runtime/admin_api/app_backend_api.py`,
-  `host/runtime/agent_app/{api,service}.py`, and the Admin API dispatch:
-  browser-to-backend proxying, app-backend Unix-socket `SO_PEERCRED` mapping,
-  thread-id prefixing/filtering, and kernel-attributed agent-to-app calls.
-- `host/runtime/admin_api/service.py`,
-  `host/runtime/admin_api/admin_ui/app.js`, and
-  `docs/architecture/apps/apps.md`: app lookup, CSP and sandbox tokens,
-  same-app API confinement, body/response/time limits, host-owned upload
-  selection, clipboard behavior, open-file behavior, and frame/source binding.
-- Agent Chat's backend and UI, including thread pagination, archive/rename,
-  attachments, activity rendering, and `rich_text.js`; and Agentic Web App's
-  backend, migrations, multi-workspace state, optimistic revisions,
-  HTML/CSS sanitizers, Shadow DOM event bridge, capability worker,
-  data mutation grammar, and agent API.
+- `host/runtime/workspace/`: browser and agent APIs, Chat/global resources, Web App
+  state/action/collection routes, revision and lock enforcement, thread and
+  app id parsing, persistence/migrations and shared rich text.
+- `admin_api/workspace_proxy.py`, the Workspace-to-admin client/allowlist,
+  agent shim, bootstrap Workspace identities/sockets/units/database grants,
+  and `peer_identity.py` cgroup attribution.
+- `web_apps/ui/personal_web_app_builder.js` and
+  `capability_worker_sandbox.js`: worker bootstrap, networkless broker CSP,
+  removed globals, bridge protocol, HTML/CSS allowlists, Shadow DOM, event
+  dispatch, app/run binding, mutations, reply caps and teardown.
+- Chat and global UI rendering, history/activity paging and caches, file
+  attachments/links, revision recovery, schedules and collection queries;
+  `test_workspace*`, `test_personal_web_app_builder`, and Workspace smokes.
 
-Targeted tests completed successfully: 31 app-platform/rich-text tests, 31
-Agent Chat backend tests, and 69 Admin UI static and Agentic Web App
-contract/routing/conversation/mock tests.
+#### Outcome and coverage
 
-#### Coverage and confidence
+No new App boundary defect was confirmed. Historical findings and accepted
+clipboard/file-open behaviors remain unchanged. Generated app content is not
+an independent Unix/database principal: isolation from privileged browser
+APIs comes from the worker/CSP and narrow trusted bridge, while the backend
+intentionally stores all Apps under the single operator's Workspace authority.
 
-- Checklist 1–2: all manifests were loaded through the production validator;
-  generated identities, DB namespaces, migrations, unit files, firewall
-  callers, and deprecated slot reservations were checked against bootstrap and
-  deploy verification. This was source/generated-config validation, not a
-  comparison with live accounts, grants, cgroups, or nftables state.
-- Checklist 3–7: all browser, backend-socket, and agent-app routes were traced
-  through their caller identity, route grammar, bounds, and response
-  filtering. The iframe CSP/sandbox and complete parent bridge were
-  enumerated. Same-app API and upload mediation hold; unmediated clipboard and
-  parent-file actions are APP-001 and APP-002. Comparing the two shipped
-  frames against each other, rather than each against the documented contract,
-  showed the bridge is only source-bound on one side: the parent binds the
-  source window, and Agentic Web App checks `event.source !== parent`, but
-  Agent Chat checks neither source nor origin (APP-003). Two further boundary
-  facts from this pass: the app-backend route allowlist grants
-  `GET /v1/network/policy`, which two of the three boundary statements in
-  `apps.md` deny (APP-004); and the app-backend Unix socket itself has no
-  per-connection read timeout and no worker bound, which is registered on
-  axis 04 as ADM-004 because its impact lands on admin-API availability rather
-  than on app authority — it was independently found here and on axis 08.
-- Checklist 8–9: markup, URL, CSS, worker, object-URL, clipboard,
-  `postMessage`, file-picker, and file-view sinks were searched and traced.
-  Agent Chat's renderer escapes agent content and converts links/images to
-  non-navigating copy controls. Agentic Web App confines generated code to its
-  blob worker and sanitizes the rendered HTML/CSS. No malicious-browser run
-  was performed, so confidence in browser-version edge behavior is lower than
-  confidence in the source-level containment.
-- Checklist 10–12: app-row/thread ownership, reserved internal ids,
-  pagination, locking, revisions, concurrent browser/agent writes, Agent Chat,
-  and Agentic Web App were checked in source and focused tests. Database tests
-  used repository mocks rather than a deployed PostgreSQL/app-service stack.
-- Checklist 13: deprecated packages retain only their manifest, migrations,
-  and reserved identities; they produce no installed UI/backend service.
-- Checklist 14: unit and contract tests were run. Deployed-host, crash/restart,
-  cross-port, cross-schema, hostile-browser, and live-thread timing probes were
-  deliberately omitted from this repository-level sweep.
+- Checklists 1–2 and 13: the old installed/deprecated manifest validator,
+  generated app uids/schemas/ports and per-app migration model are retired.
+  Their slot-reservation and cross-installed-app probes are inapplicable at
+  this commit. Reviewed current fixed Workspace provisioning, migrations,
+  service grants, sockets, source ownership and retirement paths instead.
+  No fresh host upgrade was performed to inspect leftover deployed artifacts.
+- Checklists 3–5: traced browser authentication to fixed-prefix Unix proxy
+  routes, admin-only browser peers, the Workspace-to-admin allowlist and
+  agent-only API. Body/depth/response/call/connection limits and pid/cgroup
+  attribution were inspected. Global `/agent/apps/...` access is an explicit
+  operator-authorized capability; thread identity authenticates self-memory,
+  not a promise that a thread can access only one App.
+- Checklists 6–7: the trusted page creates a networkless broker and data
+  worker; generated code has no DOM or arbitrary parent API. Reviewed CSP,
+  worker source construction, removed globals, private captured bridge
+  functions, event-only mutations, request ids, app/run/revision binding,
+  message caps, ordered writes, and stale-worker teardown. The bridge
+  constructs fixed App routes rather than accepting arbitrary Admin URLs.
+- Checklist 8: searched and traced HTML/attribute/CSS/URL/message/fetch sinks.
+  The sanitizer constructs allowed DOM from inert input, discards active
+  attributes, restricts CSS properties/selectors/URL-bearing values and keeps
+  output in a closed shadow tree. Rich text escapes raw HTML and mediates
+  unsafe links as copy controls. No new worker or sanitizer escape was found.
+- Checklist 9: inspected host-mediated file links/upload, filename escaping,
+  descriptor-relative reads, bounded streaming, atomic publish and object URL
+  cleanup. Operator file selection is intentional; generated code cannot
+  choose a local-browser file to read. Hostile document/download smoke passed.
+- Checklist 10: inspected app existence/id validation, agent-update locks,
+  optimistic revisions, collection SQL parameterization, transaction locks,
+  row/query limits and snapshot behavior. Database-dependent execution is
+  intentionally deferred to CI; no cross-role query ran on the live host.
+- Checklist 11: traced current Chat thread/session routing, cache selection,
+  newest/older activity paging, rich text, attachments, steering/stop and
+  error/reload paths. Existing Chromium tests passed activity paging and
+  reading anchors, short transcripts, and desktop/mobile navigation order.
+- Checklist 12: reviewed create/rename/action grammar, bundle limits,
+  sanitizer/worker execution, bridge state mutations, App locks/revisions,
+  persistence and schedule interactions. Existing unit/Chromium fixtures
+  cover worker startup, malicious markup and capability boundaries; this
+  was not exhaustive JavaScript/CSS adversarial fuzzing.
+- Checklist 14: local unit/mock-browser checks ran. The combined browser
+  command reached the WebKit startup canary after completing Chromium, then
+  stopped because WebKit is absent. Kern denied its download domains; CI's
+  Workspace job runs this canary. Disposable-host cross-uid/database/port
+  probes, stage, crash/restart and real live-thread lifecycle probes were
+  not performed.
+
+Confidence is strongest for the reviewed bridge/sanitizer contracts and
+Chromium fixture behavior. Per-deployment cleanup, real database isolation and
+untested browser engines remain explicit limits rather than inferred passes.

@@ -47,7 +47,7 @@ class InstagramReadTests(unittest.TestCase):
         self.assertEqual(tool.manifest.connection, "oauth")
         self.assertEqual(
             [spec.id for spec in tool.manifest.actions],
-            ["get_profile", "get_recent_media", "get_publishing_limit", "post_image", "post_carousel", "post_reel"],
+            ["get_profile", "get_recent_media", "get_reel_insights", "get_publishing_limit", "post_image", "post_carousel", "post_reel"],
         )
 
     def test_get_profile_maps_fields(self) -> None:
@@ -125,6 +125,75 @@ class InstagramReadTests(unittest.TestCase):
             result = InstagramTool().execute("get_recent_media", {"limit": "2"}, connected_api())
         assert isinstance(result, ActionExecuted)
         self.assertEqual(len(result.result["media"]), 2)
+
+    def test_recent_media_cursor_reads_older_posts(self) -> None:
+        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
+            if "after=" in url:
+                self.assertIn("after=older%3D", url)
+                return {"data": [{"id": "2"}]}
+            return {"data": [{"id": "1"}], "paging": {"next": "https://graph.instagram.com/next",
+                                                         "cursors": {"after": "older="}}}
+
+        with patch.object(instagram, "json_request", fake_json_request):
+            first = InstagramTool().execute("get_recent_media", {}, connected_api())
+            assert isinstance(first, ActionExecuted)
+            self.assertEqual(first.result["next_cursor"], "older=")
+            second = InstagramTool().execute("get_recent_media", {"after": "older="}, connected_api())
+        assert isinstance(second, ActionExecuted)
+        self.assertEqual(second.result["media"][0]["id"], "2")
+        self.assertIsNone(second.result["next_cursor"])
+
+    def test_get_reel_insights_maps_lifetime_metrics_and_missing_values(self) -> None:
+        def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
+            if "/123/insights?" in url:
+                self.assertIn("views%2Creach%2Clikes", url)
+                return {"data": [
+                    {"name": "views", "total_value": {"value": 45}},
+                    {"name": "reach", "values": [{"value": 32}]},
+                    {"name": "shares", "total_value": {"value": 0}},
+                ]}
+            self.assertIn("/123?fields=id%2Cmedia_product_type", url)
+            return {"id": "123", "media_product_type": "REELS"}
+
+        with patch.object(instagram, "json_request", fake_json_request):
+            result = InstagramTool().execute("get_reel_insights", {"media_id": "123"}, connected_api())
+        assert_matches_output_schema(self, instagram.MANIFEST, "get_reel_insights", result)
+        assert isinstance(result, ActionExecuted)
+        self.assertEqual(result.result["metrics"]["views"], 45)
+        self.assertEqual(result.result["metrics"]["reach"], 32)
+        self.assertEqual(result.result["metrics"]["shares"], 0)
+        self.assertIsNone(result.result["metrics"]["saved"])
+
+    def test_get_reel_insights_rejects_non_reel_before_insights_call(self) -> None:
+        with patch.object(instagram, "json_request", return_value={"id": "123", "media_product_type": "FEED"}) as request:
+            result = InstagramTool().execute("get_reel_insights", {"media_id": "123"}, connected_api())
+        self.assertIsInstance(result, ActionFailed)
+        request.assert_called_once()
+
+    def test_existing_connection_can_publish_without_new_insights_scope(self) -> None:
+        api = connected_api()
+        assert api.credentials.record is not None
+        api.credentials.record["account"]["scopes"] = list(instagram.REQUIRED_IG_SCOPES)
+        with patch.object(instagram, "json_request", return_value={"data": []}) as request:
+            result = InstagramTool().execute("get_reel_insights", {"media_id": "123"}, api)
+        assert isinstance(result, ActionFailed)
+        self.assertIn("Reconnect", result.error)
+        request.assert_not_called()
+        self.assertIsNotNone(api.credentials.load())
+        with patch.object(instagram, "json_request", return_value={"data": []}):
+            recent = InstagramTool().execute("get_recent_media", {}, api)
+        self.assertIsInstance(recent, ActionExecuted)
+        asset_id = api.assets.add(filename="post.jpg", media_type="image/jpeg", data=b"image")
+        with patch.object(instagram, "json_request", return_value=dict(ME_RESPONSE)):
+            pending = InstagramTool().execute("post_image", {"image_asset_id": asset_id}, api)
+        self.assertIsInstance(pending, ActionPendingApproval)
+
+    def test_reel_insights_rejects_invalid_media_ids(self) -> None:
+        for media_id in ("../me", "1" * 31, ""):
+            with self.subTest(media_id=media_id), patch.object(instagram, "json_request") as request:
+                result = InstagramTool().execute("get_reel_insights", {"media_id": media_id}, connected_api())
+            self.assertIsInstance(result, ActionFailed)
+            request.assert_not_called()
 
     def test_read_limit_is_rejected_instead_of_silently_clamped(self) -> None:
         for value in ("0", "26", "9" * 100, "²"):
@@ -636,6 +705,7 @@ class InstagramCredentialFlowTests(unittest.TestCase):
         start = flow.start_connect({"redirect_uri": "https://host.example/cb"}, api)
         self.assertTrue(start["authorization_url"].startswith("https://www.instagram.com/oauth/authorize?"))
         self.assertIn("instagram_business_content_publish", start["authorization_url"])
+        self.assertIn("instagram_business_manage_insights", start["authorization_url"])
 
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
             if url == instagram.IG_TOKEN_URL:
@@ -661,7 +731,7 @@ class InstagramCredentialFlowTests(unittest.TestCase):
                 "data": [{
                     "access_token": "short-token",
                     "user_id": 178414,
-                    "permissions": "instagram_business_basic,instagram_business_content_publish",
+                    "permissions": "instagram_business_basic,instagram_business_content_publish,instagram_business_manage_insights",
                 }]
             },
             api=api,
@@ -683,6 +753,7 @@ class InstagramCredentialFlowTests(unittest.TestCase):
                     "permissions": [
                         "instagram_business_basic",
                         "instagram_business_content_publish",
+                        "instagram_business_manage_insights",
                         "instagram_business_manage_comments",
                     ],
                 }]
@@ -691,7 +762,7 @@ class InstagramCredentialFlowTests(unittest.TestCase):
         )
         self.assertEqual(
             result["account"]["scopes"],
-            ["instagram_business_basic", "instagram_business_content_publish", "instagram_business_manage_comments"],
+            ["instagram_business_basic", "instagram_business_content_publish", "instagram_business_manage_insights", "instagram_business_manage_comments"],
         )
         stored = api.credentials.load()
         assert stored is not None
@@ -716,6 +787,15 @@ class InstagramCredentialFlowTests(unittest.TestCase):
                 {"data": [{"access_token": "short-token", "permissions": "instagram_business_basic"}]}, api=api
             )
         self.assertIn("instagram_business_content_publish", str(caught.exception))
+        self.assertEqual(api.credentials.load(), before)
+
+    def test_complete_connect_requires_insights_for_new_grant(self) -> None:
+        api = connected_api()
+        before = api.credentials.load()
+        with self.assertRaises(RuntimeError) as caught:
+            self.complete_connect({"access_token": "short-token",
+                                   "permissions": "instagram_business_basic,instagram_business_content_publish"}, api=api)
+        self.assertIn("instagram_business_manage_insights", str(caught.exception))
         self.assertEqual(api.credentials.load(), before)
 
 

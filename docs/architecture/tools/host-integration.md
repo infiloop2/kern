@@ -13,6 +13,16 @@ selected connection plus its non-secret provider account identity. WhatsApp is
 the one linked-device integration: its host-owned gateway snapshots the linked
 account id inside each approval payload instead.
 
+## Contents
+
+- [Where tool code runs, and its internet access](#where-tool-code-runs-and-its-internet-access)
+- [The agent-facing surface](#the-agent-facing-surface)
+- [Input and output validation](#input-and-output-validation)
+- [Host API implementation](#host-api-implementation)
+- [Operator flow](#operator-flow)
+- [OAuth callback and token exchange](#oauth-callback-and-token-exchange)
+- [Testing](#testing)
+
 ## Where tool code runs, and its internet access
 
 Tool packages make outbound HTTPS calls to third parties (Google, Apify, Brave, X,
@@ -24,45 +34,52 @@ the host code most exposed to attacker-influenced data. They run in a **dedicate
 `host.runtime.tools.service` — kept out of the admin service. nftables grants the
 `kern-tools` uid DNS and outbound HTTPS (port 443) and **nothing to the
 `kern-admin` uid**, so the admin service holds no internet egress at all: a
-compromised tool package cannot exfiltrate admin state or reach an arbitrary host.
+compromised tool process cannot read unrelated admin state or reach the admin
+listener. Its direct HTTPS egress is not domain-filtered by the agent proxy;
+reviewed package code owns destination and input restrictions.
 The agent never holds tool secrets and never talks to tool third parties; its own
 path through the policy proxy is unchanged, and tool traffic never rides the agent
 proxy (which would have opened those domains to the agent as an exfiltration path).
 
 The tool tables (`enabled_tools`, `tool_config`, `tool_credentials`,
-`tool_secrets`, `tool_approvals`, `tool_events`) are **owned by `kern-admin`**: the database
-is created owned by that role and the migrations run as it, so — as the table
-owner — the admin service has full read/write on them implicitly, no `GRANT`
-needed. The **`kern-tools` role** the tools service connects as is layered
-on top with an *additional, scoped* grant: read-only on `enabled_tools`/
-`tool_config`, read/write on `tool_credentials`/`tool_secrets`/`tool_approvals`/`tool_events`, and
-nothing else in the admin database. Those grants live in the schema migration
-(`host/migrations/0007_tool_state.sql`), the same pattern as the proxy role's
-grants; bootstrap provisions only the role, its `pg_hba` line, and database
-CONNECT before migrations run. That grant does not remove the owner's access;
-it confines the *tools* role. So the confinement is asymmetric by design: the admin
-service reaches all state (including the tool tables it owns) but has no internet
-egress, while the tools service has egress but can touch only the tool tables — a
-compromised tool package therefore cannot exfiltrate admin state, and admin, which
-owns everything, has no way out to the internet. The admin service holds no tool
-code path that parses third-party data; it authenticates the operator and
-**forwards** the whole OAuth connect flow (start, complete, disconnect) plus
-approved-action execution — everything that runs tool code or needs egress — to
-the tools service over the tools socket (peer-gated to the admin uid). The
-operator operations that touch only stored state (listing tools, enable/disable,
-config, listing/reading approvals) run in the admin service against the tool
-tables it owns, and need no egress. See [`../local-sockets.md`](../local-sockets.md) for
-the socket inventory and [`../privilege-boundaries.md`](../privilege-boundaries.md)
-for the service/user map.
+`tool_secrets`, `tool_approvals`, `tool_events`,
+`tool_approval_risk_assessments`, `tool_costs`, `tool_cost_daily`) are **owned
+by `kern-admin`**: the database is created owned by that role and the migrations
+run as it, so — as the table owner — the admin service has full read/write on
+them implicitly, no `GRANT` needed. The **`kern-tools` role** the tools service
+connects as is layered on top with an *additional, scoped* grant: read-only on
+`enabled_tools`/ `tool_config`, read/write on
+`tool_credentials`/`tool_secrets`/`tool_approvals`/`tool_events`, and read-only
+access to the secret-box key, explicit risk-assessment and cost writes, and only
+the non-secret `provider`/`enabled` columns of Host AI configuration. Those
+grants live in the immutable `host/migrations/` stream, the same pattern as the
+proxy role's grants; bootstrap provisions only the role, its `pg_hba` line, and
+database CONNECT before migrations run. That grant does not remove the owner's
+access; it confines the *tools* role. So the confinement is asymmetric by
+design: the admin service reaches all state (including the tool tables it owns)
+but has no internet egress, while the tools service has egress but can touch
+only the tool tables — a compromised tool package therefore cannot exfiltrate
+admin state, and admin, which owns everything, has no way out to the internet.
+The admin service holds no tool code path that parses third-party data; it
+authenticates the operator and **forwards** the whole OAuth connect flow (start,
+complete, disconnect) plus approved-action execution — everything that runs tool
+code or needs egress — to the tools service over the tools socket (peer-gated to
+the admin uid). The operator operations that touch only stored state (listing
+tools, enable/disable, config, listing/reading approvals) run in the admin
+service against the tool tables it owns, and need no egress. See
+[`../local-sockets.md`](../local-sockets.md) for the socket inventory and
+[`../privilege-boundaries.md`](../privilege-boundaries.md) for the service/user
+map.
 
 ## The agent-facing surface
 
 Agents speak MCP, so the host bridges MCP to the tool runtime with a shim:
 
-- All three harnesses spawn `python3 -m host.runtime.agent_shim.mcp_shim` as
+- All four harnesses spawn `python3 -m host.runtime.agent_shim.mcp_shim` as
   `kern-agent`: Claude Code through `--mcp-config` (with
   `--strict-mcp-config` making it the only server), Codex through `mcp_servers`
-  in the root-owned managed config `/etc/codex/managed_config.toml`, and Hermes
+  in the root-owned managed config `/etc/codex/managed_config.toml`, Grok through
+  its managed MCP configuration, and Hermes
   through its root-owned managed config and headless adapter.
 - The shim is a dumb stdio-to-socket pipe: `tools/call` forwards to the tools
   socket `/run/kern-tools/tools.sock`. It holds no state and no secrets. A
@@ -79,7 +96,7 @@ Agents speak MCP, so the host bridges MCP to the tool runtime with a shim:
   an actionable message instead of withdrawing declarations, which a model reads
   as "that capability does not exist".
 - The same shim always serves **`workspace_api`**, **`search_conversation_history`**,
-  and **`read_thread_history`**, forwarded to the
+  **`read_thread_history`**, **`spawn_agent`**, and **`send_agent_message`**, forwarded to the
   main Workspace service's agent socket (`/run/kern-workspace/agent.sock`) rather
   than the tools socket. Listing it grants no additional identity. Calls use
   explicit immutable resource ids; peer credentials establish only that the
@@ -265,15 +282,25 @@ context instead of rewriting its prefix:
   (up to 50, each capped at 1,024 characters, with clipping reported). It reports
   non-success HTTP statuses and does not fall back to GET or replay cookies.
 
+  Zoho Mail `read_message` lists a message's non-inline attachments (id, name,
+  size), making one extra `attachmentinfo` call only when Zoho flags the message
+  as having attachments. `download_attachment {folder_id, message_id,
+  attachment_id}` re-reads that list, rejects an id not on the message, and
+  streams the file from the connected mailbox with the existing
+  `ZohoMail.messages.READ` scope. It accepts any attachment type up to 200 MB
+  with one valid `Content-Length` and a 120-second whole-transfer deadline,
+  keeps the sender's filename with path
+  separators and control characters replaced, and falls back to
+  `application/octet-stream` for an invalid media type. It runs without
+  approval, like reading the message.
+
   Runway supports `runway_save_video {task_id}` and
   `runway_save_audio {task_id}` for completed MP3 speech. Each re-reads the task
   from Runway, accepts only its authoritative successful HTTPS output, and
   returns that response as a bounded `StreamingAsset`. Audio saving accepts
   `audio/mpeg` and gives the file an `.mp3` suffix. Agents do not need a custom
   network-domain allowance to save the output through these actions.
-  `seedance_save_video` is the same
-  shape against BytePlus ModelArk; both rely on the generic streaming-result
-  path rather than any per-tool wiring in the shim. The egress-capable tools
+  These actions rely on the generic streaming-result path rather than per-tool wiring in the shim. The egress-capable tools
   process cannot write agent files, while the filesystem-capable shim has no
   provider credential or external network access. To publish the returned workspace file
   later, the agent explicitly stages it for Instagram and passes the resulting
@@ -368,13 +395,14 @@ drifts from the code fails the pull request check before it can reach a host.
   `GOOGLE_OAUTH_CLIENT_ID` even though the key name repeats. Values are secretbox
   ciphertext and never leave the host; the API/UI report only whether a key is
   set.
-- **Approvals** — the `tool_approvals` table. The host assigns `approval_<number>`
-  ids; every status change is an atomic conditional update from the expected
+- **Approvals** — the `tool_approvals` table. The host assigns token-bearing
+  `approval_<number>.<token>` capabilities; every status change is an atomic
+  conditional update from the expected
   prior status, so an approval is single-use by construction. Exact host policy:
   each row also copies `connection_id`, `account_id`, and `account_label`; an
   approved action is executed with that stored connection, never whichever
   account is current when the operator clicks Approve.
-  new pending approvals are capped at `PENDING_APPROVAL_LIMIT = 1000` (backpressure
+  New pending approvals are capped at `PENDING_APPROVAL_LIMIT = 1000` (backpressure
   once reached), pending approvals expire after
   `APPROVAL_PENDING_TTL_SECONDS = 24h` (swept by the admin API's hourly
   maintenance pass), decided records are kept as bounded history pruned to
@@ -497,37 +525,28 @@ it only needs to be reachable by the operator's browser.
 **`POST /v1/tools/<tool_id>/oauth_connect/complete` is the only path that
 performs the exchange, and it is fully authenticated.** The SPA reads the
 returned `code`/`state` and calls this API with the operator's session cookie,
-exactly like every other `/v1/...` request. The handler additionally
-re-verifies the `state` the tool minted at connect start: an HMAC keyed on the
-deployment's OAuth client secret over `{tool_id, nonce, issued_at}`, checked for
-a matching `tool_id` and a 15-minute expiry. So a forged, replayed, or
-cross-tool callback cannot complete a connection even from an authenticated
-session, and an unauthenticated caller cannot complete one at all. The admin
-service holds no egress: it forwards the exchange to the tools service, which
-calls the provider's token endpoint over its own egress, so the flow is
-identical whether the operator reached the UI over SSH-forwarded loopback
-(`http://localhost:7443/oauth/callback`, which providers accept without HTTPS)
-or over a Cloudflare Tunnel hostname.
+exactly like every other `/v1/...` request. The host selects the connection
+established at connect start, and the tool re-verifies its opaque `state` before
+exchanging the authorization code. State format, expiry, PKCE, and token
+exchange are provider-specific; see [credential
+flows](tool-contract.md#credential-flows-oauth). An unauthenticated caller
+cannot complete a connection. The admin service holds no egress: it forwards the
+exchange to the tools service, which calls the provider's token endpoint over
+its own egress, so the flow is identical whether the operator reached the UI
+over SSH-forwarded loopback (`http://localhost:7443/oauth/callback`, which
+providers accept without HTTPS) or over a Cloudflare Tunnel hostname.
 
-**No API path is served without the admin password.** The unauthenticated GETs
-are static UI assets — the SPA shell (served at both `/` and
-`/oauth/callback`), `/admin_ui.css`, the `/admin_ui/*.js` modules, favicons, and
-the fixed Workspace assets under `/workspace/...`. Every `/v1/...` route,
-including `oauth_connect/complete`, `/v1/workspace/chat/...`, and `/v1/workspace/web-apps/...`,
-passes through admin authentication before it runs. The unauthenticated set carries no
-secrets and performs no state change.
+**Authentication boundary.** OAuth completion and ordinary operator API
+routes require a session and CSRF header. Login ceremonies, the public
+passkey-status read, and static assets have explicit pre-session routes.
+Approved media publishing also exposes temporary HTTPS media capabilities;
+those URLs authorize only the staged bytes, not an operator API call. See the
+[authentication route map](../admin-api-authentication.md#route-exposure).
 
-**Abuse and DDoS.** The admin login is the authentication boundary, reachable
-over the public Cloudflare Tunnel, so the origin throttles the one credential
-path that a flood could target: login attempts are blocked past a per-source
-budget (there is deliberately no global ceiling, which would be an
-attacker-triggerable lockout of every operator) and fail closed (see
-[admin login sessions](../admin-api.md#admin-login-sessions)). The Cloudflare
-edge in front of the tunnel absorbs volumetric attacks and provides DDoS
-mitigation; the SSH-forwarded loopback path additionally requires a host account.
-The only unauthenticated origin paths, the static UI assets and the callback GET,
-serve cached files with no database, crypto, or egress work, so they are cheap to
-absorb; every state-changing path (including `complete`) is behind admin auth.
+**Abuse and DDoS.** Public password login is throttled per source, without a
+global lockout that could block every operator. The Cloudflare edge provides
+transport protection; SSH-forwarded access additionally requires the operator
+key. All request paths retain their own parsing and concurrency bounds.
 
 **The provider redirect.** The redirect URI registered with the provider is the
 operator endpoint hostname (or loopback under an SSH forward). The provider only

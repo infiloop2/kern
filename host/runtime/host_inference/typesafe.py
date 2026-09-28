@@ -8,11 +8,10 @@ import math
 import re
 from typing import Any
 
-from host.runtime.host_inference import provider_http, redaction
+from host.runtime.host_inference import redaction
 
 
 ENDPOINT = "https://api.typesafe.ai/v1/systemone"
-DEFAULT_TIMEOUT_SECONDS = 2.0
 MAX_REQUEST_BYTES = 128 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024
 RESPONSE_MODEL_RE = re.compile(r"^jev-(?:latest|[1-9][0-9]*\.[0-9]+\.[0-9]+)$")
@@ -27,24 +26,6 @@ class JudgmentResponseError(ValueError):
 
 def _json_bytes(value: Any) -> bytes:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-
-
-def _request_bytes(method: str, url: str, **kwargs: Any) -> bytes:
-    timeout = float(kwargs.pop("timeout"))
-    max_bytes = int(kwargs.pop("max_bytes"))
-    headers = kwargs.pop("headers", {})
-    data = kwargs.pop("data", None)
-    kwargs.pop("failure_message", None)
-    if method != "POST" or url != ENDPOINT or kwargs:
-        raise ValueError("TypeSafe transport request is invalid")
-    return provider_http.post(
-        ENDPOINT,
-        headers=headers,
-        data=data,
-        timeout=timeout,
-        max_bytes=max_bytes,
-        label="TypeSafe judgment",
-    )
 
 
 def _valid_probability(value: Any) -> bool:
@@ -86,8 +67,7 @@ def judge(
     model: str,
     state: Any,
     questions: dict[str, dict[str, Any]],
-    timeout_seconds: float = DEFAULT_TIMEOUT_SECONDS,
-    transport: Transport = _request_bytes,
+    transport: Transport,
     usage_recorder: UsageRecorder | None = None,
 ) -> dict[str, Any]:
     """Return a validated Jev result or raise a bounded adapter error."""
@@ -95,8 +75,6 @@ def judge(
         raise ValueError("TypeSafe API key is missing")
     if model != "jev-latest":
         raise ValueError("TypeSafe model must be jev-latest")
-    if not isinstance(timeout_seconds, (int, float)) or not 0 < timeout_seconds <= DEFAULT_TIMEOUT_SECONDS:
-        raise ValueError("judgment timeout is invalid")
     questions = _validate_questions(questions)
     safe_questions = {
         question_id: {
@@ -114,12 +92,10 @@ def judge(
     if len(encoded) > MAX_REQUEST_BYTES:
         raise ValueError("TypeSafe judgment request is too large")
     raw = transport(
-        "POST",
         ENDPOINT,
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         data=encoded,
-        failure_message="TypeSafe judgment failed.",
-        timeout=timeout_seconds,
+        label="TypeSafe judgment",
         max_bytes=MAX_RESPONSE_BYTES,
     )
     try:

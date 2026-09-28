@@ -32,8 +32,10 @@ AGENT_CHAT_THREADS: dict[str, dict[str, Any]] = {
         ("thread-2", "thread-2"),
         ("thread-3", "thread-3"),
         (ACTIVITY_THREAD_ID, "activity-heavy"),
+        ("thread-6", "delegated-research"),
     )
 }
+AGENT_CHAT_THREADS["thread-6"]["spawned_by_thread_id"] = "thread-1"
 SEEN_MESSAGE_SEQS: dict[str, int] = {}
 SEEN_INITIALIZED = False
 SEEN_LOCK = Lock()
@@ -70,7 +72,8 @@ def route_workspace_api(
         }
     if method == "GET" and relative == "threads":
         archived = (query.get("archived") or ["false"])[0] == "true"
-        return {"threads": _list_threads(host_api, archived=archived, scheduled=False)}
+        spawned = (query.get("spawned") or ["false"])[0] == "true"
+        return {"threads": _list_threads(host_api, archived=archived, scheduled=False, spawned=spawned)}
     if method == "GET" and relative == "scheduled-agents":
         return {"threads": _list_threads(host_api, archived=False, scheduled=True)}
     match = re.fullmatch(r"threads/([^/]+)/seen", relative)
@@ -220,6 +223,20 @@ def desktop_smoke(page: Any) -> None:
         f".thread-item[data-thread-id='{WEBSITE_THREAD_ID}'] .thread-dot.error[aria-label='Agent error']"
     )).to_have_count(1)
 
+    spawned_nav = page.locator(
+        "#spawned-agents-nav-items [data-action='open-chat'][data-item-id='thread-6']"
+    )
+    expect(spawned_nav).to_be_visible()
+    expect(spawned_nav).to_contain_text("Spawned by thread-1")
+    expect(page.locator("#chat-nav-items [data-item-id='thread-6']")).to_have_count(0)
+    spawned_nav.click()
+    expect(frame.locator(".thread-title")).to_have_text("delegated-research")
+    expect(frame.locator("#new-thread")).to_be_hidden()
+    expect(frame.locator("#thread-memory")).to_be_visible()
+    expect(frame.locator("#clear-memory")).to_be_visible()
+    expect(frame.locator("#archive-thread")).to_be_visible()
+    expect(frame.get_by_role("switch", name="Activity", exact=True)).to_be_visible()
+
     _open_host_thread(page, WEBSITE_THREAD_ID)
     expect(frame.locator(".thread-title")).to_have_text("website-redesign")
     expect(page).to_have_url(re.compile(rf"#chat/{WEBSITE_THREAD_ID}$"))
@@ -233,6 +250,9 @@ def desktop_smoke(page: Any) -> None:
     expect(page.locator("#panel-workspace-chat")).to_be_visible()
     expect(frame.locator(".thread-title")).to_have_text("website-redesign")
     expect(page).to_have_url(re.compile(rf"#chat/{WEBSITE_THREAD_ID}$"))
+    # Opening the thread acknowledges its activity asynchronously. Wait for
+    # that write before archiving, so the archived-list assertion sees it.
+    expect(website_nav.locator(".workspace-nav-unseen")).to_have_count(0)
     page.evaluate(
         f"""() => window.KernHost.api(
           "POST",
@@ -1321,7 +1341,8 @@ def _generate_thread_id() -> str:
 
 
 def _list_threads(
-    host_api: HostApi, *, archived: bool = False, scheduled: bool = False
+    host_api: HostApi, *, archived: bool = False, scheduled: bool = False,
+    spawned: bool = False,
 ) -> list[dict[str, Any]]:
     """Mirror the real backend's paged host-summary join.
 
@@ -1331,7 +1352,7 @@ def _list_threads(
     recorded = {} if scheduled else {
         thread_id: thread
         for thread_id, thread in AGENT_CHAT_THREADS.items()
-        if thread["archived"] == archived
+        if thread["archived"] == archived and bool(thread.get("spawned_by_thread_id")) == spawned
     }
     summaries = []
     seen_before: set[str] = set()
@@ -1357,6 +1378,7 @@ def _list_threads(
             **summary,
             "name": recorded[summary["thread_id"]]["name"],
             "archived": archived,
+            "spawned_by_thread_id": recorded[summary["thread_id"]].get("spawned_by_thread_id"),
             "schedule_id": None,
             "next_run_at": None,
             "has_session": True,

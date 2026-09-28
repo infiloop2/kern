@@ -65,6 +65,23 @@ class MemoryCredentials:
     def clear(self) -> None:
         self.record = None
 
+    def save_if_current(self, loaded: JSONObject, credential: JSONObject) -> bool:
+        if not self._is_current(loaded):
+            return False
+        self.save(credential)
+        return True
+
+    def clear_if_current(self, loaded: JSONObject) -> bool:
+        if not self._is_current(loaded):
+            return False
+        self.clear()
+        return True
+
+    def _is_current(self, loaded: JSONObject) -> bool:
+        return (self.record is not None
+                and self.record["account"]["id"] == loaded["account"]["id"]
+                and self.record["secret"] == loaded["secret"])
+
 
 
 class _ConfigView(dict[str, str]):

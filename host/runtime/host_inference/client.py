@@ -10,7 +10,8 @@ from typing import Any
 
 from host.constants import HOST_INFERENCE_SOCKET_PATH as DEFAULT_SOCKET_PATH
 from host.runtime.core import host_errors
-from host.runtime.host_inference.typesafe import DEFAULT_TIMEOUT_SECONDS as JEV_MAX_TIMEOUT_SECONDS
+from host.runtime.host_inference.providers import OPENAI_MAX_TIMEOUT_SECONDS, JEV_MAX_TIMEOUT_SECONDS
+from host.runtime.host_inference.openai import MAX_PROMPT_BYTES
 
 
 SOCKET_PATH = os.environ.get("KERN_HOST_INFERENCE_SOCKET", DEFAULT_SOCKET_PATH)
@@ -20,6 +21,10 @@ MAX_RESPONSE_BYTES = 64 * 1024
 
 class HostInferenceError(RuntimeError):
     """A bounded host-inference call did not produce a usable result."""
+
+    def __init__(self, message: str, *, reason: str | None = None) -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class _HostInferenceConnection(http.client.HTTPConnection):
@@ -53,7 +58,8 @@ def _request(
             "host_inference.client", exc, context={"path": path}, kind="unexpected_behavior"
         )
         raise HostInferenceError("Host inference request could not be encoded") from exc
-    connection = _HostInferenceConnection(timeout_seconds)
+    # Small fixed allowance for local dispatch and returning the provider result.
+    connection = _HostInferenceConnection(timeout_seconds + 0.1)
     try:
         connection.request(
             "POST", path, body=payload, headers={"Content-Type": "application/json"}
@@ -81,9 +87,13 @@ def _request(
         raise HostInferenceError("Host inference request failed") from exc
     finally:
         connection.close()
-    # Provider adapters already recorded the reason for a null result. Surface
-    # the failure to the caller without duplicating or relabeling that event.
+    # The service logs provider failures; disabled providers are expected.
+    # Surface the outcome without duplicating those diagnostics.
     if result is None:
+        if decoded.get("error") == "provider_disabled":
+            raise HostInferenceError("Host inference provider is disabled", reason="provider_disabled")
+        if decoded.get("error") == "timeout":
+            raise HostInferenceError("Host inference timed out") from TimeoutError("Provider timed out")
         raise HostInferenceError("Host inference returned no usable result")
     return result
 
@@ -93,17 +103,33 @@ def openai_text_completion(
     schema: dict[str, Any],
     schema_name: str,
     *,
-    purpose: str,
+    model: str,
+    instructions: str,
+    reasoning_effort: str,
+    max_output_tokens: int,
+    timeout_seconds: float,
 ) -> dict[str, Any]:
+    if (
+        isinstance(timeout_seconds, bool)
+        or not isinstance(timeout_seconds, (int, float))
+        or not 0.1 <= timeout_seconds <= OPENAI_MAX_TIMEOUT_SECONDS
+    ):
+        raise ValueError(f"text completion timeout_seconds must be between 0.1 and {OPENAI_MAX_TIMEOUT_SECONDS}")
+    if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+        raise HostInferenceError("Host inference input exceeds the size limit", reason="input_too_large")
     return _request(
         "/openai/text-completion",
         {
+            "model": model,
+            "instructions": instructions,
+            "reasoning_effort": reasoning_effort,
+            "max_output_tokens": max_output_tokens,
             "prompt": prompt,
             "schema": schema,
             "schema_name": schema_name,
-            "purpose": purpose,
+            "timeout_seconds": timeout_seconds,
         },
-        25.0,
+        float(timeout_seconds),
         MAX_REQUEST_BYTES,
     )
 

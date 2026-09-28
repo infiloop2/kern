@@ -54,6 +54,24 @@ def open_downloaded_video(
 
 
 @contextmanager
+def open_downloaded_image(
+    url: str,
+    *,
+    provider: str,
+    filename_stem: str,
+    map_failure: Callable[[WebRequestError], str],
+    timeout: int = 120,
+) -> Iterator[OpenedStreamingAsset]:
+    """Stream a completed image with the same size/type bounds as video."""
+    with _open_downloaded_media(
+        url, provider=provider, filename_stem=filename_stem, map_failure=map_failure,
+        kind="image", suffixes={"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"},
+        min_bytes=1, timeout=timeout,
+    ) as opened:
+        yield opened
+
+
+@contextmanager
 def open_downloaded_audio(
     url: str,
     *,

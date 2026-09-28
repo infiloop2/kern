@@ -85,7 +85,7 @@ STAGE_VIDEO_TOOL = {
     "name": "stage_video",
     "description": (
         "Stream an agent-workspace MP4 or MOV into the private Kern tools service "
-        "for Runway editing or an approval-gated Instagram Reel. Returns a short-lived, "
+        "for Runway or falAI generation/enhancement, or an approval-gated Instagram Reel. Returns a short-lived, "
         "tool-scoped video_asset_id; pass it directly to the consuming tool and never "
         "store it as durable app state."
     ),
@@ -99,7 +99,7 @@ STAGE_VIDEO_TOOL = {
             },
             "for_tool": {
                 "type": "string",
-                "enum": ["runway", "instagram"],
+                "enum": ["runway", "instagram", "fal_ai"],
                 "description": "Destination tool; staged ids cannot cross tools.",
             },
         },
@@ -110,9 +110,9 @@ STAGE_IMAGE_TOOL = {
     "name": "stage_image",
     "description": (
         "Stream an agent-workspace JPEG, PNG, or WebP into the private Kern tools "
-        "service for Runway, OpenAI Image Generation, or Instagram (JPEG only). Returns a short-lived, "
+        "service for Runway, falAI, OpenAI Image Generation, or Instagram (JPEG only). Returns a short-lived, "
         "tool-scoped image_asset_id to pass directly to runway_generate_video or "
-        "openai_images_generate_image or Instagram image publishing; never store it as durable app state."
+        "openai_images_generate_image, falAI generation/enhancement, or Instagram image publishing; never store it as durable app state."
     ),
     "inputSchema": {
         "type": "object",
@@ -124,9 +124,21 @@ STAGE_IMAGE_TOOL = {
             },
             "for_tool": {
                 "type": "string",
-                "enum": ["runway", "openai_images", "instagram"],
+                "enum": ["runway", "openai_images", "instagram", "fal_ai"],
                 "description": "Destination tool; staged ids cannot cross tools.",
             },
+        },
+        "additionalProperties": False,
+    },
+}
+STAGE_AUDIO_TOOL = {
+    "name": "stage_audio",
+    "description": "Stream a workspace MP3 or WAV into private tool storage for Runway or falAI audio references. Returns a temporary, tool-scoped audio_asset_id; pass it directly to the consuming action.",
+    "inputSchema": {
+        "type": "object", "required": ["path", "for_tool"],
+        "properties": {
+            "path": {"type": "string", "description": "MP3 or WAV Files path or absolute path under agent home."},
+            "for_tool": {"type": "string", "enum": ["runway", "fal_ai"], "description": "Destination tool; staged ids cannot cross tools."},
         },
         "additionalProperties": False,
     },
@@ -413,7 +425,7 @@ def _list_tools() -> list[dict[str, Any]]:
     """
     listed = [_mcp_declaration(tool) for tool in agent_tool_surface.TOOLS_SOCKET_TOOLS]
     listed.extend(_mcp_declaration(tool) for tool in agent_tool_surface.AGENT_NETWORK_TOOLS)
-    listed.extend((STAGE_IMAGE_TOOL, STAGE_VIDEO_TOOL))
+    listed.extend((STAGE_IMAGE_TOOL, STAGE_VIDEO_TOOL, STAGE_AUDIO_TOOL))
     listed.extend((SEARCH_CONVERSATION_HISTORY_TOOL, READ_THREAD_HISTORY_TOOL))
     listed.append(_mcp_declaration(agent_tool_surface.SEND_AGENT_MESSAGE_TOOL))
     listed.append(_mcp_declaration(agent_tool_surface.SPAWN_AGENT_TOOL))
@@ -431,20 +443,22 @@ def _stage_asset(arguments: dict[str, Any], *, kind: str) -> dict[str, Any]:
         raise RuntimeError(f"{action} path must be a non-empty string.")
     public_path, local_path = _workspace_local_path(path)
     allowed_tools = (
-        {"runway", "instagram"} if kind == "video" else {"runway", "openai_images", "instagram"}
+        {"runway", "fal_ai"} if kind == "audio" else
+        {"runway", "instagram", "fal_ai"} if kind == "video" else {"runway", "openai_images", "instagram", "fal_ai"}
     )
     if for_tool not in allowed_tools:
-        choices = "runway or instagram" if kind == "video" else "runway, openai_images, or instagram"
+        choices = ", ".join(sorted(allowed_tools))
         raise RuntimeError(f"{action} for_tool must be {choices}.")
     suffix = os.path.splitext(public_path)[1].lower()
     media_types = (
+        {".mp3": "audio/mpeg", ".wav": "audio/wav"} if kind == "audio" else
         {".mp4": "video/mp4", ".mov": "video/quicktime"}
         if kind == "video"
         else {".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png", ".webp": "image/webp"}
     )
     media_type = media_types.get(suffix)
     if media_type is None:
-        supported = "MP4 or MOV" if kind == "video" else "JPEG, PNG, or WebP"
+        supported = {"video": "MP4 or MOV", "image": "JPEG, PNG, or WebP", "audio": "MP3 or WAV"}[kind]
         raise RuntimeError(f"{action} accepts only {supported} files.")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
@@ -508,6 +522,10 @@ def _stage_video(arguments: dict[str, Any]) -> dict[str, Any]:
 
 def _stage_image(arguments: dict[str, Any]) -> dict[str, Any]:
     return _stage_asset(arguments, kind="image")
+
+
+def _stage_audio(arguments: dict[str, Any]) -> dict[str, Any]:
+    return _stage_asset(arguments, kind="audio")
 
 
 def _workspace_local_path(path: Any) -> tuple[str, str]:
@@ -623,10 +641,10 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
     try:
         if not isinstance(name, str):
             raise RuntimeError("tool name must be a string.")
-        if name in {"stage_image", "stage_video"}:
+        if name in {"stage_image", "stage_video", "stage_audio"}:
             if not isinstance(arguments, dict):
                 raise RuntimeError(f"{name} arguments must be an object.")
-            stage = _stage_image if name == "stage_image" else _stage_video
+            stage = {"stage_image": _stage_image, "stage_video": _stage_video, "stage_audio": _stage_audio}[name]
             return _tool_text(json.dumps(stage(arguments), separators=_COMPACT_JSON))
         forwarded = dict(arguments) if isinstance(arguments, dict) else {}
         socket_path = AGENT_NETWORK_SOCKET_PATH if name in NETWORK_TOOL_NAMES else SOCKET_PATH

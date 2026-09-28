@@ -59,6 +59,27 @@ class ToolAssetStoreTests(unittest.TestCase):
             with self.assertRaisesRegex(AssetError, "invalid or expired"):
                 store.describe("instagram", metadata.asset_id)
 
+    def test_audio_is_scoped_expiring_private_media(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = ToolAssetStore(Path(directory) / "assets")
+            for suffix, mime in (("mp3", "audio/mpeg"), ("wav", "audio/wav")):
+                metadata = store.stage(kind="audio", tool_id="fal_ai", filename="voice." + suffix,
+                    media_type=mime, size_bytes=512, source=io.BytesIO(b"a" * 512))
+                with store.open("fal_ai", metadata.asset_id) as source:
+                    self.assertEqual(source.read(), b"a" * 512)
+                with self.assertRaises(AssetError):
+                    store.describe("runway", metadata.asset_id)
+                with self.assertRaisesRegex(AssetError, "image or video"):
+                    store.create_asset_grant("fal_ai", metadata.asset_id)
+                with patch("host.runtime.tools.assets.time.time", return_value=metadata.expires_at + 1):
+                    with self.assertRaises(AssetError):
+                        store.describe("fal_ai", metadata.asset_id)
+            for filename, mime, size in (("voice.mp4", "audio/mpeg", 512), ("voice.mp3", "video/mp4", 512),
+                                         ("voice.mp3", "audio/mpeg", 511), ("voice.mp3", "audio/mpeg", 200_000_001)):
+                with self.subTest(filename=filename, mime=mime, size=size), self.assertRaises(AssetError):
+                    store.stage(kind="audio", tool_id="fal_ai", filename=filename, media_type=mime,
+                        size_bytes=size, source=io.BytesIO(b"a" * 512))
+
     def test_rejects_mismatched_type_and_short_body(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = ToolAssetStore(Path(directory) / "assets")
@@ -299,12 +320,14 @@ class ShimVideoStageTests(unittest.TestCase):
                 patch.dict("os.environ", {"HOME": directory}),
                 patch.object(tools_mcp_shim, "UnixHTTPConnection", return_value=connection),
             ):
-                for path in ("/workspace/videos/clip.mp4", str(video)):
-                    with self.subTest(path=path):
-                        result = tools_mcp_shim._stage_video(
-                            {"path": path, "for_tool": "runway"}
-                        )
-                        self.assertEqual(connection.body, b"x" * 512)
+                for tool in ("runway", "fal_ai"):
+                    for path in ("/workspace/videos/clip.mp4", str(video)):
+                        with self.subTest(path=path, tool=tool):
+                            result = tools_mcp_shim._stage_video(
+                                {"path": path, "for_tool": tool}
+                            )
+                            self.assertEqual(connection.headers["X-Kern-Tool"], tool)
+                            self.assertEqual(connection.body, b"x" * 512)
         self.assertEqual(result, {"video_asset_id": "opaque-id"})
         self.assertEqual(connection.body, b"x" * 512)
         self.assertEqual(connection.path, "/assets/video")
@@ -399,6 +422,27 @@ class ShimVideoStageTests(unittest.TestCase):
         self.assertEqual(connection.headers["X-Kern-Filename"], "frame.webp")
         self.assertNotIn(str(image), connection.headers.values())
 
+    def test_shim_audio_upload_and_destination_boundary(self) -> None:
+        from unittest.mock import MagicMock
+        with tempfile.TemporaryDirectory() as directory:
+            (Path(directory) / "voice.mp3").write_bytes(b"a" * 512)
+            connection = MagicMock()
+            connection.getresponse.return_value.status = 200
+            connection.getresponse.return_value.read.return_value = b'{"audio_asset_id":"audio-id"}'
+            seen = []
+            connection.request.side_effect = lambda method, path, **kw: seen.append((path, kw["headers"], kw["body"].read()))
+            with patch.dict("os.environ", {"HOME": directory}), patch.object(tools_mcp_shim, "UnixHTTPConnection", return_value=connection):
+                for tool in ("runway", "fal_ai"):
+                    self.assertEqual(tools_mcp_shim._stage_audio({"path": "/voice.mp3", "for_tool": tool}), {"audio_asset_id": "audio-id"})
+                    self.assertEqual(seen[-1][0], "/assets/audio")
+                    self.assertEqual(seen[-1][1]["X-Kern-Tool"], tool)
+                    self.assertEqual(seen[-1][1]["Content-Type"], "audio/mpeg")
+                    self.assertEqual(seen[-1][2], b"a" * 512)
+                for tool in ("instagram", "seedance", "openai_images"):
+                    with self.assertRaisesRegex(RuntimeError, "for_tool"):
+                        tools_mcp_shim._stage_audio({"path": "/voice.mp3", "for_tool": tool})
+                self.assertEqual(len(seen), 2)
+
     def test_shim_scopes_image_staging_to_supported_destinations(self) -> None:
         """An image may be staged for Runway, OpenAI image generation or Instagram and
         nothing else; the destination rides in a header the tools service
@@ -432,8 +476,10 @@ class ShimVideoStageTests(unittest.TestCase):
                     {"path": "/frame.png", "for_tool": "openai_images"}
                 )
                 self.assertEqual(connection.headers["X-Kern-Tool"], "openai_images")
+                tools_mcp_shim._stage_image({"path": "/frame.png", "for_tool": "fal_ai"})
+                self.assertEqual(connection.headers["X-Kern-Tool"], "fal_ai")
                 tools_mcp_shim._stage_image({"path": "/frame.png", "for_tool": "instagram"})
-                with self.assertRaisesRegex(RuntimeError, "runway, openai_images, or instagram"):
+                with self.assertRaisesRegex(RuntimeError, "fal_ai, instagram, openai_images, runway"):
                     tools_mcp_shim._stage_image(
                         {"path": "/frame.png", "for_tool": "gmail"}
                     )

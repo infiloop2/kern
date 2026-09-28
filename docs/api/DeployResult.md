@@ -63,8 +63,9 @@ port). Lima power results use the same shape plus `operation` and
 
 No result carries the admin password. Deploy and reconfigure accept only
 `--admin-password-sha256` (the SHA-256 hex digest of the operator's chosen
-password); the host stores only that hash, so neither the CLI, its output, nor
-the instance ever holds the cleartext.
+password). The provisioning commands and their results never contain the
+cleartext. The admin API receives the password transiently at login and stores
+only its hash.
 
 ## Power result
 
@@ -102,12 +103,12 @@ commands do not change those values.
 
 ## Secret handling
 
-Lifecycle results carry no secrets. The admin password is never handled by the
-CLI — deploy and reconfigure take only its SHA-256 digest through
-`--admin-password-sha256`, and the host stores only that hash — so no result
-ever contains the password. Tunnel tokens and SSH key material are likewise
-omitted from `operator_connections`. Each command prints its result to stdout
-rather than writing a file, so redirect it yourself (`> result.json`) if you
-want to keep it. Reaching the admin UI still requires credentials the result
-does not contain: with SSH access, the matching private SSH key; with a
-Cloudflare Tunnel, the Kern admin password.
+Lifecycle results carry no secrets. Provisioning commands accept only the
+password digest through `--admin-password-sha256`, so their results never
+contain the password. The separate `generate_password` utility prints a newly
+generated password and its digest for the operator to store securely. Tunnel
+tokens and SSH key material are likewise omitted from `operator_connections`.
+Each command prints its result to stdout rather than writing a file, so redirect
+it yourself (`> result.json`) if you want to keep it. Reaching the admin UI
+still requires credentials the result does not contain: with SSH access, the
+matching private SSH key; with a Cloudflare Tunnel, the Kern admin password.

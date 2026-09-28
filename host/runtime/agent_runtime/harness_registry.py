@@ -29,7 +29,6 @@ class ModuleHarnessAdapter:
     runtime_type: str
     oauth_key: str | None
     steerable: bool
-    refresh_before_turn: bool
     collect_login_before_probe: bool
     transport_errors: tuple[type[Exception], ...]
     module: Any
@@ -90,7 +89,7 @@ class ModuleHarnessAdapter:
 
 HARNESSES: dict[str, HarnessAdapter] = {
     "codex": ModuleHarnessAdapter(
-        "codex", "codex", True, False, False,
+        "codex", "codex", True, False,
         (codex_app_server.CodexAppServerError,),
         codex_app_server,
         lambda force: (
@@ -106,7 +105,7 @@ HARNESSES: dict[str, HarnessAdapter] = {
         ),
     ),
     "codex-2": ModuleHarnessAdapter(
-        "codex-2", "codex-2", True, False, False,
+        "codex-2", "codex-2", True, False,
         (codex_app_server.CodexAppServerError,),
         codex_app_server,
         lambda force: codex_app_server.account_status(
@@ -123,7 +122,7 @@ HARNESSES: dict[str, HarnessAdapter] = {
         ),
     ),
     "codex-3": ModuleHarnessAdapter(
-        "codex-3", "codex-3", True, False, False,
+        "codex-3", "codex-3", True, False,
         (codex_app_server.CodexAppServerError,),
         codex_app_server,
         lambda force: codex_app_server.account_status(
@@ -140,7 +139,7 @@ HARNESSES: dict[str, HarnessAdapter] = {
         ),
     ),
     "claude_code": ModuleHarnessAdapter(
-        "claude_code", "claude", True, True, False,
+        "claude_code", "claude", True, False,
         (claude_code.ClaudeCodeError,),
         claude_code,
         lambda force: claude_code.account_status(),
@@ -152,7 +151,7 @@ HARNESSES: dict[str, HarnessAdapter] = {
         ),
     ),
     "grok": ModuleHarnessAdapter(
-        "grok", "grok", True, False, True,
+        "grok", "grok", True, True,
         (grok_agent.GrokAgentError,),
         grok_agent,
         lambda force: (
@@ -169,7 +168,7 @@ HARNESSES: dict[str, HarnessAdapter] = {
         lambda: grok_agent.collect_login_completion(),
     ),
     "grok-2": ModuleHarnessAdapter(
-        "grok-2", "grok-2", True, False, True,
+        "grok-2", "grok-2", True, True,
         (grok_agent.GrokAgentError,),
         grok_agent,
         lambda force: grok_agent.account_status(
@@ -187,7 +186,7 @@ HARNESSES: dict[str, HarnessAdapter] = {
         lambda: grok_agent.collect_login_completion("grok-2"),
     ),
     "hermes": ModuleHarnessAdapter(
-        "hermes", None, False, False, False,
+        "hermes", None, False, False,
         (hermes_agent.HermesAgentError,),
         hermes_agent,
         lambda force: hermes_agent.account_status(),
@@ -199,7 +198,7 @@ HARNESSES: dict[str, HarnessAdapter] = {
         ),
     ),
     "script": ModuleHarnessAdapter(
-        "script", None, False, False, False,
+        "script", None, False, False,
         (script_runner.ScriptRunError,),
         script_runner,
         lambda force: script_runner.account_status(),

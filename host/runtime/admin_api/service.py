@@ -48,6 +48,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from host.config import AGENT_RUNTIMES, ConfigError, parse_network_controls
 from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES, PROXY_PORT
+from host.runtime.admin_api import browser as browser_admin
 from host.runtime.admin_api import xai_video_storage
 from host.runtime.admin_api.request_server import BoundedThreadingHTTPServer, MAX_CONCURRENT_REQUESTS
 from host.network_integrations.bedrock.manifest import SUPPORTED_REGIONS as BEDROCK_REGIONS
@@ -58,6 +59,7 @@ from host.session_options import session_config_error
 # workspace_admin_api imports this module back to dispatch through route().
 # The cycle is safe with plain module imports: each side binds the module
 # object and reads its attributes only at request time, never during import.
+from host.runtime.admin_api import auto_approvals
 from host.runtime.admin_api import approvals as approvals_admin_api
 from host.runtime.admin_api import admin_auth, admin_passkeys, workspace_api as workspace_admin_api, workspace_proxy, github_credential, github_repo_audit, tools_client as tools_admin_api, upgrade_check
 from host.runtime.agent_runtime import (
@@ -144,6 +146,7 @@ from host.runtime.admin_api.threads import (
     list_threads,
     send_thread_message,
     stop_thread,
+    sweep_archived_codex_sessions,
     thread_route,
 )
 from host.runtime.core.state import (
@@ -192,6 +195,7 @@ UI_ASSETS = {
     # The page the operator registers as the OAuth redirect URI for tool
     # connect flows; the SPA reads the code/state query parameters on load.
     "/oauth/callback": (ADMIN_UI_DIR / "index.html", "text/html; charset=utf-8"),
+    "/browser.html": (ADMIN_UI_DIR / "browser.html", "text/html; charset=utf-8"),
     "/admin_ui.css": (ADMIN_UI_DIR / "admin_ui.css", "text/css; charset=utf-8"),
     "/manifest.webmanifest": (ADMIN_UI_DIR / "manifest.webmanifest", "application/manifest+json"),
     "/service-worker.js": (ADMIN_UI_DIR / "service-worker.js", "application/javascript; charset=utf-8"),
@@ -286,6 +290,7 @@ THREAD_HANDOFF_ACTIVITY_DETAIL_LIMIT = 1_000
 THREAD_HANDOFF_ACTIVITY_OUTPUT_LIMIT = 8_000
 THREAD_HANDOFF_ACTIVITY_EVENT_CHARACTER_LIMIT = 8_000
 MAINTENANCE_INTERVAL_SECONDS = 3600  # scheduled state cleanup cadence (not per-request)
+ARCHIVED_CODEX_SWEEP_INTERVAL_SECONDS = 24 * 3600
 THREAD_EVENT_MESSAGE_BYTES_LIMIT = 200_000
 # The in-thread boundary text. Retained events remain available to audit and
 # history APIs, while Chat treats this marker as the new visible beginning.
@@ -575,6 +580,18 @@ class Handler(BaseHTTPRequestHandler):
     def _handle_login(self) -> None:
         # The HTTP adapter parses the bounded request; admin_auth owns password
         # verification, throttling, factor-two policy, and every auth cookie.
+        # JSON is not a CORS-safelisted content type. Requiring it before any
+        # password/throttle work prevents another site from spending the
+        # operator's IP-keyed attempts with a no-cors text/plain JSON body.
+        content_types = self.headers.get_all("Content-Type") or []
+        if (
+            len(content_types) != 1
+            or content_types[0].split(";", 1)[0].strip().lower() != "application/json"
+        ):
+            raise ApiError(
+                HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                "admin login requires application/json",
+            )
         client_key = self._client_key()
 
         def password_loader() -> str | None:
@@ -1137,6 +1154,12 @@ _WORKSPACE_PROXY_SUBTREES = ("getting-started", "chat", "web-apps", "memory", "s
 # is a 404, and a method with no entry for an otherwise known path is a 404
 # too, never a 405.
 _ROUTES: tuple[_Route, ...] = (
+    *(
+        _Route("POST", "/v1/browser/" + operation,
+               lambda request: browser_admin.control(request.path.rsplit("/", 1)[-1], request.body),
+               operator_only=True, query_keys=frozenset(), query_label="browser")
+        for operation in ("list", "create", "check", "open", "frame", "input", "save", "cancel", "disconnect")
+    ),
     _Route("GET", "/v1/dictation/ready", lambda request: transcription_client.readiness(),
            operator_only=True, query_keys=frozenset(), query_label="dictation"),
     _Route("POST", "/v1/dictation/transcribe", lambda request: transcription_client.transcribe(request.body),
@@ -1202,6 +1225,10 @@ _ROUTES: tuple[_Route, ...] = (
         query_keys=frozenset({"before", "limit"}),
         query_label="event",
     ),
+    _Route("GET", "/v1/auto-approvals", lambda request: auto_approvals.page(request.query),
+           operator_only=True, query_keys=frozenset({"page", "outcome"}), query_label="auto-approval history"),
+    _Route("PUT", "/v1/auto-approvals/policy", lambda request: auto_approvals.save_policy(request.body), operator_only=True),
+    _Route("DELETE", "/v1/auto-approvals/policy", lambda request: auto_approvals.delete_policy(request.body), operator_only=True),
     _Route(
         "GET", "/v1/approvals",
         lambda request: approvals_admin_api.list_approvals(request.query),
@@ -1672,9 +1699,14 @@ def prune_state() -> None:
 
 def maintenance_loop() -> None:
     """Prune bounded state on a schedule, never on the request path."""
+    next_archived_sweep = 0.0
     while True:
         try:
             prune_state()
+            now = time.monotonic()
+            if now >= next_archived_sweep:
+                next_archived_sweep = now + ARCHIVED_CODEX_SWEEP_INTERVAL_SECONDS
+                sweep_archived_codex_sessions()
         except Exception as exc:
             host_errors.report_unexpected("admin_api.maintenance", exc)
         time.sleep(MAINTENANCE_INTERVAL_SECONDS)
@@ -1961,6 +1993,7 @@ def main() -> int:
     # admin service only forwards operator operations to it.
     orchestrator.start_background_loops()
     threading.Thread(target=maintenance_loop, daemon=True).start()
+    threading.Thread(target=auto_approvals.run, name="auto-approvals", daemon=True).start()
     threading.Thread(target=embedding_index_loop, daemon=True).start()
     threading.Thread(target=upgrade_check.poll, daemon=True).start()
     threading.Thread(target=workspace_httpd.serve_forever, daemon=True).start()

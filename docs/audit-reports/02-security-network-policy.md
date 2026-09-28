@@ -10,11 +10,11 @@ allow?
 
 ## Reviewed commits
 
-Latest reviewed commit: `6151eea5abb61590684c4cf667ae6f619d705231`.
+Latest reviewed commit: `a597a8d063d735d11c30d1f2b2f6b66e7479ceac`.
 
 | Commit | Reviewed by |
 | --- | --- |
-| `6151eea5abb61590684c4cf667ae6f619d705231` | gpt-5.6-sol; Claude Opus 5 |
+| `a597a8d063d735d11c30d1f2b2f6b66e7479ceac` | GPT-6 (Codex) |
 
 ## Findings
 
@@ -112,98 +112,85 @@ below names it.
 
 ## Collaborative review
 
-### `6151eea5abb61590684c4cf667ae6f619d705231`
+### `a597a8d063d735d11c30d1f2b2f6b66e7479ceac`
 
-Reviewed by: gpt-5.6-sol; Claude Opus 5
+Reviewed by: GPT-6 (Codex)
 
-Methodology: repository-level, pre-DNS-to-upstream trace of the proxy protocol,
-typed integration registry, policy matcher, all integration guards/hooks,
-credential state, WebSocket inspection, and nftables backstop. Parser and
-guard edge cases were checked with focused unit tests and direct pure-function
-calls; no live internet destination, deployed firewall, or extended fuzzing
-was used. A second pass read `network_proxy/service.py` end to end as a single
-connection lifecycle rather than per-guard, which is what surfaced the two
-defects that live in the gap between what the policy layer inspects and what
-the socket layer actually transmits (NET-004, NET-005), and traced each guard's
-pinned value back to what it binds rather than only how it compares (NET-006).
-Guard behaviour was confirmed by calling `request_denied` directly with
-constructed header sets, including the duplicate `Content-Encoding` form that
-independently reproduced NET-002.
+Methodology: traced the production integration registry, proxy parser,
+policy decision, credential rewrite, and forwarding order at the pinned current
+main commit. Ran the complete credential-free Python suite, including the
+proxy's isolated HTTP/TLS/WebSocket tests and integration-specific negative
+cases. No real provider request or policy-bypass traffic was sent.
 
 #### What was reviewed
 
-- `host/runtime/network_proxy/service.py`: CONNECT/TLS interposition, request
-  head/body/chunk parsing, host/authority agreement, body and connection
-  bounds, deny ordering, public-address resolution, upstream TLS/SNI,
-  credential/header rewrites, single-request forwarding, response metering,
-  WebSocket frame inspection, and bounded handler admission.
-- The integration registry/manifests and every guard for OpenAI, Claude,
-  Bedrock, GitHub, Python packages, npm packages, and custom domains,
-  including GitHub credential injection/push quarantine and the Azure Actions
-  download exception.
-- `host/config.py`, `host/runtime/core/network_policy.py`, the shared outbound
-  parameter guard, provider/GitHub credential and account anchors, policy/
-  decision persistence, database grants, and Admin UI typed controls.
-- Bootstrap nftables rules and deploy verification, plus parser, policy,
-  provider, GitHub, package, parameter-guard, proxy, and migration tests.
-  Direct calls reproduced both duplicate-encoding bypasses and an allowed
-  attacker-controlled Azure Blob account without making network traffic.
+- `host/network_integrations/{registry,runtime,base}.py`, config/manifest
+  parsing, and all eight guards: OpenAI, Claude, xAI, Bedrock, GitHub,
+  Python packages, npm packages, and custom domains.
+- `host/runtime/network_proxy/service.py` and
+  `host/runtime/core/network_policy.py`: CONNECT ownership, strict inner
+  request targets, semantic headers, body framing and decompression, policy
+  matching, public-address resolution, verified upstream TLS, response
+  framing, WebSocket upgrade/message handling, logging, and capacity bounds.
+- OpenAI bearer/account binding and cached-search controls; Claude provider
+  attestation, refresh cache, bootstrap reads and hosted-tool controls; xAI
+  principal binding and hosted-tool restrictions; Bedrock region/model
+  selection and dummy-to-real SigV4 rewriting.
+- GitHub repository rules, REST administrative exclusions, GraphQL/LFS
+  restrictions, bounded Actions storage hosts, credential injection, and
+  `.github` push quarantine/approval with exact old-tip leases. Also checked
+  package name/download rules, the narrow npm exception, and custom domains.
 
-#### Coverage and confidence
+#### Outcome and coverage
 
-- Checklist 1: manifest ids, denial codes, apex ownership/disjointness,
-  strict config parsing, disabled integration behavior, and custom-versus-
-  managed precedence were enumerated. NET-003 is the one over-broad owned
-  surface: signature syntax does not establish GitHub provenance.
-- Checklists 2–3: CONNECT/Host/SNI/destination agreement, HTTPS/443-only
-  routing, absolute/origin forms, header/body grammar, CL/TE handling, path
-  normalization, wildcard/apex precedence, methods, queries, encodings, and
-  parameter guards were traced. CL/TE is normalized before forwarding, but
-  duplicate content semantics are not, yielding NET-002. The request-target
-  itself is likewise not normalized before forwarding: policy, the parameter
-  guard, and the event log all read the `urlsplit`-parsed path and query while
-  the raw target goes on the wire, so fragment and `//authority` bytes are
-  inspected by nothing (NET-005). Worth recording as a bounding fact for that
-  finding: arbitrary agent-chosen request headers on the same allowed request
-  are also forwarded verbatim and absent from `network_events`
-  (`send_http_request` strips only six hop-by-hop names), so NET-005 is a
-  guard-fidelity defect, not a new egress capability.
-- Checklists 4–5: policy/credential/database/logging failures deny before
-  certificate/DNS/upstream work; all resolved addresses must be public and
-  the chosen address is pinned through verified TLS. The proxy does not
-  follow redirects. Mixed-address, mapped/private ranges, resolution and
-  certificate failures were covered in code/tests, not against live DNS.
-- Checklists 6–7: every provider/package/GitHub guard and supported body
-  decoder was reviewed, including account anchors, server tools, Bedrock
-  signing/metering, repo-scoped writes, `.github` approval, and package-name/
-  download restrictions. Canonical gzip and malformed/oversized bodies fail
-  closed; duplicate content headers are NET-002.
-- Checklist 8: WebSocket handshake headers, extension removal, masking, RSV,
-  fragmentation, control frames, message caps, close behavior, and which
-  integrations require message inspection were traced. Opaque tunneling
-  begins where no message-dependent guard applies — and a second pass
-  established that entering that mode is decided by the *client's* request
-  headers alone, with the upstream's `101` never checked, which is NET-004 and
-  the most serious defect on this axis. `ws_message_guard` returns `None` for
-  every integration except OpenAI's two hosted domains, so the opaque path is
-  reachable on custom, Claude, Bedrock, GitHub, PyPI, and npm hosts. The
-  frame-level guard itself (masking required, RSV/extensions denied,
-  fragmentation and per-message caps) is sound where it runs; the defect is
-  which connections reach it.
-- Checklist 9: provider, Bedrock, and GitHub secrets are stripped/injected or
-  re-signed after policy approval and are not returned to the agent.
-  Operator-anchored provider pins now keep NET-001 fixed; mutable credential/
-  push-gate state was included in race and failure review. Tracing what each
-  pinned value binds — rather than only that it is compared correctly —
-  distinguishes the two provider guards: Claude hashes and pins the bearer
-  credential itself, while OpenAI pins only the advisory `chatgpt-account-id`
-  routing header and leaves `Authorization` untouched on those hosts
-  (NET-006). GitHub and Bedrock are the only integrations registering
-  `rewrite_request_headers`.
-- Checklists 10–11: connection/body caps, slow reads, cert/quarantine errors,
-  policy replacement, restart fail-closed behavior, uid-scoped DNS/egress,
-  direct-loopback denial, and preview-port rules were reviewed. Durable and
-  aggregate resource failures are recorded under axis 08. No live proxy fuzz,
-  load test, DNS-rebinding service, or deployed nftables probe was run, so
-  confidence is high for deterministic guard logic and medium for unusual
-  upstream/parser interpretations beyond the reproduced duplicate-header case.
+No materially new policy bypass was confirmed. Existing NET findings were
+left unchanged. The source still contains the relevant remediations: strict
+origin-form targets, duplicate semantic-header rejection, explicit WebSocket
+opt-in with verified `101` and frame inspection, and credential/account pins.
+
+- Checklist 1: reviewed registry uniqueness, owned domains, disabled entries,
+  typed configuration and failure on invalid/unavailable policy. Broad custom
+  wildcards do not take ownership of managed domains; xAI is included even
+  though the older checklist does not name it.
+- Checklists 2–4: traced raw authority/target/header/body parsing through
+  decision and forwarding, and inspected malformed/pipelined/duplicate-header
+  negative tests. Denied hosts are rejected before DNS; request-level
+  decisions precede upstream connection and credential injection. TLS
+  inspection necessarily follows CONNECT host admission. Provider identity
+  attestation is a deliberate bounded guard operation, not payload forwarding.
+- Checklist 5: all DNS answers are checked for public addresses, then the
+  selected address is connected directly while preserving certificate
+  hostname/SNI verification. Redirect responses return to the caller; the
+  proxy does not follow them. Local fixtures cover address and TLS failures;
+  no public DNS-rebinding or external-ingress trial was run.
+- Checklists 6–7: exercised integration guard tests for pins, hosted tools,
+  remote MCP, fixed route/region identity, repository scope, and decoded
+  parameters. Gzip/zlib are bounded; unsupported or invalid encodings fail
+  body inspection. Source handling of JSON, nested declarations and replayed
+  history was inspected. Unknown future provider parser/tool semantics and
+  duplicate-JSON-key interpretation were not verified against live providers.
+- Checklist 8: reviewed handshake response verification, masked frames,
+  control/fragment rules, RSV rejection, pipelined initial data, message caps,
+  and explicit integration opt-in. Existing WebSocket regressions ran in the
+  full suite; arbitrary real-world WebSocket servers were not exercised.
+- Checklist 9: reviewed operator-owned account anchors, provider attestation,
+  credential stripping/injection, Bedrock replacement rechecks, quarantine
+  ownership, and secret-free denial records. No credential was printed or
+  tested against a third-party account.
+- Checklist 10: source and test coverage includes admission/body budgets,
+  read deadlines, failures while loading/logging policy, malformed bodies,
+  TLS errors, and push-gate failures. Sustained floods, real database/proxy
+  restarts, certificate-cache disk exhaustion, and concurrent live policy
+  replacement were not run.
+- Checklist 11: inspected generated nftables and deployment assertions for
+  agent DNS/egress denial, proxy access, preview isolation, and established
+  flows. Actual per-uid and post-reboot probes require a disposable deployed
+  host and remain unperformed in this sweep.
+
+Custom-domain header/body disclosure follows the operator's configured rule;
+this audit does not claim those bytes are content-scanned. Registry/CDN and
+provider-returned URL trust also remain explicit integration contracts. The
+parameter guard is a heuristic, not a proof against every possible encoding.
+The baseline suite passed 2,978 tests (608 database-dependent skips). Confidence
+is high in the exercised local decisions and lower in live deployment and
+provider behavior outside the fixtures.

@@ -39,8 +39,10 @@ fail closed. nftables separately ensures that only `cloudflared` can deliver a
 request carrying the trusted forwarding headers to this listener.
 
 The database hostname loader is lazy: classification never calls it for
-`SSH_FORWARD`. SSH key plus admin password therefore remains a recovery path
-when Postgres or tunnel configuration is unavailable.
+`SSH_FORWARD`. Transport classification for SSH forwarding therefore remains available
+without Postgres or tunnel configuration. Password verification and ordinary
+stateful routes still need their respective stored state; this is not a
+guarantee of full API operation during a database outage.
 
 ## Auth policy ownership
 
@@ -89,7 +91,15 @@ is then required before the same private mint can be reached.
 | `GET /v1/login/status` | Yes | `404` without a database read | Returns only `{"passkey_configured": bool}` with `no-store` |
 | `GET /v1/admin-passkeys` | No | `404` | Reports enrollment/setup state |
 | Passkey registration routes | No | `404` | Available to an authenticated session |
+| `GET`/`HEAD /tool-media/<token>` | Yes; temporary media capability | `404` | Streams only the staged asset authorized by the random, expiring capability |
 | Every other admin API route | No | Same cookie + CSRF session gate | Same cookie + CSRF session gate |
+
+`POST /v1/login` requires exactly one `Content-Type: application/json` header
+(parameters such as `charset=UTF-8` are allowed). Missing, duplicate, and other
+media types receive `415` before password verification or throttle accounting.
+This excludes browser form and `no-cors` POSTs; cross-origin JSON requests need
+a CORS preflight, which the admin server does not allow. Otherwise a third-party
+page could spend the visiting operator's login attempts with wrong passwords.
 
 `POST /v1/login/passkey` runs before session authentication because it is the
 operation that finishes authentication and mints that session. It still
@@ -169,11 +179,15 @@ only:
 
 | Method and path | Workspace capability |
 | --- | --- |
+| `GET /v1/agent-runtime/status` | Read runtime activation for Workspace configuration |
 | `GET /v1/threads` | List host threads, optionally filtered by a product-owned id prefix |
 | `GET /v1/threads/:thread_id` | Read one direct thread id |
 | `POST /v1/threads/:thread_id/messages` | Send or steer one direct thread id |
 | `POST /v1/threads/:thread_id/stop` | Stop one direct thread id |
 | `GET /v1/threads/:thread_id/events` | Read events for one direct thread id |
+| `POST /v1/threads/:thread_id/clear-memory` | Clear working context while idle, preserving retained history |
+| `POST /v1/conversation-history/search` | Search bounded retained message excerpts |
+| `POST /v1/conversation-history/read` | Read a bounded chronological history page |
 
 Thread ids pass through unchanged. Chat and Web Apps choose disjoint direct ids
 (`thread-N` and `app-N`) and join/filter them inside the Workspace backend; the admin
@@ -189,7 +203,7 @@ it to the Workspace socket.
 
 ## Operator-facing route policy
 
-The table below is the complete authentication policy map for the
+The table below groups the authentication policy for the
 operator-facing listener. The canonical request and response schemas remain in
 the [Admin API reference](../api/AdminAPI.md).
 
@@ -204,11 +218,13 @@ the [Admin API reference](../api/AdminAPI.md).
 | `GET /v1/health` | Session + CSRF | No unauthenticated health exception on the admin listener |
 | `GET /v1/agent-runtime/{status,account}`, runtime refresh, OAuth login/completion, Bedrock credential, and linked-account reset routes | Session + CSRF | Normal shared handler on both operator paths |
 | `GET /v1/threads`, `/v1/threads/<id>`, thread message/stop/event routes, and `GET /v1/events` | Session + CSRF | Operator sees the host-wide thread namespace |
-| `GET\|POST\|PUT\|DELETE /v1/workspace/{chat,web-apps}/...` | Session + CSRF | Proxy targets only the fixed Workspace backend and adds a fixed route prefix without forwarding credentials |
+| `GET\|POST\|PUT\|DELETE /v1/workspace/{chat,web-apps,memory,schedules}/...` | Session + CSRF | Proxy targets only the fixed Workspace backend and adds a fixed route prefix without forwarding credentials |
 | `GET /v1/agent-files`, file read/content/download/upload routes, and `GET /v1/agent-processes` | Session + CSRF | Content, download, and upload use bounded streaming handlers after authentication |
 | `GET\|PUT /v1/network/policy`, `GET /v1/network/events`, and GitHub credential/audit/pending-push routes under `/v1/network-tools/` | Session + CSRF | Method-specific mutation validation and root-helper boundaries still apply |
 | Tool catalog/config/enablement/OAuth/approval routes and tool events under `/v1/tools` | Session + CSRF | Tool-specific authorization and approval state run after operator authentication |
-| `GET /v1/host-diagnostics[/<seq>]` and `POST /v1/host-runtime/reboot` | Session + CSRF | Diagnostic read or fixed privileged helper after authentication |
+| `GET /v1/host-diagnostics[/<id>]` and `POST /v1/host-runtime/reboot` | Session + CSRF | Diagnostic read or fixed privileged helper after authentication |
+| `GET`/`HEAD /tool-media/<token>` | No operator session; expiring media capability | Configured public HTTPS only; bounded approved media, no-cache, no general file access |
+| Dictation, analytics, swarm, Host AI provider settings, and tool usage routes | Session + CSRF | Operator-only; no Workspace socket access |
 | Any unlisted method/path | Not dispatched | `404`; route prefixes do not confer access by themselves |
 
 This grouping is unchanged for external operator access. Transport-specific

@@ -1,19 +1,23 @@
 # Agent provider lifecycle
 
-How a Codex, Claude Code, or Hermes runtime moves between statuses, which
+How a Codex, Claude Code, Grok, or Hermes runtime moves between statuses, which
 refreshes run when, how a provider account becomes anchored and pinned, and
 what each operator action changes. Command-level provider interfaces live in
-[Runtime harness dependencies](harness-dependencies.md); the proxy guards that
+[Runtime harness dependencies](harness-dependencies.md), with Grok-specific
+login, probing, and ACP details in [the xAI integration](xai-integration.md); the proxy guards that
 enforce the pins live in [Network controls](network-controls.md).
 
 ## Runtimes, statuses, and where state lives
 
-Each runtime carries one provider status. Status values are `deactivated`, `loading`,
-`awaiting_login`, `active`, or `error`; `awaiting_login` applies only to the
-OAuth providers, while enabled Bedrock is `awaiting_login` or `active`.
+Each runtime carries one provider status. Status values are `deactivated`,
+`loading`, `awaiting_login`, `active`, or `error`; `awaiting_login` means an
+OAuth login is needed or enabled Bedrock lacks a connected credential. The
+schedule-only `script` runtime has no provider credential or health probe. Startup
+initializes it to `active` synchronously before admitting turns.
 
-- **Status** is derived provider health, cached in orchestrator process memory. A fresh
-  process reports `loading` until its first poll; nothing persists it.
+- **Status** is cached in orchestrator process memory. Managed runtimes report
+  `loading` until their first provider poll; nothing persists it. The providerless
+  script runtime is initialized once and excluded from these polls.
 - **The anchor** is the operator-approved provider account id, stored in the
   database. It is captured only through a completed operator login, is
   immutable afterwards, and outlives session expiry and deactivation until an
@@ -121,7 +125,7 @@ private in-memory phases `STARTING`, `RUNNING`, `FINISHING`, and `CLOSED`:
    and flush for Claude Code, and after the Hermes stdin prompt is fully
    written. A second message during STARTING receives a retryable `409`.
 3. RUNNING accepts provider events and, for Codex and Claude, synchronous
-   steering. A provider rejection in this phase is a terminal transport
+   steering (also supported by Grok through its ACP adapter). A provider rejection in this phase is a terminal transport
    failure: Kern records `thread.error` and finalizes the execution instead of
    treating it as incomplete startup.
 4. Completion, failure, deactivation, and Stop first finalize the database
@@ -164,6 +168,58 @@ before the visible user message. This is deliberately a lossy provider
 handoff: older retained events may be omitted and the old provider's hidden
 context and cache reads cannot carry across.
 
+## Automatic Codex session rotation
+
+After a successful turn, Kern measures the current Codex session's JSONL
+rollout. At 100 MiB or more (`SESSION_ROLLOUT_MAX_BYTES`), it clears that run's
+exact provider-session mapping and asks Codex to delete the retired session
+and its native descendants. This applies to all three Codex accounts and to
+Chat, App, and scheduled threads. The existing FINISHING fence blocks another
+turn until rotation and process teardown finish; stopped or failed turns do
+not trigger rotation.
+
+The Kern thread, schedule, messages, activity, self-memory, and model settings
+remain. The next ordinary message or scheduled firing starts a fresh provider
+session through the existing bounded history handoff (100k conversation and
+150k activity characters, respecting the clear-context boundary), with the
+usual memory recall. There is no additional model call or generated summary.
+
+Measurement and deletion use the existing agent-owned app-server transport;
+the admin service gains no filesystem access. Kern commits the cleared mapping
+before deletion, so an interrupted or partially failed deletion cannot leave
+the next firing resuming a retired session. Measurement or detach failures
+leave the session alone. Deletion failures are host diagnostics and may leave
+orphaned provider data; they do not fail completed work or create a retry queue.
+
+This is a soft per-session limit, checked only after successful turns, not a
+whole-directory quota. One turn may exceed the limit. Codex owns deletion of
+its metadata; Kern never edits or truncates its databases directly.
+
+### Daily archived-chat sweep
+
+The admin maintenance loop also sweeps all archived Chats at startup and every
+24 hours thereafter. There is no age or size cutoff. For each archived Chat
+with an idle Codex mapping, it rechecks archive state, skips live executions
+(including FINISHING), detaches the mapping, and deletes that Codex session
+through the same supported API. All three Codex accounts are covered, including
+archived spawned Chats. Apps and scheduled threads are not Chat archive entries
+and are outside this sweep.
+
+The sweep preserves the archived Chat, its name, Kern history, self-memory,
+settings, and clear-context boundary. It adds no memory-cleared event. Restoring
+the Chat keeps the existing UX: its next message automatically receives retained
+history and memory through the normal handoff. A concurrent restore before
+detach makes the sweep skip that Chat; a restore after detach safely uses a new
+provider session. Provider deletion happens outside the database/send locks.
+
+This is fixed host maintenance, with no model call or user-managed schedule.
+A provider startup failure preserves the mappings. A deletion failure is
+reported in host diagnostics and ends that account's pass; already detached
+sessions stay detached so partial deletion cannot break the next message.
+Unprocessed mappings are considered by the next daily sweep. Unmapped orphaned
+sessions, unarchived inactive Chats, logs, generated images, and SQLite allocated
+space remain outside these policies.
+
 ## Refresh triggers
 
 Every trigger funnels into the same provider-connection refresh:
@@ -176,7 +232,6 @@ Every trigger funnels into the same provider-connection refresh:
 | Login completion | Claude code submission refreshes directly; Codex device-login completion is observed by the next poll. |
 | Credential connect | `POST /v1/agent-runtime/bedrock-credentials` synchronously validates STS identity, atomically stores only a successful key and its metadata, then locally refreshes enabled Bedrock runtimes. |
 | Account reset | OAuth runtimes use `POST /v1/agent-runtime/reset-linked-account`; Bedrock uses `DELETE /v1/agent-runtime/bedrock-credentials`. |
-| Turn start | Claude Code only, in the turn thread before each turn's process spawns (see below). |
 
 ## The refresh pipeline
 
@@ -287,7 +342,7 @@ starts re-enter the refresh. An explicit operator refresh bypasses this memory:
   five-minute recheck, so infrastructure failures recover on the next
   scheduled poll without a five-second retry loop.
 - A **fresh `active` verdict** (with its usage snapshot) is reused until it
-  expires, so Claude credential convergence at turn start is normally memory-only.
+  expires.
 - **Claude attestations** are memoized per token hash: a token's attested
   identity never changes, so one successful profile fetch answers every later
   recheck (including a runtime parked in account-mismatch `error`).
@@ -318,8 +373,8 @@ CLI owns. The differences, step by step:
   allowed request. Disabling is a soft product state and leaves the row intact.
   Connecting another key and region validates them from scratch and atomically
   replaces the connection and metadata.
-- **No per-turn convergence.** Static keys never rotate, so like Codex the
-  cached status decides at admission; there is no pre-turn refresh.
+- **No per-turn convergence.** Like every runtime, the cached status decides
+  at admission; there is no pre-turn refresh.
 - **Identity is checked at submission.** STS proves the key pair; a rejection
   returns directly from the credential request with no database change.
   `bedrock:InvokeModel*` and model access cannot be proven without a billable,
@@ -342,19 +397,18 @@ existing host boundary intact: neither the admin service nor the agent gains
 internet access, the agent-facing proxy exposes no STS route, and the
 plaintext never touches disk.
 
-## Claude credential convergence at turn start
+## No refresh at turn start
 
-Admission already requires `active`. Before a Claude process spawns, its turn
-worker invokes the normal refresh to converge local credential metadata that
-the CLI may have rotated. Verdict memory normally makes this local; when the
-token did change, the refresh detects its new hash, attests it, and updates the
-stored metadata. Request authorization does not depend on this timing: the
-proxy independently verifies every distinct bearer against the pinned account
-uuid. There is no separate policy/status decision in the worker. If the refresh itself moves the runtime out of
-`active`, the common status-transition path records `thread.error` and stops
-the admitted turn, whose worker observes that terminal flag before spawning.
-Codex carries the account id the proxy already pins, and Bedrock uses a static
-key, so neither needs per-turn convergence.
+Admission requires the cached `active` status and the current network policy;
+a turn then spawns its process without refreshing the provider. Claude Code
+rotates its token on its own, but request authorization does not depend on the
+stored token metadata: the proxy verifies every distinct bearer against the
+pinned account uuid. The next scheduled recheck attests a rotated token and
+updates the stored metadata. A credential that stops working between rechecks
+fails the turn with the CLI's authentication error, and the next recheck moves
+the runtime out of `active`. Turn start stays inside the execution start
+deadline because it never waits on the status helpers, the `/usage` probe, or
+another refresh holding the runtime's refresh lock.
 
 ## Operator actions
 

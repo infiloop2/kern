@@ -11,16 +11,21 @@ python3 -m host.cli.start --agent-name <name>
 python3 -m host.cli.stop --agent-name <name>
 ```
 
-Each command takes arguments plus the standard AWS environment variables
+All lifecycle commands support AWS (the default) and `--provider lima`.
+This page describes the AWS delivery and shared guest bootstrap; see
+[Host provider and Lima](host-provider-design.md) for local VM behavior.
+
+AWS commands take arguments plus the standard AWS environment variables
 (`AWS_REGION`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and
-`AWS_SESSION_TOKEN` exactly when set), reads nothing from disk, streams
-progress on stderr, prints one result JSON on stdout, and provisions an
-Ubuntu 22.04 instance in the account's default VPC. It only selects a default subnet whose route table
-has an active `0.0.0.0/0` route to an internet gateway, because provisioning
-needs outbound internet reachability (package installs, and on the GitHub
-delivery the pinned code fetch), the SSH delivery additionally connects inbound
-over a temporary SSH session, and Cloudflare Tunnel also needs outbound
-internet reachability; otherwise it errors before launching.
+`AWS_SESSION_TOKEN` exactly when set), use no operator configuration file,
+stream progress on stderr, and print one result JSON on stdout. Provisioning
+creates an Ubuntu 22.04 instance in the account's default VPC. It only selects a
+default subnet whose route table has an active `0.0.0.0/0` route to an internet
+gateway, because provisioning needs outbound internet reachability (package
+installs, and on the GitHub delivery the pinned code fetch), the SSH delivery
+additionally connects inbound over a temporary SSH session, and Cloudflare
+Tunnel also needs outbound internet reachability; otherwise it errors before
+launching.
 
 The command is intentionally split by lifecycle intent:
 
@@ -99,7 +104,7 @@ delivered to the instance one of two ways.
    independently re-checks the provisioned state — account ids, path
    permissions, service sockets, loopback listeners, active units, database
    peer auth, and live firewall probes for the agent boundary (the agent reaches
-   only the loopback proxy; denied paths drop) — and fails the deploy
+   the loopback proxy and its preview range; denied paths drop) — and fails the deploy
    listing every mismatch. Service-state checks retry briefly to absorb
    startup latency, and positive external egress is advisory only, so a
    healthy deploy on an egress-restricted network cannot false-fail. Only then does bootstrap drop the staged secrets and
@@ -166,7 +171,7 @@ endpoints include an `ssh` endpoint, and bootstrap installs that endpoint's
 key; there is never a provisioning-only SSH window.
 
 Operator endpoints expose the admin API/UI only. The Workspace service binds
-its fixed loopback port and is not forwarded directly over SSH, the Cloudflare
+its browser Unix socket and is not forwarded directly over SSH, the Cloudflare
 Tunnel, or the EC2 security group; operator Workspace requests go through the
 authenticated admin API proxy.
 
@@ -351,32 +356,32 @@ installs the `--admin-password-sha256` digest every time.
 
 The lifecycle CLI never handles the admin password. `host.cli.deploy` and
 `host.cli.reconfigure` require `--admin-password-sha256` with the SHA-256 hex
-digest of the operator's chosen password, computed locally (for example
-`printf %s 'your-password' | sha256sum`); `host.cli.generate_password` prints
-a generated password and its digest for operators who want one made for them. The host stores just that hash in
-the database `config` row, so no CLI process, result file, log, or instance
-metadata anywhere ever contains the cleartext. `host.cli.upgrade`,
-`host.cli.recover`, `host.cli.start`, and `host.cli.stop` preserve the
-existing stored hash.
+digest of the operator's chosen password, computed locally (for example `printf
+%s 'your-password' | sha256sum`); `host.cli.generate_password` prints a
+generated password and its digest for operators who want one made for them. The
+host stores just that hash in the database `config` row. Provisioning results,
+logs, and instance metadata contain no cleartext password; the
+password-generation utility prints one explicitly, and the admin API receives it
+transiently during login. `host.cli.upgrade`, `host.cli.recover`,
+`host.cli.start`, and `host.cli.stop` preserve the existing stored hash.
 
-Cloudflare Tunnel tokens are secrets. The input config names a local environment
-variable, but the token value is encrypted into the database
-`operator_connections` row because a replacement root volume must be able to
-recreate the `cloudflared` service and the service must reconnect after host
-reboot. On both deliveries, the provisioning payload rides in EC2 user
+Cloudflare Tunnel tokens are secrets. The CLI reads
+`KERN_CLOUDFLARE_TUNNEL_TOKEN`, and the token value is encrypted into the
+database `operator_connections` row because a replacement root volume must be
+able to recreate the `cloudflared` service and the service must reconnect after
+host reboot. On both deliveries, the provisioning payload rides in EC2 user
 data: it carries the admin password hash (never the cleartext) and the runtime
 operator connection values, including the Cloudflare Tunnel token. User data is
-readable by root on the instance through instance metadata and by AWS
-principals holding `ec2:DescribeInstanceAttribute` in the target account, so
-the token's exposure there is bounded by that account's own IAM surface;
-`reconfigure` rotates operator access, replacing the token. Bootstrap creates a dedicated
+readable by root on the instance through instance metadata and by AWS principals
+holding `ec2:DescribeInstanceAttribute` in the target account, so the token's
+exposure there is bounded by that account's own IAM surface; `reconfigure`
+rotates operator access, replacing the token. Bootstrap creates a dedicated
 unprivileged Linux user and group named `cloudflared`, and
-`kern-cloudflared.service` runs as that `cloudflared` user. The token is
-also written to `/etc/kern/cloudflared.token` on the root volume with
-owner `root`, group `cloudflared`, and mode `0640`. That means the token file is
-readable by root and by processes running as the `cloudflared` user/group; it is
-not directly readable by the `kern-admin`, `kern-agent`, or
-`kern-proxy` users. The SSH operator can read it only by deliberately
-using unrestricted sudo. The service passes the token
-to cloudflared with `--token-file`, so the token value is not exposed in process
-argv.
+`kern-cloudflared.service` runs as that `cloudflared` user. The token is also
+written to `/etc/kern/cloudflared.token` on the root volume with owner `root`,
+group `cloudflared`, and mode `0640`. That means the token file is readable by
+root and by processes running as the `cloudflared` user/group; it is not
+directly readable by the `kern-admin`, `kern-agent`, or `kern-proxy` users. The
+SSH operator can read it only by deliberately using unrestricted sudo. The
+service passes the token to cloudflared with `--token-file`, so the token value
+is not exposed in process argv.

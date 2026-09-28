@@ -16,6 +16,14 @@ examined, and every reviewer contributes to one canonical findings table.
 | Product UX: settings clarity, no surprises | [07-ux-settings-clarity.md](07-ux-settings-clarity.md) |
 | Reliability: resource isolation and recovery | [08-reliability.md](08-reliability.md) |
 
+## Reading historical evidence
+
+Findings, source paths, and line references describe the commit named in each
+record. They are not a statement of the current release, and a documentation
+cleanup does not verify or change their resolution. Use the
+[architecture reference](../architecture/index.md) for current behavior and
+Git history to inspect a cited revision.
+
 ## Document structure
 
 Every axis has the same five durable parts:

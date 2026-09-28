@@ -115,6 +115,14 @@ call `list_bundled_tools` and verify the dynamically discovered catalog:
 Codex, Claude Code, and Grok reach the shim through their own MCP clients, Hermes
 through its MCP client wired by the managed config.
 
+## Contents
+
+- [Harness layout and failure diagnostics](#harness-layout-and-failure-diagnostics)
+- [Tool credentials for stage](#tool-credentials-for-stage)
+- [Live calls and expected cost for one `all` run](#live-calls-and-expected-cost-for-one-all-run)
+- [One-time AWS and GitHub setup for stage](#one-time-aws-and-github-setup-for-stage)
+- [Running stage](#running-stage)
+
 ## Harness layout and failure diagnostics
 
 `tests/stage/stage_aws.py` is the CLI, suite orchestration, and shared host
@@ -355,7 +363,7 @@ target exists. That workflow can only be dispatched by a repository admin from
 `main`; it starts the existing tagged `kern-stage` EC2 instance and
 prints the SSH tunnel command.
 
-For the first Grok validation after this integration reaches `main`, run the
+For the first Grok validation on a stage host, run the
 stage workflow once (an unavailable Grok row may be skipped), then use the
 stage-start workflow and its printed SSH tunnel to open the admin UI. Enable
 xAI, complete the Grok device login once, and dispatch the focused `grok`
@@ -364,9 +372,9 @@ forces the real ACP auth, subscription-entitlement, and billing probes; checks
 the pinned CLI installation and account metadata; drives missing, foreign, and
 duplicate identity credentials; denies storage, session, workspace, traversal,
 developer-API, and cloud-session routes; rejects malformed and compressed
-payloads; and covers Web search off/on plus X search, code execution, remote
-MCP, news, unknown, and untyped hosted-tool cases. It restores Web search to
-off in a `finally` block even when an assertion fails.
+payloads; and checks that web search remains denied, while exercising X search, code
+execution, remote MCP, news, unknown, and untyped hosted-tool cases. xAI has no
+web-search toggle to enable or restore.
 
 If the Bedrock credential is missing or no longer passes STS validation,
 `all` skips Hermes and the focused suite fails. Restore it by setting both

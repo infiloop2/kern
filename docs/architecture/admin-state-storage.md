@@ -13,10 +13,10 @@ host-inference, network-introspection, and Workspace services connect under sepa
 peer-authenticated roles with grants limited to the exact tables and sequences
 their processes need; the Workspace role has DML but not DDL. There is no proxy fallback cache: a
 database outage denies agent network requests until the database returns.
-The remaining writable admin-volume paths are the proxy CA/certificates and
-Git quarantine mirror under `proxy-state`, the bounded temporary media spool
-under `tools-state`, deploy-plane `version.json` (which bootstrap must read
-before PostgreSQL starts), and the admin service home.
+File-oriented state includes proxy TLS files and Git quarantine, staged tool
+media and the WhatsApp linked-device session, the bootstrap download cache,
+deploy-plane `version.json`, and the admin service home. See the
+[filesystem inventory](filesystem.md) for ownership and persistence.
 
 ## What lives in the database
 
@@ -36,9 +36,12 @@ tool-owned metadata and approval payloads (JSON by the tool contract).
 | `agent_events` | Agent runtime and turn events with a direct `thread_id` column (`NULL` for runtime events, indexed with `seq` for per-thread paging) and typed payload columns (message/source, error, runtime, provider-neutral activity JSON); pruned to the newest 10,000,000. The event log is the single durable record of a thread's turn history — turns themselves are orchestrator memory, and the former `tasks`/`task_steers` tables were dropped by migration `0005_thread_only_turns.sql`, which also renamed `task.*` event types to `turn.*` and replaced the events' `task_id` with `thread_id`. A synchronous steer is appended only after provider acknowledgement; there is no steer mailbox or delivery-marker table. |
 | `conversation_message_embeddings` | Rebuildable local pgvector encodings for the newest 250,000 user/agent message rows; activity and lifecycle events do not consume this quota. Source-event deletion cascades to vectors, and pruning is amortized across embedding batches. Relevance cursors freeze their initial semantic candidate ids so later pages do not rerun HNSW against a changing graph. |
 | `thread_sessions` | One canonical row per user `thread_id`: current runtime, provider session/thread id, model, effort, recency, and durable idle/running state. An idle configuration change atomically replaces runtime/model/effort and clears the provider session before admitting the next run; the retained `agent_events` remain the thread's handoff source. Rows referenced by retained events stay; unreferenced rows beyond the 100,000 most recently used per runtime are pruned. |
-| `chat_threads` | Chat's immutable `thread-N` ids, editable display names, and archive state. Scheduled agents are indexed separately by `schedules`; messages and provider state for both products remain in the host thread tables above. |
+| `chat_threads` | Immutable `thread-N` ids for user Chats and spawned agents, editable display names, archive state, and the spawning thread id when applicable. Scheduled agents are indexed separately by `schedules`; messages and provider state for both products remain in the host thread tables above. |
 | `web_apps` | Web Apps' immutable `app-N` ids, editable names, archive state, generated UI bundle, durable JSON data, and one optimistic revision counter. |
-| `web_app_revisions` | Sparse, bounded full-state UI/data revisions for generated Web Apps. Every retained row is restorable as a new forward revision. |
+| `web_app_revisions` | Bounded recovery checkpoints referencing immutable UI/document components and versioned collections; every retained checkpoint restores the whole App as a new forward revision. |
+| `web_app_ui_versions`, `web_app_document_versions`, `web_app_collection_versions` | Shared recovery components and revision intervals for collection rows. See [App recovery](workspaces/personal-web-app-builder.md). |
+| `web_app_collection_state`, `web_app_collection_rows` | Live collection quotas and queryable rows belonging to each App. |
+| `workspace_seen`, `workspace_navigation_order`, `workspace_onboarding_dismissal` | Operator read markers, shared sidebar ordering, and onboarding dismissal. |
 | `memory_pages`, `memory_page_revisions`, `memory_page_links` | Host-global bounded memory pages plus their latest 100 immutable revisions and a replace-on-write index of current swarm-page links. Pages soft-delete for 90 days; individual pages are excluded from the link graph. |
 | `memory_page_embeddings` | One rebuildable local pgvector encoding per current memory page and model. The stored revision must match the current page revision before semantic search can use it; updates temporarily fall back to lexical search until asynchronous replacement. Soft deletion removes the vector. |
 | `schedules`, `schedule_revisions` | Host-global schedule definitions, their stable `schedule-N` thread identities, and latest 100 revisions. Each firing submits the saved automated message through the ordinary host thread path; messages, errors, and activity remain in `agent_events`, with no separate run table. |
@@ -55,10 +58,17 @@ tool-owned metadata and approval payloads (JSON by the tool contract).
 | `network_events` | Network allow/deny decisions, written by the proxy's role, fully typed (pruned to the newest 1,000,000; URL fields are size-capped so the row cap is a real disk bound). |
 | `enabled_tools` | Bundled tools the operator has enabled; presence-based and keyed by `tool_id`. |
 | `tool_config` | Secret configuration values keyed by `(tool_id, key)`. Repeated key names are independent between tools; every value is `secretbox` ciphertext. |
-| `tool_credentials` | One OAuth credential per tool, split into typed connected-account columns, encrypted provider token material, and tool-owned non-secret metadata. |
+| `tool_credentials` | One OAuth credential per `(tool_id, connection_id)`, split into typed connected-account columns, encrypted provider token material, and tool-owned non-secret metadata. |
 | `tool_approvals` | Host-owned approval records. `number` is the identity behind the public `approval_<number>.<token>` id (the token is an unguessable poll capability); conditional transitions make each approval single-use, and terminal result text is returned to both operator and agent (decided history is pruned to the newest 10,000). |
 | `tool_events` | Tool call, approval, connection, enablement, and config audit events. Accepted calls store their exact bounded arguments; lifecycle events store no arguments. Pruned to the newest 1,000,000. |
 | `host_inference_providers` | Operator enablement, feature flags, and encrypted API keys for the OpenAI and TypeSafe Jev host providers. Model selection lives in reviewed feature code rather than operator state. The dedicated host-inference role has read-only access. |
+| `tool_secrets` | One encrypted private JSON object per tool, capped at 16 KiB. |
+| `tool_approval_risk_assessments` | Optional one-shot risk annotations that cascade with approvals; never an approval decision. |
+| `tool_costs`, `tool_cost_daily` | Immutable reported charges and daily aggregates, independent of tool event retention. |
+| `host_inference_usage` | Daily provider/model usage and cost counters; retained for 400 days. |
+| `swarm_agent_ai`, `swarm_peer_deliveries` | Current per-thread Host AI annotations and a bounded, text-free peer-delivery feed. |
+| `conversation_search_state`, `conversation_embedding_queue` | Search generation state and pending derived-vector work tied to retained message rows. |
+| `xai_video_storage` | Optional encrypted Grok output-storage credential and bucket configuration, readable by the proxy. |
 | `host_diagnostics` | Service-level errors and contained warnings copied from structured journald records. Brief repeats coalesce by service and fingerprint; one shared cap retains the newest 10,000 rows. List reads omit traceback/context until detail expansion. |
 | `counters` | Four lifetime token totals start at zero on deployment, accumulate turn-measurement deltas including corrections, and survive usage retention. Also stores monotonic Home Stats totals for threads, user messages, and agent activity. Agent activity combines agent-authored messages with activity events. Migrations seed each total from retained state, then the thread/event write transaction increments it so later session or audit pruning never lowers the displayed totals. |
 | `secret_keys` | The at-rest encryption key for stored secrets (see below). The proxy, tools, and host-inference roles can read it, but their table grants expose only their own ciphertext-bearing rows. |
@@ -86,7 +96,7 @@ data files with new binaries.
 
 ## How runtime code uses it
 
-`host/runtime/core/state.py` exposes per-operation accessors that run real queries
+`host/runtime/core/state/` exposes per-operation accessors that run real queries
 against normalized tables; no request materializes the complete state. Hot
 paths are indexed for thread/runtime lookup, per-thread event history,
 event paging, and pruning. Reads use MVCC transactions and fetch only the rows
@@ -98,8 +108,8 @@ written inside a mutation share its transaction; serial event ids are unique
 and increasing with harmless gaps after aborts.
 
 `host/runtime/core/db.py` owns a small pool in each service process, capped at 14
-active sessions per process. PostgreSQL allows 300 connections: the six
-long-running database client processes can use at most 84, leaving 216 for
+active sessions per process. PostgreSQL allows 300 connections: the seven
+long-running database client processes can use at most 98, leaving 202 for
 operator, superuser, deployment, and future fixed-service access. Chat and Web
 Apps share the Workspace process's 14-session semaphore; a new operation fails when
 those slots or the database are unavailable. Nested
@@ -131,17 +141,20 @@ non-owner roles with table or schema grants:
   held pushes. It cannot read the stored GitHub credential or other admin
   state.
 - `kern-tools` reads enablement/config and the shared secret key, and
-  reads/writes tool credentials, approvals, and events. It cannot enable a
-  tool, rewrite config, or reach non-tool state.
+  has explicit tool credential, private JSON, approval, event, risk, and cost
+  grants. It can read only `provider` and `enabled` from Host AI configuration,
+  not provider credentials. It cannot enable a tool or rewrite config.
+- `kern-host-inference` reads its provider configuration and the secret-box key,
+  and writes/prunes `host_inference_usage`. It cannot change provider settings.
 - `kern-agent-network` reads only network policy and `network_events` for
   the agent-facing introspection tools. It cannot mutate those tables, read
   credentials, or reach tool state.
-- The `kern-workspace` role has DML only on `chat_threads`, `web_apps`,
-  `web_app_revisions`, `memory_pages`, `memory_page_revisions`, `schedules`,
-  `schedule_revisions`, `memory_page_embeddings`, and
-  `memory_page_links`, plus the bounded sequences those tables use. It has no
-  access to unrelated admin,
-  credential, network, or tool tables and no DDL rights.
+- `kern-workspace` has explicit grants on Chat, App, memory, schedule,
+  navigation, onboarding, read-marker, and swarm tables and their sequences.
+  App grants include collection and shared recovery components. Grants differ
+  by operation (for example, onboarding is SELECT/INSERT only); the immutable
+  migrations define the exact list. It has no DDL or general access to host
+  credentials, network policy, or tool tables.
 - The `postgres` superuser is reachable only by the `postgres` OS user, i.e.
   by operators through sudo: `sudo -u postgres psql kern_admin`.
 - Everyone else, most importantly `kern-agent`, has no role, and

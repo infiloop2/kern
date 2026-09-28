@@ -10,6 +10,7 @@ import tempfile
 import threading
 import time
 from types import SimpleNamespace
+from typing import Callable
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 
@@ -423,7 +424,7 @@ time.sleep(120)
             )
         popen.assert_not_called()
 
-    def test_steer_flushes_interrupt_then_message_without_waiting(self) -> None:
+    def test_steer_flushes_only_the_message_without_an_interrupt(self) -> None:
         session = claude_code.ClaudeCodeSession(command=["fake-claude"])
         writes: list[dict[str, object]] = []
 
@@ -442,33 +443,32 @@ time.sleep(120)
         session._accepting_steers = True
 
         session.steer("respond now")
+        session.steer("and this too")
 
+        # A control interrupt would make Claude abort in-flight tools and
+        # report them to the model as user rejections.
+        self.assertEqual([message["type"] for message in writes], ["user", "user"])
         self.assertEqual(
-            [message["type"] for message in writes],
-            ["control_request", "user"],
+            [message["message"] for message in writes],
+            [
+                {"role": "user", "content": "respond now"},
+                {"role": "user", "content": "and this too"},
+            ],
         )
+        self.assertTrue(all(isinstance(message.get("uuid"), str) for message in writes))
+        self.assertEqual(session.take_delivered_steers(), 2)
+        self.assertEqual(session.take_delivered_steers(), 0)
         self.assertEqual(
-            writes[0]["request"],
-            {"subtype": "interrupt", "cancel_queued": True},
+            session._claimed_steer_ids,
+            [message["uuid"] for message in writes],
         )
-        self.assertEqual(
-            writes[1]["message"],
-            {"role": "user", "content": "respond now"},
-        )
-        self.assertIsInstance(writes[1].get("uuid"), str)
-        self.assertEqual(session.take_delivered_steers(), 1)
 
     def test_steer_message_write_failure_is_not_counted_as_delivered(self) -> None:
         session = claude_code.ClaudeCodeSession(command=["fake-claude"])
-        writes: list[dict[str, object]] = []
 
         class FailingStdin:
             def write(self, value: str) -> int:
-                message = json.loads(value)
-                if message["type"] == "user":
-                    raise BrokenPipeError("closed")
-                writes.append(message)
-                return len(value)
+                raise BrokenPipeError("closed")
 
             def flush(self) -> None:
                 return
@@ -482,89 +482,32 @@ time.sleep(120)
         with self.assertRaisesRegex(claude_code.ClaudeCodeError, "closed"):
             session.steer("must not be sent")
 
-        self.assertEqual([message["type"] for message in writes], ["control_request"])
         self.assertEqual(session.take_delivered_steers(), 0)
 
-    def test_rapid_steers_keep_each_interrupt_next_to_its_message(self) -> None:
-        session = claude_code.ClaudeCodeSession(command=["fake-claude"])
-        writes: list[dict[str, object]] = []
-
-        class RecordingStdin:
-            def write(self, value: str) -> int:
-                writes.append(json.loads(value))
-                return len(value)
-
-            def flush(self) -> None:
-                return
-
-        session._proc = SimpleNamespace(  # type: ignore[assignment]
-            stdin=RecordingStdin(),
-            poll=lambda: None,
-        )
-        session._accepting_steers = True
-        workers = [
-            threading.Thread(target=session.steer, args=(text,))
-            for text in ("first", "second")
-        ]
-        for worker in workers:
-            worker.start()
-        for worker in workers:
-            worker.join(timeout=1)
-
-        self.assertTrue(all(not worker.is_alive() for worker in workers))
-        self.assertEqual(
-            [message["type"] for message in writes],
-            ["control_request", "user", "control_request", "user"],
-        )
-        self.assertEqual(session.take_delivered_steers(), 2)
-
-    def test_stdout_queues_ordered_responses_for_own_interrupts(self) -> None:
+    def test_stdout_forwards_ordered_start_markers_for_commands(self) -> None:
         session = claude_code.ClaudeCodeSession(command=["fake-claude"])
         frames = [
-            {
-                "type": "control_response",
-                "response": {
-                    "subtype": "success",
-                    "request_id": "another-control-request",
-                },
-            },
-            {
-                "type": "control_response",
-                "response": {
-                    "subtype": "error",
-                    "request_id": "kern-interrupt-1",
-                },
-            },
-            {
-                "type": "control_response",
-                "response": {
-                    "subtype": "success",
-                    "request_id": "kern-interrupt-2",
-                    "response": {"cancelled": ["message-1"]},
-                },
-            },
+            {"type": "command_lifecycle", "command_uuid": "steer-1", "state": "queued"},
+            {"type": "control_response", "response": {"request_id": "other"}},
+            {"type": "command_lifecycle", "command_uuid": "steer-1", "state": "started"},
+            {"type": "command_lifecycle", "command_uuid": 7, "state": "started"},
+            {"type": "command_lifecycle", "command_uuid": "x" * 65, "state": "started"},
             {"type": "result", "subtype": "success"},
+            {"type": "command_lifecycle", "command_uuid": "steer-1", "state": "completed"},
         ]
         session._read_stdout(io.StringIO(
             "".join(json.dumps(frame) + "\n" for frame in frames)
         ))
 
+        drained = []
+        while not session._messages.empty():
+            drained.append(session._messages.get_nowait())
         self.assertEqual(
+            drained,
             [
-                session._messages.get_nowait(),
-                session._messages.get_nowait(),
-                session._messages.get_nowait(),
-            ],
-            [
-                {
-                    "type": claude_code.INTERRUPT_RESPONSE_MESSAGE_TYPE,
-                    "interrupt_id": 1,
-                },
-                {
-                    "type": claude_code.INTERRUPT_RESPONSE_MESSAGE_TYPE,
-                    "interrupt_id": 2,
-                },
+                {"type": claude_code.COMMAND_STARTED_MESSAGE_TYPE, "command_id": "steer-1"},
                 {"type": "result", "subtype": "success"},
+                {"type": claude_code.COMMAND_STARTED_MESSAGE_TYPE, "command_id": "steer-1"},
             ],
         )
 
@@ -1058,606 +1001,202 @@ print(json.dumps({"type":"result","session_id":"session-1","subtype":"error_duri
             with claude_code._login_lock:
                 claude_code._login_process = original
 
-    def test_run_turn_waits_for_result_after_delivered_steer(self) -> None:
-        # The fake CLI acknowledges the interrupt before accepting the steer.
-        # The interrupted result belongs to the initial query; the following
-        # success result belongs to the steered message and owns the host turn.
-        script = r"""
+    # The fake CLIs below follow Claude Code 2.1.280's stream-json behavior:
+    # a user message arriving mid-turn is reported queued, then started at the
+    # next safe point (after in-flight tool results, or as a follow-up query
+    # after the current result), keyed by the uuid Kern stamped on it. An
+    # interrupt control request instead aborts in-flight tools and reports
+    # each one to the model as a user rejection.
+    _FAKE_CLAUDE_PRELUDE = r"""
 import json, sys
 
 session_id = "session-1"
 
 
-def assistant(text):
-    print(json.dumps({
-        "type": "assistant",
-        "session_id": session_id,
-        "message": {"content": [{"type": "text", "text": text}]},
-    }), flush=True)
+def emit(frame):
+    frame.setdefault("session_id", session_id)
+    print(json.dumps(frame), flush=True)
+
+
+def assistant(content):
+    emit({"type": "assistant", "message": {"content": content}})
+
+
+def lifecycle(message, state):
+    emit({"type": "command_lifecycle", "command_uuid": message["uuid"], "state": state})
 
 
 def result(text):
-    print(json.dumps({
-        "type": "result",
-        "subtype": "success",
-        "session_id": session_id,
-        "result": text,
-    }), flush=True)
+    emit({"type": "result", "subtype": "success", "result": text})
 
 
-json.loads(sys.stdin.readline())
-assistant("FIRST")
-interrupt = json.loads(sys.stdin.readline())
-assert interrupt["type"] == "control_request"
-assert interrupt["request"]["subtype"] == "interrupt"
-print(json.dumps({
-    "type": "control_response",
-    "response": {
-        "subtype": "success",
-        "request_id": interrupt["request_id"],
-        "response": {"still_queued": []},
-    },
-}), flush=True)
-steer = json.loads(sys.stdin.readline())
-assert steer["message"]["content"] == "steer"
-print(json.dumps({
-    "type": "result",
-    "subtype": "error_during_execution",
-    "is_error": True,
-    "terminal_reason": "aborted_tools",
-    "session_id": session_id,
-}), flush=True)
-assistant("STEERED")
-result("STEERED")
-sys.stdin.readline()  # stay alive like the real CLI until stdin EOF
+def read_user_message():
+    frame = json.loads(sys.stdin.readline())
+    if frame.get("type") == "control_request" and frame["request"]["subtype"] == "interrupt":
+        emit({"type": "user", "message": {"content": [{
+            "type": "tool_result",
+            "tool_use_id": "tool-1",
+            "is_error": True,
+            "content": "The user doesn't want to proceed with this tool use. "
+                       "The tool use was rejected. STOP what you are doing and "
+                       "wait for the user to tell you how to proceed.",
+        }]}})
+        emit({"type": "result", "subtype": "error_during_execution", "is_error": True,
+              "terminal_reason": "aborted_tools"})
+        sys.exit(0)
+    assert frame["type"] == "user", frame
+    assert isinstance(frame.get("uuid"), str), frame
+    lifecycle(frame, "queued")
+    return frame
+
+
+initial = read_user_message()
+lifecycle(initial, "started")
 """
-        original_cwd = claude_code.AGENT_CWD
-        first_message = threading.Event()
-        result: list[tuple[str, str]] = []
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude_code.AGENT_CWD = tmp
-                server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script])
-                # The fake CLI idles on stdin after the turn, so without this
-                # the child process, its pipes, and the reader threads outlive
-                # the test.
-                self.addCleanup(server.close)
-                worker = threading.Thread(
-                    target=lambda: result.append(
-                        claude_code.run_turn(
-                            server,
-                            "initial",
-                            None,
-                            "claude-opus-5-5",
-                            "high",
-                            lambda _message: first_message.set(),
-                        )
-                    )
-                )
-                worker.start()
-                self.assertTrue(first_message.wait(timeout=10))
-                server.steer("steer")
-                worker.join(timeout=10)
-                self.assertFalse(worker.is_alive())
-        finally:
-            claude_code.AGENT_CWD = original_cwd
-        self.assertEqual(len(result), 1)
-        session_id, output = result[0]
-        self.assertEqual(session_id, "session-1")
-        self.assertEqual(output, "STEERED")
 
-    def test_queued_old_result_waits_for_latest_interrupt_response(self) -> None:
-        # Keep the turn driver blocked while stdout queues an initial success,
-        # then two interrupt responses. The old result cannot finish ahead of
-        # the newest response and replacement result.
-        script = r"""
-import json, sys
-
-json.loads(sys.stdin.readline())
-print(json.dumps({
-    "type": "assistant",
-    "session_id": "session-1",
-    "message": {"content": [{"type": "text", "text": "READY"}]},
-}), flush=True)
-print(json.dumps({
-    "type": "result",
-    "subtype": "success",
-    "session_id": "session-1",
-    "result": "FIRST",
-}), flush=True)
-
-for expected in ("first steer", "second steer"):
-    interrupt = json.loads(sys.stdin.readline())
-    assert interrupt["request"]["subtype"] == "interrupt"
-    print(json.dumps({
-        "type": "control_response",
-        "response": {
-            "subtype": "success",
-            "request_id": interrupt["request_id"],
-        },
-    }), flush=True)
-    steer = json.loads(sys.stdin.readline())
-    assert steer["message"]["content"] == expected
-
-print(json.dumps({
-    "type": "result",
-    "subtype": "error_during_execution",
-    "is_error": True,
-    "terminal_reason": "aborted_tools",
-    "session_id": "session-1",
-}), flush=True)
-print(json.dumps({
-    "type": "result",
-    "subtype": "success",
-    "session_id": "session-1",
-    "result": "SECOND",
-}), flush=True)
-sys.stdin.readline()  # stay alive until the test closes stdin
-"""
-        original_cwd = claude_code.AGENT_CWD
-        ready = threading.Event()
-        release_driver = threading.Event()
-        result: list[tuple[str, str]] = []
-        errors: list[Exception] = []
-
-        def hold_run_driver(_message: str | dict[str, object]) -> None:
-            ready.set()
-            release_driver.wait(timeout=10)
-
-        def run() -> None:
-            try:
-                result.append(claude_code.run_turn(
-                    server,
-                    "initial",
-                    None,
-                    "claude-opus-5-5",
-                    "high",
-                    hold_run_driver,
-                ))
-            except Exception as exc:
-                errors.append(exc)
-
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude_code.AGENT_CWD = tmp
-                server = claude_code.ClaudeCodeSession(
-                    [sys.executable, "-u", "-c", script]
-                )
-                self.addCleanup(server.close)
-                worker = threading.Thread(target=run)
-                worker.start()
-                self.assertTrue(ready.wait(timeout=10))
-                try:
-                    server.steer("first steer")
-                    server.steer("second steer")
-                finally:
-                    release_driver.set()
-                worker.join(timeout=10)
-                self.assertFalse(worker.is_alive())
-        finally:
-            release_driver.set()
-            claude_code.AGENT_CWD = original_cwd
-
-        self.assertEqual(errors, [])
-        self.assertEqual(result, [("session-1", "SECOND")])
-
-    def test_rapid_steer_cancelled_replacement_finishes_without_delay(self) -> None:
-        # The second cancel_queued interrupt removes the first replacement;
-        # the newest replacement result finishes immediately.
-        script = r"""
-import json, sys
-
-initial = json.loads(sys.stdin.readline())
-assert isinstance(initial.get("uuid"), str)
-print(json.dumps({
-    "type": "assistant",
-    "session_id": "session-1",
-    "message": {"content": [{"type": "text", "text": "READY"}]},
-}), flush=True)
-
-first_interrupt = json.loads(sys.stdin.readline())
-print(json.dumps({
-    "type": "control_response",
-    "response": {
-        "subtype": "success",
-        "request_id": first_interrupt["request_id"],
-        "response": {"still_queued": [], "cancelled": []},
-    },
-}), flush=True)
-first = json.loads(sys.stdin.readline())
-assert first["message"]["content"] == "first steer"
-assert isinstance(first.get("uuid"), str)
-
-second_interrupt = json.loads(sys.stdin.readline())
-print(json.dumps({
-    "type": "control_response",
-    "response": {
-        "subtype": "success",
-        "request_id": second_interrupt["request_id"],
-        "response": {
-            "still_queued": [],
-            "cancelled": [first["uuid"]],
-        },
-    },
-}), flush=True)
-second = json.loads(sys.stdin.readline())
-assert second["message"]["content"] == "second steer"
-assert isinstance(second.get("uuid"), str)
-
-print(json.dumps({
-    "type": "result",
-    "subtype": "error_during_execution",
-    "is_error": True,
-    "terminal_reason": "aborted_streaming",
-    "session_id": "session-1",
-}), flush=True)
-print(json.dumps({
-    "type": "result",
-    "subtype": "success",
-    "session_id": "session-1",
-    "result": "SECOND",
-}), flush=True)
-sys.stdin.readline()  # stay alive until the test closes stdin
-"""
-        original_cwd = claude_code.AGENT_CWD
+    def _run_fake_claude_turn(
+        self,
+        script: str,
+        steer: Callable[[claude_code.ClaudeCodeSession], None],
+        *,
+        steer_when: Callable[[str | dict[str, object]], bool],
+    ) -> tuple[tuple[str, str], list[str | dict[str, object]]]:
+        """Run one turn, calling ``steer`` once ``steer_when`` sees an event."""
+        emitted: list[str | dict[str, object]] = []
         ready = threading.Event()
         result: list[tuple[str, str]] = []
         errors: list[Exception] = []
-
-        def run() -> None:
-            try:
-                result.append(claude_code.run_turn(
-                    server,
-                    "initial",
-                    None,
-                    "claude-opus-5-5",
-                    "high",
-                    lambda _message: ready.set(),
-                ))
-            except Exception as exc:
-                errors.append(exc)
-
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude_code.AGENT_CWD = tmp
-                server = claude_code.ClaudeCodeSession(
-                    [sys.executable, "-u", "-c", script]
-                )
-                self.addCleanup(server.close)
-                worker = threading.Thread(target=run)
-                worker.start()
-                self.assertTrue(ready.wait(timeout=10))
-                server.steer("first steer")
-                started = time.monotonic()
-                server.steer("second steer")
-                worker.join(timeout=1)
-                elapsed = time.monotonic() - started
-                self.assertFalse(worker.is_alive())
-        finally:
-            claude_code.AGENT_CWD = original_cwd
-
-        self.assertLess(elapsed, 1)
-        self.assertEqual(errors, [])
-        self.assertEqual(result, [("session-1", "SECOND")])
-
-    def test_startup_cancelled_initial_finishes_without_delay(self) -> None:
-        # A startup steer can cancel the uuid-stamped initial prompt while it
-        # is still in Claude's pre-dispatch window. No abort result exists for
-        # that prompt; the replacement result is the only completion needed.
-        script = r"""
-import json, sys
-
-initial = json.loads(sys.stdin.readline())
-assert isinstance(initial.get("uuid"), str)
-interrupt = json.loads(sys.stdin.readline())
-print(json.dumps({
-    "type": "control_response",
-    "response": {
-        "subtype": "success",
-        "request_id": interrupt["request_id"],
-        "response": {
-            "still_queued": [],
-            "cancelled": [initial["uuid"]],
-        },
-    },
-}), flush=True)
-replacement = json.loads(sys.stdin.readline())
-assert replacement["message"]["content"] == "startup steer"
-print(json.dumps({
-    "type": "result",
-    "subtype": "success",
-    "session_id": "session-1",
-    "result": "STARTUP",
-}), flush=True)
-sys.stdin.readline()  # stay alive until the test closes stdin
-"""
-        original_cwd = claude_code.AGENT_CWD
-        ready = threading.Event()
-        result: list[tuple[str, str]] = []
-        errors: list[Exception] = []
-
-        def run() -> None:
-            try:
-                result.append(claude_code.run_turn(
-                    server,
-                    "initial",
-                    None,
-                    "claude-opus-5-5",
-                    "high",
-                    lambda _message: None,
-                ))
-            except Exception as exc:
-                errors.append(exc)
-
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude_code.AGENT_CWD = tmp
-                server = claude_code.ClaudeCodeSession(
-                    [sys.executable, "-u", "-c", script],
-                    on_ready=lambda: ready.set() or True,
-                )
-                self.addCleanup(server.close)
-                worker = threading.Thread(target=run)
-                worker.start()
-                self.assertTrue(ready.wait(timeout=10))
-                started = time.monotonic()
-                server.steer("startup steer")
-                worker.join(timeout=1)
-                elapsed = time.monotonic() - started
-                self.assertFalse(worker.is_alive())
-        finally:
-            claude_code.AGENT_CWD = original_cwd
-
-        self.assertLess(elapsed, 1)
-        self.assertEqual(errors, [])
-        self.assertEqual(result, [("session-1", "STARTUP")])
-
-    def test_rapid_startup_steers_ignore_abort_until_latest_success(self) -> None:
-        # Both replacements are flushed before the first response. The abort
-        # boundary is not final; the newest replacement's success is.
-        script = r"""
-import json, sys
-
-initial = json.loads(sys.stdin.readline())
-first_interrupt = json.loads(sys.stdin.readline())
-first_replacement = json.loads(sys.stdin.readline())
-assert first_replacement["message"]["content"] == "first replacement"
-second_interrupt = json.loads(sys.stdin.readline())
-second_replacement = json.loads(sys.stdin.readline())
-assert second_replacement["message"]["content"] == "second replacement"
-
-print(json.dumps({
-    "type": "control_response",
-    "response": {
-        "subtype": "success",
-        "request_id": first_interrupt["request_id"],
-        "response": {
-            "still_queued": [],
-            "cancelled": [initial["uuid"]],
-        },
-    },
-}), flush=True)
-print(json.dumps({
-    "type": "control_response",
-    "response": {
-        "subtype": "error",
-        "request_id": second_interrupt["request_id"],
-        "error": "no active query",
-    },
-}), flush=True)
-print(json.dumps({
-    "type": "result",
-    "subtype": "error_during_execution",
-    "is_error": True,
-    "terminal_reason": "aborted_streaming",
-    "session_id": "session-1",
-}), flush=True)
-print(json.dumps({
-    "type": "result",
-    "subtype": "success",
-    "session_id": "session-1",
-    "result": "SECOND",
-}), flush=True)
-"""
-        original_cwd = claude_code.AGENT_CWD
-        first_ready = threading.Event()
-        result: list[tuple[str, str]] = []
-
-        def run() -> None:
-            result.append(
-                claude_code.run_turn(
-                    server,
-                    "initial",
-                    None,
-                    "claude-opus-5-5",
-                    "high",
-                    lambda _message: None,
-                )
-            )
-
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude_code.AGENT_CWD = tmp
-                server = claude_code.ClaudeCodeSession(
-                    [sys.executable, "-u", "-c", script],
-                    on_ready=lambda: first_ready.set() or True,
-                )
-                self.addCleanup(server.close)
-                worker = threading.Thread(target=run)
-                worker.start()
-                self.assertTrue(first_ready.wait(timeout=10))
-                server.steer("first replacement")
-                server.steer("second replacement")
-                worker.join(timeout=10)
-                self.assertFalse(worker.is_alive())
-        finally:
-            claude_code.AGENT_CWD = original_cwd
-
-        self.assertEqual(result, [("session-1", "SECOND")])
-
-    def test_multiple_abort_boundaries_wait_for_latest_steer_success(self) -> None:
-        # Multiple rapid/rejected interrupts may emit multiple abort results;
-        # none outranks the newest replacement's later success.
-        script = r"""
-import json, sys
-
-json.loads(sys.stdin.readline())  # initial
-print(json.dumps({
-    "type": "assistant",
-    "session_id": "session-1",
-    "message": {"content": [{"type": "text", "text": "INITIAL_READY"}]},
-}), flush=True)
-
-first_interrupt = json.loads(sys.stdin.readline())
-first_replacement = json.loads(sys.stdin.readline())
-second_interrupt = json.loads(sys.stdin.readline())
-second_replacement = json.loads(sys.stdin.readline())
-print(json.dumps({
-    "type": "control_response",
-    "response": {
-        "subtype": "success",
-        "request_id": first_interrupt["request_id"],
-        "response": {"still_queued": [], "cancelled": []},
-    },
-}), flush=True)
-print(json.dumps({
-    "type": "control_response",
-    "response": {
-        "subtype": "success",
-        "request_id": second_interrupt["request_id"],
-        "response": {
-            "still_queued": [],
-            "cancelled": [first_replacement["uuid"]],
-        },
-    },
-}), flush=True)
-print(json.dumps({
-    "type": "result",
-    "subtype": "error_during_execution",
-    "is_error": True,
-    "terminal_reason": "aborted_streaming",
-    "session_id": "session-1",
-}), flush=True)
-print(json.dumps({
-    "type": "assistant",
-    "session_id": "session-1",
-    "message": {"content": [{"type": "text", "text": "REPLACEMENT_READY"}]},
-}), flush=True)
-
-third_interrupt = json.loads(sys.stdin.readline())
-print(json.dumps({
-    "type": "control_response",
-    "response": {
-        "subtype": "error",
-        "request_id": third_interrupt["request_id"],
-        "error": "no active query",
-    },
-}), flush=True)
-third_replacement = json.loads(sys.stdin.readline())
-assert third_replacement["message"]["content"] == "third replacement"
-assert second_replacement["message"]["content"] == "second replacement"
-print(json.dumps({
-    "type": "result",
-    "subtype": "error_during_execution",
-    "is_error": True,
-    "terminal_reason": "aborted_tools",
-    "session_id": "session-1",
-}), flush=True)
-print(json.dumps({
-    "type": "result",
-    "subtype": "success",
-    "session_id": "session-1",
-    "result": "THIRD",
-}), flush=True)
-"""
-        original_cwd = claude_code.AGENT_CWD
-        initial_ready = threading.Event()
-        replacement_ready = threading.Event()
-        result: list[tuple[str, str]] = []
 
         def on_message(message: str | dict[str, object]) -> None:
-            if message == "INITIAL_READY":
-                initial_ready.set()
-            elif message == "REPLACEMENT_READY":
-                replacement_ready.set()
+            emitted.append(message)
+            if steer_when(message):
+                ready.set()
 
-        def run() -> None:
-            result.append(
-                claude_code.run_turn(
-                    server,
-                    "initial",
-                    None,
-                    "claude-opus-5-5",
-                    "high",
-                    on_message,
-                )
+        with tempfile.TemporaryDirectory() as tmp, patch.object(claude_code, "AGENT_CWD", tmp):
+            server = claude_code.ClaudeCodeSession(
+                [sys.executable, "-u", "-c", self._FAKE_CLAUDE_PRELUDE + script]
             )
+            # The fake CLI idles on stdin after the turn; close it with the test.
+            self.addCleanup(server.close)
 
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude_code.AGENT_CWD = tmp
-                server = claude_code.ClaudeCodeSession(
-                    [sys.executable, "-u", "-c", script]
-                )
-                self.addCleanup(server.close)
-                worker = threading.Thread(target=run)
-                worker.start()
-                self.assertTrue(initial_ready.wait(timeout=10))
-                server.steer("first replacement")
-                server.steer("second replacement")
-                self.assertTrue(replacement_ready.wait(timeout=10))
-                server.steer("third replacement")
-                worker.join(timeout=10)
-                self.assertFalse(worker.is_alive())
-        finally:
-            claude_code.AGENT_CWD = original_cwd
+            def run() -> None:
+                try:
+                    result.append(claude_code.run_turn(
+                        server, "initial", None, "claude-opus-5-5", "high", on_message,
+                    ))
+                except Exception as exc:
+                    errors.append(exc)
 
-        self.assertEqual(result, [("session-1", "THIRD")])
+            worker = threading.Thread(target=run)
+            worker.start()
+            self.assertTrue(ready.wait(timeout=10))
+            steer(server)
+            worker.join(timeout=10)
+            self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        return result[0], emitted
+
+    @staticmethod
+    def _tool_started(message: str | dict[str, object]) -> bool:
+        return (
+            isinstance(message, dict)
+            and message.get("activity_id") == "tool-1"
+            and message.get("phase") == "started"
+        )
+
+    def test_steer_during_a_long_tool_call_does_not_cancel_it(self) -> None:
+        # Regression: a delivered agent or operator message used to interrupt
+        # Claude, which killed in-flight tools and told the model the user had
+        # rejected them and wanted it to STOP.
+        script = r"""
+assistant([{"type": "tool_use", "id": "tool-1", "name": "Bash",
+            "input": {"command": "sleep 600"}}])
+steer = read_user_message()  # arrives while the tool is still running
+emit({"type": "user", "message": {"content": [{
+    "type": "tool_result", "tool_use_id": "tool-1", "content": "TOOL_DONE"}]}})
+lifecycle(steer, "started")
+assistant([{"type": "text", "text": "TOOL_DONE and saw the message"}])
+lifecycle(steer, "completed")
+result("TOOL_DONE and saw the message")
+lifecycle(initial, "completed")
+sys.stdin.readline()  # stay alive like the real CLI until stdin EOF
+"""
+        (session_id, output), emitted = self._run_fake_claude_turn(
+            script,
+            lambda server: server.steer("agent message from thread-205"),
+            steer_when=self._tool_started,
+        )
+
+        self.assertEqual(session_id, "session-1")
+        self.assertEqual(output, "TOOL_DONE and saw the message")
+        tool_results = [
+            message for message in emitted
+            if isinstance(message, dict)
+            and message.get("activity_id") == "tool-1"
+            and message.get("phase") != "started"
+        ]
+        self.assertEqual(len(tool_results), 1)
+        self.assertEqual(tool_results[0]["phase"], "completed")
+        self.assertNotIn("doesn't want to proceed", json.dumps(emitted))
+
+    def test_rapid_steers_during_a_tool_finish_on_the_result_that_answers_them(self) -> None:
+        script = r"""
+assistant([{"type": "tool_use", "id": "tool-1", "name": "Bash",
+            "input": {"command": "sleep 600"}}])
+steers = [read_user_message(), read_user_message()]
+emit({"type": "user", "message": {"content": [{
+    "type": "tool_result", "tool_use_id": "tool-1", "content": "TOOL_DONE"}]}})
+for steer in steers:
+    lifecycle(steer, "started")
+assistant([{"type": "text", "text": "BOTH"}])
+result("BOTH")
+sys.stdin.readline()
+"""
+
+        def steer_twice(server: claude_code.ClaudeCodeSession) -> None:
+            server.steer("first")
+            server.steer("second")
+
+        (_session_id, output), _emitted = self._run_fake_claude_turn(
+            script, steer_twice, steer_when=self._tool_started,
+        )
+        self.assertEqual(output, "BOTH")
+
+    def test_steer_still_queued_at_a_result_waits_for_its_follow_up_query(self) -> None:
+        # With no tool boundary left, Claude finishes the current query first
+        # and then runs the queued message as a follow-up query.
+        script = r"""
+assistant([{"type": "text", "text": "FIRST"}])
+steer = read_user_message()
+result("FIRST")
+lifecycle(initial, "completed")
+lifecycle(steer, "started")
+assistant([{"type": "text", "text": "STEERED"}])
+result("STEERED")
+lifecycle(steer, "completed")
+sys.stdin.readline()
+"""
+        (session_id, output), _emitted = self._run_fake_claude_turn(
+            script,
+            lambda server: server.steer("steer"),
+            steer_when=lambda message: message == "FIRST",
+        )
+        self.assertEqual(session_id, "session-1")
+        self.assertEqual(output, "STEERED")
 
     def test_run_turn_delivers_a_steer_that_arrives_right_as_the_result_is_processed(self) -> None:
         # The completion callback is the final atomic boundary with the host's
         # delivery lock. A direct steer observed there keeps the CLI open for
         # its result instead of letting the just-completed turn close it.
         script = r"""
-import json, sys
-
-json.loads(sys.stdin.readline())
-for text in ("FIRST",):
-    print(json.dumps({
-        "type": "assistant",
-        "session_id": "session-1",
-        "message": {"content": [{"type": "text", "text": text}]},
-    }), flush=True)
-    print(json.dumps({
-        "type": "result",
-        "subtype": "success",
-        "session_id": "session-1",
-        "result": text,
-    }), flush=True)
-interrupt = json.loads(sys.stdin.readline())
-assert interrupt["request"]["subtype"] == "interrupt"
-print(json.dumps({
-    "type": "control_response",
-    "response": {
-        "subtype": "success",
-        "request_id": interrupt["request_id"],
-    },
-}), flush=True)
-steer = json.loads(sys.stdin.readline())
+assistant([{"type": "text", "text": "FIRST"}])
+result("FIRST")
+steer = read_user_message()
 assert steer["message"]["content"] == "late steer"
-print(json.dumps({
-    "type": "assistant",
-    "session_id": "session-1",
-    "message": {"content": [{"type": "text", "text": "STEERED"}]},
-}), flush=True)
-print(json.dumps({
-    "type": "result",
-    "subtype": "success",
-    "session_id": "session-1",
-    "result": "STEERED",
-}), flush=True)
+lifecycle(steer, "started")
+assistant([{"type": "text", "text": "STEERED"}])
+result("STEERED")
 """
-        original_cwd = claude_code.AGENT_CWD
         calls = 0
 
         def finish_turn(_session_id: str, _output: str) -> int:
@@ -1668,105 +1207,26 @@ print(json.dumps({
                 return server.take_delivered_steers()
             return 0
 
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude_code.AGENT_CWD = tmp
-                server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script])
-                self.addCleanup(server.close)
-                server.start()
-                session_id, output = claude_code.run_turn(
-                    server,
-                    "initial",
-                    None,
-                    "claude-opus-5-5",
-                    "high",
-                    lambda _message: None,
-                    finish_turn,
-                )
-        finally:
-            claude_code.AGENT_CWD = original_cwd
+        with tempfile.TemporaryDirectory() as tmp, patch.object(claude_code, "AGENT_CWD", tmp):
+            server = claude_code.ClaudeCodeSession(
+                [sys.executable, "-u", "-c", self._FAKE_CLAUDE_PRELUDE + script]
+            )
+            self.addCleanup(server.close)
+            server.start()
+            session_id, output = claude_code.run_turn(
+                server,
+                "initial",
+                None,
+                "claude-opus-5-5",
+                "high",
+                lambda _message: None,
+                finish_turn,
+            )
+        self.assertEqual(calls, 2)
         self.assertEqual(session_id, "session-1")
         self.assertEqual(output, "STEERED")
 
-    def test_run_turn_continues_after_a_steered_abort_boundary(self) -> None:
-        # Claude reports the interruption as an error result, then starts the
-        # newest message in the same session. That boundary is not final.
-        script = r"""
-import json, sys
-
-json.loads(sys.stdin.readline())
-print(json.dumps({
-    "type": "assistant",
-    "session_id": "session-1",
-    "message": {"content": [{"type": "text", "text": "READY"}]},
-}), flush=True)
-interrupt = json.loads(sys.stdin.readline())
-assert interrupt["request"]["subtype"] == "interrupt"
-print(json.dumps({
-    "type": "control_response",
-    "response": {
-        "subtype": "success",
-        "request_id": interrupt["request_id"],
-        "response": {"still_queued": []},
-    },
-}), flush=True)
-steer = json.loads(sys.stdin.readline())
-assert steer["message"]["content"] == "steer"
-print(json.dumps({
-    "type": "result",
-    "subtype": "error_during_execution",
-    "is_error": True,
-    "terminal_reason": "aborted_streaming",
-    "session_id": "session-1",
-}), flush=True)
-print(json.dumps({
-    "type": "assistant",
-    "session_id": "session-1",
-    "message": {"content": [{"type": "text", "text": "STEERED"}]},
-}), flush=True)
-print(json.dumps({
-    "type": "result",
-    "subtype": "success",
-    "session_id": "session-1",
-    "result": "STEERED",
-}), flush=True)
-sys.stdin.readline()  # stay alive like the real CLI until stdin EOF
-"""
-        original_cwd = claude_code.AGENT_CWD
-        ready = threading.Event()
-        result: list[tuple[str, str]] = []
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude_code.AGENT_CWD = tmp
-                server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script])
-                # The script idles on stdin after the result; close it so the
-                # child and its reader threads do not outlive the test.
-                self.addCleanup(server.close)
-                worker = threading.Thread(
-                    target=lambda: result.append(
-                        claude_code.run_turn(
-                            server,
-                            "initial",
-                            None,
-                            "claude-opus-5-5",
-                            "high",
-                            lambda _message: ready.set(),
-                        )
-                    )
-                )
-                worker.start()
-                self.assertTrue(ready.wait(timeout=10))
-                server.steer("steer")
-                worker.join(timeout=10)
-                self.assertFalse(worker.is_alive())
-        finally:
-            claude_code.AGENT_CWD = original_cwd
-        self.assertEqual(len(result), 1)
-        session_id, output = result[0]
-        self.assertEqual(session_id, "session-1")
-        self.assertEqual(output, "STEERED")
-
-    def test_run_turn_rejects_an_unacknowledged_aborted_result(self) -> None:
+    def test_run_turn_rejects_an_aborted_result(self) -> None:
         script = r"""
 import json, sys
 
@@ -1801,137 +1261,6 @@ print(json.dumps({
                     )
         finally:
             claude_code.AGENT_CWD = original_cwd
-
-    def test_run_turn_ignores_abort_boundary_after_interrupt_rejection(self) -> None:
-        script = r"""
-import json, sys
-
-json.loads(sys.stdin.readline())  # initial message
-print(json.dumps({
-    "type": "assistant",
-    "session_id": "session-1",
-    "message": {"content": [{"type": "text", "text": "READY"}]},
-}), flush=True)
-interrupt = json.loads(sys.stdin.readline())
-print(json.dumps({
-    "type": "control_response",
-    "response": {
-        "subtype": "error",
-        "request_id": interrupt["request_id"],
-        "error": "no active query",
-    },
-}), flush=True)
-json.loads(sys.stdin.readline())  # replacement user message
-print(json.dumps({
-    "type": "result",
-    "subtype": "error_during_execution",
-    "is_error": True,
-    "terminal_reason": "aborted_streaming",
-    "session_id": "session-1",
-}), flush=True)
-print(json.dumps({
-    "type": "result",
-    "subtype": "success",
-    "session_id": "session-1",
-    "result": "REPLACEMENT",
-}), flush=True)
-"""
-        original_cwd = claude_code.AGENT_CWD
-        ready = threading.Event()
-        result: list[tuple[str, str]] = []
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude_code.AGENT_CWD = tmp
-                server = claude_code.ClaudeCodeSession(
-                    [sys.executable, "-u", "-c", script]
-                )
-                self.addCleanup(server.close)
-
-                def run() -> None:
-                    result.append(
-                        claude_code.run_turn(
-                            server,
-                            "initial",
-                            None,
-                            "claude-opus-5-5",
-                            "high",
-                            lambda _message: ready.set(),
-                        )
-                    )
-
-                worker = threading.Thread(target=run)
-                worker.start()
-                self.assertTrue(ready.wait(timeout=10))
-                server.steer("replacement")
-                worker.join(timeout=10)
-                self.assertFalse(worker.is_alive())
-        finally:
-            claude_code.AGENT_CWD = original_cwd
-
-        self.assertEqual(result, [("session-1", "REPLACEMENT")])
-
-    def test_run_turn_accepts_success_after_a_rejected_interrupt(self) -> None:
-        script = r"""
-import json, sys
-
-json.loads(sys.stdin.readline())  # initial message
-print(json.dumps({
-    "type": "assistant",
-    "session_id": "session-1",
-    "message": {"content": [{"type": "text", "text": "READY"}]},
-}), flush=True)
-interrupt = json.loads(sys.stdin.readline())
-print(json.dumps({
-    "type": "control_response",
-    "response": {
-        "subtype": "error",
-        "request_id": interrupt["request_id"],
-        "error": "no active query",
-    },
-}), flush=True)
-json.loads(sys.stdin.readline())  # merged user message
-print(json.dumps({
-    "type": "assistant",
-    "session_id": "session-1",
-    "message": {"content": [{"type": "text", "text": "MERGED"}]},
-}), flush=True)
-print(json.dumps({
-    "type": "result",
-    "subtype": "success",
-    "session_id": "session-1",
-    "result": "MERGED",
-}), flush=True)
-sys.stdin.readline()  # idle until Kern closes stdin
-"""
-        original_cwd = claude_code.AGENT_CWD
-        ready = threading.Event()
-        result: list[tuple[str, str]] = []
-        try:
-            with tempfile.TemporaryDirectory() as tmp:
-                claude_code.AGENT_CWD = tmp
-                server = claude_code.ClaudeCodeSession(
-                    [sys.executable, "-u", "-c", script]
-                )
-                self.addCleanup(server.close)
-                worker = threading.Thread(
-                    target=lambda: result.append(claude_code.run_turn(
-                        server,
-                        "initial",
-                        None,
-                        "claude-opus-5-5",
-                        "high",
-                        lambda _message: ready.set(),
-                    ))
-                )
-                worker.start()
-                self.assertTrue(ready.wait(timeout=10))
-                server.steer("merged")
-                worker.join(timeout=10)
-                self.assertFalse(worker.is_alive())
-        finally:
-            claude_code.AGENT_CWD = original_cwd
-
-        self.assertEqual(result, [("session-1", "MERGED")])
 
     def test_run_turn_discards_stale_messages_from_previous_process(self) -> None:
         script = r"""

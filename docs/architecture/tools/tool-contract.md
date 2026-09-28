@@ -33,6 +33,16 @@ Every `HostAPI` handed to a tool call is already **scoped to one tool on one
 host**. Credentials, private JSON, approval records, and staged assets are implicitly
 partitioned by `tool_id`; a tool can never address another tool's data.
 
+## Contents
+
+- [The tool: `Tool`](#the-tool-tool)
+- [The manifest: `ToolManifest`](#the-manifest-toolmanifest)
+- [Action execution](#action-execution)
+- [The host API: `HostAPI`](#the-host-api-hostapi)
+- [Credential flows (OAuth)](#credential-flows-oauth)
+- [Rules](#rules)
+- [Tool-reported costs](#tool-reported-costs)
+
 ## The tool: `Tool`
 
 ```python
@@ -59,6 +69,10 @@ only `start`, `stop`, and `operator` methods. Kern follows that declaration when
 the tool is enabled and when an operator calls its `/service/...` routes; the
 generic host does not import or branch on WhatsApp. Process supervision,
 provider status, and filesystem cleanup remain inside the declared service.
+Tools that depend on a separately provisioned, separately owned host service
+declare its systemd unit in `host_service_dependency` instead. This internal manifest field
+does not start the service or expose its operator controls through the Tool API;
+host deployment and the service's own socket permissions own that boundary.
 
 `JSONObject` and `JSONValue` are plain JSON, defined once and reused for every
 value that crosses the tool/host boundary:
@@ -90,6 +104,7 @@ class InputProtection:
     description: str = ""                  # only for validated inputs
     allow_identifiers: bool = False
     allow_machine_tokens: bool = False
+    allow_longer_text: bool = False
     identifiers_condition: Literal["decimal"] | None = None
 
 @dataclass(frozen=True)
@@ -98,17 +113,11 @@ class ActionSpec:
     description: str
     data_policy: str
     input_schema: JSONObject
-    output_schema: JSONObject = {}          # required unless the action returns no JSON result
+    output_schema: JSONObject = field(default_factory=dict)          # required unless the action returns no JSON result
     approval: ApprovalKind = "direct"
     returns_asset: bool = False             # the whole result is one streamed file
     input_protections: dict[str, InputProtection] = field(default_factory=dict)
     cost_description: str = ""
-
-@dataclass(frozen=True)
-class ToolManifest:
-    # ...identity, actions, connection, and operator-facing metadata...
-    service: str = ""                       # optional trusted module:attribute
-    reports_cost: bool = False              # tool code can report USD charges
 
 @dataclass(frozen=True)
 class ConfigRequirement:
@@ -125,6 +134,7 @@ class SetupStep:
     image_alt: str = ""
     show_callback: bool = False              # render this host's OAuth callback URI in the step
     show_config: bool = False                # render the tool's config keys in the step
+    code: str = ""                          # operator-facing setup command
 
 @dataclass(frozen=True)
 class DataSummaryPoint:
@@ -160,6 +170,9 @@ class ToolManifest:
     config: tuple[ConfigRequirement, ...] = ()
     protections: tuple[str, ...] = ()
     setup_steps: tuple[SetupStep, ...] = ()
+    service: str = ""                       # optional trusted module:attribute
+    host_service_dependency: str = ""       # optional separate Kern systemd unit
+    reports_cost: bool = False              # tool code can report USD charges
 ```
 
 - **`tool_id`** matches `^[a-z][a-z0-9_]{0,63}$`, is globally stable once
@@ -186,7 +199,7 @@ class ToolManifest:
   exception limited to all-digit values, set `identifiers_condition="decimal"`;
   the short label and API metadata carry that condition. Otherwise leave it
   unset. This describes the existing check without changing it. Shared Technical notes
-  explain both flags and the checks they retain. Approval actions leave this
+  explain the identifier, machine-token, and longer-text flags and the checks they retain. Approval actions leave this
   map empty and their input descriptions explain meaning/options, without
   validation commentary. Their runtime checks remain unchanged.
 - **`ActionSpec.output_schema`** describes the JSON result the action returns:
@@ -356,6 +369,7 @@ class Outbound(Protocol):
         *,
         allow_identifiers: bool = False,
         allow_machine_tokens: bool = False,
+        allow_longer_text: bool = False,
     ) -> str: ...
 ```
 
@@ -369,7 +383,9 @@ provider token; secret/credential shapes and encoded payloads are still
 denied. `allow_machine_tokens=True` skips only the
 generic unbroken-token and random-looking-token rules for a provider-issued
 opaque token; explicit secret, credential, and identifier rules still apply.
-Both flags default to false and have the same meaning on tool and managed
+`allow_longer_text=True` raises only the byte cap from 1,024 to 5,120 for
+reviewed longer prompts; all other checks still apply. All three flags default
+to false and have the same meaning on tool and managed
 network-integration call sites. A tool applies the guard to each
 decoded semantic value it controls; the host runs the same rules over managed
 network-integration request URLs. The rules, the data classes each covers, and
@@ -404,18 +420,19 @@ Tool packages receive neither a storage path nor cross-tool lookup.
 
 `public_asset_url` is available only during host-authorized approved execution.
 Staging and ordinary tool calls cannot expose bytes. The context temporarily
-serves a tool-owned staged JPEG, PNG, WebP, MP4 or MOV through a separate
-random capability on the configured Cloudflare HTTPS hostname. SSH-only, localhost and IP configurations
-fail with an actionable error. The host invalidates the API and revokes any outstanding links when the approved
-callback exits, including retained or unclosed contexts. Context exit revokes
-the link on success or failure;
-links expire within 15 minutes, and staged images and videos expire after 26 hours.
-`delete` removes the staged copy and invalidates its links. Only Instagram uses
-this API initially, for Reel videos; its action still rejects images. Other asset
-types, including SVG and HTML, cannot be exposed. The tool must hold the context
-until the provider has finished fetching, then exit it before publishing. Never return or log the URL.
-Other tools must retain their upload flow unless their approved action can
-safely bound the provider fetch inside this context.
+serves a tool-owned staged JPEG, PNG, WebP, MP4 or MOV through a separate random
+capability on the configured Cloudflare HTTPS hostname. SSH-only, localhost and
+IP configurations fail with an actionable error. The host invalidates the API
+and revokes any outstanding links when the approved callback exits, including
+retained or unclosed contexts. Context exit revokes the link on success or
+failure; links expire within 15 minutes, and staged images and videos expire
+after 26 hours. `delete` removes the staged copy and invalidates its links.
+Instagram uses this API for Reel videos, single JPEG images, and image
+carousels. Other asset types, including SVG and HTML, cannot be exposed. The
+tool must hold the context until the provider has finished fetching, then exit
+it before publishing. Never return or log the URL. Other tools must retain their
+upload flow unless their approved action can safely bound the provider fetch
+inside this context.
 
 An approval payload that references an input asset binds its filename, encoded
 byte size, and SHA-256; execution verifies those values before data-out. Assets
@@ -447,6 +464,8 @@ class Credentials(Protocol):
     def load(self) -> StoredCredential | None: ...
     def save(self, credential: StoredCredential) -> None: ...
     def clear(self) -> None: ...
+    def save_if_current(self, loaded: StoredCredential, credential: StoredCredential) -> bool: ...
+    def clear_if_current(self, loaded: StoredCredential) -> bool: ...
 ```
 
 Only `ConnectionAccount` has a fixed, host-typed shape: it is the explicit
@@ -460,6 +479,15 @@ design; they are not declared in the manifest (which describes operator-supplied
 config, not credential internals) and are intentionally `JSONObject` rather than
 concrete fields. The host encrypts `secret` at rest; the account and metadata are non-secret.
 The store is isolated by tool and host-selected connection.
+
+Refresh and failure handlers use `save_if_current` / `clear_if_current` with
+the credential loaded before the provider call. The host compares the stored
+account id and secret and performs the write under the same database row lock.
+A missing or changed credential returns `False` without writing: a stale
+refresh cannot recreate a disconnected connection or overwrite a newer token,
+and a stale failure cannot clear a reconnect. Account labels, scopes, and
+bookkeeping metadata are not generation identifiers. `save` and `clear` remain
+unconditional operations for explicit connect and disconnect.
 
 ### Private JSON: `secrets`
 

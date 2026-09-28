@@ -9,7 +9,7 @@ scoped to exactly one peer: the agent uid gets the MCP surface
 delegation routes (``POST /operator/...``) — neither can call the other's
 routes, no admin password involved and none required.
 
-The agent-facing HTTP surface is four routes:
+The agent-facing HTTP surface is five routes:
 
 - ``GET /tools`` — a constant four-entry declaration: ``list_bundled_tools``,
   ``describe_tool``, ``call_tool``, and ``check_tool_approval``. It does not
@@ -21,6 +21,7 @@ The agent-facing HTTP surface is four routes:
 - ``POST /call`` — ``{"name": ..., "input": {...}}`` executes one action and
   returns either the JSON result shape from ``tools_host`` (``executed`` /
   ``pending_approval`` / ``failed``) or one exclusive binary asset response.
+- ``POST /assets/audio``: raw MP3/WAV bytes, scoped to Runway or falAI.
 - ``POST /assets/video``: raw MP4/MOV bytes streamed by the MCP shim, with
   bounded metadata in headers; returns an opaque tool-scoped asset id.
 - ``POST /assets/image``: raw JPEG/PNG/WebP bytes streamed by the MCP shim,
@@ -809,8 +810,8 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
         if not is_operator and not self._peer_is_agent():
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "Peer not allowed."})
             return
-        asset_kind = {"/assets/video": "video", "/assets/image": "image"}.get(self.path)
-        if not is_operator and self.path not in {"/call", "/assets/video", "/assets/image"}:
+        asset_kind = {"/assets/video": "video", "/assets/image": "image", "/assets/audio": "audio"}.get(self.path)
+        if not is_operator and self.path not in {"/call", "/assets/video", "/assets/image", "/assets/audio"}:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown path."})
             return
         try:
@@ -823,6 +824,7 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
             return
         max_length = (
             MAX_VIDEO_BODY_BYTES if asset_kind == "video"
+            else tool_assets.MAX_AUDIO_BYTES if asset_kind == "audio"
             else MAX_IMAGE_BODY_BYTES if asset_kind == "image"
             else MAX_REQUEST_BODY_BYTES
         )
@@ -888,7 +890,8 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
         try:
             tool_id = self.headers.get("X-Kern-Tool") or ""
             allowed_tools = (
-                {"runway", "instagram"} if kind == "video" else {"runway", "openai_images", "instagram"}
+                {"runway", "fal_ai"} if kind == "audio" else
+                {"runway", "instagram", "fal_ai"} if kind == "video" else {"runway", "openai_images", "instagram", "fal_ai"}
             )
             if tool_id not in allowed_tools:
                 self._send_json(

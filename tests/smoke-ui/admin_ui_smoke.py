@@ -13,6 +13,7 @@ import socket
 import subprocess
 import sys
 import time
+from typing import TypedDict
 import urllib.request
 
 import workspace_smokes
@@ -207,6 +208,8 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 upwork_smoke(upwork_context.new_page(), url)
                 upwork_context.close()
                 approval_smokes.approval_smoke(browser, url)
+                import auto_approval_smokes
+                auto_approval_smokes.auto_approval_smoke(browser, url)
                 route_restore = browser.new_context()
                 route_restore_page = route_restore.new_page()
                 report_page_errors(route_restore_page, "workspace route supersession")
@@ -220,6 +223,12 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 login_error_mapping_smoke(desktop_page, url)
                 stale_password_smoke(desktop_page, url)
                 desktop_smoke(desktop_page, url)
+                import browser_adapter_smoke
+                browser_adapter_smoke.run(playwright, chromium_executable_path())
+                import browser_smokes
+                browser_context = browser.new_context(viewport={"width": 1280, "height": 900})
+                browser_smokes.run(browser_context.new_page(), url, log_in, open_home_integration)
+                browser_context.close()
                 desktop.close()
 
                 narrow_desktop = browser.new_context(viewport={"width": 1220, "height": 800})
@@ -493,7 +502,7 @@ def workspace_route_supersession_smoke(page, url: str) -> None:
     def delay_archived_index(route) -> None:
         delayed_archived_routes.append(route)
 
-    page.route("**/v1/workspace/chat/threads?archived=true", delay_archived_index)
+    page.route("**/v1/workspace/chat/threads?spawned=false&archived=true", delay_archived_index)
     page.evaluate(
         """() => {
           history.pushState({ kernWorkspaceRoute: "chat", itemId: "thread-1" }, "", "#chat/thread-1");
@@ -510,7 +519,7 @@ def workspace_route_supersession_smoke(page, url: str) -> None:
     # though it does not pass through a host sidebar action.
     page.evaluate("window.KernHost.navigateWorkspace('memory')")
     delayed_archived_routes.pop().continue_()
-    page.unroute("**/v1/workspace/chat/threads?archived=true", delay_archived_index)
+    page.unroute("**/v1/workspace/chat/threads?spawned=false&archived=true", delay_archived_index)
     page.wait_for_timeout(150)
     expect(page.locator('[data-action="show-chat-archive"]')).to_have_attribute(
         "aria-pressed", "false"
@@ -713,7 +722,10 @@ def runway_options_smoke(page, url: str) -> None:
     video = guide.locator(".guide-capability").filter(
         has=page.locator("h4 code", has_text=re.compile("^generate_video$")))
     image_url = video.locator("tr").filter(has=page.locator("td code", has_text=re.compile("^image_url$")))
-    expect(image_url.locator(".guide-input-protection")).to_have_text("Parameter guard applied")
+    expect(image_url).to_have_count(0)
+    image_asset = video.locator("tr").filter(has=page.locator("td code", has_text=re.compile("^image_asset_id$")))
+    expect(image_asset.locator(".guide-input-protection")).to_contain_text("Validated:")
+    expect(image_asset).to_contain_text("tool ownership, expiry")
 
 
 def vercel_analytics_smoke(page, url: str) -> None:
@@ -841,6 +853,28 @@ def gmail_capability(guide, action_id: str):
     )
 
 
+class SidebarTaskStyle(TypedDict):
+    lines: float
+    clamp: str
+
+
+def sidebar_task_style(page, selector: str) -> SidebarTaskStyle:
+    return page.wait_for_function("""selector => {
+      const element = document.querySelector(selector);
+      if (!element || !element.isConnected) return false;
+      const style = getComputedStyle(element);
+      const height = element.getBoundingClientRect().height;
+      const lineHeight = parseFloat(style.lineHeight);
+      if (!Number.isFinite(lineHeight) || lineHeight <= 0 || height <= 0) return false;
+      return {lines: height / lineHeight, clamp: style.webkitLineClamp};
+    }""", arg=selector, timeout=5000).json_value()
+
+
+def assert_sidebar_task_layout(task_style: SidebarTaskStyle) -> None:
+    if task_style["clamp"] != "3" or not 1 < task_style["lines"] <= 3.1:
+        raise AssertionError(f"sidebar task did not wrap within three lines: {task_style}")
+
+
 def desktop_smoke(page, url: str) -> None:
     from playwright.sync_api import expect
 
@@ -886,13 +920,14 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#home-hero")).to_have_count(0)
     expect(page.get_by_role("button", name="New chat", exact=True)).to_be_visible()
     expect(page.get_by_role("button", name="New app", exact=True)).to_be_visible()
-    # Home is the single administration destination. Chat, Apps, and scheduled
-    # agents remain first-class workspace sections.
+    # Home is the single administration destination. Agent types remain
+    # visible as first-class workspace sections.
     headings = page.locator("#sidebar .sidebar-section-title:visible")
-    expect(headings).to_have_count(3)
+    expect(headings).to_have_count(4)
     expect(headings.nth(0)).to_have_text("Chat")
     expect(headings.nth(1)).to_have_text("Apps")
     expect(headings.nth(2)).to_have_text("Scheduled agents")
+    expect(headings.nth(3)).to_have_text("Spawned agents")
     # Home, Swarm, Approvals, Memory, and Analytics are tabs; Schedules is a section heading.
     expect(page.locator("#sidebar .tab-button")).to_have_count(5)
     expect(
@@ -926,12 +961,25 @@ def desktop_smoke(page, url: str) -> None:
     expect(task_line).to_have_text(
         "Document the theming setup and open a pull request with the implementation and test evidence"
     )
-    task_style = task_line.evaluate("""element => ({
-      lines: element.getBoundingClientRect().height / parseFloat(getComputedStyle(element).lineHeight),
-      clamp: getComputedStyle(element).webkitLineClamp,
-    })""")
-    if task_style["clamp"] != "3" or not 1 < task_style["lines"] <= 3.1:
-        raise AssertionError(f"sidebar task did not wrap within three lines: {task_style}")
+    task_selector = "#chat-nav-items [data-item-id='thread-1'] .workspace-nav-task"
+    # A sidebar refresh replaces its rows. Exercise the detached interval that
+    # used to produce NaN and an empty clamp on a one-shot style read.
+    page.evaluate("""selector => {
+      const element = document.querySelector(selector);
+      const marker = document.createComment('sidebar refresh');
+      element.replaceWith(marker);
+      setTimeout(() => marker.replaceWith(element), 75);
+    }""", task_selector)
+    task_style = sidebar_task_style(page, task_selector)
+    assert_sidebar_task_layout(task_style)
+    # Check that the assertion rejects a missing clamp without injecting an
+    # inline stylesheet, which the admin UI Content Security Policy blocks.
+    try:
+        assert_sidebar_task_layout({**task_style, "clamp": "none"})
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("broken sidebar clamp passed the layout assertion")
     short_task_fits = task_line.evaluate("""element => {
       const original = element.textContent;
       element.textContent = 'Document theming, add tests, and open the pull PR';
@@ -1255,7 +1303,10 @@ def desktop_smoke(page, url: str) -> None:
         "Memory recall reranking"
     )
     expect(page.locator("[data-guide-section='host_typesafe']")).to_contain_text(
-        "up to 20 candidate page ids and descriptions"
+        "up to 20 candidate descriptions with local ids"
+    )
+    expect(page.locator("[data-guide-section='host_typesafe']")).to_contain_text(
+        "current and recent user messages (up to 1,000 UTF-8 bytes total)"
     )
     page.locator("#panel-network .home-back").click()
 

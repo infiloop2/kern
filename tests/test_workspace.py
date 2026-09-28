@@ -102,8 +102,10 @@ class WorkspaceTests(unittest.TestCase):
             offset: int,
             *,
             scope: str,
+            alternatives: bool = False,
         ) -> list[tuple[object, ...]]:
             self.assertEqual(scope, "swarm")
+            self.assertFalse(alternatives)
             return rows[offset : offset + limit]
 
         with (
@@ -423,12 +425,14 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_workspace_service_owns_workspace_storage_maintenance(self) -> None:
         with (
+            patch.object(service.chat, "archive_idle_spawned_agents") as archive_spawned,
             patch.object(service.memory, "prune_deleted") as prune_memory,
             patch.object(service.schedules, "prune_deleted") as prune_schedules,
             patch.object(service.web_apps, "prune_revisions") as prune_apps,
         ):
             service.maintain_storage()
 
+        archive_spawned.assert_called_once_with()
         prune_memory.assert_called_once_with()
         prune_schedules.assert_called_once_with()
         prune_apps.assert_called_once_with()

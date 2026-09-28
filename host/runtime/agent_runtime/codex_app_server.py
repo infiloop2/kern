@@ -39,12 +39,14 @@ from host.runtime.agent_runtime import token_usage
 from collections import deque
 from dataclasses import dataclass, field
 import json
+from pathlib import PurePosixPath
 import queue
 import re
 import subprocess
 import threading
 import time
 from typing import IO, Any, Callable
+from uuid import UUID
 
 from host.runtime.agent_runtime import agent_activity, thread_scope
 from host.runtime.agent_runtime.harness import ProviderSessionLost, ProviderTurnFinishing
@@ -56,6 +58,9 @@ CODEX_RUNTIME_TYPES = tuple(OPENAI_PROVIDER_KEYS)
 AGENT_CWD = "/mnt/kern-agent/agent-home"
 ACCOUNT_ID_HELPER_TIMEOUT_SECONDS = 10
 CLIENT_VERSION = "v1.0"
+# A soft per-session limit: a turn may exceed it, but successful completion
+# retires the session before the next turn. This is not a CODEX_HOME quota.
+SESSION_ROLLOUT_MAX_BYTES = 100 * 1024 * 1024
 # Under the orchestrator's five-minute active recheck, so a scheduled recheck
 # always revalidates, while the five-second pending poll never becomes a
 # provider-traffic loop.
@@ -1212,6 +1217,53 @@ def _codex_item_activity_unchecked(
         output=output,
         status=str(status) if status is not None else None,
     )
+
+
+def session_rollout_size(server: CodexAppServer, session_id: str) -> int:
+    """Measure one persisted session as kern-agent, without reading its text.
+
+    kern-admin cannot read agent-home. The existing app-server's standalone
+    command transport runs stat as the agent, with an argv vector (no shell).
+    Deletion uses thread/delete by id, never the returned filesystem path.
+    """
+    UUID(session_id)
+    thread = server.call(
+        "thread/read", {"threadId": session_id, "includeTurns": False}, timeout=5,
+    )["thread"]
+    path = thread.get("path")
+    if path is None:
+        return 0
+    rollout = PurePosixPath(path)
+    sessions = PurePosixPath(AGENT_CWD) / f".{server.runtime_type}" / "sessions"
+    if (
+        thread.get("id") != session_id
+        or not rollout.is_relative_to(sessions)
+        or ".." in rollout.parts
+        or not rollout.name.endswith(f"-{session_id}.jsonl")
+    ):
+        raise CodexAppServerError("Codex returned an unexpected session rollout path")
+    result = server.call(
+        "command/exec",
+        {
+            "command": ["/usr/bin/stat", "--format=%s", "--", str(rollout)],
+            "cwd": AGENT_CWD,
+            "timeoutMs": 1000,
+            "sandboxPolicy": {"type": "dangerFullAccess"},
+        },
+        timeout=5,
+    )
+    if result.get("exitCode") != 0:
+        raise CodexAppServerError("Could not measure Codex session rollout")
+    size = int(result["stdout"].strip())
+    if size < 0:
+        raise CodexAppServerError("Codex returned a negative session rollout size")
+    return size
+
+
+def delete_session(server: CodexAppServer, session_id: str) -> None:
+    """Let Codex retire the rollout and its metadata, including native children."""
+    UUID(session_id)
+    server.call("thread/delete", {"threadId": session_id}, timeout=10)
 
 
 def _start_thread(server: CodexAppServer, model: str) -> dict[str, Any]:

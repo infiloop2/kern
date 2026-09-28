@@ -282,6 +282,64 @@ class UpworkTests(unittest.TestCase):
                 self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
                     ["upwork__find_jobs", "upwork__manage_proposals", "upwork__get_preview", "upwork__confirm_preview"])
 
+    def test_screening_answers_camelcase_preview_confirms_exact_approved_answers(self):
+        answers = [{"question": "Relevant work?", "answer": "Production agents"},
+                   {"question": "Frameworks?", "answer": "TypeScript"}]
+        pending = self.submit(answers=answers, portfolio_project_ids=["project-one"])
+        self.client.call.reset_mock()
+        self.client.call.side_effect = [self.job_cost(), self.preview(), self.stored_preview(
+            screeningAnswers=answers, screeningQuestions=[row["question"] for row in answers],
+            portfolioProjectIds=["project-one"]),
+            {"content": [{"type": "text", "text": "Submitted"}]}]
+        result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+        self.assertIsInstance(result, ApprovalExecuted)
+        calls = self.client.call.call_args_list
+        self.assertEqual(calls[1].args[1]["params"]["answers"], answers)
+        self.assertEqual([call.args[0] for call in calls],
+                         ["upwork__find_jobs", "upwork__manage_proposals", "upwork__get_preview", "upwork__confirm_preview"])
+
+    def test_screening_answers_camelcase_changes_never_confirm(self):
+        answers = [{"question": "Relevant work?", "answer": "Production agents"}]
+        for changed in ([], {}, None, [{"question": "Relevant work?", "answer": "Changed"}],
+                        [{"question": "Changed?", "answer": "Production agents"}]):
+            with self.subTest(changed=changed):
+                pending = self.submit(answers=answers)
+                self.client.call.reset_mock()
+                self.client.call.side_effect = [self.job_cost(), self.preview(),
+                    self.stored_preview(screeningAnswers=changed)]
+                result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("changed the approved proposal", result.error)
+                self.assertEqual(self.client.call.call_count, 3)
+
+    def test_screening_answers_camelcase_cannot_be_split_or_aliased_twice(self):
+        answers = [{"question": "Relevant work?", "answer": "Production agents"}]
+        for kind in ("missing", "split", "duplicate", "conflicting_mirror", "unapproved"):
+            with self.subTest(kind=kind):
+                pending = self.submit(**({} if kind == "unapproved" else {"answers": answers}))
+                preview = self.stored_preview()
+                data = json.loads(preview["content"][0]["text"])
+                if kind == "split":
+                    data["other"] = {"screeningAnswers": answers}
+                elif kind != "missing":
+                    data["params"]["screeningAnswers"] = answers
+                    if kind == "duplicate":
+                        data["params"]["answers"] = answers
+                    elif kind == "conflicting_mirror":
+                        data["other"] = {"answers": [{"question": "Relevant work?", "answer": "Changed"}]}
+                preview["content"][0]["text"] = json.dumps(data)
+                self.client.call.reset_mock()
+                self.client.call.side_effect = [self.job_cost(), self.preview(), preview]
+                record = self.api.approvals.approve(pending.approval_id)
+                if kind == "unapproved":
+                    result = upwork.BUNDLED_TOOL.execute_approved(record, self.api)
+                    self.assertIsInstance(result, ActionFailed)
+                    self.assertIn("unapproved proposal terms: answers", result.error)
+                else:
+                    with self.assertRaises(ProviderWarning):
+                        upwork.BUNDLED_TOOL.execute_approved(record, self.api)
+                self.assertEqual(self.client.call.call_count, 3)
+
     def test_stored_preview_changes_and_unapproved_camelcase_terms_never_confirm(self):
         for changes in ({"coverLetter": "Changed"}, {"chargedAmount": 51}, {"jobReference": "124"},
                         {"connects_cost": 11}, {"connects_cost": True}, {"connects_cost": "10"},
@@ -529,7 +587,7 @@ class UpworkTests(unittest.TestCase):
         with self.assertRaises(ProviderWarning) as caught:
             upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
         self.assertNotIn("client-one", caught.exception.response_body)
-        self.assertIn("[redacted]", caught.exception.response_body)
+        self.assertEqual(json.loads(caught.exception.response_body)["preview_id"], "str")
         self.assertEqual(caught.exception.operation, "get_preview")
         self.assertEqual(self.client.call.call_count, 3)
 
@@ -641,6 +699,22 @@ class UpworkTests(unittest.TestCase):
             upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
         self.assertEqual(caught.exception.operation, "get_preview")
         self.assertIn("new_preview", caught.exception.response_body)
+        self.assertEqual(self.client.call.call_count, 3)
+
+    def test_preview_diagnostic_keeps_answer_shape_after_long_cover_letter(self):
+        from host.runtime.core.host_errors import _safe_context
+
+        answers = [{"question": "Private question", "answer": "Private answer"}]
+        pending = self.submit(answers=answers)
+        self.client.call.reset_mock()
+        self.client.call.side_effect = [self.job_cost(), self.preview(), self.stored_preview(
+            coverLetter="Private proposal " * 250, unknownAnswers=answers)]
+        with self.assertRaises(ProviderWarning) as caught:
+            upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+        sample = _safe_context({"provider_response": caught.exception.response_body})["provider_response"]
+        self.assertEqual(json.loads(sample)["params"]["unknownAnswers"],
+                         [{"question": "str", "answer": "str"}])
+        self.assertNotIn("Private", sample)
         self.assertEqual(self.client.call.call_count, 3)
 
     def test_transport_failures_do_not_echo_bodies_or_retry(self):

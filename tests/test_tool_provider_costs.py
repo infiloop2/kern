@@ -1,3 +1,4 @@
+from host.tools.fal_ai import h3max, media as fal_media
 """Reported provider charges use only observable usage and tool-owned published rates."""
 from contextlib import contextmanager
 import io
@@ -5,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from host.runtime.tools.tools_host import BUNDLED_TOOLS
-from host.tools import apify, brave_search, h3max, instagram_discovery, linkedin_discovery, openai_images, seedance
+from host.tools import apify, brave_search, instagram_discovery, linkedin_discovery, openai_images
 from host.tools import elevenlabs
 from host.tools.results import ActionFailed
 from host.tools.shared.cost_reporting import report_priced_units
@@ -15,9 +16,9 @@ from test_tools_openai_images import image_response
 
 class ProviderCostTests(unittest.TestCase):
     def test_reporting_manifests_describe_every_action(self):
-        names = ('apify', 'apify_developer', 'brave_search', 'elevenlabs', 'h3max',
+        names = ('apify', 'apify_developer', 'brave_search', 'elevenlabs', 'fal_ai',
                  'instagram_discovery', 'linkedin_discovery', 'openai_images',
-                 'reddit_scrapecreators', 'seedance')
+                 'reddit_scrapecreators')
         for name in names:
             with self.subTest(tool=name):
                 manifest = BUNDLED_TOOLS[name].manifest
@@ -59,52 +60,17 @@ class ProviderCostTests(unittest.TestCase):
         self.assertEqual(api.costs.calls, [('0.001000000', '')])
 
     def test_h3max_reports_simple_mode_but_skips_reference_inputs(self):
-        api = FakeHostAPI(config={'H3MAX_FAL_KEY': 'key'})
+        api = FakeHostAPI(config={'FAL_API_KEY': 'key'})
         request_id = '764cabcf-b745-4b3e-ae38-1200304cf45b'
-        with patch.object(h3max, 'json_request', return_value={'request_id': request_id}):
-            h3max.H3MaxTool().execute('generate_video', {'prompt': 'a fox', 'image_url': 'https://example.org/fox.png'}, api)
+        with patch.object(fal_media, 'upload', return_value='https://v3.fal.media/source'), patch.object(h3max, 'json_request', return_value={'request_id': request_id}):
+            h3max.H3MaxTool().execute('generate_video', {'prompt': 'a fox', 'image_asset_id': api.assets.add(media_type='image/png')}, api)
             h3max.H3MaxTool().execute('generate_video', {
-                'prompt': 'a fox', 'reference_image_urls': ['https://example.org/fox.png']}, api)
+                'prompt': 'a fox', 'reference_image_asset_ids': [api.assets.add(media_type='image/png')]}, api)
         self.assertEqual(api.costs.calls, [('0.40', f'task:image_{request_id}')])
 
-    def test_seedance_reports_success_once_across_polls(self):
-        api = FakeHostAPI(config={'SEEDANCE_ARK_API_KEY': 'key'})
-        task_id = 'cgt-20260809-abc'
-        result = {'id': task_id, 'status': 'succeeded',
-                  'usage': {'total_tokens': 100000},
-                  'content': {'video_url': 'https://example.org/video.mp4'}}
-        with patch.object(seedance, 'json_request', side_effect=[{'id': task_id}, result, result, result]):
-            seedance.SeedanceTool().execute('generate_video', {'prompt': 'a fox'}, api)
-            for _ in range(2):
-                seedance.SeedanceTool().execute('get_task', {'task_id': task_id}, api)
-            seedance.SeedanceTool().execute('get_task', {'task_id': 'other-task'}, FakeHostAPI(config={'SEEDANCE_ARK_API_KEY': 'key'}))
-        self.assertEqual(api.costs.records[f'task:{task_id}']['amount_usd'], '1.206960000')
-        self.assertEqual(len(api.costs.records), 1)
 
-    def test_seedance_audio_increases_launch_estimate(self):
-        api = FakeHostAPI(config={'SEEDANCE_ARK_API_KEY': 'key'})
-        task_id = 'cgt-audio-task'
-        with patch.object(seedance, 'json_request', return_value={'id': task_id}):
-            seedance.SeedanceTool().execute('generate_video', {
-                'prompt': 'a fox', 'generate_audio': True}, api)
-        self.assertEqual(api.costs.records[f'task:{task_id}']['amount_usd'], '2.413920000')
 
-    def test_seedance_accepted_call_without_task_id_still_reports_cost(self):
-        api = FakeHostAPI(config={'SEEDANCE_ARK_API_KEY': 'key'})
-        with patch.object(seedance, 'json_request', return_value={}):
-            result = seedance.SeedanceTool().execute('generate_video', {'prompt': 'a fox'}, api)
-        self.assertIsInstance(result, ActionFailed)
-        self.assertEqual(api.costs.calls, [('1.206960000', '')])
 
-    def test_seedance_reports_billed_failure_only(self):
-        api = FakeHostAPI(config={'SEEDANCE_ARK_API_KEY': 'key'})
-        with patch.object(seedance, 'json_request', return_value={'id': 'cgt-failed-task', 'status': 'failed'}):
-            seedance.SeedanceTool().execute('get_task', {'task_id': 'cgt-failed-task'}, api)
-        self.assertEqual(api.costs.calls, [])
-        billed_failure = {'id': 'cgt-failed-billed', 'status': 'failed', 'usage': {'total_tokens': 100000}}
-        with patch.object(seedance, 'json_request', return_value=billed_failure):
-            seedance.SeedanceTool().execute('get_task', {'task_id': 'cgt-failed-billed'}, api)
-        self.assertEqual(api.costs.records['task:cgt-failed-billed']['amount_usd'], '1.070000000')
 
     def test_openai_images_requires_usage_breakdown(self):
         api = FakeHostAPI(config={'OPENAI_API_KEY': 'key'})

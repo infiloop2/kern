@@ -8,8 +8,8 @@ Base URL after port forwarding:
 http://127.0.0.1:7443
 ```
 
-Every API request except the narrowly scoped public-login status authenticates
-with a session cookie. `POST /v1/login` with
+API requests authenticate with a session cookie, except for the login
+ceremonies and narrowly scoped public-login status described below. `POST /v1/login` with
 `{"password": "<admin-password>"}` returns an `HttpOnly`, `SameSite=Strict`
 session cookie immediately when no passkey is configured. Once a passkey is
 enrolled, public HTTPS login returns WebAuthn request options and mints the
@@ -23,16 +23,29 @@ Requests must arrive over HTTPS through the tunnel (the origin redirects or
 refuses cleartext). Repeated failed logins are throttled and return `429`; see
 [admin login sessions](../architecture/admin-api.md#admin-login-sessions).
 
-API responses are JSON. Static UI assets are the exception: `GET /`,
-`GET /oauth/callback`, the admin CSS/JavaScript/favicon paths, and the trusted
-Chat and Web Apps UI modules under `/workspace/` are served by the admin service
-without authentication. `/workspace/` is an asset namespace within the admin UI,
-not a separate server or trust boundary.
-They return only static files and perform no state change. The sole
-unauthenticated JSON read is `GET /v1/login/status` on the configured public
-HTTPS hostname; it returns only whether a passkey is enrolled. Every other API
-route, including every workspace proxy request, requires
-an authenticated caller.
+API responses are JSON except for documented file/media streams. Static UI
+assets also return their own content types: `GET /`, `GET /oauth/callback`, the
+admin CSS/JavaScript/favicon paths, and the trusted Chat and Web Apps UI modules
+under `/workspace/` are served by the admin service without authentication.
+`/workspace/` is an asset namespace within the admin UI, not a separate server
+or trust boundary. They return only static files and perform no state change.
+The sole unauthenticated JSON read is `GET /v1/login/status` on the configured
+public HTTPS hostname; it returns only whether a passkey is enrolled. Login
+ceremonies and the narrowly scoped [public media
+capability](#public-media-capabilities) route also run before session
+authentication. All remaining API routes, including every workspace proxy
+request, require an authenticated caller.
+
+## Contents
+
+- [Session and passkeys](#session), [errors](#errors), and [health](#health)
+- [Agent runtimes](#agent-runtime), [threads](#threads), [swarm](#swarm), and [events](#events)
+- [Agent files](#agent-files), [processes](#agent-processes), and [dictation](#dictation)
+- [Network](#network) and [Grok video storage](#grok-video-storage)
+- [Workspace](#workspace), [approvals](#approvals), and [tools](#tools)
+- [Public media capabilities](#public-media-capabilities)
+- [Host AI providers](#host-ai-inference-providers), [diagnostics](#host-diagnostics), and [host controls](#host-runtime)
+- [Token analytics](#token-analytics) and [tool usage](#tool-usage)
 
 ## Host AI inference providers
 
@@ -111,7 +124,9 @@ Error status codes:
 | `404` | Requested resource or route does not exist. |
 | `409` | Request conflicts with current runtime, thread, approval, or credential state. |
 | `413` | Request body exceeds the 1 MiB admin API limit. |
+| `415` | Login has a missing, duplicate, or unsupported `Content-Type`; it requires exactly one `application/json` media type. |
 | `429` | Too many failed admin logins from this source (retry after the lockout window), or the selected runtime is already running its maximum concurrent threads (retry when one finishes). |
+| `503` | A required local service, such as dictation, is unavailable or busy. |
 | `502` | The workspace backend or delegated tools service is unavailable or returned an invalid response. |
 | `500` | Host-side error. |
 
@@ -124,10 +139,18 @@ GET  /v1/login/status
 POST /v1/logout
 ```
 
-`POST /v1/login` takes `{"password": "<admin-password>"}`. With no passkey, a
-correct password returns `{"ok": true}` and
-a `Set-Cookie: tc_admin_session=...; HttpOnly; SameSite=Strict` header (with
-`Secure` when the request arrived over HTTPS); a wrong password returns `401` and
+`POST /v1/login` takes `{"password": "<admin-password>"}` and requires exactly
+one `Content-Type: application/json` header. Parameters such as `charset=UTF-8`
+are allowed. Missing or duplicate Content-Type headers and other media types
+(including `text/plain`, form-urlencoded, and multipart) return `415` before
+password verification or throttle accounting, without issuing a cookie. Clients
+using `curl -d` must also set `-H 'Content-Type: application/json'`; the default
+form media type is rejected.
+
+With no passkey, a correct password returns `{"ok": true}` and
+an `HttpOnly; SameSite=Strict` session cookie: `tc_admin_session` on
+SSH-forwarded HTTP, or `__Host-tc_admin_session` with `Secure; Path=/` and no
+`Domain` on public HTTPS. A wrong password returns `401` and
 sets no cookie. When passkeys are configured on the public HTTPS path, a correct
 password instead returns `{"passkey_required": true, "publicKey": {...}}` and a
 five-minute, non-session pre-authentication cookie. The browser submits its
@@ -262,7 +285,7 @@ Response fields:
 | `issues[].next_step` | string |  | Recommended operator action. |
 | `agent_name` | string |  | Host name from the input config. |
 | `agent_runtime.runtimes` | array |  | Status records for every supported runtime. |
-| `agent_runtime.runtimes[].type` | enum | `codex`, `codex-2`, `codex-3`, `claude_code`, `grok`, `grok-2`, `hermes` | Agent runtime type. |
+| `agent_runtime.runtimes[].type` | enum | `codex`, `codex-2`, `codex-3`, `claude_code`, `grok`, `grok-2`, `hermes`, `script` | Agent runtime type; `script` is the providerless, schedule-only Bash runtime. |
 | `agent_runtime.runtimes[].status` | enum | `deactivated`, `loading`, `awaiting_login`, `active`, `error` | Current agent runtime supervisor state. |
 | `agent_runtime.runtimes[].active_thread_ids` | string array |  | Threads with a live turn on this runtime. |
 | `network_controls.status` | enum | `active`, `error` | Derived network policy enforcement state. |
@@ -394,7 +417,7 @@ Agent runtime status response fields:
 
 | Field | Type | Values | Meaning |
 | --- | --- | --- | --- |
-| `runtimes[].type` | enum | `codex`, `codex-2`, `codex-3`, `claude_code`, `grok`, `grok-2`, `hermes` | Agent runtime type. |
+| `runtimes[].type` | enum | `codex`, `codex-2`, `codex-3`, `claude_code`, `grok`, `grok-2`, `hermes`, `script` | Agent runtime type; `script` is the providerless, schedule-only Bash runtime. |
 | `runtimes[].status` | enum | `deactivated`, `loading`, `awaiting_login`, `active`, `error` | Current runtime state. Codex uses its rate-limit request and, if that fails, one Codex-owned forced refresh. Claude Code uses a `/usage` probe for the pinned token, or provider profile attestation for a new or rotated token. Grok uses live auth, entitlement, and billing probes through the managed xAI proxy. Bedrock is `active` when the integration is enabled and its synchronously validated credential/account row is present. AWS checks model-specific invocation permission and current credential validity on the first real turn; later provider failures are turn failures. |
 | `runtimes[].active_thread_ids` | string array |  | Threads with a live turn on that runtime, sorted by thread id. Empty when no turn is running. |
 | `runtimes[].error_message` | string | optional | Present only while `status` is `error`: the underlying runtime failure message. |
@@ -629,9 +652,7 @@ decides whether and when to retry. Agent work runs only while its chosen
 runtime is `active`: a message for a non-active runtime is rejected at
 admission. Policy changes and provider-status refreshes own the transition out
 of `active`; either transition closes that runtime's live processes, including
-a run admitted just before the transition, and records `thread.error`. Claude
-Code additionally converges its rotating credential pin before spawning each
-process. Any runtime/CLI exception during execution — including a provider
+a run admitted just before the transition, and records `thread.error`. Any runtime/CLI exception during execution — including a provider
 rate limit — also returns the thread to idle with `thread.error` and its error
 message.
 
@@ -843,8 +864,8 @@ The response contains:
 
 - `generated_at`: snapshot timestamp.
 - `agents`: up to 250 matching non-archived Chats and Apps and non-deleted
-  model schedules, prioritizing running agents and then recent use. Bash
-  schedules are excluded.
+  model schedules, prioritizing agents with pending approvals, then running
+  agents and recent use. Bash schedules are excluded.
 - `has_more`: whether more agents match; narrow `q` to find older agents.
 
 Each agent has `thread_id`, `kind` (`app`, `chat`, `schedule`), `name`,
@@ -854,13 +875,14 @@ Each agent has `thread_id`, `kind` (`app`, `chat`, `schedule`), `name`,
   latest event is `thread.error`, or `idle`. This follows the thread error-badge
   rule; a running session takes precedence over an earlier error.
 - `task`: a nullable GPT-6 Luna title, at most 100 characters, for the current turn.
-- `needs_human`: a nullable Jev judgment about the latest completed turn.
-  `null` means unassessed/unavailable. It is advisory and independent of failure;
-  pending approvals alone do not imply a human blocker.
+- `pending_approval_count`: the number of pending Kern tool approvals and gated
+  GitHub pushes whose recorded origin is this thread. Approvals without an
+  origin thread are omitted. The count is live and independent of runtime state.
 
 App/schedule `purpose` is manually maintained and separate from `task`.
-A new turn clears `task` and `needs_human`; clearing working memory also clears
-these annotations. Missing or disabled inference leaves them unavailable.
+A new turn clears `task`; clearing working memory also clears it. Missing or
+disabled inference leaves the task title unavailable. Approval counts come
+from native approval records and do not require inference.
 
 `GET /v1/swarm/peer-messages` is a separate operator-only call with no query
 parameters. The response has `messages`, the newest 50 peer deliveries.
@@ -1140,6 +1162,22 @@ never overwrites an existing file. Incomplete uploads are removed.
 `path` is relative to `/mnt/kern-agent/agent-home`, which is also the
 agent runtime's working directory. Uploads are durable workspace data and are
 not pruned automatically.
+
+## Dictation
+
+```text
+GET  /v1/dictation/ready
+POST /v1/dictation/transcribe
+```
+
+Both routes require the operator session and CSRF header and accept no query
+parameters. Readiness returns `{"ready": true}` only when the resident local
+model is loaded. Transcription accepts exactly `{"audio": "<base64>"}`,
+containing mono 16 kHz PCM16 samples (no file header), at most twelve seconds or
+384,000 raw bytes, and returns `{"text": "..."}`. Invalid audio returns `400`;
+an unavailable, loading, or busy worker returns `503`. Requests do not load the
+model or store audio on the host. See [dictation behavior and
+recovery](../development/dictation.md).
 
 ## Agent Processes
 
@@ -1681,7 +1719,7 @@ tool. Each tool object has:
 | `connection` | `oauth` (operator third-party auth), `mcp_oauth` (hosted MCP OAuth with one fixed `default` connection), `enable_only` (deployment key only), or `whatsapp_linked_device` (WhatsApp QR linking). |
 | `enabled` | Whether the operator has enabled the tool for agent calls. |
 | `reports_cost` | Tool-level boolean indicating whether tool code reports USD charges. False means untracked, not zero-priced. |
-| `actions[]` | Each action's stable `id`, `description`, per-action `data_policy`, `approval` (`direct` or `operator`), `input_schema`, `input_protections`, `output_schema`, `returns_asset`, and `cost_description` (string explaining that action's charges). `input_protections` maps each direct input name to `{kind, description, allow_identifiers, allow_machine_tokens, identifiers_condition}`; kind is `validated` (with a concise description) or `parameter_guard` (with the two boolean exception flags). `identifiers_condition` is null or `decimal` (the identifier exception applies only to all-digit values). It describes existing checks and does not configure execution. Approval actions return an empty map. Both schemas name every field and close every object (`additionalProperties: false`). `output_schema` is empty `{}` exactly for the actions that return no JSON result: an approval-gated one, which returns a user-visible message, and a `returns_asset` one, whose whole result is a file streamed into the agent workspace. A field the provider may not supply is declared as a `oneOf` union with `{"type": "null"}`. |
+| `actions[]` | Each action's stable `id`, `description`, per-action `data_policy`, `approval` (`direct` or `operator`), `input_schema`, `input_protections`, `output_schema`, `returns_asset`, and `cost_description` (string explaining that action's charges). `input_protections` maps each direct input name to `{kind, description, allow_identifiers, allow_machine_tokens, allow_longer_text, identifiers_condition}`; kind is `validated` (with a concise description) or `parameter_guard` (with the three boolean exception flags). `identifiers_condition` is null or `decimal` (the identifier exception applies only to all-digit values). It describes existing checks and does not configure execution. Approval actions return an empty map. Both schemas name every field and close every object (`additionalProperties: false`). `output_schema` is empty `{}` exactly for the actions that return no JSON result: an approval-gated one, which returns a user-visible message, and a `returns_asset` one, whose whole result is a file streamed into the agent workspace. A field the provider may not supply is declared as a `oneOf` union with `{"type": "null"}`. |
 | `config[]` | This tool's declared config keys with `description` and `set`. All config is secret and scoped per tool; values are never returned (see `PUT /v1/tools/{tool_id}/config`). |
 | `protections[]` | Short operator-facing safeguards rendered on the focused Home integration page. |
 | `setup_steps[]` | Ordered provider-side and Kern setup steps. A step may include a provider documentation link and a local audited screenshot with alt text; `show_callback`/`show_config` render this host's OAuth callback URI or the tool's config keys inside that step. |
@@ -1779,6 +1817,22 @@ the Tool Audit Log. The UI loads arguments only after the operator expands an
 event. Tool config values and OAuth callback parameters are never stored as
 event arguments.
 
+## Public media capabilities
+
+```text
+GET|HEAD /tool-media/{token}
+```
+
+Approved Instagram publishing can temporarily expose one staged media file on
+the configured public HTTPS hostname. This route uses a random 256-bit,
+process-local capability instead of an admin session. It is unavailable over the
+SSH-forward origin. Links expire within fifteen minutes and are revoked when the
+approved callback ends, the asset is deleted, or the tools service restarts.
+Existing downloads may finish after revocation. Single byte ranges are supported
+and responses prohibit caching. No App, filesystem path, or staging id is a
+public capability. See [media
+handoff](../architecture/tools/host-integration.md#the-agent-facing-surface).
+
 ## Host diagnostics
 
 ```text
@@ -1847,7 +1901,11 @@ number of turns contributing to each bucket. Fewer measured turns than
 See [token analytics](../architecture/token-analytics.md).
 
 
-### `GET /v1/tools/usage`
+## Tool usage
+
+```text
+GET /v1/tools/usage
+```
 
 Requires the authenticated operator session. No request body or query
 parameters. Returns tool-reported USD charges for the current UTC calendar

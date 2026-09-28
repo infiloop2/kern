@@ -18,7 +18,10 @@ _APPROVAL_ROWS = """
                'tool_id', tool_id, 'action_id', action_id, 'summary', summary,
                'check_token', check_token, 'result', result,
                'connection_id', connection_id, 'account_label', account_label,
-               'risk_scores', assessment.scores
+               'risk_scores', assessment.scores,
+               'has_auto_policy', EXISTS (SELECT 1 FROM auto_approval_policies p WHERE p.tool_id = approval.tool_id AND p.action_id = approval.action_id),
+               'auto_review', (SELECT jsonb_build_object('outcome', r.outcome, 'reason', r.reason, 'checked_at', r.checked_at, 'approval_error', r.approval_error)
+                               FROM auto_approval_reviews r WHERE r.approval_number = approval.number ORDER BY r.id DESC LIMIT 1)
            )) AS detail
     FROM tool_approvals AS approval
     LEFT JOIN tool_approval_risk_assessments AS assessment

@@ -172,7 +172,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("const actionSequence = ++workspaceNavigationActionSequence;", app)
         self.assertIn("actionSequence !== workspaceNavigationActionSequence", app)
         self.assertIn("backToHome(actionSequence)", app)
-        self.assertEqual(app.count("backToHome(actionSequence)"), 3)
+        self.assertEqual(app.count("backToHome(actionSequence)"), 4)
         self.assertRegex(
             app,
             r"function backToHome\(workspaceActionSequence = null\) \{\s*"
@@ -214,7 +214,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("return current.message_seq > (Number(item.seen_message_seq) || 0)", last_seen)
         self.assertIn("const pending = new Set();", last_seen)
         self.assertIn('kind === "chat"', app)
-        self.assertIn("[...chatNavItems, ...scheduledAgentNavItems].find", app)
+        self.assertIn("[...chatNavItems, ...scheduledAgentNavItems, ...spawnedAgentNavItems].find", app)
         find_chat = app.split("async function findChatNavItem", 1)[1].split(
             "async function openWorkspaceNewChat", 1
         )[0]
@@ -403,6 +403,7 @@ class AdminUiStaticTests(unittest.TestCase):
             save_schedule.index("state.selected = response.schedule;"),
             save_schedule.index("await window.KernHost.refreshNavigation();"),
         )
+
         self.assertEqual(
             save_schedule.count(
                 "if (!scheduleOperationIsCurrent(operationSequence, operationRoute)) return;"
@@ -456,6 +457,20 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn(".activity-card.started .activity-icon", stylesheet)
         self.assertIn('"/threads?archived=true"', script)
         self.assertIn('"unarchive"', script)
+
+    def test_spawned_agents_use_chat_controls_without_a_create_button(self) -> None:
+        root = Path(__file__).parents[1]
+        admin_html = (root / "host/runtime/admin_api/admin_ui/index.html").read_text()
+        admin_script = (root / "host/runtime/admin_api/admin_ui/app.js").read_text()
+        chat_script = (root / "host/runtime/workspace/chat/ui/agent_chat.js").read_text()
+        section = admin_html.split('aria-labelledby="spawned-agents-nav-title"', 1)[1]
+        section = section.split('<div class="sidebar-divider"', 1)[0]
+        self.assertIn('id="spawned-agents-nav-items"', section)
+        self.assertNotIn("workspace-nav-new", section)
+        self.assertIn('renderWorkspaceRows("spawned-agents-nav-items"', admin_script)
+        self.assertIn('showingSpawnedThreads = spawned', chat_script)
+        self.assertIn('Boolean(thread.spawned_by_thread_id)', chat_script)
+        self.assertIn('$("new-thread").hidden = showingArchivedThreads || showingSpawnedThreads', chat_script)
 
     def test_workspace_use_host_owned_file_and_api_helpers(self) -> None:
         runtime = Path(__file__).parents[1] / "host/runtime/admin_api/admin_ui"
