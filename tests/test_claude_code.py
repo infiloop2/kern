@@ -418,7 +418,7 @@ time.sleep(120)
             session.run(
                 "must not run",
                 None,
-                "claude-sonnet-5",
+                "claude-sonnet-5-5",
                 "high",
                 lambda _message: None,
             )
@@ -753,6 +753,45 @@ time.sleep(120)
             claude_code._parse_claude_usage_result(result, now=datetime(2026, 7, 13, tzinfo=timezone.utc)),
             {"fable_weekly_used_percent": 6},
         )
+
+    def test_usage_timeout_records_host_resources_without_cli_output(self) -> None:
+        timeout = subprocess.TimeoutExpired(["claude"], 60, output="private output", stderr="secret")
+        with (
+            patch.object(claude_code.subprocess, "run", side_effect=timeout) as run,
+            patch.object(claude_code.time, "monotonic", side_effect=[10.0, 70.5]),
+            patch.object(claude_code.host_metrics, "resource_snapshot", side_effect=[
+                {"browser_cpu_usage_usec": 100, "agents_cpu_usage_usec": 200},
+                {"browser_cpu_usage_usec": 250, "agents_cpu_usage_usec": 900, "host_memory_available_bytes": 4096, "browser_memory_bytes": 1024, "browser_tasks": 3},
+            ]),
+            patch.object(claude_code.host_errors, "emit_record") as emit,
+        ):
+            with self.assertRaises(claude_code.ClaudeCodeError):
+                claude_code.read_claude_usage()
+        self.assertEqual(run.call_args.kwargs["timeout"], 60)
+        emit.assert_called_once()
+        record = emit.call_args.args[0]
+        self.assertEqual(record["severity"], "error")
+        self.assertEqual(record["component"], "claude_code.usage_probe")
+        self.assertEqual(record["summary"], "Claude usage check timed out")
+        self.assertEqual(record["context"],
+                    {"timeout_seconds": 60, "elapsed_seconds": 60.5,
+                     "browser_cpu_usage_usec_before": 100, "browser_cpu_usage_usec": 250,
+                     "agents_cpu_usage_usec_before": 200, "agents_cpu_usage_usec": 900,
+                     "host_memory_available_bytes": 4096,
+                     "browser_memory_bytes": 1024, "browser_tasks": 3},
+        )
+        self.assertNotIn("secret", str(record))
+        self.assertNotIn("private output", str(record))
+
+    def test_usage_timeout_still_reports_when_resource_counters_are_unavailable(self) -> None:
+        with (
+            patch.object(claude_code.subprocess, "run", side_effect=subprocess.TimeoutExpired(["claude"], 60)),
+            patch.object(claude_code.host_metrics, "resource_snapshot", return_value={}),
+            patch.object(claude_code.host_errors, "report_unexpected") as error,
+        ):
+            with self.assertRaises(claude_code.ClaudeCodeError):
+                claude_code.read_claude_usage()
+        self.assertEqual(set(error.call_args.kwargs["context"]), {"timeout_seconds", "elapsed_seconds"})
 
     def test_read_claude_usage_ignores_unknown_result_text(self) -> None:
         command = [sys.executable, "-c", "import json; print(json.dumps({'result': 'not usage'}))"]

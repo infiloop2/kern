@@ -10,7 +10,6 @@ import hmac
 from http import HTTPStatus
 import json
 import re
-import random
 import secrets
 import threading
 import time
@@ -21,12 +20,10 @@ from host.memory_recall import bound_query
 from host.memory_recall_rules import CANDIDATE_LIMIT, MAX_QUERY_BYTES, RELEVANT_PAGE_LIMIT, RECALL_RERANK_TIMEOUT_SECONDS
 from host.runtime.core import db, host_errors, pgclient, state
 from host.runtime.embeddings import client as embedding_client
-from host.runtime.host_inference import HostInferenceError, openai_text_completion, typesafe_jev_judgment as judge
+from host.runtime.host_inference import HostInferenceError, typesafe_jev_judgment as judge
 from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.query import one as _one
 
-
-RECALL_OPENAI_MODEL = "gpt-6-luna"
 
 PAGE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 INDIVIDUAL_PAGE_ID_RE = re.compile(r"^(?:app|thread|schedule)-")
@@ -281,11 +278,11 @@ def recall_pages(body: Any) -> dict[str, Any]:
 def _rerank_recall(
     summaries: list[dict[str, Any]], *, query: str, details: list[str],
 ) -> None:
-    """Assign hybrid control or one reranker, accepting only complete scores."""
+    """Rerank with Jev when enabled, accepting only complete scores."""
     started = time.monotonic()
-    experiment: dict[str, Any] = {
-        "version": 4, "provider": None, "probability": 0,
-        "model": None, "outcome": "no_candidates", "timeout_seconds": RECALL_RERANK_TIMEOUT_SECONDS,
+    diagnostic: dict[str, Any] = {
+        "version": 5, "provider": "typesafe",
+        "model": "jev-latest", "outcome": "no_candidates", "timeout_seconds": RECALL_RERANK_TIMEOUT_SECONDS,
     }
     original = list(summaries)
     scores: dict[str, float] = {}
@@ -304,51 +301,26 @@ def _rerank_recall(
     try:
         if not candidates:
             return
-        provider = random.choice([None, "openai", "typesafe"])
-        experiment.update(provider=provider, probability=1 / 3,
-                          model=RECALL_OPENAI_MODEL if provider == "openai"
-                          else "jev-latest" if provider == "typesafe" else None)
-        if provider is None:
-            experiment["outcome"] = "control"
+        diagnostic["outcome"] = "provider_unavailable"
+        result = judge(
+            {"task_query": query, "candidates": candidates},
+            {c["id"]: {"type": "noul", "instructions":
+                f"Evaluate only candidate {c['id']} in state.candidates. " + instructions}
+             for c in candidates},
+            timeout_seconds=RECALL_RERANK_TIMEOUT_SECONDS,
+        )
+        if not isinstance(result, dict):
             return
-        experiment["outcome"] = "provider_unavailable"
-        state_value = {"task_query": query, "candidates": candidates}
-        if provider == "openai":
-            schema = {
-                "type": "object", "additionalProperties": False,
-                "properties": {c["id"]: {"type": "number", "description": "Relevance from 0 to 1."}
-                               for c in candidates},
-                "required": [c["id"] for c in candidates],
-            }
-            values = openai_text_completion(
-                instructions + " Return a relevance score from 0 to 1 for every candidate id.\n"
-                + json.dumps(state_value, ensure_ascii=False),
-                schema, "memory_recall",
-                model=RECALL_OPENAI_MODEL, reasoning_effort="none", max_output_tokens=400,
-                instructions="Return a JSON object that matches the supplied schema.",
-                timeout_seconds=RECALL_RERANK_TIMEOUT_SECONDS,
-            )
-        else:
-            result = judge(
-                state_value,
-                {c["id"]: {"type": "noul", "instructions":
-                    f"Evaluate only candidate {c['id']} in state.candidates. " + instructions}
-                 for c in candidates},
-                timeout_seconds=RECALL_RERANK_TIMEOUT_SECONDS,
-            )
-            if not isinstance(result, dict):
-                return
-            experiment["outcome"] = "invalid_response"
-            model, answers = result.get("model"), result.get("answers")
-            if (not isinstance(model, str) or not model or len(model) > 128
-                    or not isinstance(answers, dict)
-                    or any(not isinstance(a, dict) or set(a) != {"type", "noul"}
-                           or a.get("type") != "noul" for a in answers.values())):
-                return
-            experiment["response_model"] = model
-            values = {key: answer["noul"] for key, answer in answers.items()}
-        experiment["outcome"] = "invalid_response"
-        if not isinstance(values, dict) or set(values) != {c["id"] for c in candidates}:
+        diagnostic["outcome"] = "invalid_response"
+        model, answers = result.get("model"), result.get("answers")
+        if (not isinstance(model, str) or not model or len(model) > 128
+                or not isinstance(answers, dict)
+                or any(not isinstance(a, dict) or set(a) != {"type", "noul"}
+                       or a.get("type") != "noul" for a in answers.values())):
+            return
+        diagnostic["response_model"] = model
+        values = {key: answer["noul"] for key, answer in answers.items()}
+        if set(values) != {c["id"] for c in candidates}:
             return
         if any(isinstance(value, bool) or not isinstance(value, (int, float))
                or not 0 <= value <= 1 for value in values.values()):
@@ -356,34 +328,34 @@ def _rerank_recall(
         scores = {page["page_id"]: float(values[f"q{index}"])
                   for index, page in enumerate(original)}
         summaries.sort(key=lambda page: -scores[page["page_id"]])
-        experiment["outcome"] = "success"
+        diagnostic["outcome"] = "success"
     except Exception as exc:
         # Record the bounded failure category, never provider response text or secrets.
         cause = exc.__cause__ if isinstance(exc, HostInferenceError) else exc
-        experiment["error_type"] = type(cause or exc).__name__
+        diagnostic["error_type"] = type(cause or exc).__name__
         if isinstance(cause, TimeoutError):
-            experiment["outcome"] = "timeout"
+            diagnostic["outcome"] = "timeout"
         if isinstance(exc, HostInferenceError) and exc.reason == "provider_disabled":
-            experiment["outcome"] = "provider_disabled"
+            diagnostic["outcome"] = "provider_disabled"
             return
         host_errors.report_warning(
             "workspace.memory_rerank", exc, kind="memory_recall_degraded",
-            context={"provider": experiment["provider"]},
+            context={"provider": diagnostic["provider"]},
         )
     finally:
-        experiment["elapsed_ms"] = round((time.monotonic() - started) * 1000)
-        experiment["fallback"] = experiment["outcome"] in {
+        diagnostic["elapsed_ms"] = round((time.monotonic() - started) * 1000)
+        diagnostic["fallback"] = diagnostic["outcome"] in {
             "provider_disabled", "provider_unavailable", "invalid_response", "timeout",
         }
         ranks = {page["page_id"]: index for index, page in enumerate(summaries, start=1)}
-        experiment["candidates"] = [
+        diagnostic["candidates"] = [
             {"id": f"q{index}", "page_id": page["page_id"], "revision": page.get("revision"),
              "hybrid_rank": index + 1, "hybrid_score": page.get("memory_relevance_score"),
              "score": scores.get(page["page_id"]), "final_rank": ranks[page["page_id"]]}
             for index, page in enumerate(original)
         ]
-        experiment["selection"] = [page["page_id"] for page in summaries[:RECALL_RELEVANT_LIMIT]]
-        details.append("Rerank experiment: " + json.dumps(experiment, ensure_ascii=False, separators=(",", ":")))
+        diagnostic["selection"] = [page["page_id"] for page in summaries[:RECALL_RELEVANT_LIMIT]]
+        details.append("Rerank: " + json.dumps(diagnostic, ensure_ascii=False, separators=(",", ":")))
 
 
 def _recall_response(pages: list[dict[str, Any]], details: list[str], started: float) -> dict[str, Any]:

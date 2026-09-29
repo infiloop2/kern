@@ -11,7 +11,7 @@ from unittest.mock import MagicMock, patch
 
 from host.memory_recall import bound_query, task_query
 from host.runtime.admin_api import conversation_history, threads
-from host.runtime.host_inference import api, provider_http, providers, typesafe, openai, client
+from host.runtime.host_inference import api, provider_http, providers, typesafe, client
 from host.runtime.workspace import memory
 
 
@@ -25,18 +25,12 @@ def row(page_id):
 
 
 class MemoryRecallDiagnosticsTests(unittest.TestCase):
-    def test_both_rerankers_have_the_same_short_client_timeout(self):
-        # Both rerankers return or fall back within the same socket timeout.
-        # Admission leaves room for local search and memory loading.
+    def test_jev_recall_keeps_its_short_timeout_separate_from_task_titles(self):
         with patch.object(threads.workspace_proxy, "_proxy") as proxy:
             threads.workspace_proxy.recall_memory("thread-1", "Fix login")
         with patch.object(client, "_request") as inference:
-            client.openai_text_completion("prompt", {}, "memory_recall", timeout_seconds=memory.RECALL_RERANK_TIMEOUT_SECONDS, **OPENAI_SETTINGS)
-        luna_timeout = inference.call_args.args[2]
-        with patch.object(client, "_request") as inference:
             client.typesafe_jev_judgment({}, {"q0": {}}, timeout_seconds=memory.RECALL_RERANK_TIMEOUT_SECONDS)
-        self.assertEqual(luna_timeout, 1.2)
-        self.assertEqual(inference.call_args.args[2], luna_timeout)
+        self.assertEqual(inference.call_args.args[2], 1.2)
         self.assertEqual(proxy.call_args.kwargs["timeout_seconds"], 3)
         with patch.object(client, "_request") as title:
             client.openai_text_completion("prompt", {}, "swarm_task", timeout_seconds=20, **OPENAI_SETTINGS)
@@ -104,8 +98,8 @@ class MemoryRecallDiagnosticsTests(unittest.TestCase):
 
 class TaskRecallTests(unittest.TestCase):
     def setUp(self) -> None:
-        # Retrieval tests use control; reranker tests cover provider assignments.
-        self.enterContext(patch.object(memory.random, "choice", return_value=None))
+        # Retrieval tests keep hybrid order; reranker tests cover Jev outcomes.
+        self.enterContext(patch.object(memory, "judge", side_effect=client.HostInferenceError("disabled", reason="provider_disabled")))
 
     def test_every_request_uses_bounded_user_context_newest_first(self):
         history = [
@@ -292,9 +286,7 @@ class RecallRerankingTests(unittest.TestCase):
                        "revision": i + 1, "content": "PRIVATE BODY",
                        "memory_relevance_score": .1 / (i + 1)} for i in range(6)]
         self.scores = {f"q{i}": i / 10 for i in range(6)}
-        self.draw = self.enterContext(patch.object(memory.random, "choice", return_value="openai"))
         self.config_read = self.enterContext(patch.object(memory.state, "host_inference_provider_is_enabled", side_effect=AssertionError("Workspace must not read provider settings")))
-        self.complete = self.enterContext(patch.object(memory, "openai_text_completion", return_value=self.scores))
         self.judge = self.enterContext(patch.object(memory, "judge", return_value={
             "model": "jev-latest", "answers": {k: {"type": "noul", "noul": v} for k, v in self.scores.items()}}))
 
@@ -302,96 +294,78 @@ class RecallRerankingTests(unittest.TestCase):
         details = []
         memory._rerank_recall(self.pages if pages is None else pages,
                               query="Fix login\n\nDo not deploy", details=details)
-        return json.loads(details[-1].removeprefix("Rerank experiment: "))
+        return json.loads(details[-1].removeprefix("Rerank: "))
 
-    def test_enabled_provider_matrix_and_equal_random_assignment(self):
-        for enabled in ([], ["openai"], ["typesafe"], ["openai", "typesafe"]):
-            for choice in (None, "openai", "typesafe"):
-                with self.subTest(enabled=enabled, choice=choice):
-                    def response(provider, value):
-                        if provider not in enabled:
-                            raise client.HostInferenceError("disabled", reason="provider_disabled")
-                        return value
-                    self.complete.side_effect = lambda *a, **kw: response("openai", self.scores)
-                    self.judge.side_effect = lambda *a, **kw: response("typesafe", self.judge.return_value)
-                    self.complete.reset_mock(); self.judge.reset_mock()
-                    pages = [dict(p) for p in self.pages]
-                    with patch.object(memory.random, "choice", return_value=choice) as draw:
-                        result = self.rerank(pages)
-                    self.config_read.assert_not_called()
-                    self.assertNotIn("enabled", result)
-                    self.assertEqual(result["provider"], choice)
-                    self.assertEqual(result["version"], 4)
-                    self.assertEqual(result["probability"], 1 / 3)
-                    self.assertEqual(self.complete.call_count, int(choice == "openai"))
-                    self.assertEqual(self.judge.call_count, int(choice == "typesafe"))
-                    draw.assert_called_once_with([None, "openai", "typesafe"])
-                    succeeded = choice in enabled
-                    self.assertEqual(result["outcome"], "success" if succeeded else
-                                     "control" if choice is None else "provider_disabled")
-                    self.assertEqual(result["fallback"], choice is not None and not succeeded)
-                    if not succeeded:
-                        self.assertTrue(all(c["score"] is None for c in result["candidates"]))
-                    expected = list(reversed(self.pages)) if succeeded else self.pages
-                    self.assertEqual(pages, expected)
-                    self.assertEqual(result["selection"], [p["page_id"] for p in expected[:5]])
-                    self.assertEqual(result["candidates"][0]["hybrid_rank"], 1)
-                    self.assertEqual(result["candidates"][0]["final_rank"], 6 if succeeded else 1)
-                    self.assertIn("elapsed_ms", result)
+    def test_jev_always_used_when_enabled_and_disabled_keeps_hybrid_order(self):
+        for enabled in (False, True):
+            with self.subTest(enabled=enabled):
+                self.judge.side_effect = None if enabled else client.HostInferenceError("disabled", reason="provider_disabled")
+                self.judge.reset_mock()
+                pages = [dict(p) for p in self.pages]
+                result = self.rerank(pages)
+                self.config_read.assert_not_called()
+                self.judge.assert_called_once()
+                self.assertNotIn("probability", result)
+                self.assertEqual(result["provider"], "typesafe")
+                self.assertEqual(result["model"], "jev-latest")
+                self.assertEqual(result["version"], 5)
+                self.assertEqual(result["outcome"], "success" if enabled else "provider_disabled")
+                self.assertEqual(result["fallback"], not enabled)
+                if not enabled:
+                    self.assertTrue(all(c["score"] is None for c in result["candidates"]))
+                expected = list(reversed(self.pages)) if enabled else self.pages
+                self.assertEqual(pages, expected)
+                self.assertEqual(result["selection"], [p["page_id"] for p in expected[:5]])
+                self.assertEqual(result["candidates"][0]["hybrid_rank"], 1)
+                self.assertEqual(result["candidates"][0]["final_rank"], 6 if enabled else 1)
+                self.assertIn("elapsed_ms", result)
 
-    def test_complete_valid_scores_required_and_no_second_provider_on_failure(self):
+    def test_complete_valid_scores_required_and_no_retry_on_failure(self):
         bad_values = [None, {}, {"q0": .5}, {**self.scores, "extra": .5}]
         bad_values += [{**self.scores, "q0": v} for v in (True, "0.5", -1, 2, float("nan"), float("inf"))]
-        for provider in ("openai", "typesafe"):
-            for values in bad_values:
-                with self.subTest(provider=provider, values=values):
-                    self.complete.reset_mock(); self.judge.reset_mock()
-                    self.complete.return_value = values
-                    self.judge.return_value = {"model": "jev-latest", "answers":
-                        {k: {"type": "noul", "noul": v} for k, v in values.items()} if isinstance(values, dict) else values}
-                    with patch.object(memory.random, "choice", return_value=provider):
-                        result = self.rerank()
-                    self.assertTrue(result["fallback"])
-                    self.assertEqual([p["page_id"] for p in self.pages], [f"guide-{i}" for i in range(6)])
-                    self.assertTrue(all(c["score"] is None for c in result["candidates"]))
-                    self.assertEqual(self.complete.call_count + self.judge.call_count, 1)
+        for values in bad_values:
+            with self.subTest(values=values):
+                self.judge.reset_mock()
+                self.judge.return_value = {"model": "jev-latest", "answers":
+                    {k: {"type": "noul", "noul": v} for k, v in values.items()} if isinstance(values, dict) else values}
+                result = self.rerank()
+                self.assertTrue(result["fallback"])
+                self.assertEqual([p["page_id"] for p in self.pages], [f"guide-{i}" for i in range(6)])
+                self.assertTrue(all(c["score"] is None for c in result["candidates"]))
+                self.judge.assert_called_once()
 
     def test_errors_ties_and_empty_candidates(self):
-        self.complete.side_effect = TimeoutError("private response")
+        self.judge.side_effect = TimeoutError("private response")
         with patch.object(memory.host_errors, "report_warning"):
             result = self.rerank()
         self.assertEqual(result["outcome"], "timeout")
         self.assertEqual(result["error_type"], "TimeoutError")
         self.assertNotIn("private response", json.dumps(result))
-        self.complete.side_effect = None
-        self.complete.return_value = {k: .5 for k in self.scores}
+        self.judge.side_effect = None
+        self.judge.return_value = {"model": "jev-latest", "answers":
+            {k: {"type": "noul", "noul": .5} for k in self.scores}}
         result = self.rerank()
         self.assertEqual(result["selection"], [f"guide-{i}" for i in range(5)])
-        self.config_read.reset_mock(); self.complete.reset_mock()
+        self.config_read.reset_mock(); self.judge.reset_mock()
         self.assertEqual(self.rerank([])["outcome"], "no_candidates")
-        self.config_read.assert_not_called(); self.complete.assert_not_called()
+        self.config_read.assert_not_called(); self.judge.assert_not_called()
 
-    def test_socket_timeouts_keep_assignment_and_hybrid_order_for_both_providers(self):
+    def test_socket_timeouts_keep_hybrid_order(self):
         connection = MagicMock()
         connection.getresponse.side_effect = TimeoutError("private network detail")
-        for provider in ("openai", "typesafe"):
-            with self.subTest(provider=provider), \
-                 patch.object(memory.random, "choice", return_value=provider), \
-                 patch.object(memory, "openai_text_completion", client.openai_text_completion), \
-                 patch.object(memory, "judge", client.typesafe_jev_judgment), \
-                 patch.object(client, "_HostInferenceConnection", return_value=connection) as connect, \
-                 patch.object(memory.host_errors, "report_warning"):
-                result = self.rerank()
-            connect.assert_called_once_with(1.3)
-            self.assertEqual(result["provider"], provider)
-            self.assertEqual(result["probability"], 1 / 3)
-            self.assertEqual(result["timeout_seconds"], 1.2)
-            self.assertEqual(result["outcome"], "timeout")
-            self.assertTrue(result["fallback"])
-            self.assertEqual(result["selection"], [f"guide-{i}" for i in range(5)])
-            self.assertTrue(all(c["score"] is None for c in result["candidates"]))
-            self.assertNotIn("private network detail", json.dumps(result))
-            self.assertIn("elapsed_ms", result)
+        with patch.object(memory, "judge", client.typesafe_jev_judgment), \
+             patch.object(client, "_HostInferenceConnection", return_value=connection) as connect, \
+             patch.object(memory.host_errors, "report_warning"):
+            result = self.rerank()
+        connect.assert_called_once_with(1.3)
+        self.assertEqual(result["provider"], "typesafe")
+        self.assertEqual(result["timeout_seconds"], 1.2)
+        self.assertEqual(result["outcome"], "timeout")
+        self.assertTrue(result["fallback"])
+        self.assertEqual(result["selection"], [f"guide-{i}" for i in range(5)])
+        self.assertTrue(all(c["score"] is None for c in result["candidates"]))
+        self.assertNotIn("private network detail", json.dumps(result))
+        self.assertIn("elapsed_ms", result)
 
     def test_provider_outcomes_cross_the_real_socket_into_recall_diagnostics(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -401,62 +375,51 @@ class RecallRerankingTests(unittest.TestCase):
                                       kwargs={"poll_interval": .01}, daemon=True)
             worker.start()
             try:
-                for provider in ("openai", "typesafe"):
-                    for error in (None, TimeoutError("private timeout"),
-                                  urllib.error.URLError(TimeoutError("private timeout"))):
-                        with self.subTest(provider=provider, error=type(error).__name__), \
-                             patch.object(memory.random, "choice", return_value=provider), \
-                             patch.object(memory, "openai_text_completion", client.openai_text_completion), \
-                             patch.object(memory, "judge", client.typesafe_jev_judgment), \
-                             patch.object(client, "SOCKET_PATH", socket_path), \
-                             patch.object(providers.state, "enabled_host_inference_provider",
-                                          return_value={"api_key": "test-key"} if error else None), \
-                             patch.object(provider_http._OPENER, "open", side_effect=error) as request, \
-                             patch.object(memory.host_errors, "report_warning"):
-                            result = self.rerank()
-                        self.assertEqual(result["outcome"], "timeout" if error else "provider_disabled")
-                        self.assertEqual(request.call_count, int(error is not None))
-                        self.assertEqual(result["provider"], provider)
-                        self.assertEqual(result["probability"], 1 / 3)
-                        self.assertTrue(result["fallback"])
-                        self.assertEqual(result["selection"], [f"guide-{i}" for i in range(5)])
-                        self.assertNotIn("private timeout", json.dumps(result))
+                for error in (None, TimeoutError("private timeout"),
+                              urllib.error.URLError(TimeoutError("private timeout"))):
+                    with self.subTest(error=type(error).__name__), \
+                         patch.object(memory, "judge", client.typesafe_jev_judgment), \
+                         patch.object(client, "SOCKET_PATH", socket_path), \
+                         patch.object(providers.state, "enabled_host_inference_provider",
+                                      return_value={"api_key": "test-key"} if error else None) as config, \
+                         patch.object(provider_http._OPENER, "open", side_effect=error) as request, \
+                         patch.object(memory.host_errors, "report_warning"):
+                        result = self.rerank()
+                    config.assert_called_once_with("typesafe")
+                    self.assertEqual(result["outcome"], "timeout" if error else "provider_disabled")
+                    self.assertEqual(request.call_count, int(error is not None))
+                    self.assertEqual(result["provider"], "typesafe")
+                    self.assertTrue(result["fallback"])
+                    self.assertEqual(result["selection"], [f"guide-{i}" for i in range(5)])
+                    self.assertNotIn("private timeout", json.dumps(result))
             finally:
                 server.shutdown()
                 server.server_close()
                 worker.join()
 
-    def test_both_provider_transports_receive_only_bounded_context_and_descriptions(self):
+    def test_jev_transport_receives_only_bounded_context_and_descriptions(self):
         pages = [{**self.pages[0], "page_id": f"guide-{i}", "description": "Use token sk-proj-abcdefghijklmnopqrstuv"}
                  for i in range(memory.CANDIDATE_LIMIT)]
-        for provider in ("openai", "typesafe"):
-            captured = {}
-            self.draw.return_value = provider
-            def transport(_url, **kwargs):
-                captured.update(json.loads(kwargs["data"]))
-                values = {f"q{i}": i / 100 for i in range(len(pages))}
-                if provider == "openai":
-                    return json.dumps({"choices": [{"message": {"content": json.dumps(values)}}]}).encode()
-                return json.dumps({"model": "jev-latest", "answers":
-                    {k: {"type": "noul", "noul": v} for k, v in values.items()}}).encode()
-            def complete(prompt, schema, name, *, timeout_seconds, **settings):
-                self.assertEqual(timeout_seconds, 1.2)
-                return openai.complete(api_key="test-key", prompt=prompt,
-                                       schema=schema, schema_name=name, transport=transport, **settings)
-            def judge(state, questions, *, timeout_seconds):
-                return typesafe.judge(api_key="test-key", model="jev-latest", state=state,
-                                      questions=questions, transport=transport)
-            with patch.object(memory, "openai_text_completion", side_effect=complete), \
-                 patch.object(memory, "judge", side_effect=judge):
-                result = self.rerank([dict(p) for p in pages])
-            self.assertEqual(result["outcome"], "success")
-            payload = json.dumps(captured)
-            self.assertNotIn("PRIVATE BODY", payload)
-            self.assertNotIn("guide-", payload)
-            self.assertNotIn("sk-proj-abcdefghijklmnopqrstuv", payload)
-            self.assertIn("<redacted>", payload)
-            self.assertIn("Do not deploy", payload)
-            self.assertIn("not to override a new task", payload)
+        captured = {}
+        def transport(_url, **kwargs):
+            captured.update(json.loads(kwargs["data"]))
+            values = {f"q{i}": i / 100 for i in range(len(pages))}
+            return json.dumps({"model": "jev-latest", "answers":
+                {k: {"type": "noul", "noul": v} for k, v in values.items()}}).encode()
+        def judge(state, questions, *, timeout_seconds):
+            self.assertEqual(timeout_seconds, 1.2)
+            return typesafe.judge(api_key="test-key", model="jev-latest", state=state,
+                                  questions=questions, transport=transport)
+        with patch.object(memory, "judge", side_effect=judge):
+            result = self.rerank([dict(p) for p in pages])
+        self.assertEqual(result["outcome"], "success")
+        payload = json.dumps(captured)
+        self.assertNotIn("PRIVATE BODY", payload)
+        self.assertNotIn("guide-", payload)
+        self.assertNotIn("sk-proj-abcdefghijklmnopqrstuv", payload)
+        self.assertIn("<redacted>", payload)
+        self.assertIn("Do not deploy", payload)
+        self.assertIn("not to override a new task", payload)
 
     def test_recall_loads_reranked_top_five_and_records_actual_selection(self):
         def load(page_id):

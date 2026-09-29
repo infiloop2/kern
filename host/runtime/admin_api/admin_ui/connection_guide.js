@@ -194,7 +194,7 @@ function homeIntegrationCard(guide) {
 }
 
 function sortHomeIntegrationCards() {
-  for (const grid of document.querySelectorAll("#home-runtime-groups .home-card-grid, #home-integration-groups .home-card-grid")) {
+  for (const grid of document.querySelectorAll("#home-runtime-groups .home-card-grid, #home-host-inference-groups .home-card-grid, #home-integration-groups .home-card-grid")) {
     const cards = Array.from(grid.querySelectorAll(".home-integration-card"));
     cards.sort((left, right) => {
       const leftEnabled = left.querySelector("[data-home-integration-status]")?.classList.contains("active") === true;
@@ -219,11 +219,11 @@ function renderHomeIntegrationGroups() {
   const runtimes = HOME_RUNTIME_IDS.map(id => byId.get(id)).filter(Boolean);
   const hostInferenceIds = new Set(Object.keys(HOST_INFERENCE_INTEGRATIONS));
   const groups = [
-    ["Host AI inference", [...hostInferenceIds].map(id => byId.get(id)).filter(Boolean)],
     ["Tools", loadedGuides.filter(guide => guide.id !== "custom_domain" && !HOME_RUNTIME_IDS.includes(guide.id) && !hostInferenceIds.has(guide.id))],
     ["Manual", loadedGuides.filter(guide => guide.id === "custom_domain")],
   ];
   setHtml($("home-runtime-groups"), homeCardGrid(runtimes));
+  setHtml($("home-host-inference-groups"), homeCardGrid([...hostInferenceIds].map(id => byId.get(id)).filter(Boolean)));
   setHtml($("home-integration-groups"), groups.filter(([, guides]) => guides.length).map(([label, guides]) => `
     <div class="home-integration-group">
       <h3>${esc(label)}</h3>
@@ -267,7 +267,7 @@ function renderConnectionGuide() {
     $("integration-detail-summary").textContent = selected.summary;
     $("integration-detail-nav-section").textContent = HOME_RUNTIME_IDS.includes(selected.id)
       ? "Agent runtimes"
-      : "Integrations";
+      : selected.hostInference ? "Host AI inference" : "Integrations";
   }
 }
 

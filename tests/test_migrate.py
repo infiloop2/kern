@@ -51,6 +51,68 @@ class MigrateRunnerTests(unittest.TestCase):
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
             return {row[0] for row in cur.fetchall()}
 
+    def test_sonnet_5_5_migration_preserves_history_and_rolls_back_settings(self) -> None:
+        migrate.up(target=75, quiet=True)
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort, provider_session_id)"
+                " VALUES ('claude_code', 'thread-old-sonnet', 'claude-sonnet-5', 'high', 'old-provider')"
+            )
+            cur.execute(
+                "INSERT INTO web_apps (app_id, name, revision, agent_runtime, agent_model,"
+                " agent_effort, created_at, updated_at)"
+                " VALUES ('app-76', 'Sonnet app', 0, 'claude_code', 'claude-sonnet-5', 'high', 'now', 'now')"
+            )
+            cur.execute(
+                "INSERT INTO schedules (id, thread_id, name, message, cadence, interval_minutes,"
+                " agent_runtime, model, effort, next_run_at, created_at, updated_at)"
+                " VALUES (76, 'schedule-76', 'Sonnet job', 'hello', 'interval', 60,"
+                " 'claude_code', 'claude-sonnet-5', 'max', 'now', 'now', 'now')"
+            )
+        with self.assertRaises(Exception):
+            with db.transaction() as cur:
+                cur.execute(
+                    "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort)"
+                    " VALUES ('claude_code', 'thread-new-sonnet', 'claude-sonnet-5-5', 'high')"
+                )
+
+        self.assertEqual(migrate.up(target=76, quiet=True), [76])
+        with db.transaction() as cur:
+            cur.execute("SELECT agent_model FROM web_apps WHERE app_id = 'app-76'")
+            self.assertEqual(cur.fetchone(), ("claude-sonnet-5-5",))
+            cur.execute("SELECT model FROM schedules WHERE id = 76")
+            self.assertEqual(cur.fetchone(), ("claude-sonnet-5-5",))
+            cur.execute(
+                "SELECT model, provider_session_id FROM thread_sessions"
+                " WHERE thread_id = 'thread-old-sonnet'"
+            )
+            self.assertEqual(cur.fetchone(), ("claude-sonnet-5", "old-provider"))
+            cur.execute(
+                "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort, provider_session_id)"
+                " VALUES ('claude_code', 'thread-new-sonnet', 'claude-sonnet-5-5', 'ultracode', 'new-provider')"
+            )
+            cur.execute(
+                "INSERT INTO agent_events (created_at, event_type, thread_id, message, source)"
+                " VALUES ('2026-09-29T00:00:00Z', 'thread.message', 'thread-new-sonnet', 'retained', 'agent')"
+            )
+
+        self.assertEqual(migrate.down(target=75, quiet=True), [76])
+        with db.transaction() as cur:
+            cur.execute("SELECT agent_model FROM web_apps WHERE app_id = 'app-76'")
+            self.assertEqual(cur.fetchone(), ("claude-sonnet-5",))
+            cur.execute("SELECT model FROM schedules WHERE id = 76")
+            self.assertEqual(cur.fetchone(), ("claude-sonnet-5",))
+            cur.execute(
+                "SELECT thread_id, model, provider_session_id FROM thread_sessions"
+                " WHERE thread_id IN ('thread-old-sonnet', 'thread-new-sonnet') ORDER BY thread_id"
+            )
+            self.assertEqual(cur.fetchall(), [
+                ("thread-new-sonnet", "claude-sonnet-5", None),
+                ("thread-old-sonnet", "claude-sonnet-5", "old-provider"),
+            ])
+            cur.execute("SELECT message FROM agent_events WHERE thread_id = 'thread-new-sonnet'")
+            self.assertEqual(cur.fetchall(), [("retained",)])
+
     def test_spawned_chat_migration_refuses_data_losing_rollback(self) -> None:
         self.assertIn(74, {item.version for item in migrate.load_migrations()})
         migrate.up(target=74, quiet=True)

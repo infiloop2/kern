@@ -9,6 +9,39 @@ import unittest
 
 class AgentChatRichTextTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
+    def test_user_upload_reference_opens_workspace_file_without_rendering_other_markup(self) -> None:
+        renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
+        script = (
+            f"const rich = require({json.dumps(str(renderer))});"
+            "process.stdout.write(rich.renderUserMessage(process.argv[1]));"
+        )
+        source = (
+            "Please review <this> & keep **formatting**.\n\n"
+            "[User-uploaded file: user-files/20260928T120000.000000Z_report [final].txt ]\n"
+            "[User-uploaded file: user-files/20260928T120001.000000Z_notes.txt\u00a0]\n"
+            "[User-uploaded file: user-files/../secret.txt]"
+        )
+        rendered = subprocess.run(
+            ["node", "-e", script, source],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+
+        self.assertIn("Please review &lt;this&gt; &amp; keep **formatting**.\n\n", rendered)
+        self.assertIn(
+            'class="md-open-file" data-file-path="/user-files/20260928T120000.000000Z_report [final].txt "',
+            rendered,
+        )
+        self.assertIn(
+            '>user-files/20260928T120000.000000Z_report [final].txt </button>]',
+            rendered,
+        )
+        self.assertIn('data-file-path="/user-files/20260928T120001.000000Z_notes.txt\u00a0"', rendered)
+        self.assertIn("[User-uploaded file: user-files/../secret.txt]", rendered)
+        self.assertEqual(rendered.count('class="md-open-file"'), 2)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
     def test_markdown_renderer_escapes_html_and_rejects_javascript_links(self) -> None:
         renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
         script = (

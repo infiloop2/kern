@@ -76,7 +76,7 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
     "claude_code": {
         "claude-opus-5-5": ("high", "max", "ultracode"),
         "claude-fable-5-1": ("high", "max", "ultracode"),
-        "claude-sonnet-5": ("high", "max", "ultracode"),
+        "claude-sonnet-5-5": ("high", "max", "ultracode"),
     },
     # Grok Build's subscription runtime exposes one pinned model in the
     # vendored CLI. These are its wire-level reasoning effort values.

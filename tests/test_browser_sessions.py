@@ -11,7 +11,7 @@ from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser.accounts import Profile, Accounts
@@ -366,6 +366,87 @@ class BrowserSessionsTests(unittest.TestCase):
                      {**self.body, "request_id": "short"}, {**self.body, "text": ""}]:
             with self.assertRaises(BrowserError):
                 validate_post(body)
+
+    def test_browser_failure_logs_are_sanitized_and_bounded(self):
+        browser = Browser.__new__(Browser)
+        browser.reported_failures = set()
+        request = SimpleNamespace(
+            url="https://abs.twimg.com/private/path?token=secret", resource_type="script",
+            failure="net::ERR_CONNECTION_RESET private details",
+        )
+        with patch("host.runtime.browser.browser.host_errors.report_warning") as warning, patch(
+            "host.runtime.browser.browser.host_metrics.service_resource_snapshot",
+            return_value={"browser_memory_bytes": 12345},
+        ):
+            browser.record_failed_request(request)
+            browser.record_failed_request(request)
+            browser.record_response(SimpleNamespace(request=request, status=200))
+            warning.assert_called_once_with(
+                "browser.session", "net::ERR_CONNECTION_RESET",
+                context={"host": "abs.twimg.com", "resource_type": "script", "browser_memory_bytes": 12345},
+            )
+            browser.record_response(SimpleNamespace(request=request, status=403))
+            self.assertEqual(warning.call_args.args[1], "HTTP 403")
+            request.failure = "private details without an error code"
+            browser.record_failed_request(request)
+            self.assertEqual(warning.call_args.args[1], "Request failed")
+            for index in range(30):
+                request.url = f"https://host{index}.example/private?token=secret"
+                browser.record_failed_request(request)
+            self.assertEqual(warning.call_count, 20)
+            self.assertNotIn("private", str(warning.call_args_list))
+            self.assertNotIn("secret", str(warning.call_args_list))
+
+    def test_browser_policy_blocks_are_logged_and_still_aborted(self):
+        browser = Browser.__new__(Browser)
+        browser.reported_failures = set()
+        route = Mock(request=SimpleNamespace(url="https://127.0.0.1/private", resource_type="document"))
+        with patch("host.runtime.browser.browser.host_errors.report_warning") as warning:
+            browser.route_request(route)
+            route.request.failure = "net::ERR_FAILED"
+            browser.record_failed_request(route.request)
+        warning.assert_called_once()
+        route.abort.assert_called_once()
+        route.fallback.assert_not_called()
+        self.assertEqual(warning.call_args.args[1], "Blocked by Browser URL policy")
+
+    def test_browser_warning_is_accepted_by_host_diagnostics_collector(self):
+        from host.runtime.host_diagnostics_collector.collector import parse_journal_record
+        browser = Browser.__new__(Browser)
+        browser.reported_failures = set()
+        with patch("host.runtime.core.host_errors.emit_record") as emit:
+            browser.report_failure("Screenshot capture failed")
+        _, event = parse_journal_record(json.dumps({
+            "__REALTIME_TIMESTAMP": "1000000", "_SYSTEMD_UNIT": "kern-browser.service",
+            "MESSAGE": json.dumps(emit.call_args.args[0]),
+        }))
+        self.assertEqual(event["kind"], "unexpected_behavior")
+        self.assertEqual(event["service"], "kern-browser")
+        self.assertEqual(event["summary"], "Screenshot capture failed")
+
+    def test_screenshot_failures_are_logged_once_without_changing_error(self):
+        browser = Browser.__new__(Browser)
+        browser.reported_failures = set()
+        browser.page = Mock()
+        browser.page.screenshot.side_effect = RuntimeError("private screenshot failure")
+        with patch("host.runtime.browser.browser.host_errors.report_warning") as warning:
+            for _ in range(2):
+                with self.assertRaisesRegex(RuntimeError, "private screenshot failure"):
+                    browser.frame()
+        warning.assert_called_once()
+        self.assertEqual(warning.call_args.args[1], "Screenshot capture failed")
+        self.assertNotIn("private", str(warning.call_args))
+
+    def test_browser_home_and_reload_use_fixed_page_targets(self):
+        browser = Browser.__new__(Browser)
+        browser.site = "https://x.com/"
+        browser.page = Mock()
+        browser.input({"kind": "home"})
+        browser.input({"kind": "reload"})
+        browser.page.goto.assert_called_once_with("https://x.com/", wait_until="domcontentloaded")
+        browser.page.reload.assert_called_once_with(wait_until="domcontentloaded")
+        with self.assertRaises(BrowserError):
+            browser.input({"kind": "reload", "url": "https://other.example"})
 
     def test_peers_have_disjoint_capabilities(self):
         self.assertEqual(MANIFEST.host_service_dependency, "kern-browser.service")

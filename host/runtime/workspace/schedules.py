@@ -14,7 +14,7 @@ from host.runtime.core import db, host_errors
 from host.runtime.workspace.purpose import validate_purpose
 from host.runtime.workspace.host_api import WorkspaceError, active_agent_runtimes, call_admin_api
 from host.runtime.workspace.query import one as _one
-from host.session_options import DEFAULT_INTERACTIVE_MODELS, SCRIPT_RUNTIME, schedule_session_options
+from host.session_options import SCRIPT_RUNTIME, schedule_session_options, session_config_error
 
 
 MAX_SCHEDULES = 100
@@ -412,11 +412,12 @@ def restore_revision(schedule_id: int, revision: int, body: Any) -> dict[str, An
             "agent_runtime": source[5], "model": source[6], "effort": source[7],
             "purpose": source[9],
         }
-        # Preserve the original revision, but do not reactivate its retired
-        # Grok model: a later scheduled delivery must use an offered model.
-        if fields["agent_runtime"] in ("grok", "grok-2") and fields["model"] == "grok-4.6":
-            fields["model"] = DEFAULT_INTERACTIVE_MODELS[fields["agent_runtime"]]
         fields = _validated_fields(fields)
+        error = session_config_error(
+            fields["agent_runtime"], fields["model"], fields["effort"], allow_script=True
+        )
+        if error is not None:
+            raise WorkspaceError(HTTPStatus.CONFLICT, f"schedule revision cannot be restored: {error}")
         new_revision = expected + 1
         deleted_at = now_ts if source[8] else None
         if current["deleted"] and deleted_at is None:

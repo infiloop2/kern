@@ -85,7 +85,7 @@ def auto_approval_smoke(browser, url, screenshot_dir=None):
     availability[0] = False
     page.locator('[data-action="approval-refresh"]').click()
     expect(page.locator(".auto-schedule")).to_contain_text("Auto-approval is off")
-    expect(page.locator(".auto-schedule")).to_contain_text("Enable OpenAI under Home > Integrations > Host AI inference")
+    expect(page.locator(".auto-schedule")).to_contain_text("Enable OpenAI under Home > Host AI inference")
     expect(page.locator(".auto-policy-row")).to_have_count(1)
     expect(page.locator(".auto-history-row")).to_have_count(2)
     if screenshot_dir:

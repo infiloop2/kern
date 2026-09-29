@@ -196,7 +196,7 @@ class SessionOptionsTests(unittest.TestCase):
                 "claude_code": {
                     "claude-opus-5-5": ("high", "max", "ultracode"),
                     "claude-fable-5-1": ("high", "max", "ultracode"),
-                    "claude-sonnet-5": ("high", "max", "ultracode"),
+                    "claude-sonnet-5-5": ("high", "max", "ultracode"),
                 },
                 "grok": {
                     "grok-4.7": ("xhigh", "high"),
@@ -265,7 +265,7 @@ class SessionOptionsTests(unittest.TestCase):
     def test_rejects_the_superseded_claude_code_models(self) -> None:
         # Aliases and earlier exact ids remain readable from recorded sessions,
         # but cannot start a thread or run new work on one.
-        for model in ("opus", "fable", "sonnet", "claude-fable-5", "claude-opus-5"):
+        for model in ("opus", "fable", "sonnet", "claude-fable-5", "claude-opus-5", "claude-sonnet-5"):
             self.assertIsNotNone(session_config_error("claude_code", model, "high"))
 
     def test_recorded_config_accepts_any_model_and_checks_only_the_shape(self) -> None:

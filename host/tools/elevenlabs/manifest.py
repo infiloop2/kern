@@ -79,15 +79,15 @@ ACTIONS = (
         output_schema=schema({"voice_id": text("Saved voice ID to use with generate_speech.")}, ["voice_id"]),
     ),
     ActionSpec(
-        id="generate_speech", cost_description='Speech generation uses account credits. Uses $0.0002 per returned credit, based on the published Starter plan; plan pricing varies. Reports nothing without charged usage.', description="Generate narration and automatically save the MP3 under /tool_assets. Eleven v3 supports expressive script tags such as [whispers]. Audition delivery before making a full narration.",
+        id="generate_speech", cost_description='Speech generation uses account credits. Uses $0.0002 per returned credit, based on the published Starter plan; plan pricing varies. Reports nothing without charged usage.', description="Generate narration and automatically save the MP3 under /tool_assets. Eleven v4 and v4 Turbo support expressive script tags such as [whispers]. Audition delivery before making a full narration.",
         data_policy="Script, voice ID, model and delivery controls go directly to ElevenLabs and use account credits. The generated audio is saved privately into the agent workspace; no publication or separate download approval occurs.",
         input_schema=schema({
-            "text": text("Exact script, up to 1000 characters and the host's UTF-8 parameter limit. Inline audio tags are supported by eleven_v3."),
+            "text": text("Exact script, up to 1000 characters and the host's UTF-8 parameter limit. Inline audio tags are supported by Eleven v4, v4 Turbo and v3."),
             "voice_id": text("Voice ID from list_voices or save_voice; not a Runway preset name."),
-            "model": {"type": "string", "enum": ["eleven_v3", "eleven_multilingual_v2"], "description": "Default eleven_v3 for expressive narration."},
-            "stability": number("Eleven v3: 0 (creative), 0.5 (natural), or 1 (robust). Multilingual v2: any value from 0 to 1. Lower values permit greater emotional variation."),
-            "style": number("Style exaggeration, 0 to 1."),
-            "speed": number("Speaking speed, 0.7 to 1.2; 1 is normal. Extreme values may reduce quality."),
+            "model": {"type": "string", "enum": ["eleven_v4", "eleven_v4_turbo", "eleven_v3", "eleven_multilingual_v2"], "description": "Eleven v4 favors quality; v4 Turbo favors low latency. Default eleven_v3 preserves existing behavior."},
+            "stability": number("Eleven v3: 0 (creative), 0.5 (natural), or 1 (robust). Eleven v4, v4 Turbo and Multilingual v2: any value from 0 to 1. Lower values permit greater emotional variation."),
+            "style": number("Style exaggeration, 0 to 1. Unavailable for Eleven v4 and v4 Turbo."),
+            "speed": number("Speaking speed, 0.7 to 1.2; 1 is normal. Unavailable for Eleven v4 and v4 Turbo."),
             "similarity_boost": number("Voice similarity, 0 to 1."),
         }, ["text", "voice_id"]), returns_asset=True,
     ),
@@ -139,5 +139,5 @@ MANIFEST = ToolManifest(
         DataSummaryCard(title="What ElevenLabs can do with it", description="ElevenLabs processes inputs to generate audio and may use data to improve its services according to your account settings and terms. Review its data-use controls for your account.", links=(DataSummaryLink("Privacy policy", "https://elevenlabs.io/privacy-policy"),)),
         DataSummaryCard(title="How long ElevenLabs retains it", description="Provider retention follows your ElevenLabs account and policies; this integration does not enable enterprise zero-retention mode. Saved voice designs remain with ElevenLabs for reuse. Saved workspace outputs remain until removed.", links=(DataSummaryLink("Data usage", "https://elevenlabs.io/docs/help-center/legal/is-my-data-used-to-improve-eleven-labs-ai-models"),)),
     )),
-    agent_notes="Audio actions return a saved workspace path, not an audio URL. design_voice returns candidate IDs: audition them with preview_voice, then use save_voice to retain a selected voice and obtain its permanent voice_id. list_voices includes default and account voices. Music uses Music 2.5 only, with prompts or timed generated sections, up to five minutes. No audio upload, cloning or song-reference editing is exposed. Long generations may time out. Use empty section text plus instrumental styles for scores. Speech tags need eleven_v3. Audition short passages. Paid failures may consume credits; do not retry automatically.",
+    agent_notes="Audio actions return a saved workspace path, not an audio URL. design_voice returns candidate IDs: audition them with preview_voice, then use save_voice to retain a selected voice and obtain its permanent voice_id. list_voices includes default and account voices. Music uses Music 2.5 only, with prompts or timed generated sections, up to five minutes. No audio upload, cloning or song-reference editing is exposed. Long generations may time out. Use empty section text plus instrumental styles for scores. Eleven v4 and v4 Turbo support speech tags and stability/similarity controls; style and speed are unavailable. Audition short passages. Paid failures may consume credits; do not retry automatically.",
 )

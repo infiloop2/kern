@@ -7,7 +7,7 @@ umask 077
 cd /
 NODE_VERSION=22.12.0
 CODEX_CLI_VERSION=0.155.1
-CLAUDE_CODE_VERSION=2.1.280
+CLAUDE_CODE_VERSION=2.1.284
 # Grok Build, xAI's coding agent. The npm package is a JS trampoline plus a
 # per-platform optional dependency carrying a brotli-compressed binary; see
 # docs/architecture/xai-integration.md for the upgrade review checklist.

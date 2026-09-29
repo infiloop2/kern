@@ -62,15 +62,23 @@ def run(page, url, log_in, runtime="grok-2", provider="xai"):
     assert methods.count("GET") == 2, methods
 
     # An explicit start works immediately even just after an absent-session read.
-    page.evaluate("runtime => import('/admin_ui/health.js').then(module => module.startLogin(runtime))", runtime)
+    # Read the card in the same browser task as the completed start. A pending
+    # health tick can replace the card before a separate Playwright assertion.
+    started_text = page.evaluate("""async runtime => {
+      const { startLogin } = await import('/admin_ui/health.js');
+      await startLogin(runtime);
+      return document.querySelector(`[data-provider-oauth="${runtime}"]`)?.textContent || '';
+    }""", runtime)
     assert methods.count("POST") == 1, methods
+    assert login["login_url"] in started_text, started_text
+    # A refresh must recover the started login after the card is re-rendered.
+    page.evaluate(refresh)
     target = page.locator(f'[data-provider-oauth="{runtime}"]')
     expect(target).to_contain_text(login["login_url"])
     if runtime == "claude_code":
         expect(target.get_by_role("button", name="Submit code")).to_be_visible()
     else:
         expect(target).to_contain_text(login["device_code"])
-    page.evaluate(refresh)
     assert methods.count("GET") == 3, methods
 
     # A visible, successful login is eligible for a later health tick. This is

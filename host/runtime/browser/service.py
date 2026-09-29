@@ -13,7 +13,7 @@ from typing import Any
 from host.constants import BROWSER_SOCKET_PATH
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser.accounts import Accounts
-from host.runtime.core import host_errors
+from host.runtime.core import host_errors, host_metrics
 from host.runtime.core.unix_socket_service import UnixSocketRequestHandler, UnixSocketServer
 
 OPERATOR_OPERATIONS = {"ready", "list", "create", "check", "open", "frame", "input", "save", "cancel", "disconnect"}
@@ -64,7 +64,10 @@ class Handler(UnixSocketRequestHandler):
             # Browser exceptions can contain URLs, DOM fragments and credentials.
             # Preserve the call stack, but replace the exception message.
             safe = RuntimeError(type(exc).__name__).with_traceback(exc.__traceback__)
-            host_errors.report_unexpected("browser.dispatch", safe, context={"operation": operation})
+            host_errors.report_unexpected(
+                "browser.dispatch", safe,
+                context={"operation": operation, **host_metrics.service_resource_snapshot("browser")},
+            )
             message = "Browser operation failed. Reopen the browser or check Host diagnostics."
             if operation == "post_tweet":
                 message += " Check X before approving another attempt."

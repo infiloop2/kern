@@ -47,6 +47,7 @@ from typing import Any, Callable, cast, NamedTuple
 from urllib.parse import parse_qs, quote, urlparse
 
 from host.config import AGENT_RUNTIMES, ConfigError, parse_network_controls
+from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX
 from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES, PROXY_PORT
 from host.runtime.admin_api import browser as browser_admin
 from host.runtime.admin_api import xai_video_storage
@@ -1952,7 +1953,7 @@ def _minutes_from_now(minutes: int) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() + minutes * 60))
 
 
-def initialize_state() -> None:
+def initialize_state() -> list[str]:
     """Recover after a restart or reboot: a run persisted as running died with
     the admin process, so return its thread to idle and record the interruption.
     (A pending push interrupted mid-resolve is still pending and the operator
@@ -1961,6 +1962,7 @@ def initialize_state() -> None:
     mid-execution is marked failed, never re-executed
     (tools_host.recover_interrupted_approvals)."""
     error_message = "host runtime restarted while the thread was running"
+    interrupted: list[str] = []
     with state.mutation() as cur:
         for thread_id, run_number in state.recover_interrupted_thread_runs(cur):
             state.append_agent_event(
@@ -1969,6 +1971,31 @@ def initialize_state() -> None:
                 thread_id,
                 {"error_message": error_message},
                 run_number=run_number,
+            )
+            interrupted.append(thread_id)
+    return interrupted
+
+
+RESTART_MESSAGE = AUTOMATED_TRIGGER_PREFIX + "Kern was restarted. Please resume your work."
+
+
+def restart_interrupted_agents(thread_ids: list[str]) -> None:
+    """Resume interrupted model turns once, after their errors are committed."""
+    refreshed: set[str] = set()
+    for thread_id in thread_ids:
+        try:
+            config = state.thread_session_config(thread_id)
+            if config is None or config["agent_runtime"] == session_options.SCRIPT_RUNTIME:
+                continue
+            runtime_type = config["agent_runtime"]
+            if runtime_type not in refreshed:
+                orchestrator.refresh_runtime_status(runtime_type)
+                refreshed.add(runtime_type)
+            send_thread_message(thread_id, {"message": RESTART_MESSAGE}, None)
+        except Exception as exc:
+            host_errors.report_warning(
+                "admin_api.restart_interrupted_agent", exc,
+                context={"thread_id": thread_id},
             )
 
 
@@ -1984,7 +2011,7 @@ def main() -> int:
     # rather than fail the live instance's running turn first.
     httpd = BoundedThreadingHTTPServer((HOST, PORT), Handler)
     workspace_httpd = workspace_admin_api.create_workspace_admin_server()
-    initialize_state()
+    interrupted = initialize_state()
     # Cache the admin password hash once so the login path never touches the
     # database (reconfigure restarts this service, which reloads it).
     admin_auth.preload_password_verifier()
@@ -1992,6 +2019,10 @@ def main() -> int:
     # kern-tools service (its own user, egress, and scoped DB role); the
     # admin service only forwards operator operations to it.
     orchestrator.start_background_loops()
+    if interrupted:
+        threading.Thread(
+            target=restart_interrupted_agents, args=(interrupted,), daemon=True
+        ).start()
     threading.Thread(target=maintenance_loop, daemon=True).start()
     threading.Thread(target=auto_approvals.run, name="auto-approvals", daemon=True).start()
     threading.Thread(target=embedding_index_loop, daemon=True).start()

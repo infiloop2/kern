@@ -377,6 +377,10 @@ def run_webkit_worker_startup_canary(playwright, url: str, *, headed: bool) -> N
         log_in(workspace_page, url)
         workspace_smokes.web_app_worker_startup_smoke(workspace_page)
         workspace.close()
+        import browser_smokes
+        browser_context = browser.new_context(service_workers="block")
+        browser_smokes.run(browser_context.new_page(), url, log_in, open_home_integration)
+        browser_context.close()
     finally:
         browser.close()
 
@@ -1216,8 +1220,12 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#sidebar-configuration, #sidebar-audit")).to_have_count(0)
     expect(page.locator("#home-runtimes-title")).to_have_text("Agent runtimes")
     expect(page.locator("#home-integrations-title")).to_have_text("Integrations")
+    expect(page.locator("#home-host-inference-title")).to_have_text("Host AI inference")
+    for guide_id in HOST_INFERENCE_INTEGRATION_IDS:
+        expect(page.locator(f"#home-host-inference-groups [data-guide='{guide_id}']")).to_be_visible()
+        expect(page.locator(f"#home-integration-groups [data-guide='{guide_id}']")).to_have_count(0)
     expect(page.locator("#home-integration-groups .home-integration-group h3")).to_have_text(
-        ["Host AI inference", "Tools", "Manual"]
+        ["Tools", "Manual"]
     )
     expect(page.locator("#tools-cross-access-notice")).to_have_count(0)
     expect(page.get_by_text("Review combined tool access")).to_have_count(0)
@@ -1226,7 +1234,7 @@ def desktop_smoke(page, url: str) -> None:
         expect(page.locator(f"#home-integration-groups [data-guide='{guide_id}']")).to_have_count(0)
     expect(page.locator("#home-integration-groups [data-guide='github']")).to_be_visible()
     integration_cards = page.locator(
-        "#home-runtime-groups .home-integration-card, #home-integration-groups .home-integration-card"
+        "#panel-home .home-integration-card"
     )
     integration_count = len(EXPECTED_HOME_INTEGRATION_IDS)
     expect(integration_cards).to_have_count(integration_count)
@@ -1246,7 +1254,7 @@ def desktop_smoke(page, url: str) -> None:
     if integration_cards.locator(".integration-logo:not([aria-hidden='true'])").count():
         raise AssertionError("integration logos must remain decorative inside their labelled card buttons")
     grouped_ordering = page.locator(
-        "#home-runtime-groups, #home-integration-groups .home-integration-group"
+        "#home-runtime-groups, #home-host-inference-groups, #home-integration-groups .home-integration-group"
     ).evaluate_all("""groups =>
       groups.map(group => [...group.querySelectorAll('.home-integration-card')].map(card => ({
         enabled: card.querySelector('[data-home-integration-status]').classList.contains('active'),
@@ -1265,6 +1273,7 @@ def desktop_smoke(page, url: str) -> None:
 
     open_home_integration(page, "host_openai")
     expect(page.locator("#integration-detail-title")).to_have_text("OpenAI API")
+    expect(page.locator("#integration-detail-nav-section")).to_have_text("Host AI inference")
     expect(page.locator(".integration-row[data-integration='host_openai']")).to_be_visible()
     expect(page.locator("#host-inference-model-openai")).to_have_count(0)
     openai_key_label = page.locator("label[for='host-inference-key-openai']")

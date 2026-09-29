@@ -5,6 +5,9 @@ const reference = params.has("login") ? {login_id: params.get("login")} : {accou
 let lease = "", stopped = false, timer = null, queue = Promise.resolve();
 const screen = $("browser-screen");
 function message(text) { $("browser-message").textContent = text; }
+function frameError(text) { const node = $("browser-frame-error"); node.textContent = text; node.hidden = !text; }
+screen.onload = () => frameError("");
+screen.onerror = () => frameError("The browser image could not be loaded. Reload the page or reopen this window.");
 setUnauthorizedHandler(() => { stopped = true; message("Your Kern login expired. Sign in to Kern again, then reopen this window."); });
 function call(operation, payload = {}) { return api("POST", `/v1/browser/${operation}`, {...reference, lease, ...payload}); }
 function enqueue(task) {
@@ -16,8 +19,9 @@ async function frame() {
   let result;
   try { result = await call("frame"); }
   catch (error) {
+    frameError(error.message);
     if (error.message.includes("control expired")) { stopped = true; screen.removeAttribute("src"); screen.hidden = true; }
-    throw error;
+    return;
   }
   $("browser-origin").textContent = result.origin || "X browser";
   screen.src = `data:image/jpeg;base64,${result.image}`;
@@ -45,7 +49,7 @@ async function finish(operation) {
 $("browser-save").onclick = () => enqueue(() => finish("save"));
 $("browser-cancel").onclick = () => enqueue(() => finish("cancel"));
 $("browser-home").onclick = () => input({kind: "home"});
-$("browser-refresh").onclick = () => enqueue(frame);
+$("browser-refresh").onclick = () => input({kind: "reload"});
 $("browser-tab").onclick = () => input({kind: "key", key: "Tab"});
 $("browser-enter").onclick = () => input({kind: "key", key: "Enter"});
 $("browser-insert").onclick = () => { const text = $("browser-text").value; $("browser-text").value = ""; if (text) input({kind: "text", text}); };
