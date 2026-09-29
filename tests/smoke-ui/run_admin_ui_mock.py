@@ -2529,7 +2529,11 @@ def list_agent_files(path: str) -> dict[str, Any]:
             {"name": ".gitconfig", "path": "/.gitconfig", "type": "file", "size_bytes": 143, "modified_at": ago(2880)},
             {"name": "AGENTS.md", "path": "/AGENTS.md", "type": "file", "size_bytes": 851, "modified_at": ago(2880)},
             {"name": "CLAUDE.md", "path": "/CLAUDE.md", "type": "file", "size_bytes": 851, "modified_at": ago(2880)},
+            {"name": "user-files", "path": "/user-files", "type": "directory", "modified_at": ago(84)},
             {"name": "workspace", "path": "/workspace", "type": "directory", "modified_at": ago(84)},
+        ],
+        "/user-files": [
+            {"name": "20260722T120000.000000Z_reference image.png", "path": "/user-files/20260722T120000.000000Z_reference image.png", "type": "file", "size_bytes": 68, "modified_at": ago(84)},
         ],
         "/.claude": [
             {"name": "settings.json", "path": "/.claude/settings.json", "type": "file", "size_bytes": 117, "modified_at": ago(180)},

@@ -152,8 +152,8 @@ const runtimeLabel = runtime => ({
   claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", "codex-3": "Codex 3", grok: "Grok", "grok-2": "Grok 2", hermes: "Hermes",
 })[runtime] || runtime;
 const optionLabel = value => value.split(/[-_]/).map(part => part.charAt(0).toUpperCase() + part.slice(1)).join(" ");
-// Claude Code model ids carry the provider prefix ("claude-sonnet-5"); the
-// runtime name already says Claude Code, so the pill reads "Sonnet 5". A model
+// Claude Code model ids carry the provider prefix ("claude-sonnet-5-5"); the
+// runtime name already says Claude Code, so the pill reads "Sonnet 5.5". A model
 // point release uses two numeric id segments, rendered as "Opus 5.5" rather
 // than the generic option label's "Opus 5 5".
 const modelLabel = (runtime, value) => {
@@ -1208,7 +1208,7 @@ function renderThreadEntry(event, openActivities) {
   const text = typeof payload.message === "string" ? payload.message : "";
   if (payload.source === "user") {
     return `<article class="thread-entry thread-user" data-entry-id="${entryId}">
-      <div class="bubble"><pre>${esc(text)}</pre></div>
+      <div class="bubble"><pre>${KernRichText.renderUserMessage(text)}</pre></div>
     </article>`;
   }
   return `<article class="thread-entry thread-agent md-content" data-entry-id="${entryId}">

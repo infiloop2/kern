@@ -20,7 +20,7 @@ can break when a harness package is upgraded.
 | Harness | Package | Pinned version | Runtime id | Adapter |
 | --- | --- | --- | --- | --- |
 | Codex | `@openai/codex` | `0.155.1` | `codex`, `codex-2`, `codex-3` | `host/runtime/agent_runtime/codex_app_server.py` |
-| Claude Code | `@anthropic-ai/claude-code` | `2.1.280` | `claude_code` | `host/runtime/agent_runtime/claude_code.py` |
+| Claude Code | `@anthropic-ai/claude-code` | `2.1.284` | `claude_code` | `host/runtime/agent_runtime/claude_code.py` |
 | Grok Build | `@xai-official/grok` | `1.0.40` | `grok`, `grok-2` | `host/runtime/agent_runtime/grok_agent.py` |
 | Hermes | `hermes-agent[bedrock,mcp]` | `0.18.2` | `hermes` | `host/runtime/agent_runtime/hermes_agent.py` |
 
@@ -248,8 +248,8 @@ claude -p --input-format stream-json --output-format stream-json --verbose \
 ```
 
 Kern passes the session selection on every new and resumed process.
-Claude Code `2.1.280` accepts the exposed model ids `claude-opus-5-5`,
-`claude-fable-5-1`, and `claude-sonnet-5`; it also accepts `high`, `max`, and the
+Claude Code `2.1.284` accepts the exposed model ids `claude-opus-5-5`,
+`claude-fable-5-1`, and `claude-sonnet-5-5`; it also accepts `high`, `max`, and the
 session-only `ultracode` effort. `ultracode` combines xhigh effort with dynamic
 workflow orchestration, so an older CLI that silently ignores that value is not
 compatible. The catalog names exact model ids rather than the CLI's
@@ -528,7 +528,7 @@ Claude usage is read with:
 claude -p "/usage" --output-format json
 ```
 
-On pinned Claude Code `2.1.280`, the command returns a JSON object whose
+On pinned Claude Code `2.1.284`, the command returns a JSON object whose
 `result` string contains lines like:
 
 ```text

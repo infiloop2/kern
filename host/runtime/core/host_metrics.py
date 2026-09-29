@@ -11,6 +11,83 @@ from typing import Any
 AGENT_CGROUP_ROOT = Path("/sys/fs/cgroup/kern_agent.slice")
 PROC_ROOT = Path("/proc")
 AGENT_PROCESS_LIMIT = 1000
+CGROUP_ROOT = Path("/sys/fs/cgroup")
+RESOURCE_CGROUPS = {
+    "agents": "kern_agent.slice",
+    **{name: f"kern_workspace.slice/kern-{unit}.service" for name, unit in (
+        ("browser", "browser"), ("workspace", "workspace"),
+        ("embedding", "embedding"), ("transcription", "transcription"),
+    )},
+    **{name: f"system.slice/kern-{unit}.service" for name, unit in (
+        ("admin", "admin-api"), ("proxy", "network-proxy"), ("tools", "tools"),
+        ("postgres", "postgres"), ("inference", "host-inference"),
+        ("agent_network", "agent-network"), ("diagnostics", "host-errors"),
+        ("tunnel", "cloudflared"),
+    )},
+}
+
+
+def service_resource_snapshot(name: str) -> dict[str, int]:
+    """Read fixed cgroup totals including descendants; unavailable is not zero.
+
+    No process arguments, browser state, or subprocesses are read/launched.
+    Task counts include threads, and CPU is cumulative microseconds.
+    """
+    root = CGROUP_ROOT / RESOURCE_CGROUPS[name]
+    result: dict[str, int] = {}
+    for filename, key in (
+        ("memory.current", "memory_bytes"),
+        ("memory.swap.current", "swap_bytes"),
+        ("pids.current", "tasks"),
+    ):
+        try:
+            value = int((root / filename).read_text())
+            if value >= 0:
+                result[f"{name}_{key}"] = value
+        except (OSError, ValueError):
+            pass
+    try:
+        for line in (root / "cpu.stat").read_text().splitlines():
+            fields = line.split()
+            if len(fields) == 2 and fields[0] == "usage_usec":
+                value = int(fields[1])
+                if value >= 0:
+                    result[f"{name}_cpu_usage_usec"] = value
+    except (OSError, ValueError):
+        pass
+    return result
+
+
+def resource_snapshot() -> dict[str, int | float]:
+    """Small, nonblocking host/service snapshot for failure diagnostics."""
+    result: dict[str, int | float] = {}
+    try:
+        result["host_load_1m"] = round(os.getloadavg()[0], 2)
+    except OSError:
+        pass
+    try:
+        mem = _proc_meminfo()
+        result["host_memory_total_bytes"] = mem["MemTotal"] * 1024
+        result["host_memory_available_bytes"] = mem["MemAvailable"] * 1024
+        result["host_swap_used_bytes"] = (mem["SwapTotal"] - mem["SwapFree"]) * 1024
+    except (OSError, ValueError, KeyError, IndexError):
+        pass
+    for resource in ("cpu", "memory", "io"):
+        try:
+            for line in (PROC_ROOT / "pressure" / resource).read_text().splitlines():
+                fields = line.split()
+                if fields and fields[0] in {"some", "full"}:
+                    for field in fields[1:]:
+                        if field.startswith("avg10="):
+                            value = float(field.removeprefix("avg10="))
+                            if 0 <= value <= 100:
+                                result[f"host_{resource}_pressure_{fields[0]}_avg10"] = value
+        except (OSError, ValueError):
+            pass
+    for name in RESOURCE_CGROUPS:
+        result.update(service_resource_snapshot(name))
+    return result
+
 
 def agent_processes() -> dict[str, Any]:
     """Return a bounded process snapshot for the agent runtime slice — exactly
@@ -189,7 +266,7 @@ def swap_metrics() -> dict[str, int]:
 
 def _proc_meminfo() -> dict[str, int]:
     values: dict[str, int] = {}
-    for line in Path("/proc/meminfo").read_text().splitlines():
+    for line in (PROC_ROOT / "meminfo").read_text().splitlines():
         key, value = line.split(":", 1)
         values[key] = int(value.strip().split()[0])
     return values

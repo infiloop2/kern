@@ -17,7 +17,9 @@ def run(page, url, log_in, open_home_integration):
     sessions = {}
     inputs = []
     fail_cancel = False
+    frame_calls = 0
     def route(request_route):
+        nonlocal frame_calls
         operation = request_route.request.url.rsplit("/", 1)[-1]
         body = request_route.request.post_data_json
         key = body.get("account_id")
@@ -37,6 +39,10 @@ def run(page, url, log_in, open_home_integration):
             result = {"site": "https://x.com/", "lease": "test-operator-lease", "width": 1100, "height": 760}
         elif operation == "frame":
             assert body["lease"] == "test-operator-lease"
+            frame_calls += 1
+            if frame_calls == 1:
+                request_route.fulfill(status=503, content_type="application/json", body=json.dumps({"error": {"message": "Browser image unavailable. Wait for navigation or reopen the browser."}}))
+                return
             result = {"image": jpeg, "origin": "https://x.com"}
         elif operation == "input":
             inputs.append(body)
@@ -67,7 +73,14 @@ def run(page, url, log_in, open_home_integration):
     with page.expect_popup() as popup_info:
         page.get_by_role("button", name="Connect X account", exact=True).click()
     popup = popup_info.value
+    expect(popup.locator("#browser-frame-error")).to_contain_text("Browser image unavailable")
     expect(popup.locator("#browser-screen")).to_be_visible()
+    popup.wait_for_function("document.getElementById('browser-screen').naturalWidth > 0")
+    expect(popup.locator("#browser-frame-error")).to_be_hidden()
+    expect(popup.locator("#browser-message")).to_contain_text("You have control")
+    assert frame_calls >= 2  # A transient first capture failure must not stop polling.
+    with popup.expect_response(lambda response: response.url.endswith("/v1/browser/input") and response.request.post_data_json.get("kind") == "reload"):
+        popup.get_by_role("button", name="Reload page", exact=True).click()
     expect(page.locator("#browser-sessions")).to_contain_text("No saved X accounts yet")
     if directory := os.environ.get("KERN_BROWSER_SCREENSHOTS"):
         Path(directory).mkdir(parents=True, exist_ok=True)
@@ -106,6 +119,9 @@ def run(page, url, log_in, open_home_integration):
     expect(popup.locator("#browser-screen")).to_be_visible()
     fail_cancel = True
     popup.get_by_role("button", name="Close", exact=True).click()
+    expect(popup.locator("#browser-message")).to_have_text("Fixture close failed")
+    with popup.expect_response(lambda response: response.url.endswith("/v1/browser/frame")):
+        pass
     expect(popup.locator("#browser-message")).to_have_text("Fixture close failed")
     assert not popup.is_closed()
     fail_cancel = False

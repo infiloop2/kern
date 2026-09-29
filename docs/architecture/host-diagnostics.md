@@ -58,3 +58,27 @@ same pipeline, with bounded durations, process CPU time and random request IDs.
 It emits no speech, transcripts or library exception messages. See
 [dictation diagnostics](../development/dictation.md#host-diagnostics) for timing
 boundaries and per-outcome rate limits.
+
+Browser session warnings and dispatch errors include best-effort resource
+counters for the entire Browser service (including Chromium and Playwright):
+`browser_memory_bytes`, `browser_swap_bytes`, `browser_tasks`, and
+`browser_cpu_usage_usec`. Tasks include threads. CPU is cumulative service CPU
+time in microseconds, not a current utilization percentage; it resets when the
+service cgroup is recreated. Unavailable counters are omitted, not recorded as
+zero. These snapshots read fixed cgroup files only, without process arguments,
+page content, or authentication state.
+
+Claude's `/usage` authentication check allows 60 seconds. A timeout emits a
+`claude_code.usage_probe` error with its timeout and elapsed seconds and a
+shared host resource snapshot: one-minute load, memory available/total, swap
+used, CPU/memory/I/O pressure over the last ten seconds, and the same cumulative
+CPU, memory, swap and task counters for agents and each Kern service. The
+service prefixes are `agents`, `browser`, `workspace`, `embedding`,
+`transcription`, `admin`, `proxy`, `tools`, `postgres`, `inference`,
+`agent_network`, `diagnostics`, and `tunnel`. Agent totals include all thread
+scopes; the other groups are individual services, so they do not overlap.
+
+CPU totals from before the check are included with a `_before` suffix when
+available. Compare them with the failure snapshot only if the service did not
+restart. CLI output is excluded. The timeout still follows the existing runtime
+error path; it does not relax authentication checks or retry a failed agent turn.

@@ -30,8 +30,8 @@ actually needs:
   `max_output_tokens` (1 to 4096), and `timeout_seconds` (0.1 to 60 seconds).
   Supported models are `gpt-6-luna` and `gpt-6-sol`. The shared socket client adds a fixed 100 ms
   for local dispatch and response overhead.
-  There is no feature-purpose field or purpose-to-model mapping. Recall and
-  task titles keep their Luna/none/400-token settings and existing timeouts.
+  There is no feature-purpose field or purpose-to-model mapping.
+  Task titles keep their Luna/none/400-token settings and existing timeout.
 - `typesafe_jev_judgment(...)` sends bounded state and yes/no Jev questions and
   validates the returned probabilities using `jev-latest`. Its existing timeout
   range remains 0.1 to 2 seconds.
@@ -78,16 +78,16 @@ calls are not logged merely for operating within those limits. Features must
 handle that error by preserving their last good state or using a deterministic
 fallback.
 
-Memory recall optionally uses OpenAI Luna or TypeSafe Jev to score the bounded
-task query and up to 20 candidate descriptions under short local ids. Recall
-randomly chooses no reranking, OpenAI, or Jev with probability 1/3 each,
-regardless of enablement. A disabled assigned provider makes no call and keeps
-hybrid order. The inference service owns enablement checks and reports
-`provider_disabled` or `timeout` to callers without exposing configuration
-tables or credentials. Page contents are never sent to either provider. Unsuccessful
-reranking also retains hybrid order. Swarm task titles use the same bounded
-query text as recall, passed to Luna with task-title instructions. See
-[Memory recall](memory-recall.md) for retrieval, assignment, and diagnostics.
+Memory recall uses TypeSafe Jev when enabled to score the bounded task query
+and up to 20 candidate descriptions under short local ids. Every recall with
+candidates requests Jev; there is no random assignment or OpenAI reranking.
+Disabled Jev makes no external call and keeps hybrid order. The inference
+service owns enablement checks and reports `provider_disabled` or `timeout` to
+callers without exposing configuration tables or credentials. Page contents
+are never sent to Jev. Unsuccessful reranking also retains hybrid order.
+Swarm task titles use the same bounded query text as recall, passed to Luna
+with task-title instructions. See [Memory recall](memory-recall.md) for
+retrieval, reranking, and diagnostics.
 
 ## Auto-approval
 

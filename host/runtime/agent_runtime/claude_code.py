@@ -25,6 +25,7 @@ from uuid import uuid4
 
 from host.runtime.agent_runtime import agent_activity, thread_scope
 from host.runtime.agent_runtime.harness import ProviderSessionLost, subprocess_cwd
+from host.runtime.core import host_errors, host_metrics
 
 DEFAULT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/run-claude-code"]
 DEFAULT_ACCOUNT_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/read-claude-account"]
@@ -50,7 +51,7 @@ ACCOUNT_HELPER_TIMEOUT_SECONDS = 15
 # of the file read, so it gets a larger budget than the plain account read.
 ATTEST_HELPER_TIMEOUT_SECONDS = 20
 STATUS_TIMEOUT_SECONDS = 45
-USAGE_TIMEOUT_SECONDS = 30
+USAGE_TIMEOUT_SECONDS = 60
 LOGIN_START_TIMEOUT_SECONDS = 30
 PROCESS_EXIT_TIMEOUT_SECONDS = 3
 # Claude Code reports each stream-json user message's progress as
@@ -628,6 +629,8 @@ def account_status() -> tuple[str, str | None, dict[str, Any] | None]:
 
 def read_claude_usage(command: list[str] | None = None) -> dict[str, Any]:
     usage_command = command or DEFAULT_COMMAND
+    resources_before = host_metrics.resource_snapshot()
+    started = time.monotonic()
     try:
         proc = subprocess.run(
             # /usage runs no agent turn; pass the launcher's required decision
@@ -639,7 +642,20 @@ def read_claude_usage(command: list[str] | None = None) -> dict[str, Any]:
             text=True,
             timeout=USAGE_TIMEOUT_SECONDS,
         )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+    except subprocess.TimeoutExpired as exc:
+        context: dict[str, Any] = {
+            "timeout_seconds": USAGE_TIMEOUT_SECONDS,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            **host_metrics.resource_snapshot(),
+        }
+        for key, value in resources_before.items():
+            if key.endswith("_cpu_usage_usec"):
+                context[f"{key}_before"] = value
+        host_errors.report_unexpected(
+            "claude_code.usage_probe", TimeoutError("Claude usage check timed out"), context=context,
+        )
+        raise ClaudeCodeError(str(exc)) from exc
+    except OSError as exc:
         raise ClaudeCodeError(str(exc)) from exc
     if proc.returncode != 0:
         _raise_usage_probe_error("\n".join(part for part in (proc.stdout, proc.stderr) if part))

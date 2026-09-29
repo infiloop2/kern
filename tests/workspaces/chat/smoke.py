@@ -531,6 +531,13 @@ def desktop_smoke(page: Any) -> None:
     # refusal below; sending into an idle thread starts a fresh turn whose full
     # duration covers the few round trips that follow.
     expect(frame.locator("#composer-running")).to_be_hidden(timeout=25_000)
+    frame.locator(".thread-user .md-open-file").first.click()
+    expect(page.locator("#panel-files")).to_be_visible()
+    expect(page.locator("#file-viewer-title")).to_have_text(
+        "/user-files/20260722T120000.000000Z_reference image.png"
+    )
+    expect(page.locator("#file-image")).to_be_visible()
+    _open_host_thread(page, generated_thread)
     frame.locator("#new-task").fill("agent workspace smoke follow up")
     frame.get_by_role("button", name="Send").click()
     expect(frame.locator("#thread-detail")).to_contain_text("agent workspace smoke follow up")

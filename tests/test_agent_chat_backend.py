@@ -65,7 +65,7 @@ class AgentChatBackendTests(unittest.TestCase):
                     "claude_code": {
                         "claude-opus-5-5": ["high", "max", "ultracode"],
                         "claude-fable-5-1": ["high", "max", "ultracode"],
-                        "claude-sonnet-5": ["high", "max", "ultracode"],
+                        "claude-sonnet-5-5": ["high", "max", "ultracode"],
                     },
                     "grok": {
                         "grok-4.7": ["xhigh", "high"],

@@ -138,9 +138,22 @@ Inputs are fixed: `kind: "pointer"` plus `phase` (`down`, `move`, `up`) and inte
 `x,y` within the 1100×760 viewport; `kind: "click"` with the same coordinates; `kind: "text"` plus `text` of 1–4096 characters;
 `kind: "key"` plus `key` (`Enter`, `Tab`, `Shift+Tab`, `Backspace`, `Delete`, `Escape`,
 `ArrowLeft`, `ArrowRight`, `ArrowUp`, `ArrowDown`, `Home`, `End`, `Control+a`); `kind: "scroll"` plus
-integer `delta` between -1000 and 1000; or `kind: "home"` to return to the fixed
-provider URL. Frames alone do not extend a lease. No operation accepts caller
+integer `delta` between -1000 and 1000; `kind: "home"` to return to the fixed
+provider URL; or `kind: "reload"` to reload the current page. Frames alone do not extend a lease. No operation accepts caller
 JavaScript, selectors, cookies, or arbitrary navigation URLs.
+
+Reload page reloads the remote website. Chromium still opens the provider home
+URL for new and saved connections. Host diagnostics records failed document,
+script, stylesheet, XHR and fetch requests (hostname, resource type, HTTP status
+or Chromium error code), Browser URL policy blocks, uncaught page script errors,
+and screenshot capture failures. These are events from the whole browser session,
+including background pages, not a verdict about the displayed page. Each session
+logs at most 20 distinct failures, with duplicates suppressed until Chromium is
+closed. Logs exclude URL paths, page content and raw error messages. A blank page
+without one of these failures produces no warning. The popup reports image-load
+and frame-request errors separately from control errors, clears them when an
+image loads, and continues polling after transient capture failures. It does not
+inspect image pixels.
 
 The popup streams images from hosted Chromium. Clicks and desktop typing go to
 the selected remote field. A compact phone text bar supplies native keyboard

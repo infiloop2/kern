@@ -2067,7 +2067,7 @@ class AgenticWebAppMockTests(unittest.TestCase):
         self._send("app-1", "Build the first app.")
         replacement = {
             "agent_runtime": "claude_code",
-            "model": "claude-sonnet-5",
+            "model": "claude-sonnet-5-5",
             "effort": "high",
         }
         with self.assertRaises(backend.WorkspaceError) as running:
@@ -2099,7 +2099,7 @@ class AgenticWebAppMockTests(unittest.TestCase):
         ]
         self.assertEqual(len(activities), 1)
         self.assertEqual(activities[0]["title"], "Agent provider changed")
-        self.assertIn("Claude Code · claude-sonnet-5 · high", activities[0]["detail"])
+        self.assertIn("Claude Code · claude-sonnet-5-5 · high", activities[0]["detail"])
 
     def test_mock_keeps_data_conversations_and_sessions_per_workspace(self) -> None:
         self._create_app()

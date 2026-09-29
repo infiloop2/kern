@@ -78,8 +78,8 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
         self.addCleanup(db.close_pool)
-        # Retrieval tests use control; reranker tests cover provider assignments.
-        self.enterContext(patch.object(memory.random, "choice", return_value=None))
+        # Retrieval tests keep hybrid order; reranker tests cover Jev outcomes.
+        self.enterContext(patch.object(memory, "judge", side_effect=memory.HostInferenceError("disabled", reason="provider_disabled")))
 
     def test_onboarding_status_is_derived_from_live_resources(self) -> None:
         active = patch.object(
@@ -1641,28 +1641,39 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             )
         self.assertEqual(old_pause_field.exception.status, HTTPStatus.BAD_REQUEST)
 
-    def test_restoring_old_grok_revision_uses_the_current_model(self) -> None:
-        schedule = schedules.create_schedule(
-            {
-                "name": "Grok review",
-                "message": "Review work",
-                "cadence": "interval",
-                "interval_minutes": 60,
-                "agent_runtime": "grok",
-                "model": "grok-4.6",
-                "effort": "high",
-            },
-            actor="user",
-        )
-        updated = schedules.update_schedule(
-            schedule["id"], schedule_update(schedule, model="grok-4.7"), actor="user"
-        )
-        restored = schedules.restore_revision(
-            schedule["id"], 1, {"expected_revision": updated["revision"]}
-        )
-        self.assertEqual(restored["model"], "grok-4.7")
-        revisions = schedules.list_revisions(schedule["id"], {})["revisions"]
-        self.assertEqual(next(item for item in revisions if item["revision"] == 1)["model"], "grok-4.6")
+    def test_restoring_a_retired_model_does_not_change_the_schedule(self) -> None:
+        for runtime, retired, offered in (
+            ("grok", "grok-4.6", "grok-4.7"),
+            ("grok-2", "grok-4.6", "grok-4.7"),
+            ("claude_code", "claude-sonnet-5", "claude-sonnet-5-5"),
+        ):
+            with self.subTest(runtime=runtime):
+                schedule = schedules.create_schedule(
+                    {
+                        "name": "Model review",
+                        "message": "Review work",
+                        "cadence": "interval",
+                        "interval_minutes": 60,
+                        "agent_runtime": runtime,
+                        "model": retired,
+                        "effort": "high",
+                    },
+                    actor="user",
+                )
+                updated = schedules.update_schedule(
+                    schedule["id"], schedule_update(schedule, model=offered), actor="user"
+                )
+                with self.assertRaises(WorkspaceError) as rejected:
+                    schedules.restore_revision(
+                        schedule["id"], 1, {"expected_revision": updated["revision"]}
+                    )
+                self.assertEqual(rejected.exception.status, HTTPStatus.CONFLICT)
+                self.assertIn("schedule revision cannot be restored", rejected.exception.message)
+                current = schedules.load_schedule(schedule["id"])
+                self.assertEqual((current["model"], current["revision"]), (offered, 2))
+                revisions = schedules.list_revisions(schedule["id"], {})["revisions"]
+                self.assertEqual(len(revisions), 2)
+                self.assertEqual(next(item for item in revisions if item["revision"] == 1)["model"], retired)
 
     def test_scheduled_agent_rename_updates_schedule_and_revision_history(self) -> None:
         schedule = schedules.create_schedule(

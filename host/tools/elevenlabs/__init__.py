@@ -113,14 +113,17 @@ def _generation(action: str, values: JSONObject, api: HostAPI) -> tuple[str, JSO
     body: JSONObject = {"text": _text(values.get("text"), api)}
     if action == "generate_speech":
         voice_id = _id(values.get("voice_id"))
-        model = _choice(values.get("model", "eleven_v3"), ("eleven_v3", "eleven_multilingual_v2"))
-        body["model_id"] = model
+        model = _choice(values.get("model", "eleven_v3"), ("eleven_v4", "eleven_v4_turbo", "eleven_v3", "eleven_multilingual_v2"))
         settings: JSONObject = {}
         for key in ("stability", "style", "similarity_boost", "speed"):
             if key in values:
                 settings[key] = _number(values[key], 0.7 if key == "speed" else 0, 1.2 if key == "speed" else 1)
         if model == "eleven_v3" and "stability" in settings and settings["stability"] not in (0, 0.5, 1):
             raise ValueError("Eleven v3 stability must be 0 (creative), 0.5 (natural), or 1 (robust).")
+        if model in {"eleven_v4", "eleven_v4_turbo"}:
+            if "style" in settings or "speed" in settings:
+                raise ValueError("Eleven v4 models support stability and similarity_boost, not style or speed.")
+        body["model_id"] = model
         if settings:
             body["voice_settings"] = settings
         return f"/v1/text-to-speech/{voice_id}", body

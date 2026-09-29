@@ -56,6 +56,17 @@ class ElevenLabsTests(unittest.TestCase):
                         self.assertIsInstance(result, StreamingAsset)
                         self.assertEqual(json.loads(self.calls[-1][2]["data"])["voice_settings"]["speed"], speed)
 
+    def test_eleven_v4_models_use_speech_endpoint_and_supported_controls(self):
+        with patch.object(el, "open_response_stream", self.response):
+            for model in ("eleven_v4", "eleven_v4_turbo"):
+                with self.subTest(model=model):
+                    result = self.tool.execute("generate_speech", {"text": "[whispers] Hello.", "voice_id": "voice", "model": model, "stability": 0.3, "similarity_boost": 0.8}, self.api)
+                    self.assertIsInstance(result, StreamingAsset)
+                    self.assertEqual(self.calls[-1][:2], ("POST", el.API_ROOT + "/v1/text-to-speech/voice?output_format=mp3_44100_128"))
+                    self.assertEqual(json.loads(self.calls[-1][2]["data"]), {"text": "[whispers] Hello.", "model_id": model, "voice_settings": {"stability": 0.3, "similarity_boost": 0.8}})
+
+        self.assertEqual(el.MANIFEST.action("generate_speech").input_schema["properties"]["model"]["enum"], ["eleven_v4", "eleven_v4_turbo", "eleven_v3", "eleven_multilingual_v2"])
+
     def test_speech_stability_respects_model_modes(self):
         with patch.object(el, "open_response_stream", self.response):
             for model, stability in (("eleven_v3", 0), ("eleven_v3", 0.5), ("eleven_v3", 1), ("eleven_multilingual_v2", 0.3)):
@@ -114,6 +125,8 @@ class ElevenLabsTests(unittest.TestCase):
             ("generate_speech", {"text": "hello", "voice_id": "voice", "speed": 1.201}),
             ("generate_speech", {"text": "hello", "voice_id": "voice", "speed": 4}),
             ("generate_speech", {"text": "hello", "voice_id": "voice", "style": float("nan")}),
+            ("generate_speech", {"text": "hello", "voice_id": "voice", "model": "eleven_v4", "style": 0.2}),
+            ("generate_speech", {"text": "hello", "voice_id": "voice", "model": "eleven_v4_turbo", "speed": 1.1}),
             ("generate_music", {"prompt": "piano", "duration_ms": 300001}),
             ("generate_music", {"prompt": "piano", "duration_ms": 5000, "model": "music_v2"}),
             ("generate_music", {"prompt": "piano", "sections": [], "duration_ms": 4000}),

@@ -34,6 +34,18 @@
     return workspaceFilePath(stripped);
   }
 
+  function renderUserMessage(source) {
+    return String(source ?? "").split("\n").map(line => {
+      const match = line.match(/^\[User-uploaded file: (user-files\/\d{8}T\d{6}\.\d{6}Z_[^/\\\x00-\x1f\x7f]+)\]$/);
+      if (!match) return escapeHtml(line);
+      // Uploads have a single-file path; keep whitespace at the end of a filename.
+      const path = `/${match[1]}`;
+      return `[User-uploaded file: <button type="button" class="md-open-file" ` +
+        `data-file-path="${escapeHtml(path)}" title="Open in Agent workspace">` +
+        `${escapeHtml(match[1])}</button>]`;
+    }).join("\n");
+  }
+
   // This is deliberately a browser-navigation allowlist, not a reflection of
   // Kern's agent network policy. Keep it to exact, human-facing provider
   // hosts: API, OAuth, CDN, redirector, and arbitrary search-result hosts do
@@ -442,6 +454,7 @@
     safeNavigationHref,
     workspaceFilePath,
     workspaceFileFallbackPath,
+    renderUserMessage,
     renderMarkdown,
     safeHref,
     clipUtf8,

@@ -106,7 +106,7 @@ fifty-turn cap for Codex, Claude Code, Grok, and Hermes without adding paid prov
 turns merely to repeat the admission invariant.
 
 All agent turns use the least expensive exposed options: Codex uses
-`gpt-6-luna` with `high` effort, Claude Code uses `sonnet` with `high`
+`gpt-6-luna` with `high` effort, Claude Code uses `claude-sonnet-5-5` with `high`
 effort, Grok uses `grok-4.7` with `high` effort, and Hermes uses
 `qwen.qwen3-coder-next` with `high` effort.
 This includes concurrency,

@@ -6156,7 +6156,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 run_number=run_number,
             )
 
-        admin_api.initialize_state()
+        interrupted = admin_api.initialize_state()
+        self.assertEqual(interrupted, ["thread-t1"])
 
         _, open_events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
@@ -6174,6 +6175,39 @@ class AdminApiIntegrationTests(unittest.TestCase):
             [],
         )
         self.assertEqual(state.thread_session_config("thread-t1")["status"], "idle")
+        self.assertEqual(admin_api.initialize_state(), [])
+
+        with (
+            patch.object(orchestrator, "refresh_runtime_status", return_value="active"),
+            patch.object(orchestrator, "launch_turn") as launch,
+        ):
+            admin_api.restart_interrupted_agents(interrupted)
+        launch.assert_called_once()
+        self.assertIn("Kern was restarted. Please resume your work.", launch.call_args.args[1])
+        self.mock_memory_recall.assert_called_once_with(
+            "thread-t1", "Kern was restarted. Please resume your work.\n\ninterrupted turn"
+        )
+        _, resumed_events = self.request("GET", "/v1/threads/thread-t1/events")
+        self.assertEqual(
+            [event["event_type"] for event in resumed_events["events"]],
+            [
+                "thread.message", "thread.error", "thread.message",
+                "thread.context_added", "thread.context_added",
+            ],
+        )
+        self.assertEqual(resumed_events["events"][2]["payload"], {
+            "message": admin_api.RESTART_MESSAGE,
+            "source": "user",
+        })
+
+    def test_restart_does_not_rerun_interrupted_script(self) -> None:
+        seed_thread_session("schedule-1", "script")
+        with state.mutation() as cur:
+            state.start_thread_run(cur, "schedule-1")
+        interrupted = admin_api.initialize_state()
+        with patch.object(admin_api, "send_thread_message") as send:
+            admin_api.restart_interrupted_agents(interrupted)
+        send.assert_not_called()
 
     def test_event_seq_commits_atomically_with_the_event(self) -> None:
         # Event seqs come from a database serial: unique and increasing, and
