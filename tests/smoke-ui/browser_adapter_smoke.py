@@ -26,7 +26,7 @@ REPLY_HTML = f'''<!doctype html><html><body>
 </body></html>'''
 
 
-def run(playwright, executable_path):
+def run(playwright):
     calls = []
     response_override = None
     def fixture(route):
@@ -42,7 +42,7 @@ def run(playwright, executable_path):
     processes = []
     def launch(**options):
         # CI cannot create the nested sandbox; host smoke checks it separately.
-        options.update(chromium_sandbox=False, executable_path=executable_path)
+        options.update(chromium_sandbox=False)
         process = real_launch(**options)
         processes.append(process)
         def new_context(**context_options):

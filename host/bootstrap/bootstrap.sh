@@ -1065,7 +1065,7 @@ chmod -R a+rX /usr/local/lib/kern-transcription-venv /usr/local/share/kern-trans
 uv venv --python /usr/bin/python3 /usr/local/lib/kern-browser-venv
 uv pip install --python /usr/local/lib/kern-browser-venv/bin/python "playwright==${BROWSER_PLAYWRIGHT_VERSION}"
 PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/kern-browsers \
-  /usr/local/lib/kern-browser-venv/bin/python -m playwright install --with-deps chromium --only-shell
+  /usr/local/lib/kern-browser-venv/bin/python -m playwright install --with-deps chromium --no-shell
 chmod -R a+rX /usr/local/lib/kern-browser-venv /usr/local/share/kern-browsers
 # npm inherits the script's umask 077, which would leave the CLI root-only;
 # the agent user must be able to run it.

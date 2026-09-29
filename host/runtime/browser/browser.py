@@ -41,7 +41,7 @@ class Browser:
         self.runtime = sync_playwright().start()
         try:
             self.process = self.runtime.chromium.launch(
-                headless=True, chromium_sandbox=True, timeout=30000,
+                channel="chromium", headless=True, chromium_sandbox=True, timeout=30000,
                 args=["--disable-quic", "--disable-background-networking"],
             )
             self.context = self.process.new_context(
