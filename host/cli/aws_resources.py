@@ -130,6 +130,10 @@ def _launch_instance(
         ami_id,
         "--instance-type",
         INSTANCE_TYPE,
+        # Never inherit Unlimited from the account default: customer CPU work
+        # must consume earned credits, not accrue surplus-credit charges.
+        "--credit-specification",
+        "CpuCredits=standard",
         "--subnet-id",
         subnet_id,
         "--security-group-ids",

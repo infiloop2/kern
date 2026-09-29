@@ -569,7 +569,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertEqual(admin_mapping, [{"DeviceName": "/dev/sdf", "Ebs": {"DeleteOnTermination": False}}])
         self.assertEqual(agent_mapping, [{"DeviceName": "/dev/sdg", "Ebs": {"DeleteOnTermination": False}}])
 
-    def test_launch_instance_sets_terminate_on_shutdown(self) -> None:
+    def test_launch_instance_sets_standard_cpu_credits_and_terminate_on_shutdown(self) -> None:
         config = sample_input_config()
         calls: list[tuple[str, ...]] = []
 
@@ -601,6 +601,7 @@ class DeployUnitTests(unittest.TestCase):
                 )
         self.assertEqual(instance_id, "i-123")
         run = next(call for call in calls if call[:2] == ("ec2", "run-instances"))
+        self.assertEqual(run[run.index("--credit-specification") + 1], "CpuCredits=standard")
         # An OS-initiated shutdown terminates the instance, so a detached
         # provisioning failure can clean up its own instance.
         self.assertIn("--instance-initiated-shutdown-behavior", run)
@@ -3166,6 +3167,7 @@ class FakeCliIntegrationTests(unittest.TestCase):
             calls = [json.loads(line) for line in log_path.read_text().splitlines()]
             run_call = next(call for call in calls if call[1:3] == ["ec2", "run-instances"])
             self.assertIn("--associate-public-ip-address", run_call)
+            self.assertEqual(run_call[run_call.index("--credit-specification") + 1], "CpuCredits=standard")
             self.assertIn("subnet-public", run_call)
             self.assertTrue(any(f"Key=kern-host-version,Value={repo_version()}" in str(item) for item in run_call))
             # User data is passed as fileb:// so the AWS CLI base64-encodes the raw

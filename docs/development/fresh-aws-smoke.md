@@ -55,6 +55,11 @@ into the region pinned in `tests/smoke/smoke_aws.py` (`SMOKE_REGION`, which matc
 the IAM policy), and generates an ephemeral operator SSH key it discards at
 teardown. So you write no config and create no key.
 
+The shared AWS launcher explicitly selects Standard CPU credits for the smoke
+instance. It does not inherit the account's Unlimited default or incur surplus
+CPU-credit charges. After earned credits are exhausted, the `t3.small` runs at
+its 20% baseline per vCPU, so sustained CPU-heavy checks can take longer.
+
 Cost: one `t3.small`, one 16 GiB root gp3 volume, one 16 GiB encrypted admin
 volume, and one 16 GiB encrypted agent volume for a few minutes. Teardown
 removes the instance root volume, both
