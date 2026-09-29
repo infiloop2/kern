@@ -130,10 +130,10 @@ def _launch_instance(
         ami_id,
         "--instance-type",
         INSTANCE_TYPE,
-        # Never inherit Unlimited from the account default: customer CPU work
-        # must consume earned credits, not accrue surplus-credit charges.
+        # Allow bootstrap and agent startup to burst even when earned credits
+        # are exhausted, regardless of the account's CPU-credit default.
         "--credit-specification",
-        "CpuCredits=standard",
+        "CpuCredits=unlimited",
         "--subnet-id",
         subnet_id,
         "--security-group-ids",
