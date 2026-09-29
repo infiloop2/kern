@@ -228,7 +228,7 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 stale_password_smoke(desktop_page, url)
                 desktop_smoke(desktop_page, url)
                 import browser_adapter_smoke
-                browser_adapter_smoke.run(playwright, chromium_executable_path())
+                browser_adapter_smoke.run(playwright)
                 import browser_smokes
                 browser_context = browser.new_context(viewport={"width": 1280, "height": 900})
                 browser_smokes.run(browser_context.new_page(), url, log_in, open_home_integration)

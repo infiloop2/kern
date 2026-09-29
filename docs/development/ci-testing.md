@@ -174,6 +174,11 @@ during the Docker image build, then runs this smoke through
 a preinstalled Playwright browser cache, the smoke reuses the newest cached
 Chromium automatically. To use a specific browser binary, set
 `PLAYWRIGHT_CHROMIUM_EXECUTABLE=/path/to/chrome`.
+This override selects the admin UI test browser only. The Browser service adapter
+journey in the `core` and `all` scopes always uses Playwright's managed full
+Chromium, matching the deployed service's `chromium` channel. Install that binary
+with `python3 -m playwright install chromium --no-shell` even when using a custom
+executable for the surrounding UI tests; a headless-shell-only cache is insufficient.
 
 ### Choosing browser coverage
 

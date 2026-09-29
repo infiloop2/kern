@@ -29,7 +29,10 @@ Agent → Tool API → Browser tool → /actions/*           ┘
 existing private encrypted admin volume. It runs separately from `kern-tools`
 and `kern-admin`; its storage is beside `tools-state`, not inside it. It has
 no database credentials, agent-home access, or public TCP/CDP listener.
-Chromium and Playwright are root-owned deploy artifacts; Chromium's sandbox is
+Chromium and Playwright are root-owned deploy artifacts. Deployment installs full
+Chromium (`--no-shell`), and the service selects `channel="chromium"` for its
+unified headless mode, which uses the normal browser implementation. It does not
+use Playwright's separate headless shell. Chromium's sandbox is
 enabled on the Ubuntu 22.04 images used by AWS and Lima. No custom AppArmor
 profile or global user-namespace override is installed. Public HTTPS egress is allowed. DNS over TCP/UDP port 53 is allowed to any
 destination, matching the tools service and supporting local resolvers without
@@ -283,7 +286,9 @@ initial Save, reconnect, login checks, removal of posting settings, and disconne
 against fixtures. An offline real-Chromium adapter test covers selectors and
 submission responses, plus cookie/local-storage/IndexedDB restoration across full
 browser restarts, refreshed snapshots and account isolation. This uses dummy
-fixture data and never a real X login. Host smoke covers service ownership, private paths,
+fixture data and never a real X login. The adapter test uses the service's
+Chromium channel without substituting a different browser executable.
+Host smoke covers service ownership, private paths,
 socket admission, and blocked internal-network access. Fixtures and green CI do
 not establish compatibility with live X: a real login and submission require
 an explicitly authorized live-account test.
