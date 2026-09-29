@@ -239,12 +239,12 @@ while its included credits remain; outside those credits, expect about
 `$23/month` in `us-east-1`. AI provider usage is billed separately through
 your Codex or Claude Code subscription.
 
-New AWS instances use **Standard CPU credits**, so CPU bursting cannot incur
-Unlimited surplus-credit charges. When earned credits run out, the `t3.small`
-returns to its 20% baseline per vCPU; sustained CPU-heavy work will run slower.
-This applies to new deployments and replacement instances. Existing instances
-keep their credit mode until replaced or changed in EC2; switching an Unlimited
-instance to Standard settles any unpaid surplus credits already used.
+New AWS instances use **Unlimited CPU credits**, allowing bootstrap and agent
+startup to burst above the `t3.small` baseline even when earned credits run out.
+Sustained CPU usage above the baseline can incur surplus-credit charges in
+addition to the instance cost. This applies to new deployments and replacement
+instances. Existing instances keep their credit mode until replaced or changed
+in EC2; starting an existing instance does not change its mode.
 
 **You need:**
 
