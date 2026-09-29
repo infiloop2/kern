@@ -191,6 +191,10 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 files_context = browser.new_context(service_workers="block")
                 file_preview_smokes.run(files_context.new_page(), url, log_in)
                 files_context.close()
+                import integration_config_smokes
+                config_context = browser.new_context(service_workers="block")
+                integration_config_smokes.run(config_context.new_page(), url, log_in, open_home_integration)
+                config_context.close()
                 import analytics_smokes
                 analytics_context = browser.new_context(service_workers="block")
                 analytics_smokes.run(analytics_context.new_page(), url, log_in)
@@ -664,11 +668,19 @@ def open_home_integration(page, guide_id: str) -> None:
             page.get_by_role("button", name="Home", exact=True).click()
     card = page.locator(f"#panel-home .home-integration-card[data-guide='{guide_id}']")
     expect(card).to_be_visible()
-    # Opening Integrations refreshes both resources. Do not let a caller start
-    # editing a tool row while the tool refresh can still replace that input.
-    with page.expect_response(lambda response: "/v1/network/policy" in response.url), \
-         page.expect_response(lambda response: response.url.endswith("/v1/tools")):
+    # Home also fetches /v1/tools, and response headers can arrive before JSON
+    # parsing/rendering. Wait for the previous tool rows to be replaced by the
+    # Integration refresh before letting callers edit their inputs.
+    previous_row = page.query_selector("#tools [data-tool-row]")
+    try:
         card.click()
+        page.wait_for_function("""previous => {
+            const current = document.querySelector('#tools [data-tool-row]');
+            return current && current !== previous;
+        }""", arg=previous_row)
+    finally:
+        if previous_row is not None:
+            previous_row.dispose()
     expect(page.locator("#panel-network")).to_be_visible()
     expect(page.locator("#integration-detail-title")).not_to_have_text("Integration")
 

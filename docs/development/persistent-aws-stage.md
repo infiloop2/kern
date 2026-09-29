@@ -6,6 +6,13 @@ stable admin password and a persistent operator SSH endpoint. The admin and
 agent data volumes are preserved, so Codex, Claude, and Grok OAuth sessions and
 the validated AWS Bedrock credential survive across upgrades.
 
+Stage deploy, upgrade, and recovery use the shared AWS launcher, which selects
+Standard CPU credits explicitly. New and replacement stage instances cannot
+accrue Unlimited surplus CPU charges; after earned credits run out, the
+`t3.small` returns to its 20% baseline per vCPU. Starting an existing stage
+instance preserves its credit mode: upgrade it to this release or change its
+mode in EC2 to convert an older Unlimited instance.
+
 The stage workflow uses the lifecycle commands in this order:
 
 1. `python3 -m host.cli.upgrade --agent-name kern-stage > kern-stage.json`
