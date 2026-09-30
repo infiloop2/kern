@@ -258,14 +258,14 @@ class DeployUnitTests(unittest.TestCase):
         self.assertEqual(create_tags, [])
         self.assertEqual(len(ingress), 1)
         self.assertIn('"FromPort": 22', ingress[0][-1])
-        # Egress is pinned to HTTP, HTTPS, NTP, and a temporary Cloudflare
+        # Egress is pinned to HTTP, HTTPS, Decodo, NTP, and a temporary Cloudflare
         # Tunnel allowance — never all-protocol. The lifecycle CLI revokes 7844
         # after bootstrap when no cloudflare_tunnel endpoint is configured.
         egress_ports = sorted(
             (json.loads(call[-1])[0]["IpProtocol"], json.loads(call[-1])[0]["FromPort"])
             for call in egress
         )
-        self.assertEqual(egress_ports, [("tcp", 80), ("tcp", 443), ("tcp", 7844), ("udp", 123), ("udp", 7844)])
+        self.assertEqual(egress_ports, [("tcp", 80), ("tcp", 443), ("tcp", 7000), ("tcp", 7844), ("udp", 123), ("udp", 7844)])
         self.assertNotIn('"IpProtocol": "-1"', " ".join(call[-1] for call in egress))
 
     def test_security_group_can_close_provisioning_ssh_ingress(self) -> None:

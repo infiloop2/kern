@@ -400,6 +400,10 @@ def enforced_probes() -> list[Probe]:
         ("kern-browser", "127.0.0.1", ADMIN_API_PORT, "blocked", "browser to admin API"),
         ("kern-browser", "169.254.169.254", 80, "blocked", "browser to instance metadata"),
         ("kern-browser", "10.0.0.1", 443, "blocked", "browser to private network"),
+        # AWS permits Decodo's port instance-wide; the host still denies it to
+        # the agent and the other services that otherwise have public egress.
+        *((user, EXTERNAL_PROBE_HOST, 7000, "blocked", f"{user} to Browser proxy port")
+          for user in ("kern-agent", "kern-tools", "kern-proxy", "kern-host-inference", "cloudflared")),
         # The agent's entire network world is the loopback proxy port.
         ("kern-agent", "127.0.0.1", PROXY_PORT, "reachable", "agent to egress proxy"),
         ("kern-agent", "127.0.0.1", ADMIN_API_PORT, "blocked", "agent to admin API"),
