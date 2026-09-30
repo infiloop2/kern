@@ -25,9 +25,3 @@ GRANT SELECT, INSERT, DELETE ON swarm_peer_deliveries TO "kern-workspace";
 CREATE INDEX agent_events_thread_run_seq_idx ON agent_events (thread_id, run_number, seq DESC)
     WHERE thread_id IS NOT NULL AND run_number IS NOT NULL
       AND event_type IN ('thread.message', 'thread.error');
--- migrate:down
--- Keep the current usage catalog on rollback; removed usage cannot be restored.
-SET LOCAL search_path TO public;
-DROP INDEX agent_events_thread_run_seq_idx;
-DROP TABLE swarm_peer_deliveries;
-DROP TABLE swarm_agent_ai;

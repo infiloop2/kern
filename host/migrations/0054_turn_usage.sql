@@ -23,11 +23,3 @@ INSERT INTO counters (name, value) VALUES
     ('token_usage_cached_input_tokens', 0),
     ('token_usage_cache_write_tokens', 0),
     ('token_usage_output_tokens', 0);
-
--- migrate:down
-SET LOCAL search_path TO public;
-DROP TABLE turn_usage;
-DELETE FROM counters WHERE name IN (
-    'token_usage_input_tokens', 'token_usage_cached_input_tokens',
-    'token_usage_cache_write_tokens', 'token_usage_output_tokens'
-);

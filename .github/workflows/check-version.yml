@@ -76,6 +76,7 @@ jobs:
           MIGRATION_RESET_BASE_SHA="20b5713338c8f91643b65a52c2fb9a2f01b63e56"
           APP_PLATFORM_REMOVAL_BASE_SHA="d93a378d47b6413992078ae121cefb4dabd56516"
           WORKSPACE_MIGRATION_CONSOLIDATION_BASE_SHA="5717f1c4184a4b7ac838ee282e525bcc26d936bd"
+          FORWARD_ONLY_MIGRATION_BASE_SHA="992602514ba719cee11534dc5b2847bf9cf2a3c9"
           paths=(host/migrations/)
           if [ "${BASE_SHA}" = "${MIGRATION_RESET_BASE_SHA}" ]; then
             echo "migration immutability bypassed for the one-time Kern 1.0.0 baseline reset"
@@ -87,6 +88,10 @@ jobs:
           fi
           if [ "${BASE_SHA}" = "${WORKSPACE_MIGRATION_CONSOLIDATION_BASE_SHA}" ]; then
             echo "migration immutability bypassed for the one-time Workspace migration consolidation"
+            exit 0
+          fi
+          if [ "${BASE_SHA}" = "${FORWARD_ONLY_MIGRATION_BASE_SHA}" ]; then
+            echo "migration immutability bypassed for the one-time forward-only cleanup"
             exit 0
           fi
           # --no-renames: a replaced migration must report as D + A under its

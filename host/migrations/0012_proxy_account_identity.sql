@@ -6,8 +6,3 @@
 -- migrate:up
 
 ALTER TABLE proxy_provider_pins DROP COLUMN access_token_sha256;
-
--- migrate:down
-
-ALTER TABLE proxy_provider_pins
-    ADD COLUMN access_token_sha256 TEXT CHECK (access_token_sha256 ~ '^[0-9a-f]{64}$');

@@ -105,7 +105,10 @@ delivered to the instance one of two ways.
    permissions, service sockets, loopback listeners, active units, database
    peer auth, and live firewall probes for the agent boundary (the agent reaches
    the loopback proxy and its preview range; denied paths drop) — and fails the deploy
-   listing every mismatch. Service-state checks retry briefly to absorb
+   listing every mismatch. Independent firewall probes run concurrently, so
+   their three-second connection timeouts overlap. Verification logs its total
+   duration; service startup and retries can extend it beyond three seconds.
+   Service-state checks retry briefly to absorb
    startup latency, and positive external egress is advisory only, so a
    healthy deploy on an egress-restricted network cannot false-fail. Only then does bootstrap drop the staged secrets and
    write the final admin state version, then

@@ -39,24 +39,3 @@ ALTER TABLE tool_events
     ADD COLUMN connection_id TEXT NOT NULL DEFAULT '',
     ADD COLUMN account_id TEXT NOT NULL DEFAULT '',
     ADD COLUMN account_label TEXT NOT NULL DEFAULT '';
-
--- migrate:down
-SET LOCAL search_path TO public;
-
-ALTER TABLE tool_events
-    DROP COLUMN account_label,
-    DROP COLUMN account_id,
-    DROP COLUMN connection_id;
-
-ALTER TABLE tool_approvals
-    DROP COLUMN account_label,
-    DROP COLUMN account_id,
-    DROP COLUMN connection_id;
-
--- A pre-profile schema can represent only its historical default row.
-DELETE FROM tool_credentials WHERE connection_id <> 'default';
-ALTER TABLE tool_credentials
-    DROP CONSTRAINT tool_credentials_account_unique,
-    DROP CONSTRAINT tool_credentials_pkey;
-ALTER TABLE tool_credentials DROP COLUMN connection_id;
-ALTER TABLE tool_credentials ADD PRIMARY KEY (tool_id);

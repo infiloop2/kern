@@ -12,17 +12,67 @@ from host.runtime.browser.client import BrowserError
 from host.runtime.core import host_errors
 
 
-def failure(stage: str, exc: Exception, *, host: str = "", status: int | None = None) -> BrowserError:
-    """Expose connection facts, never provider text, headers or credentials."""
+class ConnectionFailure(BrowserError):
+    """A sanitized connection error safe to return through the local relay."""
+
+
+def failure(stage: str, exc: Exception, *, host: str = "", status: int | None = None,
+            detail: str = "", facts: dict[str, Any] | None = None) -> ConnectionFailure:
+    """Expose connection facts and the redacted Decodo error header."""
     context: dict[str, Any] = {"stage": stage, "host": host, "error_type": type(exc).__name__}
     if isinstance(exc, OSError) and isinstance(exc.errno, int):
         context["errno"] = exc.errno
     if status is not None:
         context["proxy_status"] = status
+    if detail:
+        context["proxy_error"] = detail
+    context.update(facts or {})
     suffix = f" (HTTP {status})" if status is not None else ""
-    message = f"Browser connection failed during {stage.replace('_', ' ')}{suffix}. Check Host diagnostics."
+    message = f"Browser connection failed during {stage.replace('_', ' ')}{suffix}."
+    message += f" Decodo: {detail}" if detail else " Check Host diagnostics."
     host_errors.report_warning("browser.network", message, context=context)
-    return BrowserError(message)
+    return ConnectionFailure(message)
+
+
+def redact(value: str, credentials: tuple[str, str]) -> str:
+    """Replace known credential strings before any diagnostic truncation."""
+    username, password = credentials
+    secrets = [username, password, base64.b64encode(":".join(credentials).encode("ascii")).decode("ascii")]
+    secrets.append(username.removeprefix("user-").split("-country-", 1)[0])
+    if "-session-" in username:
+        secrets.append(username.split("-session-", 1)[1].split("-", 1)[0])
+    for secret in sorted(set(secrets), key=len, reverse=True):
+        if secret:
+            value = value.replace(secret, "[redacted]")
+    return value
+
+
+def proxy_details(response: bytes, credentials: tuple[str, str]) -> dict[str, Any]:
+    # Ignore an incomplete trailing line, which might end partway through a secret.
+    lines = redact(response.decode("utf-8", errors="replace"), credentials).split("\r\n")[:-1]
+    details: dict[str, Any] = {"proxy_response_bytes": len(response),
+                              "proxy_headers_complete": response.endswith(b"\r\n\r\n")}
+    if not lines:
+        return details
+    details["proxy_status_line"] = lines[0]
+    headers = []
+    for line in lines[1:]:
+        if not line:
+            continue
+        name, _, value = line.partition(":")
+        if name.lower() in {"authorization", "proxy-authorization", "cookie", "set-cookie"}:
+            line = f"{name}: [redacted]"
+        headers.append(line)
+    details["proxy_header_count"] = len(headers)
+    for line in headers:
+        name, _, value = line.partition(":")
+        if name.lower() == "x-error-message":
+            details["proxy_error"] = "".join(c if " " <= c <= "~" else "?" for c in value).strip()[:512]
+            break
+    # Use separate fields so the existing per-field and whole-record diagnostic
+    # limits retain several headers, including authentication and request IDs.
+    details.update({f"proxy_header_{i + 1}": line for i, line in enumerate(headers[:16])})
+    return details
 
 
 def target(authority: str) -> str:
@@ -40,6 +90,8 @@ def target(authority: str) -> str:
 def connect_proxy(endpoint: tuple[str, int], host: str, credentials: tuple[str, str]) -> socket.socket:
     stream: socket.socket | None = None
     stage, status_code = "proxy_connection", None
+    started = time.monotonic()
+    response = bytearray()
     try:
         stream = socket.create_connection(endpoint, timeout=10)
         # Verify the gateway before sending any proxy credentials. No HTTP or
@@ -53,7 +105,6 @@ def connect_proxy(endpoint: tuple[str, int], host: str, credentials: tuple[str, 
         headers += f"Proxy-Authorization: Basic {encoded}\r\n\r\n"
         stream.sendall(headers.encode("ascii"))
         # Avoid consuming bytes of the TLS tunnel while parsing proxy headers.
-        response = bytearray()
         deadline = time.monotonic() + 15
         while not response.endswith(b"\r\n\r\n") and len(response) < 16384:
             remaining = deadline - time.monotonic()
@@ -75,4 +126,11 @@ def connect_proxy(endpoint: tuple[str, int], host: str, credentials: tuple[str, 
     except Exception as exc:
         if stream is not None:
             stream.close()
-        raise failure(stage, exc, host=host, status=status_code) from exc
+        facts = {
+            "gateway": f"{endpoint[0]}:{endpoint[1]}",
+            "elapsed_ms": round((time.monotonic() - started) * 1000),
+            "error_message": redact(str(exc), credentials),
+            **proxy_details(bytes(response), credentials),
+        }
+        raise failure(stage, exc, host=host, status=status_code,
+                      detail=facts.get("proxy_error", ""), facts=facts) from exc

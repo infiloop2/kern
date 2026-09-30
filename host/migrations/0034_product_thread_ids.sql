@@ -16,8 +16,3 @@ WHERE NOT (
     thread_id ~ '^(app|thread|schedule)-[a-z0-9-]+$'
     AND char_length(thread_id) <= 64
 );
-
--- migrate:down
-
--- Deleted thread history cannot be reconstructed.
-SELECT 1;

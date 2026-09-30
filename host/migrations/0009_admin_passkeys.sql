@@ -29,8 +29,3 @@ CREATE TABLE admin_passkeys (
     last_used_at TEXT
 );
 CREATE INDEX admin_passkeys_rp_id_idx ON admin_passkeys (rp_id);
-
--- migrate:down
-
-DROP TABLE admin_passkeys;
-DROP TABLE admin_passkey_config;

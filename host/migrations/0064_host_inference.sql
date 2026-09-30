@@ -23,7 +23,3 @@ VALUES
 
 GRANT SELECT ON host_inference_providers TO "kern-host-inference";
 GRANT SELECT ON secret_keys TO "kern-host-inference";
-
--- migrate:down
-SET LOCAL search_path TO public;
-DROP TABLE host_inference_providers;

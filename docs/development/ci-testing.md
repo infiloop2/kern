@@ -17,6 +17,13 @@ Lima-specific definition, lifecycle, disk, replacement, and recovery checks.
 Live AWS checks are covered separately in
 [Fresh AWS smoke](fresh-aws-smoke.md) and [Persistent AWS stage](persistent-aws-stage.md).
 
+## Kern Cloud compatibility
+
+Every PR also runs the [hardcoded Kern Cloud contract](kern-cloud-contract.md).
+This static source test lives under `tests/` and runs with the normal unit
+suite, as part of the required **Run all host tests** aggregate. It does not access Infiverse or run lifecycle
+commands. Contract changes require matching Infiverse support updates.
+
 ## Static type checks (run on every change, and in CI)
 
 ```bash
@@ -207,3 +214,60 @@ the observed request/state, and make failures identify the condition that did
 not settle. The WebKit canary is intentionally not a claim of complete Safari
 or iOS coverage; device-only behavior still needs the appropriate live or
 manual check.
+
+### Reliability is part of coverage
+
+Required browser checks should give a dependable signal on their first attempt.
+Do not hide intermittent failures with whole-test retries, larger timeouts, or
+weaker assertions. Prefer fewer focused journeys that prove a user outcome to
+many overlapping journeys that depend on incidental timing. Use the same tests
+in the canonical repository and public mirror.
+
+Following [Playwright's testing guidance](https://playwright.dev/docs/best-practices)
+and [auto-waiting assertions](https://playwright.dev/python/docs/actionability):
+
+- Give each independent journey a fresh browser context and owned fixture data.
+  A fresh context does not reset the shared mock server: intercept the relevant
+  endpoints or explicitly restore mutations. Make fixtures valid for the UI
+  action, such as enabling a provider before clicking its login button.
+- Await the state that enables the next action. A response event can precede
+  JSON parsing and rendering; `networkidle` does not prove that a particular
+  control is ready. Use locators and assertions for visible state, and await the
+  actual refresh promise for request-count contracts.
+- Use [controlled time](https://playwright.dev/python/docs/clock) for deadlines.
+  `clock.run_for()` dispatches timers but does not join asynchronous work started
+  by their callbacks. For a wall-clock cooldown, pause timers, use
+  `set_system_time()`, and await one refresh per assertion. Install the clock
+  before navigation and pause ahead of its initial time: pausing at the same
+  timestamp can already be in the past on a slow runner. Test interval wiring
+  separately when it is the behavior under test.
+- Keep browser checks for interaction wiring, focus, navigation, isolation and
+  visible results. Keep protocol variants and combinatorial state transitions
+  below the browser layer. Prefer semantic visibility/containment assertions to
+  exact pixel geometry unless geometry is the regression being tested; then
+  wait for the final layout condition after resize, not a single snapshot.
+- Reproduce a failure before choosing a fix. Repeat the changed focused journey
+  with fresh contexts and run the full affected scope. A repeated run validates
+  a proposed fix; it is not a retry policy that turns a failing CI run green.
+
+The OAuth recovery journey retains hidden-card suppression, absent-session
+cooldown, explicit login, successful recovery and reload checks for both device
+code and Claude flows. It controls refresh timing; it does not assert an exact
+number of automatically scheduled health ticks. Opening an integration waits
+for its replacement controls before requesting recovery, including after reload.
+
+Navigation ordering retains desktop mouse drag/drop, Escape cancellation,
+captured-handle preservation across refresh, mobile keyboard reordering, focus,
+rejected saves, and order across reloads/tabs. The synthetic CDP touch-drag
+journey is intentionally removed: raw coordinates raced sidebar scrolling and
+bypassed Playwright's actionability checks. This reduces automated touch gesture
+coverage. Mobile keyboard tests do **not** prove native touch dragging or iOS
+behavior; those require device checks. Reintroduce an automated gesture check
+only with a stable, focused reproduction that justifies its maintenance cost.
+
+Focused commands (also useful for repeated validation):
+
+```bash
+python3 tests/smoke-ui/admin_ui_smoke.py --port 8000 --scope oauth-poll
+python3 tests/smoke-ui/admin_ui_smoke.py --port 8000 --scope navigation-order
+```

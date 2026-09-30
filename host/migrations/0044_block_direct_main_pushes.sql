@@ -8,8 +8,3 @@
 
 ALTER TABLE github_settings
     ADD COLUMN block_direct_main_pushes BOOLEAN NOT NULL DEFAULT TRUE;
-
--- migrate:down
-
-ALTER TABLE github_settings
-    DROP COLUMN block_direct_main_pushes;

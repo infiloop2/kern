@@ -20,10 +20,3 @@ CREATE TABLE auto_approval_reviews (
 CREATE INDEX auto_approval_reviews_approval ON auto_approval_reviews (approval_number, id DESC);
 ALTER TABLE host_inference_usage DROP CONSTRAINT host_inference_usage_model_check;
 ALTER TABLE host_inference_usage ADD CHECK (model IN ('gpt-6-luna', 'gpt-6-sol', 'jev'));
--- migrate:down
-SET LOCAL search_path TO public;
-DELETE FROM host_inference_usage WHERE model = 'gpt-6-sol';
-ALTER TABLE host_inference_usage DROP CONSTRAINT host_inference_usage_model_check;
-ALTER TABLE host_inference_usage ADD CHECK (model IN ('gpt-6-luna', 'jev'));
-DROP TABLE auto_approval_reviews;
-DROP TABLE auto_approval_policies;

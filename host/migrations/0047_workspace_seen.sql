@@ -41,8 +41,3 @@ SELECT
 FROM web_apps AS app;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON workspace_seen TO "kern-workspace";
-
--- migrate:down
-
-REVOKE ALL ON workspace_seen FROM "kern-workspace";
-DROP TABLE workspace_seen;

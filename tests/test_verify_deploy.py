@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import stat as stat_module
 import subprocess
+import threading
 import unittest
 
 from host.bootstrap import verify_deploy
@@ -230,6 +231,28 @@ class RunnerBackedCheckTests(unittest.TestCase):
         )
         self.assertEqual(len(failures), 1)
         self.assertIn("errored: boom", failures[0])
+
+    def test_reachability_runs_all_probes_concurrently_and_preserves_findings(self) -> None:
+        probes = verify_deploy.enforced_probes()
+        started = threading.Barrier(len(probes))
+
+        def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            # No probe can finish until every probe has started. A serial
+            # implementation (or a worker cap below the batch size) fails.
+            started.wait(timeout=5)
+            return completed(1, stderr="probe failed")
+
+        failures = verify_deploy.check_reachability(probes, run)
+        self.assertEqual(failures, [
+            f"probe: {reason} ({user} -> {host}:{port}) errored: probe failed"
+            for user, host, port, _, reason in probes
+        ])
+
+    def test_empty_reachability_batch(self) -> None:
+        def run(argv: list[str]) -> subprocess.CompletedProcess[str]:
+            self.fail("empty batch must not run a probe")
+
+        self.assertEqual(verify_deploy.check_reachability([], run), [])
 
     def test_probe_lists_cover_agent_boundary_and_cannot_false_fail(self) -> None:
         enforced = verify_deploy.enforced_probes()

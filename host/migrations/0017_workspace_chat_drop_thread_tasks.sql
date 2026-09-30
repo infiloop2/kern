@@ -8,12 +8,3 @@
 SET LOCAL search_path TO app_agent_chat;
 
 DROP TABLE IF EXISTS thread_tasks;
-
--- migrate:down
-SET LOCAL search_path TO app_agent_chat;
-
-CREATE TABLE IF NOT EXISTS thread_tasks (
-    task_id TEXT PRIMARY KEY,
-    thread_id TEXT NOT NULL REFERENCES threads(thread_id) ON DELETE CASCADE
-);
-CREATE INDEX IF NOT EXISTS idx_thread_tasks_thread_id ON thread_tasks(thread_id);

@@ -12,11 +12,3 @@ ALTER TABLE memory_pages
 CREATE INDEX memory_pages_popular_idx ON memory_pages
     (strong_top_hit_count DESC, last_strong_top_hit_at DESC, updated_at DESC, page_id)
     WHERE deleted_at IS NULL;
-
--- migrate:down
-SET LOCAL search_path TO public;
-
-DROP INDEX memory_pages_popular_idx;
-ALTER TABLE memory_pages
-    DROP COLUMN last_strong_top_hit_at,
-    DROP COLUMN strong_top_hit_count;

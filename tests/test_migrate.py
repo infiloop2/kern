@@ -1,11 +1,13 @@
 """Tests for the SQL migration runner (host.runtime.deploy.migrate).
 
-These run against a dedicated database on the scratch cluster so migrating
-down never disturbs the schema the other tests share.
+Database tests use a dedicated database on the scratch cluster so each test
+can build its required schema version without disturbing other tests.
 """
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr
+import io
 from pathlib import Path
 import tempfile
 import unittest
@@ -14,11 +16,11 @@ from unittest.mock import patch
 import pg_harness
 
 from host.runtime.deploy import migrate
-from host.runtime.core import db, pgclient, state
+from host.runtime.core import db, state
 
 
-def _write(directory: Path, name: str, up: str, down: str = "") -> None:
-    (directory / name).write_text(f"-- migrate:up\n{up}\n\n-- migrate:down\n{down}\n")
+def _write(directory: Path, name: str, up: str) -> None:
+    (directory / name).write_text(f"-- migrate:up\n{up}\n")
 
 
 def _workspace_ledger_adoption_sql() -> str:
@@ -29,6 +31,49 @@ def _workspace_ledger_adoption_sql() -> str:
     function = bootstrap.split("adopt_workspace_migration_history() {", 1)[1]
     heredoc = function.split("<<'SQL'\n", 1)[1]
     return heredoc.split("\nSQL", 1)[0]
+
+
+class MigrationFileTests(unittest.TestCase):
+    def setUp(self) -> None:
+        directory = tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        self.migrations = Path(directory.name)
+
+    def test_forward_only_file_loads_without_down_section(self) -> None:
+        _write(self.migrations, "0001_first.sql", "CREATE TABLE first (id INT);")
+        self.assertEqual(migrate.load_migrations(self.migrations), [
+            migrate.Migration(1, "first", "CREATE TABLE first (id INT);")
+        ])
+
+    def test_malformed_migration_files_are_rejected(self) -> None:
+        for name, sql, error in [
+            ("0001_first.sql", "SELECT 1;", "missing"),
+            ("not_versioned.sql", "-- migrate:up\nSELECT 1;", "must be named"),
+            ("0001_first.sql", "-- migrate:up\n", "empty up section"),
+            ("0001_first.sql", "-- migrate:up\nSELECT 1;\n-- migrate:down\nSELECT 2;", "down sections are unsupported"),
+        ]:
+            with self.subTest(name=name, sql=sql):
+                path = self.migrations / name
+                path.write_text(sql)
+                with self.assertRaisesRegex(migrate.MigrationError, error):
+                    migrate.load_migrations(self.migrations)
+                path.unlink()
+
+    def test_duplicate_versions_are_rejected(self) -> None:
+        _write(self.migrations, "0001_first.sql", "SELECT 1;")
+        _write(self.migrations, "0001_second.sql", "SELECT 2;")
+        with self.assertRaisesRegex(migrate.MigrationError, "duplicate migration version"):
+            migrate.load_migrations(self.migrations)
+
+    def test_repo_files_load_in_forward_only_format(self) -> None:
+        self.assertTrue(migrate.load_migrations())
+
+    def test_down_command_is_rejected_before_opening_database(self) -> None:
+        with patch.object(db, "transaction") as transaction, redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                migrate.main(["down"])
+        self.assertEqual(raised.exception.code, 2)
+        transaction.assert_not_called()
 
 
 class MigrateRunnerTests(unittest.TestCase):
@@ -46,7 +91,7 @@ class MigrateRunnerTests(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.migrations = Path(self.temp_dir.name)
 
-    def test_browser_state_migration_round_trip_and_constraints(self) -> None:
+    def test_browser_state_migration_constraints(self) -> None:
         migrate.up(target=77, quiet=True)
         self.assertEqual(migrate.up(target=78, quiet=True), [78])
         with db.transaction() as cur:
@@ -54,17 +99,13 @@ class MigrateRunnerTests(unittest.TestCase):
         with self.assertRaises(Exception):
             with db.transaction() as cur:
                 cur.execute("UPDATE browser_settings SET mode='decodo'")
-        self.assertEqual(migrate.down(target=77, quiet=True), [78])
-        self.assertNotIn("browser_accounts", self.table_names())
-        self.assertNotIn("browser_settings", self.table_names())
-        self.assertEqual(migrate.up(target=78, quiet=True), [78])
 
     def table_names(self) -> set[str]:
         with db.transaction() as cur:
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
             return {row[0] for row in cur.fetchall()}
 
-    def test_codex_sol_6_1_speed_migration_and_rollback(self) -> None:
+    def test_codex_sol_6_1_speed_migration(self) -> None:
         migrate.up(target=80, quiet=True)
         runtimes = ("codex", "codex-2", "codex-3")
         with db.transaction() as cur:
@@ -103,27 +144,8 @@ class MigrateRunnerTests(unittest.TestCase):
                             " VALUES (%s, %s, %s, %s, 'new-provider')",
                             (runtime, f"new-{runtime}-{model}-{effort}", model, effort),
                         )
-            cur.execute("UPDATE web_apps SET agent_effort = 'high-ultrafast'")
-            cur.execute("UPDATE schedules SET effort = 'high-fast'")
-            cur.execute(
-                "INSERT INTO agent_events (created_at, event_type, thread_id, message, source)"
-                " VALUES ('2026-09-29T00:00:00Z', 'thread.message', 'old-sol-codex', 'retained', 'agent')"
-            )
-        self.assertEqual(migrate.down(target=80, quiet=True), [81])
-        with db.transaction() as cur:
-            cur.execute("SELECT agent_model, agent_effort FROM web_apps ORDER BY app_id")
-            self.assertEqual(cur.fetchall(), [("gpt-6-sol", "high")] * 3)
-            cur.execute("SELECT model, effort FROM schedules ORDER BY id")
-            self.assertEqual(cur.fetchall(), [("gpt-6-sol", "high")] * 3)
-            cur.execute("SELECT model, effort, provider_session_id FROM thread_sessions WHERE thread_id LIKE 'old-%'")
-            self.assertEqual(cur.fetchall(), [("gpt-6-sol", "ultra", "old-provider")] * 3)
-            cur.execute("SELECT model, effort, provider_session_id FROM thread_sessions WHERE thread_id LIKE 'new-%'")
-            self.assertCountEqual(cur.fetchall(), [(model, "high", None)
-                for _ in runtimes for model in ("gpt-6-sol", "gpt-6-astra", "gpt-6-luna") for _ in range(2)])
-            cur.execute("SELECT message FROM agent_events WHERE thread_id = 'old-sol-codex'")
-            self.assertEqual(cur.fetchall(), [("retained",)])
 
-    def test_sol_6_1_host_usage_migration_preserves_history_and_rolls_back(self) -> None:
+    def test_sol_6_1_host_usage_migration_preserves_history(self) -> None:
         migrate.up(target=80, quiet=True)
         with db.transaction() as cur:
             cur.execute(
@@ -139,14 +161,6 @@ class MigrateRunnerTests(unittest.TestCase):
             rows = cur.fetchall()
             by_model = {row[0]: (row[1], float(row[2])) for row in rows}
             self.assertEqual(by_model, {"gpt-6-sol": (2, 0.02), "gpt-6.1-sol": (1, 0.000262)})
-        migrate.down(target=80, quiet=True)
-        with db.transaction() as cur:
-            cur.execute("SELECT model, requests, cost_usd FROM host_inference_usage")
-            rows = cur.fetchall()
-            self.assertEqual([(row[0], row[1]) for row in rows], [("gpt-6-sol", 2)])
-            self.assertAlmostEqual(float(rows[0][2]), 0.02)
-        with self.assertRaises(pgclient.Error):
-            state.record_host_inference_usage("openai", "gpt-6.1-sol", None, None)
 
     def test_custom_content_guard_migration_preserves_existing_domains(self) -> None:
         version = next(item.version for item in migrate.load_migrations()
@@ -159,10 +173,6 @@ class MigrateRunnerTests(unittest.TestCase):
             cur.execute("SELECT domain, guard_request_content FROM allowed_domains")
             self.assertEqual(cur.fetchall(), [("api.example.com", False)])
             cur.execute("UPDATE allowed_domains SET guard_request_content = TRUE")
-        migrate.down(target=version - 1, quiet=True)
-        with db.transaction() as cur:
-            cur.execute("SELECT domain FROM allowed_domains")
-            self.assertEqual(cur.fetchall(), [("api.example.com",)])
 
     def test_calendar_trigger_migration_preserves_cadences_and_history(self) -> None:
         import json
@@ -263,16 +273,8 @@ class MigrateRunnerTests(unittest.TestCase):
         self.assertEqual(restored["triggers"], converted[5])
         restored_old = schedules.restore_revision(2, 1, {"expected_revision": 2})
         self.assertEqual(restored_old["triggers"], [{"type": "daily", "times": ["07:15"], "prompt": "Earlier prompt"}])
-        # Conservative rollback stays unchanged; exercise re-application too.
-        with self.assertRaisesRegex(Exception, "cannot roll back calendar triggers"):
-            migrate.down(target=78, quiet=True)
-        with db.transaction() as cur:
-            cur.execute("DELETE FROM schedules WHERE id <> 1")
-        self.assertEqual(migrate.down(target=78, quiet=True), [79])
-        self.assertEqual(migrate.up(target=79, quiet=True), [79])
 
-
-    def test_sonnet_5_5_migration_preserves_history_and_rolls_back_settings(self) -> None:
+    def test_sonnet_5_5_migration_preserves_history(self) -> None:
         migrate.up(target=75, quiet=True)
         with db.transaction() as cur:
             cur.execute(
@@ -317,40 +319,20 @@ class MigrateRunnerTests(unittest.TestCase):
                 " VALUES ('2026-09-29T00:00:00Z', 'thread.message', 'thread-new-sonnet', 'retained', 'agent')"
             )
 
-        self.assertEqual(migrate.down(target=75, quiet=True), [76])
+    def test_spawned_chat_migration_preserves_existing_chats(self) -> None:
+        migrate.up(target=73, quiet=True)
         with db.transaction() as cur:
-            cur.execute("SELECT agent_model FROM web_apps WHERE app_id = 'app-76'")
-            self.assertEqual(cur.fetchone(), ("claude-sonnet-5",))
-            cur.execute("SELECT model FROM schedules WHERE id = 76")
-            self.assertEqual(cur.fetchone(), ("claude-sonnet-5",))
-            cur.execute(
-                "SELECT thread_id, model, provider_session_id FROM thread_sessions"
-                " WHERE thread_id IN ('thread-old-sonnet', 'thread-new-sonnet') ORDER BY thread_id"
-            )
-            self.assertEqual(cur.fetchall(), [
-                ("thread-new-sonnet", "claude-sonnet-5", None),
-                ("thread-old-sonnet", "claude-sonnet-5", "old-provider"),
-            ])
-            cur.execute("SELECT message FROM agent_events WHERE thread_id = 'thread-new-sonnet'")
-            self.assertEqual(cur.fetchall(), [("retained",)])
-
-    def test_spawned_chat_migration_refuses_data_losing_rollback(self) -> None:
-        self.assertIn(74, {item.version for item in migrate.load_migrations()})
-        migrate.up(target=74, quiet=True)
+            cur.execute("INSERT INTO chat_threads (thread_id, archived) VALUES ('thread-1', FALSE)")
+        self.assertEqual(migrate.up(target=74, quiet=True), [74])
         with db.transaction() as cur:
+            cur.execute("SELECT thread_id, archived, spawned_by_thread_id FROM chat_threads")
+            self.assertEqual(cur.fetchall(), [("thread-1", False, None)])
             cur.execute(
                 "INSERT INTO chat_threads (thread_id, archived, spawned_by_thread_id)"
                 " VALUES ('thread-2', FALSE, 'thread-1')"
             )
-        with self.assertRaisesRegex(Exception, "cannot roll back spawned Chat origin"):
-            migrate.down(target=73, quiet=True)
-        with db.transaction() as cur:
-            cur.execute("SELECT spawned_by_thread_id FROM chat_threads WHERE thread_id = 'thread-2'")
-            self.assertEqual(cur.fetchone(), ("thread-1",))
-            cur.execute("DELETE FROM chat_threads WHERE thread_id = 'thread-2'")
-        self.assertEqual(migrate.down(target=73, quiet=True), [74])
 
-    def test_grok_4_7_migration_preserves_history_and_rolls_back_settings(self) -> None:
+    def test_grok_4_7_migration_preserves_history(self) -> None:
         migrate.up(target=71, quiet=True)
         with db.transaction() as cur:
             cur.execute(
@@ -404,28 +386,6 @@ class MigrateRunnerTests(unittest.TestCase):
                 " VALUES (72, 'schedule-72', 'Grok job', 'hello', 'interval', 60,"
                 " 'grok-2', 'grok-4.7', 'xhigh', 'now', 'now', 'now')"
             )
-        self.assertEqual(migrate.down(target=71, quiet=True), [72])
-        with db.transaction() as cur:
-            cur.execute(
-                "SELECT thread_id, model, provider_session_id FROM thread_sessions"
-                " WHERE agent_runtime IN ('grok', 'grok-2') ORDER BY thread_id"
-            )
-            self.assertEqual(
-                cur.fetchall(),
-                [
-                    ("thread-grok-2-4.7", "grok-4.6", None),
-                    ("thread-grok-4.7", "grok-4.6", None),
-                    ("thread-old-grok", "grok-4.6", "old-provider"),
-                ],
-            )
-            cur.execute("SELECT agent_model FROM web_apps WHERE app_id = 'app-72'")
-            self.assertEqual(cur.fetchone(), ("grok-4.6",))
-            cur.execute("SELECT agent_model FROM web_apps WHERE app_id = 'app-73'")
-            self.assertEqual(cur.fetchone(), ("grok-4.6",))
-            cur.execute("SELECT model FROM schedules WHERE id = 72")
-            self.assertEqual(cur.fetchone(), ("grok-4.6",))
-            cur.execute("SELECT model FROM schedules WHERE id = 73")
-            self.assertEqual(cur.fetchone(), ("grok-4.6",))
 
     def test_swarm_migration_retires_usage_buckets_and_preserves_jev(self) -> None:
         source = Path(__file__).resolve().parents[1] / "host" / "migrations"
@@ -455,12 +415,11 @@ class MigrateRunnerTests(unittest.TestCase):
             )
 
     def test_up_applies_pending_migrations_in_order_and_records_them(self) -> None:
-        _write(self.migrations, "0001_first.sql", "CREATE TABLE first (id INT);", "DROP TABLE first;")
+        _write(self.migrations, "0001_first.sql", "CREATE TABLE first (id INT);")
         _write(
             self.migrations,
             "0002_second.sql",
             "CREATE TABLE second (first_like INT); INSERT INTO second SELECT 1 FROM first;",
-            "DROP TABLE second;",
         )
 
         applied = migrate.up(directory=self.migrations, quiet=True)
@@ -471,63 +430,71 @@ class MigrateRunnerTests(unittest.TestCase):
         self.assertEqual(status, [(1, "first", True), (2, "second", True)])
 
     def test_up_is_idempotent_and_applies_only_new_versions(self) -> None:
-        _write(self.migrations, "0001_first.sql", "CREATE TABLE first (id INT);", "DROP TABLE first;")
+        _write(self.migrations, "0001_first.sql", "CREATE TABLE first (id INT);")
         self.assertEqual(migrate.up(directory=self.migrations, quiet=True), [1])
         self.assertEqual(migrate.up(directory=self.migrations, quiet=True), [])
-        _write(self.migrations, "0002_second.sql", "CREATE TABLE second (id INT);", "DROP TABLE second;")
+        _write(self.migrations, "0002_second.sql", "CREATE TABLE second (id INT);")
         self.assertEqual(migrate.up(directory=self.migrations, quiet=True), [2])
 
+    def test_existing_ledger_prevents_replay_after_down_section_cleanup(self) -> None:
+        legacy_sql = (
+            "-- migrate:up\n"
+            "CREATE TABLE retained (value TEXT); INSERT INTO retained VALUES ('existing data');\n"
+            "-- migrate:down\nDROP TABLE retained;\n"
+        )
+        path = self.migrations / "0001_retained.sql"
+        path.write_text(legacy_sql)
+        # Seed a database as the old runner did, before changing the file format.
+        with db.transaction() as cur:
+            cur.execute(legacy_sql.split("-- migrate:down", 1)[0])
+            migrate.applied_versions(cur)
+            cur.execute(
+                "INSERT INTO schema_migrations (version, name, applied_at)"
+                " VALUES (1, 'retained', '2026-09-01T00:00:00Z')"
+            )
+            cur.execute("SELECT version, name, applied_at FROM schema_migrations")
+            ledger = cur.fetchall()
+
+        path.write_text(legacy_sql.split("-- migrate:down", 1)[0].rstrip() + "\n")
+        # Bootstrap's bounded pass and subsequent full pass must both skip it.
+        self.assertEqual(migrate.up(target=13, directory=self.migrations, quiet=True), [])
+        self.assertEqual(migrate.up(directory=self.migrations, quiet=True), [])
+        with db.transaction() as cur:
+            cur.execute("SELECT value FROM retained")
+            self.assertEqual(cur.fetchall(), [("existing data",)])
+            cur.execute("SELECT version, name, applied_at FROM schema_migrations")
+            self.assertEqual(cur.fetchall(), ledger)
+
     def test_a_failing_migration_rolls_back_and_leaves_the_previous_version(self) -> None:
-        _write(self.migrations, "0001_first.sql", "CREATE TABLE first (id INT);", "DROP TABLE first;")
+        _write(self.migrations, "0001_first.sql", "CREATE TABLE first (id INT);")
         migrate.up(directory=self.migrations, quiet=True)
-        _write(self.migrations, "0002_broken.sql", "CREATE TABLE second (id INT); SELECT no_such_column;")
+        _write(self.migrations, "0002_second.sql", "CREATE TABLE second (id INT);")
+        _write(self.migrations, "0003_broken.sql", "CREATE TABLE third (id INT); SELECT no_such_column;")
 
         with self.assertRaises(Exception):
             migrate.up(directory=self.migrations, quiet=True)
 
         self.assertNotIn("second", self.table_names())
-        self.assertEqual(migrate.status(directory=self.migrations)[0], (1, "first", True))
-
-    def test_down_reverts_the_newest_and_to_reverts_everything_above_the_target(self) -> None:
-        _write(self.migrations, "0001_first.sql", "CREATE TABLE first (id INT);", "DROP TABLE first;")
-        _write(self.migrations, "0002_second.sql", "CREATE TABLE second (id INT);", "DROP TABLE second;")
-        _write(self.migrations, "0003_third.sql", "CREATE TABLE third (id INT);", "DROP TABLE third;")
-        migrate.up(directory=self.migrations, quiet=True)
-
-        self.assertEqual(migrate.down(directory=self.migrations, quiet=True), [3])
         self.assertNotIn("third", self.table_names())
-        self.assertEqual(migrate.down(target=0, directory=self.migrations, quiet=True), [2, 1])
-        self.assertNotIn("first", self.table_names())
-        self.assertNotIn("second", self.table_names())
-        self.assertEqual(
-            migrate.status(directory=self.migrations),
-            [(1, "first", False), (2, "second", False), (3, "third", False)],
-        )
-
-    def test_down_refuses_a_version_with_no_file_or_empty_down_section(self) -> None:
-        _write(self.migrations, "0001_first.sql", "CREATE TABLE first (id INT);")
-        migrate.up(directory=self.migrations, quiet=True)
-        with self.assertRaises(migrate.MigrationError):
-            migrate.down(directory=self.migrations, quiet=True)
-
-    def test_malformed_migration_files_are_rejected(self) -> None:
-        (self.migrations / "0001_missing_markers.sql").write_text("CREATE TABLE first (id INT);")
-        with self.assertRaises(migrate.MigrationError):
-            migrate.load_migrations(self.migrations)
-        (self.migrations / "0001_missing_markers.sql").unlink()
-
-        (self.migrations / "not_versioned.sql").write_text("-- migrate:up\nSELECT 1;\n-- migrate:down\n")
-        with self.assertRaises(migrate.MigrationError):
-            migrate.load_migrations(self.migrations)
+        self.assertEqual(migrate.status(directory=self.migrations), [
+            (1, "first", True), (2, "second", False), (3, "broken", False),
+        ])
 
     def test_shared_app_recovery_migration_starts_from_live_state(self) -> None:
         import json
         from host.runtime.workspace.web_apps import backend
 
-        migrate.up(quiet=True)
-        for _ in range(3):
-            backend.create_web_app()
-        migrate.down(target=64, quiet=True)
+        migrate.up(target=64, quiet=True)
+        # Seed the old schema directly; the current API writes shared recovery.
+        with db.transaction() as cur:
+            for app_id in ["app-1", "app-2", "app-3"]:
+                cur.execute(
+                    "INSERT INTO web_apps (app_id, name, revision, created_at, updated_at,"
+                    " agent_runtime, agent_model, agent_effort)"
+                    " VALUES (%s, %s, 0, 'now', 'now', 'codex', 'gpt-6-astra', 'high')",
+                    (app_id, app_id),
+                )
+                cur.execute("INSERT INTO web_app_collection_state (app_id) VALUES (%s)", (app_id,))
         live_rows = {"leads": {"a": {"v": 2}, "b": {"v": 9}}}
         with db.transaction() as cur:
             # Both an existing checkpoint and a live state newer than its last
@@ -546,10 +513,12 @@ class MigrateRunnerTests(unittest.TestCase):
                 " '', '', %s, %s, '2026-09-21T00:00:00Z')",
                 (json.dumps({"count": 10}), json.dumps(live_rows)),
             )
-        before = {app_id: backend.load_app_state(app_id) for app_id in ["app-1", "app-2", "app-3"]}
         migrate.up(quiet=True)
-        for app_id, state in before.items():
-            self.assertEqual(backend.load_app_state(app_id), state)
+        for app_id in ["app-1", "app-2", "app-3"]:
+            state = backend.load_app_state(app_id)
+            self.assertEqual(state["revision"], 0 if app_id == "app-3" else 10)
+            self.assertEqual(state["html"], "" if app_id == "app-3" else "<main>live</main>")
+            self.assertEqual(state["data"], {} if app_id == "app-3" else {"count": 10})
             points = backend.list_revisions(app_id, {})["revisions"]
             self.assertEqual([(r["revision"], r["kind"]) for r in points], [(state["revision"], "migration")])
             with db.transaction() as cur:
@@ -568,22 +537,9 @@ class MigrateRunnerTests(unittest.TestCase):
                 self.assertEqual(restored["data"], state["data"])
                 self.assertEqual(backend.query_collection(app_id, "leads", {})["rows"],
                                  [{"id": key, "value": value} for key, value in live_rows["leads"].items()])
-        # Rollback preserves the new baseline and subsequent recovery points;
-        # deliberately discarded pre-upgrade points do not reappear.
-        migrate.down(target=64, quiet=True)
-        with db.transaction() as cur:
-            cur.execute("SELECT revision, collections_json FROM web_app_revisions WHERE app_id = 'app-1' ORDER BY revision")
-            rows = cur.fetchall()
-            self.assertEqual([row[0] for row in rows], [10, 11, 12])
-            self.assertEqual(json.loads(rows[0][1]), live_rows)
-            self.assertEqual(json.loads(rows[1][1]), {"leads": {"b": {"v": 9}}})
-            self.assertEqual(json.loads(rows[2][1]), live_rows)
-        migrate.up(quiet=True)
-        self.assertEqual([p["revision"] for p in backend.list_revisions("app-1", {})["revisions"]], [12])
 
-    def test_repo_migrations_apply_and_roll_back_cleanly(self) -> None:
-        # The real migration history must always migrate a fresh database up
-        # and back down; this is the guardrail for every future migration.
+    def test_repo_migrations_apply_and_repeat_cleanly(self) -> None:
+        # Every shipped migration must apply to a fresh database exactly once.
         applied = migrate.up(quiet=True)
         self.assertGreaterEqual(len(applied), 1)
         tables = self.table_names()
@@ -606,40 +562,10 @@ class MigrateRunnerTests(unittest.TestCase):
             event_indexes,
         )
 
-        with db.transaction() as cur:
-            cur.execute(
-                "INSERT INTO oauth_logins"
-                " (runtime, status, login_url, expires_at, device_code, login_id)"
-                " VALUES ('grok', 'awaiting_login', 'https://accounts.x.ai/device',"
-                " '2099-01-01T00:00:00Z', 'CODE', 'login-1')"
-            )
-        reverted = migrate.down(target=13, quiet=True)
-        with db.transaction() as cur:
-            cur.execute(
-                "SELECT workspace_kind, version, name"
-                " FROM workspace_migrations"
-                " ORDER BY workspace_kind, version"
-            )
-            self.assertEqual(
-                cur.fetchall(),
-                [
-                    ("chat", 1, "baseline"),
-                    ("chat", 2, "thread_names"),
-                    ("chat", 3, "drop_thread_tasks"),
-                    ("web_apps", 1, "app_state"),
-                    ("web_apps", 2, "builder_thread_reset"),
-                    ("web_apps", 3, "multiple_web_apps"),
-                    ("web_apps", 4, "workspace_platform"),
-                    ("web_apps", 5, "remove_archiving"),
-                    ("web_apps", 6, "memory_revision"),
-                    ("web_apps", 7, "restore_archiving"),
-                ],
-            )
-        reverted += migrate.down(target=0, quiet=True)
-        self.assertEqual(reverted, list(reversed(applied)))
-        self.assertEqual(self.table_names(), {"schema_migrations"})
+        self.assertEqual(migrate.up(quiet=True), [])
+        self.assertTrue(all(applied for _, _, applied in migrate.status()))
 
-    def test_astra_model_migration_allows_sessions_and_rolls_back_active_settings(self) -> None:
+    def test_astra_model_migration_allows_sessions(self) -> None:
         self.assertEqual(migrate.up(target=50, quiet=True), list(range(1, 51)))
         with self.assertRaises(Exception):
             with db.transaction() as cur:
@@ -688,36 +614,6 @@ class MigrateRunnerTests(unittest.TestCase):
                 " 'thread-astra', 'Astra transcript', 'agent')"
             )
 
-        self.assertEqual(migrate.down(target=50, quiet=True), [51])
-        with db.transaction() as cur:
-            cur.execute(
-                "SELECT thread_id, model, effort, provider_session_id"
-                " FROM thread_sessions ORDER BY thread_id"
-            )
-            self.assertEqual(
-                cur.fetchall(),
-                [
-                    ("app-51", "gpt-5.6-sol", "high", None),
-                    ("schedule-51", "gpt-5.6-sol", "high", None),
-                    ("thread-astra", "gpt-5.6-sol", "high", None),
-                ],
-            )
-            cur.execute(
-                "SELECT agent_runtime, agent_model, agent_effort"
-                " FROM web_apps WHERE app_id = 'app-51'"
-            )
-            self.assertEqual(cur.fetchone(), ("codex", "gpt-5.6-sol", "high"))
-            cur.execute(
-                "SELECT agent_runtime, model, effort FROM schedules WHERE id = 51"
-            )
-            self.assertEqual(cur.fetchone(), ("codex", "gpt-5.6-sol", "high"))
-            cur.execute(
-                "SELECT model, effort FROM schedule_revisions WHERE schedule_id = 51"
-            )
-            self.assertEqual(cur.fetchone(), ("gpt-6-astra", "ultra"))
-            cur.execute("SELECT message FROM agent_events WHERE thread_id = 'thread-astra'")
-            self.assertEqual(cur.fetchall(), [("Astra transcript",)])
-
     def test_gpt_6_sol_luna_migration_preserves_retired_rows_and_account_bindings(self) -> None:
         migrate.up(target=68, quiet=True)
         runtimes = ("codex", "codex-2", "codex-3")
@@ -745,7 +641,7 @@ class MigrateRunnerTests(unittest.TestCase):
                         " VALUES (%s, %s, 'provider-session', %s, %s)",
                         (runtime, thread, model, effort),
                     )
-                    expected.append((runtime, thread, model.replace("gpt-6-", "gpt-5.6-"), effort, None))
+                    expected.append((runtime, thread, model, effort, "provider-session"))
                 cur.execute(
                     "INSERT INTO web_apps (app_id, name, revision, agent_runtime, agent_model,"
                     " agent_effort, created_at, updated_at)"
@@ -766,7 +662,6 @@ class MigrateRunnerTests(unittest.TestCase):
                         "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort)"
                         " VALUES (%s, 'invalid-luna', 'gpt-6-luna', 'ultra')", (runtime,),
                     )
-        self.assertEqual(migrate.down(target=68, quiet=True), [69])
         with db.transaction() as cur:
             cur.execute(
                 "SELECT agent_runtime, thread_id, model, effort, provider_session_id"
@@ -778,11 +673,11 @@ class MigrateRunnerTests(unittest.TestCase):
             cur.execute("SELECT model, effort FROM thread_sessions WHERE thread_id = 'thread-opus'")
             self.assertEqual(cur.fetchone(), ("claude-opus-5-5", "max"))
             cur.execute("SELECT agent_runtime, agent_model, agent_effort FROM web_apps")
-            self.assertCountEqual(cur.fetchall(), [(r, "gpt-5.6-sol", "ultra") for r in runtimes])
+            self.assertCountEqual(cur.fetchall(), [(r, "gpt-6-sol", "ultra") for r in runtimes])
             cur.execute("SELECT agent_runtime, model, effort FROM schedules")
-            self.assertCountEqual(cur.fetchall(), [(r, "gpt-5.6-luna", "max") for r in runtimes])
+            self.assertCountEqual(cur.fetchall(), [(r, "gpt-6-luna", "max") for r in runtimes])
 
-    def test_glm_model_migration_allows_sessions_and_rolls_back_active_settings(self) -> None:
+    def test_glm_model_migration_allows_sessions(self) -> None:
         self.assertEqual(migrate.up(target=58, quiet=True), list(range(1, 59)))
         with self.assertRaises(Exception):
             with db.transaction() as cur:
@@ -831,37 +726,7 @@ class MigrateRunnerTests(unittest.TestCase):
                 " 'thread-glm', 'GLM transcript', 'agent')"
             )
 
-        self.assertEqual(migrate.down(target=58, quiet=True), [59])
-        with db.transaction() as cur:
-            cur.execute(
-                "SELECT thread_id, model, effort, provider_session_id"
-                " FROM thread_sessions ORDER BY thread_id"
-            )
-            self.assertEqual(
-                cur.fetchall(),
-                [
-                    ("app-59", "moonshotai.kimi-k2.5", "high", None),
-                    ("schedule-59", "moonshotai.kimi-k2.5", "high", None),
-                    ("thread-glm", "moonshotai.kimi-k2.5", "high", None),
-                ],
-            )
-            cur.execute(
-                "SELECT agent_runtime, agent_model, agent_effort"
-                " FROM web_apps WHERE app_id = 'app-59'"
-            )
-            self.assertEqual(cur.fetchone(), ("hermes", "moonshotai.kimi-k2.5", "high"))
-            cur.execute(
-                "SELECT agent_runtime, model, effort FROM schedules WHERE id = 59"
-            )
-            self.assertEqual(cur.fetchone(), ("hermes", "moonshotai.kimi-k2.5", "high"))
-            cur.execute(
-                "SELECT model, effort FROM schedule_revisions WHERE schedule_id = 59"
-            )
-            self.assertEqual(cur.fetchone(), ("zai.glm-5", "high"))
-            cur.execute("SELECT message FROM agent_events WHERE thread_id = 'thread-glm'")
-            self.assertEqual(cur.fetchall(), [("GLM transcript",)])
-
-    def test_third_codex_migration_admits_the_runtime_and_rolls_back_without_losing_history(self) -> None:
+    def test_third_codex_migration_admits_the_runtime(self) -> None:
         self.assertEqual(migrate.up(target=62, quiet=True), list(range(1, 63)))
         with self.assertRaises(Exception):
             with db.transaction() as cur:
@@ -910,38 +775,7 @@ class MigrateRunnerTests(unittest.TestCase):
                 " VALUES ('openai-3', 'acct-3')"
             )
 
-        self.assertEqual(migrate.down(target=62, quiet=True), [63])
-        with db.transaction() as cur:
-            # Rolling back removes the runtime, not the conversations that used
-            # it: each canonical row stays listable under a runtime the older
-            # host still launches, with only the unresumable provider session
-            # cleared.
-            cur.execute(
-                "SELECT thread_id, agent_runtime, model, effort, provider_session_id"
-                " FROM thread_sessions ORDER BY thread_id"
-            )
-            self.assertEqual(
-                cur.fetchall(),
-                [
-                    ("app-62", "codex-2", "gpt-5.6-sol", "high", None),
-                    ("schedule-62", "codex-2", "gpt-5.6-sol", "high", None),
-                    ("thread-codex-3", "codex-2", "gpt-5.6-sol", "high", None),
-                ],
-            )
-            cur.execute("SELECT agent_runtime FROM web_apps WHERE app_id = 'app-62'")
-            self.assertEqual(cur.fetchone(), ("codex-2",))
-            cur.execute("SELECT agent_runtime FROM schedules WHERE id = 62")
-            self.assertEqual(cur.fetchone(), ("codex-2",))
-            cur.execute(
-                "SELECT message FROM agent_events WHERE thread_id = 'thread-codex-3'"
-            )
-            self.assertEqual(cur.fetchall(), [("Codex 3 transcript",)])
-            cur.execute("SELECT provider FROM provider_accounts WHERE provider = 'openai-3'")
-            self.assertEqual(cur.fetchall(), [])
-            cur.execute("SELECT provider FROM proxy_provider_pins WHERE provider = 'openai-3'")
-            self.assertEqual(cur.fetchall(), [])
-
-    def test_opus_5_5_rollback_preserves_sessions_and_transcripts(self) -> None:
+    def test_opus_5_5_migration_preserves_existing_sessions(self) -> None:
         self.assertEqual(migrate.up(target=67, quiet=True), list(range(1, 68)))
         with self.assertRaises(Exception):
             with db.transaction() as cur:
@@ -977,77 +811,10 @@ class MigrateRunnerTests(unittest.TestCase):
                 with db.transaction() as cur:
                     cur.execute("INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort) "
                                 "VALUES (%s, 'thread-invalid', %s, %s)", (runtime, model, effort))
-        # Record non-default lifecycle/context metadata too: retaining only
-        # model/effort would not preserve the canonical conversation state.
         with db.transaction() as cur:
-            cur.execute("UPDATE thread_sessions SET run_number = 4, context_cleared_seq = 1, "
-                        "last_used_at = '2026-09-22T01:00:00Z' WHERE thread_id LIKE 'thread-new-%'")
-            cur.execute("SELECT thread_id, to_jsonb(thread_sessions) - 'provider_session_id' "
-                        "FROM thread_sessions ORDER BY thread_id")
-            before = cur.fetchall()
-            for thread_id, fields in before:
-                if thread_id.startswith("thread-new-"):
-                    fields["model"] = "claude-opus-5"
-        self.assertEqual(migrate.down(target=67, quiet=True), [68])
-
-        def assert_preserved():
-            with db.transaction() as cur:
-                cur.execute("SELECT thread_id, to_jsonb(thread_sessions) - 'provider_session_id' "
-                            "FROM thread_sessions ORDER BY thread_id")
-                self.assertEqual(cur.fetchall(), before)
-                cur.execute("SELECT thread_id, provider_session_id FROM thread_sessions")
-                self.assertEqual(dict(cur.fetchall()), {
-                    **{row[1]: "old-provider" for row in old_rows},
-                    **{f"thread-new-{effort}": None for effort in ("high", "max", "ultracode")},
-                })
-                cur.execute("SELECT message FROM agent_events WHERE thread_id LIKE 'thread-new-%'")
-                self.assertEqual(cur.fetchall(), [("preserved transcript",)] * 3)
-        assert_preserved()
-        self.assertEqual(migrate.up(target=68, quiet=True), [68])
-        assert_preserved()
-
-    def test_opus_rollback_crosses_older_constraints_and_updates_active_settings(self) -> None:
-        migrate.up(target=68, quiet=True)
-        with db.transaction() as cur:
-            cur.execute(
-                "INSERT INTO web_apps (app_id, name, archived, revision, agent_runtime, "
-                "agent_model, agent_effort, created_at, updated_at) VALUES "
-                "('app-67', 'Opus App', FALSE, 0, 'claude_code', 'claude-opus-5-5', 'max', "
-                "'2026-09-22T00:00:00Z', '2026-09-22T00:00:00Z')")
-            cur.execute(
-                "INSERT INTO schedules (id, thread_id, name, message, cadence, interval_minutes, "
-                "agent_runtime, model, effort, next_run_at, created_at, updated_at) VALUES "
-                "(67, 'schedule-67', 'Opus Schedule', 'Work', 'interval', 60, 'claude_code', "
-                "'claude-opus-5-5', 'ultracode', '2026-09-22T01:00:00Z', "
-                "'2026-09-22T00:00:00Z', '2026-09-22T00:00:00Z')")
-            cur.execute(
-                "INSERT INTO schedule_revisions (schedule_id, revision, name, message, cadence, "
-                "interval_minutes, agent_runtime, model, effort, deleted, actor, created_at) VALUES "
-                "(67, 1, 'Opus Schedule', 'Work', 'interval', 60, 'claude_code', 'claude-opus-5-5', "
-                "'ultracode', FALSE, 'user', '2026-09-22T00:00:00Z')")
-            for thread_id, effort in (("thread-67", "high"), ("app-67", "max"), ("schedule-67", "ultracode")):
-                cur.execute(
-                    "INSERT INTO thread_sessions (thread_id, agent_runtime, model, effort, provider_session_id) "
-                    "VALUES (%s, 'claude_code', 'claude-opus-5-5', %s, 'new-provider')", (thread_id, effort))
-        # Migration 63 rewrites the options constraint again; storage-only
-        # Opus 5.5 rows would make this multi-version downgrade fail.
-        self.assertEqual(migrate.down(target=62, quiet=True), [68, 67, 66, 65, 64, 63])
-        for target in (62, 68):
-            if target == 68:
-                self.assertEqual(migrate.up(target=68, quiet=True), [63, 64, 65, 66, 67, 68])
-            with self.subTest(target=target), db.transaction() as cur:
-                cur.execute("SELECT thread_id, model, effort, provider_session_id FROM thread_sessions ORDER BY thread_id")
-                self.assertEqual(cur.fetchall(), [
-                    ("app-67", "claude-opus-5", "max", None),
-                    ("schedule-67", "claude-opus-5", "ultracode", None),
-                    ("thread-67", "claude-opus-5", "high", None),
-                ])
-                cur.execute("SELECT agent_model, agent_effort FROM web_apps WHERE app_id = 'app-67'")
-                self.assertEqual(cur.fetchone(), ("claude-opus-5", "max"))
-                cur.execute("SELECT model, effort FROM schedules WHERE id = 67")
-                self.assertEqual(cur.fetchone(), ("claude-opus-5", "ultracode"))
-                cur.execute("SELECT model, effort FROM schedule_revisions WHERE schedule_id = 67")
-                self.assertEqual(cur.fetchone(), ("claude-opus-5-5", "ultracode"))
+            cur.execute("SELECT agent_runtime, thread_id, model, effort, provider_session_id "
+                        "FROM thread_sessions WHERE thread_id NOT LIKE 'thread-new-%'")
+            self.assertCountEqual(cur.fetchall(), [(*row, "old-provider") for row in old_rows])
 
     def test_persistent_schedules_create_threads_and_drop_old_runs(self) -> None:
         migrate.up(target=46, quiet=True)
@@ -1140,40 +907,6 @@ class MigrateRunnerTests(unittest.TestCase):
                 " (item_kind, item_id, message_seq, revision)"
                 " VALUES ('chat', 'schedule-11', 7, 0)"
             )
-        self.assertEqual(migrate.down(target=49, quiet=True), [50])
-        with db.transaction() as cur:
-            cur.execute("SELECT thread_id, name FROM chat_threads ORDER BY thread_id")
-            self.assertEqual(
-                cur.fetchall(),
-                [("schedule-11", "Agent"), ("schedule-12", "Script")],
-            )
-        self.assertEqual(migrate.down(target=48, quiet=True), [49])
-        with db.transaction() as cur:
-            cur.execute(
-                "SELECT column_name FROM information_schema.columns"
-                " WHERE table_schema = 'public' AND table_name = 'schedules'"
-                " AND column_name = 'thread_id'"
-            )
-            self.assertEqual(cur.fetchall(), [])
-            cur.execute("SELECT thread_id FROM chat_threads")
-            self.assertEqual(cur.fetchall(), [])
-            cur.execute("SELECT thread_id FROM schedule_runs ORDER BY thread_id")
-            self.assertEqual(cur.fetchall(), [])
-            cur.execute("SELECT thread_id FROM thread_sessions ORDER BY thread_id")
-            self.assertEqual(cur.fetchall(), [])
-            cur.execute("SELECT thread_id FROM agent_events ORDER BY thread_id")
-            self.assertEqual(cur.fetchall(), [])
-            cur.execute(
-                "SELECT item_id FROM workspace_seen WHERE item_kind = 'chat'"
-            )
-            self.assertEqual(cur.fetchall(), [])
-        with db.transaction() as cur:
-            cur.execute(
-                "SELECT schema_name FROM information_schema.schemata"
-                " WHERE schema_name IN"
-                " ('app_agent_chat', 'app_personal_web_app_builder')"
-            )
-            self.assertEqual(cur.fetchall(), [])
 
     def test_connection_profiles_preserve_oauth_and_enable_only_approvals(self) -> None:
         migrate.up(target=44, quiet=True)
@@ -1268,7 +1001,7 @@ class MigrateRunnerTests(unittest.TestCase):
             cur.execute("SELECT count(*) FROM workspace_onboarding_dismissal")
             self.assertEqual(cur.fetchone()[0], 1)
 
-    def test_agent_history_counters_seed_retained_state_and_roll_back_cleanly(self) -> None:
+    def test_agent_history_counters_seed_retained_state(self) -> None:
         self.assertEqual(migrate.up(target=29, quiet=True), list(range(1, 30)))
         with db.transaction() as cur:
             cur.execute(
@@ -1300,11 +1033,6 @@ class MigrateRunnerTests(unittest.TestCase):
                     ("agent_history_threads", 2),
                 ],
             )
-
-        self.assertEqual(migrate.down(target=29, quiet=True), [30])
-        with db.transaction() as cur:
-            cur.execute("SELECT name FROM counters WHERE name LIKE 'agent_history_%'")
-            self.assertEqual(cur.fetchall(), [])
 
     def test_agent_stats_split_user_messages_from_agent_activity(self) -> None:
         self.assertEqual(migrate.up(target=29, quiet=True), list(range(1, 30)))
@@ -1346,18 +1074,6 @@ class MigrateRunnerTests(unittest.TestCase):
             self.assertEqual(
                 cur.fetchall(),
                 [("agent_history_activities", 2), ("agent_history_messages", 2)],
-            )
-
-        self.assertEqual(migrate.down(target=31, quiet=True), [32])
-        with db.transaction() as cur:
-            cur.execute(
-                "SELECT name, value FROM counters"
-                " WHERE name IN ('agent_history_messages', 'agent_history_activities')"
-                " ORDER BY name"
-            )
-            self.assertEqual(
-                cur.fetchall(),
-                [("agent_history_activities", 1), ("agent_history_messages", 3)],
             )
 
     def test_product_thread_id_migration_drops_old_sessions_and_events(self) -> None:
@@ -1504,7 +1220,7 @@ class MigrateRunnerTests(unittest.TestCase):
             )
             self.assertEqual(cur.fetchone(), (None, None, False))
 
-    def test_workspace_resource_limit_migration_expands_and_restores_bounds(self) -> None:
+    def test_workspace_resource_limit_migration_expands_bounds(self) -> None:
         self.assertEqual(migrate.up(target=37, quiet=True), list(range(1, 38)))
         self.assertEqual(migrate.up(target=38, quiet=True), [38])
 
@@ -1549,28 +1265,6 @@ class MigrateRunnerTests(unittest.TestCase):
                 " 'succeeded', '2026-08-18T01:00:00Z')",
                 (schedule_id, f"schedule-{schedule_id}-run-1", "u" * 12000),
             )
-
-        self.assertEqual(migrate.down(target=37, quiet=True), [38])
-        with db.transaction() as cur:
-            cur.execute("SELECT char_length(content) FROM memory_pages WHERE page_id = 'boundary'")
-            self.assertEqual(cur.fetchone(), (1000,))
-            cur.execute(
-                "SELECT char_length(content) FROM memory_page_revisions"
-                " WHERE page_id = 'boundary'"
-            )
-            self.assertEqual(cur.fetchone(), (1000,))
-            cur.execute("SELECT char_length(message) FROM schedules WHERE id = %s", (schedule_id,))
-            self.assertEqual(cur.fetchone(), (4000,))
-            cur.execute(
-                "SELECT char_length(message) FROM schedule_revisions WHERE schedule_id = %s",
-                (schedule_id,),
-            )
-            self.assertEqual(cur.fetchone(), (4000,))
-            cur.execute(
-                "SELECT char_length(message) FROM schedule_runs WHERE schedule_id = %s",
-                (schedule_id,),
-            )
-            self.assertEqual(cur.fetchone(), (4000,))
 
     def test_xai_migration_removes_custom_rules_for_the_newly_owned_apexes(self) -> None:
         # Reserving an apex makes any stored custom rule beneath it invalid at
@@ -2049,7 +1743,7 @@ class MigrateRunnerTests(unittest.TestCase):
             list(range(1, 14)),
         )
 
-    def test_direct_workspace_id_rollback_changes_only_mapped_legacy_ids(self) -> None:
+    def test_direct_workspace_id_migration_changes_only_mapped_legacy_ids(self) -> None:
         self.assertEqual(migrate.up(target=13, quiet=True), list(range(1, 14)))
         with db.transaction() as cur:
             for thread_id in (
@@ -2088,54 +1782,6 @@ class MigrateRunnerTests(unittest.TestCase):
                     "thread-99",
                 ],
             )
-
-        self.assertEqual(migrate.down(target=13, quiet=True), [14])
-        expected = [
-            "agent-chat--foo",
-            "agent_chat__thread-1",
-            "app-99",
-            "personal-web-app-builder--foo",
-            "personal_web_app_builder__app-1",
-            "thread-99",
-        ]
-        with db.transaction() as cur:
-            cur.execute("SELECT thread_id FROM thread_sessions ORDER BY thread_id")
-            self.assertEqual([row[0] for row in cur.fetchall()], expected)
-            cur.execute("SELECT thread_id FROM agent_events ORDER BY thread_id")
-            self.assertEqual([row[0] for row in cur.fetchall()], expected)
-            cur.execute(
-                "SELECT to_regclass('public.workspace_thread_id_migrations')"
-            )
-            self.assertEqual(cur.fetchone(), (None,))
-
-    def test_workspace_storage_rollback_restores_legacy_service_access(self) -> None:
-        self.assertEqual(migrate.up(target=26, quiet=True), list(range(1, 27)))
-        with db.transaction() as cur:
-            cur.execute('CREATE ROLE "kern-ux-surface"')
-
-        try:
-            self.assertEqual(migrate.down(target=25, quiet=True), [26])
-            with db.transaction() as cur:
-                cur.execute(
-                    "SELECT"
-                    " has_schema_privilege('kern-ux-surface',"
-                    " 'app_agent_chat', 'USAGE'),"
-                    " has_table_privilege('kern-ux-surface',"
-                    " 'app_agent_chat.threads', 'SELECT'),"
-                    " has_table_privilege('kern-ux-surface',"
-                    " 'app_personal_web_app_builder.web_apps', 'UPDATE'),"
-                    " has_sequence_privilege('kern-ux-surface',"
-                    " 'app_personal_web_app_builder.web_app_history_id_seq',"
-                    " 'USAGE')"
-                )
-                self.assertEqual(cur.fetchone(), (True, True, True, True))
-        finally:
-            # Reapplying 0026 explicitly revokes the restored grants, leaving
-            # the synthetic legacy role safe to remove.
-            migrate.up(quiet=True)
-            with db.transaction() as cur:
-                cur.execute('DROP ROLE IF EXISTS "kern-ux-surface"')
-
 
 
 if __name__ == "__main__":

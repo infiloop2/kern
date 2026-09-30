@@ -33,12 +33,3 @@ ALTER TABLE web_apps
     ADD CONSTRAINT web_apps_agent_settings_complete CHECK (
         agent_runtime <> '' AND agent_model <> '' AND agent_effort <> ''
     );
-
--- migrate:down
-SET LOCAL search_path TO public;
-
-ALTER TABLE web_apps
-    DROP CONSTRAINT web_apps_agent_settings_complete,
-    DROP COLUMN agent_effort,
-    DROP COLUMN agent_model,
-    DROP COLUMN agent_runtime;

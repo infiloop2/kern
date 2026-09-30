@@ -7,7 +7,3 @@ CREATE TABLE tool_secrets (
     value TEXT NOT NULL CHECK (value LIKE 'enc:v1:%' AND octet_length(value) <= 24576)
 );
 GRANT SELECT, INSERT, UPDATE, DELETE ON tool_secrets TO "kern-tools";
-
--- migrate:down
-SET LOCAL search_path TO public;
-DROP TABLE tool_secrets;
