@@ -108,7 +108,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scope",
-        choices=("all", "core", "workspaces", "overload", "oauth-poll"),
+        choices=("all", "core", "workspaces", "overload", "oauth-poll", "navigation-order"),
         default="all",
         help="Smoke only the host UI core, only workspaces, or both.",
     )
@@ -176,7 +176,9 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 import oauth_poll_smokes
                 for runtime, provider in (("grok-2", "xai"), ("claude_code", "claude")):
                     oauth_context = browser.new_context(service_workers="block")
-                    oauth_poll_smokes.run(oauth_context.new_page(), url, log_in, runtime, provider)
+                    oauth_poll_smokes.run(
+                        oauth_context.new_page(), url, log_in, open_home_integration, runtime, provider,
+                    )
                     oauth_context.close()
             if scope in {"all", "core"}:
                 import swarm_smokes
@@ -341,6 +343,14 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 app_chat_review_smokes.run_activity_only_paging(activity_only_context.new_page(), url, log_in)
                 activity_only_context.close()
 
+                import dictation_smokes
+                voice_context = browser.new_context(service_workers="block")
+                voice_page = voice_context.new_page()
+                report_page_errors(voice_page, "dictation recovery")
+                dictation_smokes.run(voice_page, url, log_in)
+                voice_context.close()
+
+            if scope in {"all", "workspaces", "navigation-order"}:
                 import navigation_order_smokes
                 for touch in (False, True):
                     order_context = browser.new_context(
@@ -351,13 +361,6 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                         order_context.new_page(), url, log_in, touch=touch,
                     )
                     order_context.close()
-
-                import dictation_smokes
-                voice_context = browser.new_context(service_workers="block")
-                voice_page = voice_context.new_page()
-                report_page_errors(voice_page, "dictation recovery")
-                dictation_smokes.run(voice_page, url, log_in)
-                voice_context.close()
 
         finally:
             browser.close()

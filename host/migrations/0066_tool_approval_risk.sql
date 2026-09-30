@@ -13,8 +13,3 @@ CREATE TABLE tool_approval_risk_assessments (
 
 GRANT SELECT, INSERT ON tool_approval_risk_assessments TO "kern-tools";
 GRANT SELECT (provider, enabled) ON host_inference_providers TO "kern-tools";
-
--- migrate:down
-SET LOCAL search_path TO public;
-REVOKE SELECT (provider, enabled) ON host_inference_providers FROM "kern-tools";
-DROP TABLE tool_approval_risk_assessments;

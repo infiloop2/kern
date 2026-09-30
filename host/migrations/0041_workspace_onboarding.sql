@@ -11,8 +11,3 @@ CREATE TABLE workspace_onboarding_dismissal (
 );
 
 GRANT SELECT, INSERT ON workspace_onboarding_dismissal TO "kern-workspace";
-
--- migrate:down
-SET LOCAL search_path TO public;
-
-DROP TABLE workspace_onboarding_dismissal;

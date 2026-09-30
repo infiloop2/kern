@@ -24,7 +24,3 @@ CREATE TABLE browser_accounts (
 );
 GRANT SELECT, INSERT, UPDATE, DELETE ON browser_settings, browser_accounts TO "kern-browser";
 GRANT SELECT ON secret_keys TO "kern-browser";
--- migrate:down
-REVOKE SELECT ON secret_keys FROM "kern-browser";
-DROP TABLE browser_accounts;
-DROP TABLE browser_settings;

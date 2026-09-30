@@ -17,9 +17,3 @@ CREATE TABLE app_state (
 
 INSERT INTO app_state (singleton, updated_at)
 VALUES (TRUE, '1970-01-01T00:00:00Z');
-
--- migrate:down
-SET LOCAL search_path TO app_personal_web_app_builder;
-
-DROP TABLE app_state;
-DROP SCHEMA IF EXISTS app_personal_web_app_builder;

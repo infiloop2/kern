@@ -7,6 +7,3 @@ CREATE TABLE auto_approval_settings (
     sleep_end_minute INTEGER NOT NULL CHECK (sleep_end_minute BETWEEN 0 AND 1439),
     CHECK ((sleep_end_minute - sleep_start_minute + 1440) % 1440 >= 360)
 );
--- migrate:down
-SET LOCAL search_path TO public;
-DROP TABLE auto_approval_settings;

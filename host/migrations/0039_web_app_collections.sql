@@ -41,17 +41,3 @@ ALTER TABLE web_app_revisions
 
 GRANT SELECT, INSERT, UPDATE, DELETE
     ON web_app_collection_state, web_app_collection_rows TO "kern-workspace";
-
--- migrate:down
-SET LOCAL search_path TO public;
-
-DELETE FROM web_app_revisions WHERE kind = 'collection';
-ALTER TABLE web_app_revisions
-    DROP CONSTRAINT web_app_revisions_kind_check;
-ALTER TABLE web_app_revisions
-    ADD CONSTRAINT web_app_revisions_kind_check
-    CHECK (kind IN ('created', 'ui', 'data', 'restore', 'migration'));
-ALTER TABLE web_app_revisions DROP COLUMN collections_json;
-
-DROP TABLE web_app_collection_rows;
-DROP TABLE web_app_collection_state;

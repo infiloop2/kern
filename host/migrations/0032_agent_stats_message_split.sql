@@ -20,17 +20,3 @@ SET value = (
        OR (event_type = 'thread.message' AND source = 'agent')
 )
 WHERE name = 'agent_history_activities';
-
--- migrate:down
-
-UPDATE counters
-SET value = (
-    SELECT COUNT(*) FROM agent_events WHERE event_type = 'thread.message'
-)
-WHERE name = 'agent_history_messages';
-
-UPDATE counters
-SET value = (
-    SELECT COUNT(*) FROM agent_events WHERE event_type = 'thread.activity'
-)
-WHERE name = 'agent_history_activities';

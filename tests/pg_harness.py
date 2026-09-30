@@ -405,8 +405,8 @@ def reset_database() -> None:
 
 def create_database(name: str) -> None:
     """Create an extra empty database on the scratch cluster (migration-runner
-    tests use their own so they can migrate down without disturbing the shared
-    schema)."""
+    tests use their own to build historical schemas without disturbing the
+    shared schema)."""
     ensure_database()
     from host.runtime.core import db
 

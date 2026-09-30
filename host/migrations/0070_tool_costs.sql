@@ -24,7 +24,3 @@ CREATE TABLE tool_cost_daily (
 );
 GRANT SELECT, INSERT ON tool_costs TO "kern-tools";
 GRANT SELECT, INSERT, UPDATE ON tool_cost_daily TO "kern-tools";
--- migrate:down
-SET LOCAL search_path TO public;
-DROP TABLE tool_cost_daily;
-DROP TABLE tool_costs;

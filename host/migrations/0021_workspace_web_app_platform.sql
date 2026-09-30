@@ -84,15 +84,3 @@ CREATE TABLE web_app_memories (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (thread_id, name)
 );
-
--- migrate:down
-SET LOCAL search_path TO app_personal_web_app_builder;
-
-DROP TABLE web_app_memories;
-DROP TABLE web_app_schedules;
-DROP TABLE web_app_history;
-ALTER TABLE web_apps DROP COLUMN instructions_updated_at;
-ALTER TABLE web_apps DROP COLUMN instructions_updated_by;
-ALTER TABLE web_apps DROP COLUMN instructions_md;
-ALTER TABLE web_apps DROP COLUMN data_version;
-ALTER TABLE web_apps RENAME COLUMN ui_revision TO revision;

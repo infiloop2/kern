@@ -21,7 +21,3 @@ CREATE TABLE host_inference_usage (
 );
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON host_inference_usage TO "kern-host-inference";
-
--- migrate:down
-SET LOCAL search_path TO public;
-DROP TABLE host_inference_usage;

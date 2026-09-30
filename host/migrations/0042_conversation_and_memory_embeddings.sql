@@ -114,14 +114,3 @@ ON CONFLICT DO NOTHING;
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON memory_page_embeddings TO "kern-workspace";
 GRANT SELECT, INSERT, UPDATE, DELETE ON memory_page_links TO "kern-workspace";
-
--- migrate:down
-
-REVOKE ALL ON memory_page_embeddings FROM "kern-workspace";
-REVOKE ALL ON memory_page_links FROM "kern-workspace";
-DROP TABLE memory_page_links;
-DROP TABLE memory_page_embeddings;
-DROP TABLE conversation_embedding_queue;
-DROP INDEX agent_events_message_seq_idx;
-DROP TABLE conversation_message_embeddings;
-DROP TABLE conversation_search_state;

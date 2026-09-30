@@ -13,12 +13,3 @@ VALUES
     ('agent_history_activities', (
         SELECT COUNT(*) FROM agent_events WHERE event_type = 'thread.activity'
     ));
-
--- migrate:down
-
-DELETE FROM counters
-WHERE name IN (
-    'agent_history_threads',
-    'agent_history_messages',
-    'agent_history_activities'
-);

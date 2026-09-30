@@ -15,7 +15,7 @@ from host.constants import BROWSER_NETWORK_PORT
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser_network.config import Settings
 from host.runtime.browser.storage import Store
-from host.runtime.browser_network.transport import connect_proxy, failure, target
+from host.runtime.browser_network.transport import ConnectionFailure, connect_proxy, failure, target
 from host.runtime.core import host_errors
 
 
@@ -91,7 +91,7 @@ class Network:
             result = subprocess.run(
                 ["/usr/bin/curl", "--disable", "--silent", "--fail", "--max-time", "30",
                  "--max-filesize", "100", "--proxy", f"http://127.0.0.1:{BROWSER_NETWORK_PORT}",
-                 "--noproxy", "", "https://api.ipify.org"],
+                 "--noproxy", "", "--dump-header", "/dev/stderr", "https://api.ipify.org"],
                 capture_output=True, timeout=35, check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -100,6 +100,13 @@ class Network:
             message = ("Browser connection test timed out." if result.returncode == 28
                        else "Browser connection test failed.")
             message += " Check Host diagnostics."
+            # Only the first header block belongs to our relay. Never expose
+            # website headers, response bodies or curl's raw error output.
+            headers = result.stderr.partition(b"\r\n\r\n")[0].split(b"\r\n")
+            for line in headers[1:]:
+                if line.startswith(b"X-Kern-Browser-Error: "):
+                    message = line.removeprefix(b"X-Kern-Browser-Error: ").decode("ascii")
+                    break
             host_errors.report_warning("browser.network", message, context={"stage": "connection_test", "curl_exit": result.returncode})
             raise BrowserError(message)
         try:
@@ -143,9 +150,13 @@ class TunnelHandler(BaseHTTPRequestHandler):
                     if not data:
                         return
                     (upstream if stream is self.connection else self.connection).sendall(data)
-        except (OSError, ValueError, BrowserError):
+        except (OSError, ValueError, BrowserError) as exc:
             if not connected:
-                self.send_error(502, "Browser connection unavailable. Test the connection in Browser settings.")
+                self.send_response(502)
+                if isinstance(exc, ConnectionFailure):
+                    self.send_header("X-Kern-Browser-Error", str(exc))
+                self.send_header("Content-Length", "0")
+                self.end_headers()
         finally:
             self.close_connection = True
             if upstream:

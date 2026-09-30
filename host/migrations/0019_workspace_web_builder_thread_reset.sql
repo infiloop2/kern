@@ -7,8 +7,3 @@
 SET LOCAL search_path TO app_personal_web_app_builder;
 
 ALTER TABLE app_state ADD COLUMN thread_seq BIGINT NOT NULL DEFAULT 1 CHECK (thread_seq >= 1);
-
--- migrate:down
-SET LOCAL search_path TO app_personal_web_app_builder;
-
-ALTER TABLE app_state DROP COLUMN thread_seq;

@@ -169,24 +169,20 @@ persist config edits across an upgrade).
 ## Schema migrations
 
 Migrations are plain SQL files in `host/migrations/`, named
-`NNNN_description.sql`, with goose-style up and down sections:
+`NNNN_description.sql`, with one forward-only up section:
 
 ```sql
 -- migrate:up
 ALTER TABLE thread_sessions ADD COLUMN priority BIGINT;
-
--- migrate:down
-ALTER TABLE thread_sessions DROP COLUMN priority;
 ```
 
 `host/runtime/deploy/migrate.py` is the runner
-(`python3 -m host.runtime.deploy.migrate {up|down|status} [--to VERSION]`). Applied
+(`python3 -m host.runtime.deploy.migrate {up|status} [--to VERSION]`). Applied
 versions are recorded in `schema_migrations`; `up` applies only pending files,
 all in one transaction (PostgreSQL DDL is transactional), under an advisory
 lock so concurrent runners serialize. It is an in-repo runner rather than
 goose/alembic/dbmate so the host needs no extra toolchain and migrations ship
-inside the runtime code archive; the file format deliberately matches that
-family of tools.
+inside the runtime code archive.
 
 Migrations are deploy-plane work, applied in exactly one place: bootstrap
 runs `migrate up` (as `kern-admin`) after the database is up and before
@@ -205,17 +201,20 @@ migration, maps every already-applied per-product ledger row to its renumbered
 applied old product histories are not replayed; after consolidation the old
 ledger is dropped and all future schema changes are ordinary host migrations.
 
-`migrate down` is a manual operator action only
-(`sudo -u kern-admin env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.migrate down`).
+Migrations are forward-only. A failed migration transaction rolls back
+automatically; correcting an already committed change requires a new migration
+in a forward release. Data recovery requires restoring a suitable backup with
+matching code; installing older code against a newer schema is unsupported.
 
 Rules for changing persisted state shape from now on:
 
 - Never edit an applied migration; add a new `NNNN+1_*.sql` file.
-- Every migration needs a working down section (the test suite migrates the
-  whole history up and back down on every run).
-- Old code is not expected to run against a newer schema: deploy replaces the
-  code and migrates in one operation, and downgrades go through `migrate down`
-  before installing older code.
+- Include only the `-- migrate:up` section; down sections are rejected.
+- Test fresh installation, upgrades from populated historical schemas,
+  repeat execution, and transaction rollback on failure.
+- The one-time forward-only cleanup removed historical down sections without
+  changing their up SQL, filenames, or versions. Applied versions stay recorded
+  and are not replayed. Historical files remain immutable after this cleanup.
 
 ## Token accounting
 

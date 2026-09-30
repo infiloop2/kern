@@ -24,6 +24,7 @@ bug cannot silently verify itself.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import glob
 import grp
 import os
@@ -424,11 +425,22 @@ def enforced_probes() -> list[Probe]:
 
 
 def check_reachability(probes: list[Probe], run: Runner = _run) -> list[str]:
-    failures = []
-    for user, host, port, expectation, reason in probes:
-        result = run(
+    if not probes:
+        return []
+
+    def run_probe(probe: Probe) -> subprocess.CompletedProcess[str]:
+        user, host, port, _, _ = probe
+        return run(
             ["runuser", "-u", user, "--", "python3", "-c", _PROBE_SNIPPET, host, str(port)]
         )
+
+    # These independent probes use a fixed, internal list. Run them together
+    # so correctly dropped packets cost one timeout, not one per boundary.
+    with ThreadPoolExecutor(max_workers=len(probes)) as pool:
+        results = list(pool.map(run_probe, probes))
+
+    failures = []
+    for (user, host, port, expectation, reason), result in zip(probes, results):
         if result.returncode == 0:
             outcome = "reachable"
         elif result.returncode == 10:
@@ -534,7 +546,9 @@ def main(argv: list[str] | None = None) -> int:
         help="whether a cloudflare_tunnel operator connection was configured",
     )
     args = parser.parse_args(argv)
+    started = time.monotonic()
     failures = run_all_checks(cloudflare_enabled=args.cloudflare == "yes")
+    print(f"deploy verification took {time.monotonic() - started:.1f}s", flush=True)
     if failures:
         print(f"deploy verification failed with {len(failures)} finding(s):", file=sys.stderr)
         for failure in failures:

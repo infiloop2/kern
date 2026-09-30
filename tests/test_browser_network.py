@@ -13,7 +13,7 @@ from browser_fakes import MemoryStore
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser_network.config import LOCATIONS, Settings
 from host.runtime.browser_network.relay import Network, TunnelHandler, TunnelServer
-from host.runtime.browser_network.transport import connect_proxy, target
+from host.runtime.browser_network.transport import connect_proxy, proxy_details, target
 from host.runtime.browser.accounts import Accounts
 from host.runtime.browser.service import authorized
 
@@ -267,7 +267,7 @@ class BrowserNetworkTests(unittest.TestCase):
         self.assertIn(base64.b64encode(b"username:password"), received[0])
         self.assertEqual(stream.recv(11), b"TLS-FIXTURE")
 
-    def test_provider_error_redacts_body_and_headers(self):
+    def test_provider_error_records_headers_but_not_body_and_redacts_credentials(self):
         client, peer = socket.socketpair()
         self.addCleanup(peer.close)
         peer.sendall(b"HTTP/1.1 407 secret-provider-message\r\nSecret: private\r\n\r\nprivate-body")
@@ -279,10 +279,90 @@ class BrowserNetworkTests(unittest.TestCase):
         context = self.warning.call_args.kwargs["context"]
         self.assertEqual(context["stage"], "proxy_connect")
         self.assertEqual(context["proxy_status"], 407)
+        self.assertIn("[redacted]-provider-message", context["proxy_status_line"])
+        self.assertEqual(context["proxy_header_1"], "Secret: private")
+        self.assertEqual(context["gateway"], "gate.decodo.com:7000")
+        self.assertGreaterEqual(context["elapsed_ms"], 0)
+        self.assertNotIn("private-body", str(self.warning.call_args))
         self.assertNotIn("secret", str(self.warning.call_args))
         self.assertNotIn("private", str(error.exception))
         self.assertNotIn("secret", str(error.exception))
         self.assertEqual(client.fileno(), -1)
+
+    def test_decodo_reason_reaches_diagnostics_and_real_curl_test(self):
+        self.network.dispatch("save", DECODO)
+        client, peer = socket.socketpair()
+        self.addCleanup(peer.close)
+        reason = "Access denied. You've reached your current traffic limit."
+        peer.sendall(("HTTP/1.1 407 Proxy Authentication Required\r\n"
+                      f"X-Error-Message: {reason}\r\nSecret: private\r\n\r\nprivate-body").encode())
+        with TunnelServer(self.network, port=8010) as relay:
+            worker = threading.Thread(target=relay.serve_forever)
+            worker.start()
+            try:
+                with patch("socket.create_connection", return_value=client), patch("host.runtime.browser_network.transport.ssl.create_default_context") as tls, patch("host.runtime.browser_network.relay.BROWSER_NETWORK_PORT", 8010):
+                    tls.return_value.wrap_socket.return_value = client
+                    with self.assertRaises(BrowserError) as caught:
+                        self.network.test()
+                self.assertIn(reason, str(caught.exception))
+                self.assertIn("407", str(caught.exception))
+                contexts = [call.kwargs["context"] for call in self.warning.call_args_list]
+                self.assertTrue(any(context.get("proxy_error") == reason and context.get("proxy_status") == 407 for context in contexts))
+                self.assertIn("curl_exit", contexts[-1])
+                self.assertNotIn("private-body", str(self.warning.call_args_list))
+            finally:
+                relay.shutdown()
+                worker.join(3)
+        self.assertEqual(client.fileno(), -1)
+
+    def test_proxy_reason_redacts_credentials_before_clipping_and_removes_controls(self):
+        username = "user-fixture-country-gb-city-london-session-abcdef123456-sessionduration-1440"
+        password = "long-secret-" + "z" * 600
+        encoded = base64.b64encode(f"{username}:{password}".encode()).decode()
+        response = (f"HTTP/1.1 407 Rejected\r\nx-error-message: rejected {username} {password} {encoded} "
+                    "fixture abcdef123456\t\x1b " + "more " * 200 + "\r\n\r\n").encode()
+        details = proxy_details(response, (username, password))
+        reason = details["proxy_error"]
+        for secret in (username, password, encoded, "fixture", "abcdef123456", "long-secret", "zzz"):
+            self.assertNotIn(secret, str(details))
+        self.assertIn("[redacted]", reason)
+        self.assertEqual(len(reason), 512)
+        self.assertTrue(all(" " <= c <= "~" for c in reason))
+
+    def test_test_ignores_website_error_header_after_successful_connect(self):
+        headers = (b"HTTP/1.0 200 Connection established\r\n\r\n"
+                   b"HTTP/1.1 502 Bad Gateway\r\nX-Kern-Browser-Error: private website text\r\n\r\n")
+        with patch("subprocess.run", return_value=Mock(returncode=22, stdout=b"", stderr=headers)):
+            with self.assertRaises(BrowserError) as caught:
+                self.network.test()
+        self.assertNotIn("private", str(caught.exception))
+        self.assertNotIn("private", str(self.warning.call_args_list))
+
+    def test_partial_proxy_header_does_not_log_a_truncated_credential(self):
+        details = proxy_details(b"HTTP/1.1 407 Rejected\r\nRequest-Id: abc123\r\nEcho: private-pass",
+                                ("username", "private-password"))
+        self.assertFalse(details["proxy_headers_complete"])
+        self.assertEqual(details["proxy_header_1"], "Request-Id: abc123")
+        self.assertNotIn("private-pass", str(details))
+
+    def test_provider_issued_credentials_are_redacted_but_challenges_and_ids_remain(self):
+        details = proxy_details(b"HTTP/1.1 407 Rejected\r\nSet-Cookie: newly-issued-secret\r\n"
+                                b"Authorization: Bearer new-token\r\nProxy-Authorization: Basic new-auth\r\n"
+                                b"Cookie: another-secret\r\nProxy-Authenticate: Basic realm=decodo\r\n"
+                                b"X-Request-Id: abc123\r\n\r\n", ("username", "password"))
+        for i in range(1, 5):
+            self.assertTrue(details[f"proxy_header_{i}"].endswith(": [redacted]"))
+        self.assertEqual(details["proxy_header_5"], "Proxy-Authenticate: Basic realm=decodo")
+        self.assertEqual(details["proxy_header_6"], "X-Request-Id: abc123")
+
+    def test_test_returns_relay_error_independent_of_http_version_or_status(self):
+        reason = "Browser connection failed during proxy TLS. Check Host diagnostics."
+        for status in ("HTTP/1.0 502 Bad Gateway", "HTTP/1.1 503 Unavailable", "HTTP/1.1 407 Authentication Required"):
+            headers = f"{status}\r\nX-Kern-Browser-Error: {reason}\r\n\r\n".encode()
+            with self.subTest(status=status), patch("subprocess.run", return_value=Mock(returncode=22, stdout=b"", stderr=headers)):
+                with self.assertRaises(BrowserError) as caught:
+                    self.network.test()
+                self.assertEqual(str(caught.exception), reason)
 
     def test_accounts_share_saved_connection_settings_with_browser_launch(self):
         accounts = Accounts(self.store)

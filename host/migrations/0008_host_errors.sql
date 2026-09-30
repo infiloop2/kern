@@ -28,7 +28,3 @@ CREATE TABLE host_errors (
 );
 CREATE INDEX host_errors_fingerprint_last_seen_idx
     ON host_errors (fingerprint, last_seen_at DESC, seq DESC);
-
--- migrate:down
-
-DROP TABLE host_errors;

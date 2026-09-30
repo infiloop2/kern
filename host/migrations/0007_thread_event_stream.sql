@@ -82,27 +82,3 @@ WHERE event_type IN (
 
 DELETE FROM agent_events
 WHERE event_type IN ('turn.started', 'turn.completed');
-
--- migrate:down
-
-UPDATE agent_events
-SET event_type = CASE event_type
-    WHEN 'thread.message' THEN 'turn.message'
-    WHEN 'thread.activity' THEN 'turn.activity'
-    WHEN 'thread.error' THEN 'turn.failed'
-    WHEN 'thread.stopped' THEN 'turn.cancelled'
-    ELSE event_type
-END
-WHERE event_type IN (
-    'thread.message',
-    'thread.activity',
-    'thread.error',
-    'thread.stopped'
-);
-
-ALTER TABLE agent_events
-    DROP COLUMN run_number;
-
-ALTER TABLE thread_sessions
-    DROP COLUMN run_status,
-    DROP COLUMN run_number;

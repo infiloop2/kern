@@ -19,10 +19,3 @@ CREATE TABLE IF NOT EXISTS thread_tasks (
 );
 
 CREATE INDEX IF NOT EXISTS idx_thread_tasks_thread_id ON thread_tasks(thread_id);
-
--- migrate:down
-SET LOCAL search_path TO app_agent_chat;
-
-DROP TABLE IF EXISTS thread_tasks;
-DROP TABLE IF EXISTS threads;
-DROP SCHEMA IF EXISTS app_agent_chat;

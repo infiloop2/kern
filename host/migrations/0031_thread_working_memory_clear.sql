@@ -11,9 +11,3 @@ ALTER TABLE thread_sessions
     ADD COLUMN context_cleared_seq BIGINT NOT NULL DEFAULT 0,
     ADD CONSTRAINT thread_sessions_context_cleared_seq_check
         CHECK (context_cleared_seq >= 0);
-
--- migrate:down
-
-ALTER TABLE thread_sessions
-    DROP CONSTRAINT thread_sessions_context_cleared_seq_check,
-    DROP COLUMN context_cleared_seq;

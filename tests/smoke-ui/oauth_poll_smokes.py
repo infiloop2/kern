@@ -1,16 +1,18 @@
 """Recover pending logins without polling hidden cards or absent sessions."""
 
 
-def run(page, url, log_in, runtime="grok-2", provider="xai"):
-    from datetime import datetime, timezone
+def run(page, url, log_in, open_home_integration, runtime="grok-2", provider="xai"):
+    from datetime import datetime, timedelta, timezone
 
     from playwright.sync_api import expect
 
-    # The app has a five-second background health tick. Freeze it between the
-    # explicit clock advances below so real elapsed time cannot add a GET to a
-    # request-count assertion while Playwright waits for a card or response.
+    # Keep recurring health ticks paused. Move wall time without firing timers,
+    # then await one real refresh at a time: run_for() fires async intervals but
+    # does not join their fetch/render work.
     clock_time = datetime(2026, 9, 28, tzinfo=timezone.utc)
-    page.clock.install(time=clock_time)
+    # install() starts a running clock. Pausing at its exact start races the
+    # next protocol call on slow runners; pause ahead before app timers exist.
+    page.clock.install(time=clock_time - timedelta(days=1))
     page.clock.pause_at(clock_time)
 
     def pending_runtime(route):
@@ -20,6 +22,13 @@ def run(page, url, log_in, runtime="grok-2", provider="xai"):
             for record in data["agent_runtime"]["runtimes"]:
                 if record["type"] == runtime:
                     record["status"] = "awaiting_login"
+        route.fulfill(response=response, json=data)
+
+    def enabled_policy(route):
+        response = route.fetch()
+        data = response.json()
+        if response.ok:
+            data["network_controls"]["network_integrations"][provider] = {"enabled": True}
         route.fulfill(response=response, json=data)
 
     methods = []
@@ -38,6 +47,7 @@ def run(page, url, log_in, runtime="grok-2", provider="xai"):
             route.fulfill(status=404, json={"error": {"message": "login has not been started"}})
 
     route_name = "claude" if runtime == "claude_code" else runtime
+    page.route("**/v1/network/policy", enabled_policy)
     page.route("**/v1/health", pending_runtime)
     page.route(f"**/v1/agent-runtime/{route_name}-oauth-login", oauth)
     log_in(page, url)
@@ -45,29 +55,21 @@ def run(page, url, log_in, runtime="grok-2", provider="xai"):
     refresh = "() => import('/admin_ui/health.js').then(module => module.refreshHealth())"
     page.evaluate(refresh)
     assert methods == [], methods
-    page.locator(f'#panel-home .home-card[data-action="open-home-integration"][data-guide="{provider}"]').click()
-    expect(page.locator(f'.integration-details[data-integration-details="{provider}"]')).to_be_visible()
+    open_home_integration(page, provider)
     page.evaluate(refresh)
     assert methods == ["GET"], methods
-    page.clock.run_for(20000)
-    page.wait_for_load_state("networkidle")
+    page.clock.set_system_time(clock_time + timedelta(seconds=20))
     page.evaluate(refresh)
     assert methods == ["GET"], methods
-    page.clock.run_for(11000)
-    page.wait_for_load_state("networkidle")
+    page.clock.set_system_time(clock_time + timedelta(seconds=31))
     page.evaluate(refresh)
     assert methods.count("GET") == 2, methods
 
-    # An explicit start works immediately even just after an absent-session read.
-    # Read the card in the same browser task as the completed start. A pending
-    # health tick can replace the card before a separate Playwright assertion.
-    started_text = page.evaluate("""async runtime => {
-      const { startLogin } = await import('/admin_ui/health.js');
-      await startLogin(runtime);
-      return document.querySelector(`[data-provider-oauth="${runtime}"]`)?.textContent || '';
-    }""", runtime)
+    # Exercise the operator's actual control, including its event wiring.
+    page.locator(f'[data-action="start-login"][data-runtime="{runtime}"]').click()
+    target = page.locator(f'[data-provider-oauth="{runtime}"]')
+    expect(target).to_contain_text(login["login_url"])
     assert methods.count("POST") == 1, methods
-    assert login["login_url"] in started_text, started_text
     # A refresh must recover the started login after the card is re-rendered.
     reads_before_recovery = methods.count("GET")
     page.evaluate(refresh)
@@ -79,9 +81,8 @@ def run(page, url, log_in, runtime="grok-2", provider="xai"):
         expect(target).to_contain_text(login["device_code"])
     assert methods.count("GET") > reads_before_recovery, methods
 
-    # Successful recovery clears the pause, so the next visible refresh can
-    # read again. Await that refresh directly: advancing the fake clock does
-    # not await tick()'s async work, and a busy tick can skip interval callbacks.
+    # Successful recovery clears the pause, so the next visible refresh reads
+    # again. Every count follows a completed refresh, never an elapsed sleep.
     reads_before_refresh = methods.count("GET")
     page.evaluate(refresh)
     assert methods.count("GET") > reads_before_refresh, methods
@@ -89,8 +90,7 @@ def run(page, url, log_in, runtime="grok-2", provider="xai"):
     # Leaving the integration suppresses reads even when the code exists.
     reads_before_hiding = methods.count("GET")
     page.locator("#panel-network .home-back").click()
-    page.clock.run_for(31000)
-    page.wait_for_load_state("networkidle")
+    page.clock.set_system_time(clock_time + timedelta(seconds=62))
     page.evaluate(refresh)
     assert methods.count("GET") == reads_before_hiding, methods
 
@@ -100,9 +100,9 @@ def run(page, url, log_in, runtime="grok-2", provider="xai"):
     # The policy render replaces integration cards. Wait for the actual card
     # instead of networkidle, which can hang behind the app's recurring polls.
     expect(page.locator(f'#agent-runtime-integrations > section[data-integration="{provider}"]')).to_be_attached()
-    page.locator(f'#panel-home .home-card[data-action="open-home-integration"][data-guide="{provider}"]').click()
-    expect(page.locator(f'.integration-details[data-integration-details="{provider}"]')).to_be_visible()
+    open_home_integration(page, provider)
     page.evaluate(refresh)
     expect(target).to_contain_text(login["login_url"])
     assert methods.count("POST") == 1, methods
     page.unroute_all(behavior="wait")
+    print(f"OAuth recovery smoke: {runtime}", flush=True)

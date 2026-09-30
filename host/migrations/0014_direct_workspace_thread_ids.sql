@@ -122,18 +122,3 @@ END
 WHERE left(thread_id, length('agent_chat__')) = 'agent_chat__'
    OR left(thread_id, length('personal_web_app_builder__')) =
       'personal_web_app_builder__';
-
--- migrate:down
-SET LOCAL search_path TO public;
-
-UPDATE agent_events AS events
-SET thread_id = mapping.legacy_id
-FROM workspace_thread_id_migrations AS mapping
-WHERE events.thread_id = mapping.direct_id;
-
-UPDATE thread_sessions AS sessions
-SET thread_id = mapping.legacy_id
-FROM workspace_thread_id_migrations AS mapping
-WHERE sessions.thread_id = mapping.direct_id;
-
-DROP TABLE workspace_thread_id_migrations;

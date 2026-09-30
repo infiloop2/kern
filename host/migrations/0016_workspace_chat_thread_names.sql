@@ -5,8 +5,3 @@
 SET LOCAL search_path TO app_agent_chat;
 
 ALTER TABLE threads ADD COLUMN IF NOT EXISTS name TEXT;
-
--- migrate:down
-SET LOCAL search_path TO app_agent_chat;
-
-ALTER TABLE threads DROP COLUMN IF EXISTS name;

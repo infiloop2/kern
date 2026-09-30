@@ -12,8 +12,3 @@ WHERE
         domain LIKE '*.%'
         AND 'blob.core.windows.net' LIKE '%.' || substring(domain FROM 3)
     );
-
--- migrate:down
--- Removed operator rules cannot be reconstructed safely. Rolling back the
--- ownership code leaves those rules absent rather than inventing permissions.
-SELECT 1;

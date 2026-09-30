@@ -404,7 +404,20 @@ proxy HTTP status. System DNS errors appear as `gaierror` at the connection
 stage. The test additionally records curl's exit code (28 means timeout).
 There is no custom DNS worker or hard deadline on libc resolution inside a
 relay thread; the caller's test deadline remains bounded independently.
-No raw provider errors, response bodies, cookies or credentials are logged.
+Proxy failures additionally record the gateway, elapsed milliseconds, exception
+message, received header byte count, header completeness, CONNECT status line
+and up to 16 response headers. Exact matches for the proxy username, password,
+Basic authorization value, base username and session are redacted before the
+existing diagnostic limits (512 bytes per field, 4096 bytes per context) apply.
+Authorization, Proxy-Authorization, Cookie and Set-Cookie values are also
+redacted because the gateway can issue credentials not known to Kern.
+Incomplete trailing header lines are omitted. Decodo's `x-error-message` also
+appears as `proxy_error`, limited to 512 printable ASCII characters.
+The local relay passes this sanitized failure to the connection test, which
+shows it inline. Curl captures headers separately from the IP response; only
+the first (local relay) header block can supply a test error, regardless of
+its HTTP version or status. Response bodies and destination website headers
+are not logged.
 
 The relay shares `kern-browser.service` and its resource limits. Settings and
 connection tests use in-process calls from the existing operator-only Browser
