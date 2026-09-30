@@ -19,6 +19,13 @@ from tests.stage.stage_support import (
 )
 
 
+class McpSmokeCatalogTests(unittest.TestCase):
+    def test_deployed_smoke_expects_the_complete_static_mcp_catalog(self) -> None:
+        from host.runtime.agent_shim import mcp_shim
+        from tests.smoke.smoke_aws import STATIC_SHIM_TOOLS
+        self.assertEqual(set(STATIC_SHIM_TOOLS), {tool["name"] for tool in mcp_shim._list_tools()})
+
+
 class DictationLiveSmokeTests(unittest.TestCase):
     def test_real_recognition_failure_cannot_pass_live_smoke(self):
         smoke = AwsSmoke()

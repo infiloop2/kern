@@ -1261,9 +1261,16 @@ def session_rollout_size(server: CodexAppServer, session_id: str) -> int:
 
 
 def delete_session(server: CodexAppServer, session_id: str) -> None:
-    """Let Codex retire the rollout and its metadata, including native children."""
+    """Retire the session and native children; an absent rollout is already gone."""
     UUID(session_id)
-    server.call("thread/delete", {"threadId": session_id}, timeout=10)
+    try:
+        server.call("thread/delete", {"threadId": session_id}, timeout=10)
+    except CodexAppServerError as exc:
+        # Older app-servers reject deletion of a rollout that is already gone.
+        # Match the requested id exactly; other delete/transport failures must
+        # still reach cleanup diagnostics and stop an archived sweep's pass.
+        if str(exc) != f"no rollout found for thread id {session_id}":
+            raise
 
 
 def _start_thread(server: CodexAppServer, model: str) -> dict[str, Any]:

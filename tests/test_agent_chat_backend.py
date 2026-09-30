@@ -360,7 +360,7 @@ class AgentChatBackendTests(unittest.TestCase):
                 {"action": "accepted", "thread_id": "thread-4"},
             )
 
-        reserve.assert_called_once_with(spawned_by_thread_id=None)
+        reserve.assert_called_once_with(spawned_by_thread_id=None, name=None)
         require.assert_called_once_with("thread-4")
         admin_call.assert_called_once_with(
             "POST",
@@ -593,7 +593,7 @@ class AgentChatBackendTests(unittest.TestCase):
                 self.assertEqual(backend._reserve_generated_thread_id(), expected)
             insert_args, _kwargs = cursor.execute.call_args
             self.assertIn("ON CONFLICT (thread_id) DO NOTHING", insert_args[0])
-            self.assertEqual(insert_args[1], (expected, None))
+            self.assertEqual(insert_args[1], (expected, None, None))
             cursor.reset_mock()
 
     def test_spawned_thread_shares_the_chat_id_sequence_and_records_parent(self) -> None:
@@ -607,7 +607,7 @@ class AgentChatBackendTests(unittest.TestCase):
                 backend._reserve_generated_thread_id(spawned_by_thread_id="app-3"),
                 "thread-100",
             )
-        self.assertEqual(cursor.execute.call_args.args[1], ("thread-100", "app-3"))
+        self.assertEqual(cursor.execute.call_args.args[1], ("thread-100", "app-3", None))
 
     def test_spawned_index_selects_only_spawned_chats(self) -> None:
         cursor = unittest.mock.MagicMock()
@@ -628,38 +628,10 @@ class AgentChatBackendTests(unittest.TestCase):
             listed = backend.list_chat_threads(spawned=True)["threads"]
         self.assertEqual([item["thread_id"] for item in listed], ["thread-3"])
         self.assertEqual(listed[0]["spawned_by_thread_id"], "thread-2")
+        self.assertEqual(listed[0]["name"], "Research")
         self.assertIn("spawned_by_thread_id IS NOT NULL", cursor.execute.call_args.args[0])
         self.assertEqual(cursor.execute.call_args.args[1], (False,))
         self.assertEqual(host.call_args.args[1], "/v1/threads?limit=100&prefix=thread-")
-
-    def test_idle_spawned_agents_archive_but_running_agents_remain_active(self) -> None:
-        cursor = unittest.mock.MagicMock()
-        transaction = unittest.mock.MagicMock()
-        transaction.__enter__.return_value = cursor
-        cursor.fetchall.return_value = [("thread-1",), ("thread-2",), ("thread-3",)]
-        cursor.fetchone.side_effect = [
-            (1,), ("thread-1", True),
-        ]
-        summaries = {"threads": [
-            {"thread_id": "thread-1", "status": "idle", "last_used_at": "2020-01-01T00:00:00Z"},
-            {"thread_id": "thread-2", "status": "running", "last_used_at": "2020-01-01T00:00:00Z"},
-            {"thread_id": "thread-3", "status": "idle", "last_used_at": "2099-01-01T00:00:00Z"},
-        ]}
-        def host_call(method, path):
-            if path.startswith("/v1/threads?"):
-                return summaries
-            self.assertEqual((method, path), ("GET", "/v1/threads/thread-1"))
-            return {"thread": summaries["threads"][0]}
-        with (
-            patch("host.runtime.workspace.chat.backend.db.transaction", return_value=transaction),
-            patch.object(backend, "call_admin_api", side_effect=host_call) as host,
-        ):
-            archived = backend.archive_idle_spawned_agents()
-        self.assertEqual(archived, 1)
-        self.assertEqual(host.call_count, 2)
-        updates = [call for call in cursor.execute.call_args_list
-                   if "UPDATE chat_threads SET archived = %s" in call.args[0]]
-        self.assertEqual([call.args[1] for call in updates], [(True, "thread-1")])
 
     def test_generated_thread_creation_stops_at_durable_quota(self) -> None:
         cursor = unittest.mock.MagicMock()

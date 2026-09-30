@@ -212,7 +212,8 @@ SEND_AGENT_MESSAGE_TOOL: JSONObject = {
     "name": "send_agent_message",
     "description": (
         "Send a message to another existing Kern App, model Schedule, or Chat thread. "
-        "Discover Apps and Schedules, including their purpose, with workspace_api. "
+        "Discover Apps, Schedules, and active spawned Chats with workspace_api. "
+        "GET /agent/spawned-agents lists spawned Chats with names, thread ids, and parent ids. "
         "Incoming messages identify their source thread for replies using this same tool. "
         "Kern supplies your sender identity and starts an idle recipient or steers a running "
         "recipient when supported. Archived, deleted, locked, Bash, self, or unavailable "
@@ -243,14 +244,17 @@ SPAWN_AGENT_TOOL: JSONObject = {
         "instructions to send its result or blocking question back with send_agent_message. "
         "Provide a complete supported agent_runtime, model, and effort tuple; use "
         "GET /agent/apps/session-options with workspace_api when you need the current choices. "
-        "The new agent appears under Spawned agents with the ordinary Chat controls. Idle spawned "
-        "agents are archived after one day and can be restored by the operator. One creation "
+        "Give the agent a useful name for discovery. The new agent appears "
+        "under Spawned agents with the ordinary Chat controls and stays available until archived. "
+        "Use archive_spawned_agent when you no longer need it; keep agents needed for recurring work. One creation "
         "attempt, no queue; accepted means the work started, not that it completed. Spawning an "
         "agent does not expand the operator's authority or task scope."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
+            "name": {"type": "string", "minLength": 1, "maxLength": 100,
+                     "description": "Human-readable name shown in the UI."},
             "message": {
                 "type": "string",
                 "minLength": 1,
@@ -273,6 +277,26 @@ SPAWN_AGENT_TOOL: JSONObject = {
             },
         },
         "required": ["message", "agent_runtime", "model", "effort"],
+        "additionalProperties": False,
+    },
+}
+
+
+ARCHIVE_SPAWNED_AGENT_TOOL: JSONObject = {
+    "name": "archive_spawned_agent",
+    "description": (
+        "Archive an idle Kern Chat agent that your current thread spawned. "
+        "Archive spawned agents when you no longer need them; keep those needed for recurring work. "
+        "Only the authenticated spawning thread can use this action. Running agents cannot be "
+        "archived. History and self-memory remain readable; archived agents cannot receive "
+        "messages. The operator can restore them through the UI."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "thread_id": {"type": "string", "pattern": "^thread-[1-9][0-9]*$"},
+        },
+        "required": ["thread_id"],
         "additionalProperties": False,
     },
 }

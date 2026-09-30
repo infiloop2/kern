@@ -305,6 +305,13 @@ class AgentWorkspaceSocketTests(unittest.TestCase):
                 )
                 self.assertEqual(status, 429)
                 route.assert_not_called()
+            with patch.object(agent_api.agent_messages, "list_spawned_agents") as discovery:
+                status, _body = self.http(
+                    socket_path, "POST", "/call",
+                    {"method": "GET", "path": "/agent/spawned-agents"},
+                )
+                self.assertEqual(status, 429)
+                discovery.assert_not_called()
             with patch.object(agent_api, "_peer_thread_id", return_value="thread-1"):
                 status, body = self.http(
                     socket_path,
@@ -314,6 +321,14 @@ class AgentWorkspaceSocketTests(unittest.TestCase):
                 )
                 self.assertEqual(status, 200)
                 self.assertEqual(body["body"], {"thread_id": "thread-1"})
+                archived = {"thread_id": "thread-2", "archived": True}
+                with patch.object(agent_api.agent_messages, "archive_spawned_agent", return_value=archived):
+                    status, body = self.http(
+                        socket_path, "POST", "/call",
+                        {"method": "POST", "path": "/agent/agents/archive", "body": {"thread_id": "thread-2"}},
+                    )
+                self.assertEqual(status, 200)
+                self.assertEqual(body["body"], archived)
         finally:
             for _ in range(agent_api.MAX_CONCURRENT_LARGE_RESPONSES):
                 agent_api._LARGE_RESPONSE_SLOTS.release()

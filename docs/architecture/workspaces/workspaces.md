@@ -113,7 +113,8 @@ stored only as presentation metadata in Workspace-owned tables.
 ## Agent path
 
 The MCP shim always lists `workspace_api`, `search_conversation_history`,
-`read_thread_history`, `spawn_agent`, and `send_agent_message`. Calls go to
+`read_thread_history`, `spawn_agent`, `archive_spawned_agent`, and
+`send_agent_message`. Calls go to
 `/run/kern-workspace/agent.sock`, which is owned by the main service. The
 server authenticates the `kern-agent` uid with `SO_PEERCRED` before allocating
 a bounded handler, accepts a bounded `POST /call` envelope, and routes only
@@ -129,7 +130,9 @@ An agent selects an existing Web App explicitly through routes under
 `/agent/apps/{app_id}/...`. Any agent thread may read any existing app and
 write any active app. Archived apps remain readable but reject every agent
 mutation. Agents can create a Chat with `spawn_agent` and send a peer-labeled message
-to a known eligible thread with `send_agent_message`; see
+to a known eligible thread with `send_agent_message`. `GET /agent/spawned-agents`
+discovers active spawned Chats by name; only their authenticated
+parent can use `archive_spawned_agent` to archive them. See
 [Workspace agent API](workspace-agent-api.md).
 Agents can also list, search, fetch, create, edit, and delete swarm memory
 pages. Individual `app-*`, `thread-*`, and `schedule-*` pages are absent from

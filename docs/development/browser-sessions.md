@@ -47,19 +47,22 @@ enabled on the Ubuntu 22.04 images used by AWS and Lima. No custom AppArmor
 profile or global user-namespace override is installed. Chromium uses a local
 HTTPS relay on port 7447, running as a thread in the same Browser service and UID.
 Connection settings use a constrained database row; the proxy password is encrypted
-using Kern's existing secretbox mechanism. Before any tunnel, the relay resolves the website hostname,
-rejects mixed public/private DNS answers and non-public IPs, and pins a public
-address in the direct dial or upstream CONNECT request. Only HTTPS on port 443
-is admitted; website TLS remains end to end. This also blocks private and
-metadata destinations behind a remote proxy.
+using Kern's existing secretbox mechanism. The relay accepts HTTPS CONNECT on
+port 443. Direct uses the system's ordinary hostname connection; Decodo receives
+the website hostname and resolves it remotely. There is no DNS precheck, IP
+pinning, or custom destination-address retry loop. The Browser UID firewall is
+the host's private-network and metadata boundary. It cannot enforce the remote
+proxy's destination policy; Decodo is trusted with destination resolution and
+routing. Website TLS remains end to end.
 Chromium's implicit loopback proxy bypass is disabled, no Direct fallback is
 configured, and non-proxied WebRTC UDP, QUIC and background networking are disabled.
 The shared Browser UID can reach public TCP 443/7000 and DNS; its firewall blocks
 private/metadata destinations and keeps other UIDs off the relay. Proxy routing
 is enforced by Chromium configuration and relay code, not a separate egress UID.
 A compromised Browser process could therefore bypass the configured proxy to a
-public destination. DNS resolves on the host, including through local resolvers
-on port 53.
+public destination. Direct destinations and the Decodo gateway resolve on the
+host, including through local resolvers on port 53. Proxied website hostnames
+resolve at Decodo.
 Browser routing also rejects non-HTTPS resources. This disables Chromium's HTTP
 cache, an accepted cost of the URL policy. Agent proxy policy is unchanged.
 Chromium supplies its own user agent and client hints; Kern does not override
@@ -383,14 +386,25 @@ unreleased earlier draft.
 
 The network service verifies the gateway certificate and hostname before
 sending CONNECT or proxy authentication. It never downgrades to HTTP or ignores
-certificate failures. Destination IPs are resolved, validated and pinned before
-CONNECT; website TLS still runs end to end inside the encrypted proxy tunnel.
+certificate failures. CONNECT carries the destination hostname, matching ordinary
+HTTPS proxy clients; website TLS runs end to end inside the encrypted proxy tunnel.
 Proxy credentials never reach Chromium or the destination website.
 
-Test saved connection requests `https://api.ipify.org` through the saved route,
-using a second verified TLS layer inside the gateway TLS. It returns only the
-public IP. This is not a location, residential-classification or X login test.
-No raw provider errors, cookies or credentials enter model context or logs.
+Test saved connection runs the installed curl against `https://api.ipify.org`
+through the same local relay as Chromium. Curl verifies website TLS and limits
+the whole request to 30 seconds, including time waiting for a relay stuck in DNS;
+the subprocess has a 35-second backstop. Curl configuration files and proxy
+bypass are disabled. Proxy credentials remain in the relay and never enter curl
+arguments. The test returns only the public IP, not a location,
+residential-classification or X login verdict.
+
+Host diagnostics records Direct/gateway connection, gateway TLS and upstream
+CONNECT failures with the exception type, errno when available, hostname and
+proxy HTTP status. System DNS errors appear as `gaierror` at the connection
+stage. The test additionally records curl's exit code (28 means timeout).
+There is no custom DNS worker or hard deadline on libc resolution inside a
+relay thread; the caller's test deadline remains bounded independently.
+No raw provider errors, response bodies, cookies or credentials are logged.
 
 The relay shares `kern-browser.service` and its resource limits. Settings and
 connection tests use in-process calls from the existing operator-only Browser
@@ -407,8 +421,9 @@ Admin `POST /v1/browser/network_get` and `network_test` take `{}`.
 ```
 
 Offline tests cover encrypted authentication, certificate rejection, nested TLS,
-credential lifecycle, sticky identity, location validation, public destination
-pinning and caller isolation. Real Chromium fixtures cover locale/timezone,
+credential lifecycle, sticky identity, location validation, hostname forwarding,
+connection-test deadlines, diagnostic redaction and caller isolation. Deployment
+verification probes the Browser UID firewall's private-network/metadata blocks. Real Chromium fixtures cover locale/timezone,
 native UA/client hints, language headers/APIs, daylight-saving offsets, input,
 auth restoration and settings UI. They do not
 prove live Decodo delivery or X acceptance; those need an operator account.

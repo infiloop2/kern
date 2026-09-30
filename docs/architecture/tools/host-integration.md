@@ -96,7 +96,8 @@ Agents speak MCP, so the host bridges MCP to the tool runtime with a shim:
   an actionable message instead of withdrawing declarations, which a model reads
   as "that capability does not exist".
 - The same shim always serves **`workspace_api`**, **`search_conversation_history`**,
-  **`read_thread_history`**, **`spawn_agent`**, and **`send_agent_message`**, forwarded to the
+  **`read_thread_history`**, **`spawn_agent`**, **`archive_spawned_agent`**, and
+  **`send_agent_message`**, forwarded to the
   main Workspace service's agent socket (`/run/kern-workspace/agent.sock`) rather
   than the tools socket. Listing it grants no additional identity. Calls use
   explicit immutable resource ids; peer credentials establish only that the

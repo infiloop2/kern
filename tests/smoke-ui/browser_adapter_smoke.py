@@ -286,7 +286,7 @@ def run_proxy_failure(playwright):
                 runtime = SimpleNamespace(chromium=playwright.chromium, stop=lambda: None)
                 def launch(**options):
                     return real_launch(**{**options, "chromium_sandbox": False})
-                with patch("playwright.sync_api.sync_playwright", return_value=SimpleNamespace(start=lambda: runtime)), patch.object(playwright.chromium, "launch", side_effect=launch), patch("host.runtime.browser.browser.BROWSER_NETWORK_PORT", 8011), patch("host.runtime.browser.browser.permitted_url", return_value=True), patch("host.runtime.browser_network.relay.target", return_value=["127.0.0.1"]), patch("host.runtime.browser_network.relay.connect_proxy", side_effect=BrowserError("fixture gateway unavailable")) as proxy, patch("host.runtime.browser_network.relay.connect_addresses") as fallback:
+                with patch("playwright.sync_api.sync_playwright", return_value=SimpleNamespace(start=lambda: runtime)), patch.object(playwright.chromium, "launch", side_effect=launch), patch("host.runtime.browser.browser.BROWSER_NETWORK_PORT", 8011), patch("host.runtime.browser.browser.permitted_url", return_value=True), patch("host.runtime.browser_network.relay.target", return_value="127.0.0.1"), patch("host.runtime.browser_network.relay.connect_proxy", side_effect=BrowserError("fixture gateway unavailable")) as proxy, patch("socket.create_connection") as fallback:
                     with TunnelServer(accounts.network, port=8011) as tunnel:
                         worker = threading.Thread(target=tunnel.serve_forever, daemon=True)
                         worker.start()

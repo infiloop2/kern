@@ -41,9 +41,19 @@ Agents can create a Chat in the Spawned agents section through `spawn_agent`.
 The operation requires an initial message and a complete interactive
 runtime/model/effort tuple, returns a `thread-N` id, and records the spawning
 thread. Spawned agents use the same conversation, activity, memory, and archive
-controls as other Chats. Idle spawned agents are archived after one day and can
-be restored by the operator. Restore does not reset the host's last-activity
-time, so an unchanged thread can be archived again on the next hourly pass.
+controls as other Chats. An optional `name` is stored in the existing Chat name
+field before the first message is admitted and appears in navigation and the
+Chat list. Agents can discover active spawned Chats from any parent through
+`workspace_api` GET `/agent/spawned-agents`, which returns an `agents` array with
+ids, names, parent ids, runtime/model/effort, and status. Ordinary and archived
+Chats are excluded. Listing reserves large-response capacity; spawning and
+archiving return small status objects.
+Spawned Chats have no inactivity expiry. The spawning thread should call
+`archive_spawned_agent` when it no longer needs one, while keeping agents needed
+for recurring work. Archive explicitly checks the authenticated parent against
+the stored origin under the Chat send lock, then calls the existing idle-only
+archive operation. Other agents cannot archive it. The operator can archive and
+restore spawned Chats normally.
 The spawned agent can return its result to the
 authenticated sender with `send_agent_message` while it is active.
 

@@ -145,6 +145,64 @@ def save_attested_claude_account(account_id: str, **extra: object) -> None:
     )
 
 
+class ArchivedCodexSweepTests(unittest.TestCase):
+    """Exercise deletion responses through the sweep without a database."""
+
+    def setUp(self) -> None:
+        self.session_ids = [
+            "01900000-0000-7000-8000-000000000001",
+            "01900000-0000-7000-8000-000000000002",
+        ]
+        self.servers = {
+            runtime: MagicMock(runtime_type=runtime)
+            for runtime in admin_threads.codex_app_server.CODEX_RUNTIME_TYPES
+        }
+        self.enterContext(patch.object(
+            admin_threads.codex_app_server, "CodexAppServer",
+            side_effect=lambda runtime_type: self.servers[runtime_type],
+        ))
+        self.enterContext(patch.object(
+            admin_threads.state, "archived_thread_session_ids",
+            return_value=["thread-71", "thread-72"],
+        ))
+        self.enterContext(patch.object(admin_threads.orchestrator, "live_thread_ids", return_value=[]))
+        self.enterContext(patch.object(admin_threads.state, "mutation"))
+        self.detach = self.enterContext(patch.object(
+            admin_threads.state, "detach_archived_thread_session",
+            side_effect=lambda cur, thread_id, runtime: self.session_ids[int(thread_id.removeprefix("thread-")) - 71],
+        ))
+        self.report = self.enterContext(patch.object(admin_threads.host_errors, "report_unexpected"))
+
+    def test_missing_rollout_continues_cleanup_without_error_reporting(self) -> None:
+        for server in self.servers.values():
+            server.call.side_effect = [
+                admin_threads.codex_app_server.CodexAppServerError(
+                    f"no rollout found for thread id {self.session_ids[0]}"
+                ),
+                {},
+            ]
+        self.assertEqual(admin_threads.sweep_archived_codex_sessions(), 2 * len(self.servers))
+        self.assertEqual(self.detach.call_count, 2 * len(self.servers))
+        self.report.assert_not_called()
+        for server in self.servers.values():
+            self.assertEqual([call.args for call in server.call.call_args_list], [
+                ("thread/delete", {"threadId": session_id}) for session_id in self.session_ids
+            ])
+            server.close.assert_called_once_with()
+
+    def test_other_delete_failure_is_reported_and_stops_each_runtime_pass(self) -> None:
+        error = admin_threads.codex_app_server.CodexAppServerError("failed to delete rollout: permission denied")
+        for server in self.servers.values():
+            server.call.side_effect = error
+        self.assertEqual(admin_threads.sweep_archived_codex_sessions(), 0)
+        self.assertEqual(self.detach.call_count, len(self.servers))
+        self.assertEqual(self.report.call_count, len(self.servers))
+        for runtime, server in self.servers.items():
+            self.report.assert_any_call("admin_api.archived_codex_sweep", error, context={"runtime": runtime})
+            server.call.assert_called_once_with("thread/delete", {"threadId": self.session_ids[0]}, timeout=10)
+            server.close.assert_called_once_with()
+
+
 class CodexRotationTests(unittest.TestCase):
     """Exercise cleanup failures without requiring the production database."""
 

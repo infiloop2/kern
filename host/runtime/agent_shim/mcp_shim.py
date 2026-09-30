@@ -429,6 +429,7 @@ def _list_tools() -> list[dict[str, Any]]:
     listed.extend((SEARCH_CONVERSATION_HISTORY_TOOL, READ_THREAD_HISTORY_TOOL))
     listed.append(_mcp_declaration(agent_tool_surface.SEND_AGENT_MESSAGE_TOOL))
     listed.append(_mcp_declaration(agent_tool_surface.SPAWN_AGENT_TOOL))
+    listed.append(_mcp_declaration(agent_tool_surface.ARCHIVE_SPAWNED_AGENT_TOOL))
     listed.append(_workspace_api_tool())
     return listed
 
@@ -559,7 +560,9 @@ def _workspace_api_tool() -> dict[str, Any]:
         "name": WORKSPACE_API_TOOL_NAME,
         "description": (
             "Call Kern's bounded agent-facing Workspace API for Web Apps, global memory, "
-            "global schedules, and current thread identity. App routes use an explicit "
+            "global schedules, spawned-agent discovery, and current thread identity. "
+            "GET /agent/spawned-agents lists active spawned Chats with name, thread id, parent id, "
+            "runtime/model/effort, and status. App routes use an explicit "
             "immutable app id; GET /agent/apps lists the available ids, and POST "
             "/agent/apps creates a new app only when the operator explicitly asks. "
             "GET /agent/apps/session-options lists runtime/model/effort choices; "
@@ -601,10 +604,12 @@ def _call_typed_workspace_tool(name: str, arguments: dict[str, Any]) -> dict[str
         READ_THREAD_HISTORY_TOOL_NAME: "/agent/conversation-history/read",
         "send_agent_message": "/agent/messages",
         "spawn_agent": "/agent/agents",
+        "archive_spawned_agent": "/agent/agents/archive",
     }[name]
     label = {
         "send_agent_message": "Agent message",
         "spawn_agent": "Agent spawn",
+        "archive_spawned_agent": "Agent archive",
     }.get(name, "Conversation history")
     try:
         result = _tools_request(
@@ -634,6 +639,7 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         READ_THREAD_HISTORY_TOOL_NAME,
         "send_agent_message",
         "spawn_agent",
+        "archive_spawned_agent",
     }:
         return _call_typed_workspace_tool(
             str(name), arguments if isinstance(arguments, dict) else {}

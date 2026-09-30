@@ -182,7 +182,6 @@ class Handler(BaseHTTPRequestHandler):
 
 def maintain_storage() -> None:
     """Apply every Workspace-owned PostgreSQL retention policy."""
-    chat.archive_idle_spawned_agents()
     memory.prune_deleted()
     schedules.prune_deleted()
     web_apps.prune_revisions()

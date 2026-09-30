@@ -2,9 +2,10 @@
 
 The Workspace agent socket is the single agent-facing transport for Kern's
 Workspace service. The MCP shim exposes Web Apps, first-class self-memory,
-host-global memory, schedules, and thread identity through `workspace_api`, and provides typed
-`search_conversation_history`, `read_thread_history`, `send_agent_message`, and
-`spawn_agent` tools over the same boundary. A compact capability map and failure-prone invariants remain in the
+host-global memory, schedules, spawned-agent discovery, and thread identity
+through `workspace_api`, and provides typed
+`search_conversation_history`, `read_thread_history`, `send_agent_message`,
+`spawn_agent`, and `archive_spawned_agent` tools over the same boundary. A compact capability map and failure-prone invariants remain in the
 host-global instructions; complete App, memory, and schedule routes live in
 the root-owned release references those instructions point to. Tool listing
 itself is not dynamic discovery and grants no
@@ -28,19 +29,34 @@ POST /agent/conversation-history/search
 POST /agent/conversation-history/read
 ```
 
-Cross-thread collaboration has two peer-identity-bound routes:
+Cross-thread collaboration has three peer-identity-bound mutation routes:
 
 ```text
 POST /agent/messages
 POST /agent/agents
+POST /agent/agents/archive
 ```
 
 The first sends one host-labeled message to a known eligible App, model
 Schedule, or Chat. The second atomically presents one create-and-send operation
 to the caller: Workspace reserves the next `thread-N` Chat id and admits its
-first message with a required interactive runtime/model/effort tuple. Both use
+first message with a required interactive runtime/model/effort tuple. Messaging and spawning use
 the same header, which identifies the authenticated sender, explicitly denies
 operator authority, and gives the `send_agent_message` reply command.
+
+Spawning also accepts an optional display `name`, stored in the existing Chat
+name field.
+`archive_spawned_agent` archives only the authenticated caller's idle spawned
+Chats. It explicitly checks the stored spawning thread against the authenticated
+caller under the Chat send lock, then calls the existing archive operation.
+Spawned Chats stay available until explicitly archived. Parents should archive
+agents they no longer need and keep those used for recurring work.
+
+`GET /agent/spawned-agents` returns active spawned Chats across all parents in
+an `agents` array: thread id, display name, parent id, runtime/model/effort,
+and status. Ordinary and archived Chats are excluded. Discovery grants no
+archive ownership. Names appear in Chat navigation. This catalog uses large-response capacity;
+spawning, messaging, and archiving return small status objects.
 
 Search returns bounded message excerpts, the active `search_mode`, and an opaque
 relevance/time cursor. Text queries automatically use local hybrid vector and
