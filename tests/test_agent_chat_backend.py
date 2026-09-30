@@ -48,19 +48,19 @@ class AgentChatBackendTests(unittest.TestCase):
             {
                 "session_options": {
                     "codex": {
-                        "gpt-6-sol": ["high", "max", "ultra"],
+                        "gpt-6.1-sol": ["high", "max", "ultra", "high-fast", "high-ultrafast"],
                         "gpt-6-luna": ["high", "max"],
-                        "gpt-6-astra": ["high", "max", "ultra"],
+                        "gpt-6-astra": ["high", "max", "ultra", "high-fast", "high-ultrafast"],
                     },
                     "codex-2": {
-                        "gpt-6-sol": ["high", "max", "ultra"],
+                        "gpt-6.1-sol": ["high", "max", "ultra", "high-fast", "high-ultrafast"],
                         "gpt-6-luna": ["high", "max"],
-                        "gpt-6-astra": ["high", "max", "ultra"],
+                        "gpt-6-astra": ["high", "max", "ultra", "high-fast", "high-ultrafast"],
                     },
                     "codex-3": {
-                        "gpt-6-sol": ["high", "max", "ultra"],
+                        "gpt-6.1-sol": ["high", "max", "ultra", "high-fast", "high-ultrafast"],
                         "gpt-6-luna": ["high", "max"],
-                        "gpt-6-astra": ["high", "max", "ultra"],
+                        "gpt-6-astra": ["high", "max", "ultra", "high-fast", "high-ultrafast"],
                     },
                     "claude_code": {
                         "claude-opus-5-5": ["high", "max", "ultracode"],
@@ -192,7 +192,7 @@ class AgentChatBackendTests(unittest.TestCase):
 
     def test_composer_restores_the_new_thread_draft_on_startup(self) -> None:
         source = (CHAT_DIR / "ui" / "agent_chat.js").read_text()
-        self.assertIn('codex: "gpt-6-sol"', source)
+        self.assertIn('codex: "gpt-6.1-sol"', source)
         self.assertIn('claude_code: "claude-opus-5-5"', source)
         self.assertIn('hermes: "moonshotai.kimi-k2.5"', source)
         self.assertIn('defaultingNewThread && efforts.includes("high")', source)
@@ -258,7 +258,7 @@ class AgentChatBackendTests(unittest.TestCase):
                         "input_message": "continue",
                         "thread_id": "thread-7",
                         "agent_runtime": "codex",
-                        "model": "gpt-6-sol",
+                        "model": "gpt-6.1-sol",
                         "effort": "high",
                     }
                 ),
@@ -272,7 +272,7 @@ class AgentChatBackendTests(unittest.TestCase):
             {
                 "message": "continue",
                 "agent_runtime": "codex",
-                "model": "gpt-6-sol",
+                "model": "gpt-6.1-sol",
                 "effort": "high",
             },
         )
@@ -343,7 +343,7 @@ class AgentChatBackendTests(unittest.TestCase):
         request = {
             "input_message": "start",
             "agent_runtime": "codex",
-            "model": "gpt-6-sol",
+            "model": "gpt-6.1-sol",
             "effort": "max",
         }
         response = {
@@ -368,7 +368,7 @@ class AgentChatBackendTests(unittest.TestCase):
             {
                 "message": "start",
                 "agent_runtime": "codex",
-                "model": "gpt-6-sol",
+                "model": "gpt-6.1-sol",
                 "effort": "max",
             },
         )
@@ -617,7 +617,7 @@ class AgentChatBackendTests(unittest.TestCase):
             ("thread-3", "Research", None, None, None, None, None, None, "thread-2"),
         ]
         summaries = {"threads": [{
-            "thread_id": "thread-3", "agent_runtime": "codex", "model": "gpt-6-sol",
+            "thread_id": "thread-3", "agent_runtime": "codex", "model": "gpt-6.1-sol",
             "effort": "high", "last_used_at": "2026-09-27T12:00:00Z", "status": "idle",
         }]}
         with (
@@ -709,7 +709,7 @@ class AgentChatBackendTests(unittest.TestCase):
                 {
                     "thread_id": "thread-1",
                     "agent_runtime": "codex",
-                    "model": "gpt-6-sol",
+                    "model": "gpt-6.1-sol",
                     "effort": "high",
                     "last_used_at": "2026-07-17T10:00:00Z",
                     "latest_event_seq": 12,
@@ -774,7 +774,7 @@ class AgentChatBackendTests(unittest.TestCase):
             "threads": [{
                 "thread_id": "thread-1",
                 "agent_runtime": "codex",
-                "model": "gpt-6-sol",
+                "model": "gpt-6.1-sol",
                 "effort": "high",
                 "last_used_at": "2026-07-17T10:00:00Z",
                 "status": "idle",
@@ -910,7 +910,7 @@ class AgentChatBackendTests(unittest.TestCase):
             "threads": [{
                 "thread_id": "thread-1",
                 "agent_runtime": "codex",
-                "model": "gpt-6-sol",
+                "model": "gpt-6.1-sol",
                 "effort": "high",
                 "last_used_at": "2026-07-17T10:00:00Z",
                 "status": "queued",

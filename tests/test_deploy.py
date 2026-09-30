@@ -2048,6 +2048,36 @@ class DeployUnitTests(unittest.TestCase):
             bootstrap.index('cat > "$PGDATA_DIR/postgresql.conf"'),
         )
 
+    def test_bootstrap_discards_legacy_browser_files_without_following_symlinks(self) -> None:
+        bootstrap = render._render_bootstrap()
+        cleanup = bootstrap.split("<<'BROWSER_CLEANUP'\n", 1)[1].split("\nBROWSER_CLEANUP", 1)[0]
+        self.assertLess(bootstrap.index("systemctl stop kern-browser.service"), bootstrap.index(cleanup))
+        with tempfile.TemporaryDirectory() as temporary:
+            admin = Path(temporary)
+            legacy = admin / "browser-state"
+            preserved = admin / "postgres"
+            preserved.mkdir()
+            sentinel = preserved / "untouched"
+            sentinel.write_text("database data")
+            code = cleanup.replace('Path("/mnt/kern-admin/browser-state")', f"Path({str(legacy)!r})")
+            for kind in ("directory", "symlink", "file", "absent"):
+                with self.subTest(kind=kind):
+                    if kind == "directory":
+                        account = legacy / "acct_old"
+                        account.mkdir(parents=True)
+                        (account / "auth.json").write_text("obsolete credentials")
+                        (legacy / "connection.json").write_text("obsolete proxy settings")
+                        (legacy / "outside").symlink_to(preserved, target_is_directory=True)
+                        os.mkfifo(account / "auth.tmp")
+                    elif kind == "symlink":
+                        legacy.symlink_to(preserved, target_is_directory=True)
+                    elif kind == "file":
+                        legacy.write_text("obsolete state")
+                    subprocess.run([sys.executable, "-c", code], check=True, timeout=10)
+                    self.assertFalse(legacy.exists())
+                    self.assertFalse(legacy.is_symlink())
+                    self.assertEqual(sentinel.read_text(), "database data")
+
     def test_rendered_bootstrap_does_not_require_root_quota_support(self) -> None:
         bootstrap = render._render_bootstrap()
 

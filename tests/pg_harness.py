@@ -317,6 +317,7 @@ def ensure_database() -> None:
         "kern-admin",
         "kern-proxy",
         "kern-tools",
+        "kern-browser",
         "kern-agent-network",
         "kern-workspace",
         "kern-host-inference",

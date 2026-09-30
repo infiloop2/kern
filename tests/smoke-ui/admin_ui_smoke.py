@@ -401,6 +401,10 @@ def log_in(page, url: str) -> None:
     page.locator("#password").fill(PASSWORD)
     page.get_by_role("button", name="Log in").click()
     expect(page.locator("#app")).to_be_visible()
+    # showApp() starts policy loading without awaiting it. Its render replaces
+    # the integration cards, so a test opening one before this row exists can
+    # lose its controls or OAuth content to that later render.
+    expect(page.locator('#agent-runtime-integrations > section[data-integration="claude"]')).to_be_attached()
 
 
 def grok_video_storage_smoke(page, url: str) -> None:
@@ -889,6 +893,65 @@ def sidebar_task_style(page, selector: str) -> SidebarTaskStyle:
 def assert_sidebar_task_layout(task_style: SidebarTaskStyle) -> None:
     if task_style["clamp"] != "3" or not 1 < task_style["lines"] <= 3.1:
         raise AssertionError(f"sidebar task did not wrap within three lines: {task_style}")
+
+
+def custom_domain_smoke(page) -> None:
+    from playwright.sync_api import expect
+
+    # Custom domain controls get the same focused integration page.
+    open_home_integration(page, "custom_domain")
+    expect(page.locator("#domain-rule-count")).to_have_text("0 domains enabled")
+    expect(page.locator("#domain-rule-count")).to_have_class("status disabled")
+    expect(page.locator("#custom-domain-details")).to_be_visible()
+    expect(page.locator("#domain-rules")).to_contain_text("No custom domains configured")
+    page.locator("#policy-domain").fill("api.example.com")
+    methods = page.get_by_role("group", name="HTTP methods", exact=True)
+    expect(methods.get_by_role("button")).to_have_count(6)
+    expect(methods.locator('[aria-pressed="true"]')).to_have_count(0)
+    page.get_by_role("button", name="Add domain rule", exact=True).click()
+    expect(page.locator("[data-integration-message='custom_domain']")).to_contain_text("at least one HTTP method")
+    for method in ("GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"):
+        button = methods.get_by_role("button", name=method, exact=True)
+        button.click()
+        expect(button).to_have_attribute("aria-pressed", "true")
+        if method not in ("GET", "HEAD"):
+            button.focus()
+            page.keyboard.press("Space")
+            expect(button).to_have_attribute("aria-pressed", "false")
+    guard = page.locator("#policy-guard-request-content")
+    expect(guard).not_to_be_checked()
+    websocket = page.locator("#policy-allow-websocket")
+    websocket.check()
+    guard.check()
+    expect(websocket).not_to_be_checked()
+    expect(websocket).to_be_disabled()
+    guard.uncheck()
+    expect(websocket).to_be_enabled()
+    expect(websocket).not_to_be_checked()
+    guard.check()
+    page.get_by_role("button", name="Add domain rule", exact=True).click()
+    domain_message = page.locator("[data-integration-message='custom_domain']")
+    expect(domain_message).to_contain_text("Domain rule for api.example.com saved")
+    expect(page.locator("#domain-rule-count")).to_have_text("1 domain enabled")
+    expect(page.locator("#domain-rule-count")).to_have_class("status enabled")
+    expect(page.locator("#domain-rules")).to_contain_text("api.example.com")
+    expect(page.locator("#domain-rules")).to_contain_text("GET, HEAD")
+    expect(page.locator("#domain-rules tr").nth(1).locator("td").nth(2)).to_have_text("on")
+    expect(methods.locator('[aria-pressed="true"]')).to_have_count(0)
+    expect(guard).not_to_be_checked()
+    expect(websocket).to_be_enabled()
+    saved_policy = page.evaluate("async () => (await (await import('/admin_ui/api.js')).api('GET', '/v1/network/policy')).network_controls")
+    assert saved_policy["network_integrations"]["custom"]["domains"]["api.example.com"] == {
+        "allow_http_methods": ["GET", "HEAD"], "guard_request_content": True,
+    }
+    expect(page.locator("#domain-rules tr").nth(1).locator("td").nth(3)).to_have_text("off")
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.locator("#domain-rules").get_by_role("button", name="Remove", exact=True).click()
+    expect(domain_message).to_contain_text("Domain rule for api.example.com removed")
+    expect(page.locator("#domain-rule-count")).to_have_text("0 domains enabled")
+    expect(page.locator("#domain-rule-count")).to_have_class("status disabled")
+    expect(page.locator("#domain-rules")).to_contain_text("No custom domains configured")
+
 
 
 def desktop_smoke(page, url: str) -> None:
@@ -1752,29 +1815,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("[data-integration-message='npm_packages']")).to_contain_text("NPM Packages disabled")
     expect(npm_row).to_contain_text("disabled")
 
-    # Custom domain controls get the same focused integration page.
-    open_home_integration(page, "custom_domain")
-    expect(page.locator("#domain-rule-count")).to_have_text("0 domains enabled")
-    expect(page.locator("#domain-rule-count")).to_have_class("status disabled")
-    expect(page.locator("#custom-domain-details")).to_be_visible()
-    expect(page.locator("#domain-rules")).to_contain_text("No custom domains configured")
-    page.locator("#policy-domain").fill("api.example.com")
-    page.locator("#policy-methods").fill("GET,HEAD")
-    page.locator("#policy-allow-websocket").check()
-    page.get_by_role("button", name="Add domain rule", exact=True).click()
-    domain_message = page.locator("[data-integration-message='custom_domain']")
-    expect(domain_message).to_contain_text("Domain rule for api.example.com saved")
-    expect(page.locator("#domain-rule-count")).to_have_text("1 domain enabled")
-    expect(page.locator("#domain-rule-count")).to_have_class("status enabled")
-    expect(page.locator("#domain-rules")).to_contain_text("api.example.com")
-    expect(page.locator("#domain-rules")).to_contain_text("GET, HEAD")
-    expect(page.locator("#domain-rules")).to_contain_text("allowed")
-    page.once("dialog", lambda dialog: dialog.accept())
-    page.locator("#domain-rules").get_by_role("button", name="Remove", exact=True).click()
-    expect(domain_message).to_contain_text("Domain rule for api.example.com removed")
-    expect(page.locator("#domain-rule-count")).to_have_text("0 domains enabled")
-    expect(page.locator("#domain-rule-count")).to_have_class("status disabled")
-    expect(page.locator("#domain-rules")).to_contain_text("No custom domains configured")
+    custom_domain_smoke(page)
 
     open_home_integration(page, "github")
     github_row = page.locator(".integration-row[data-integration='github']")
@@ -2057,8 +2098,24 @@ def tools_smoke(page, url: str) -> None:
             body='{"error":{"message":"mock WhatsApp link failure"}}',
         ),
     )
+    # A tool status refresh can replace the row immediately after the error is
+    # shown. Observe the message mutation so the test checks that the user saw
+    # the error without depending on how long this inline status survives.
+    page.evaluate("""() => {
+      window.__whatsappLinkErrorSeen = false;
+      const expected = 'mock WhatsApp link failure';
+      const containsError = node => node.textContent?.includes(expected);
+      new MutationObserver(records => {
+        if (records.some(record => containsError(record.target)
+          || [...record.addedNodes].some(containsError))) {
+          window.__whatsappLinkErrorSeen = true;
+        }
+      }).observe(document.querySelector('#tools'), {
+        subtree: true, childList: true, characterData: true,
+      });
+    }""")
     whatsapp_row.get_by_role("button", name="Link device", exact=True).click()
-    expect(whatsapp_row).to_contain_text("mock WhatsApp link failure")
+    page.wait_for_function("() => window.__whatsappLinkErrorSeen", timeout=5000)
     expect(whatsapp_row.get_by_role("button", name="Link device", exact=True)).to_be_enabled()
     page.unroute(connect_url)
     whatsapp_row.get_by_role("button", name="Link device", exact=True).click()

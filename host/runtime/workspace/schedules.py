@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
+import json
 import re
 import threading
 from typing import Any
@@ -21,14 +22,17 @@ MAX_SCHEDULES = 100
 MAX_NAME_CHARS = 100
 MAX_MESSAGE_CHARS = 12_000
 MAX_SESSION_VALUE_CHARS = 100
-MIN_INTERVAL_MINUTES = 5
-MAX_INTERVAL_MINUTES = 7 * 24 * 60
+MAX_TRIGGERS = 5
+MAX_DAILY_TIMES = 24
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 DEFAULT_PAGE_LIMIT = 40
 MAX_PAGE_LIMIT = 100
 MAX_REVISION_PAGE_LIMIT = 10
 REVISION_RETAINED = 100
 DELETED_RETAIN_DAYS = 90
-DUE_BATCH = 10
+# Inspect the full active quota each poll so simultaneous calendar times do
+# not become stale merely because of our own batch limit.
+DUE_BATCH = MAX_SCHEDULES
 POLL_SECONDS = 30
 TIME_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 DAILY_TIME_RE = re.compile(r"^([01][0-9]|2[0-3]):[0-5][0-9]$")
@@ -37,9 +41,8 @@ MAX_BIGINT = 2**63 - 1
 _SCHEDULER_WAKE = threading.Event()
 
 SCHEDULE_COLUMNS = (
-    "id, name, message, cadence, interval_minutes, daily_time, agent_runtime,"
-    " model, effort, revision, deleted_at, last_run_at, next_run_at,"
-    " created_at, updated_at, thread_id, purpose"
+    "id, name, triggers, agent_runtime, model, effort, revision, deleted_at,"
+    " last_run_at, next_run_at, created_at, updated_at, thread_id, purpose"
 )
 
 
@@ -161,7 +164,7 @@ def load_schedule(schedule_id: int, *, include_deleted: bool = False) -> dict[st
     with db.transaction() as cur:
         cur.execute(f"SELECT {SCHEDULE_COLUMNS} FROM schedules WHERE id = %s", (schedule_id,))
         row = cur.fetchone()
-    if row is None or (not include_deleted and row[10] is not None):
+    if row is None or (not include_deleted and row[7] is not None):
         raise WorkspaceError(HTTPStatus.NOT_FOUND, "schedule not found")
     return _schedule_row(row)
 
@@ -169,17 +172,17 @@ def load_schedule(schedule_id: int, *, include_deleted: bool = False) -> dict[st
 def create_schedule(body: Any, *, actor: str) -> dict[str, Any]:
     request = _object(body, "schedule request")
     required = {
-        "name", "message", "cadence", "agent_runtime", "model", "effort"
+        "name", "triggers", "agent_runtime", "model", "effort"
     }
     _require_keys(
         request,
-        required | {"interval_minutes", "daily_time", "purpose"},
+        required | {"purpose"},
         required,
     )
     fields = _validated_fields(request)
     now = datetime.now(timezone.utc)
     now_ts = _format_ts(now)
-    next_run = _format_ts(_next_run(fields, now))
+    next_run = _next_run(fields, now)
     with db.transaction() as cur:
         # Serialize only schedule creation so concurrent agents cannot both
         # observe the last free quota slot. Edits and scheduler claims remain
@@ -199,14 +202,12 @@ def create_schedule(body: Any, *, actor: str) -> dict[str, Any]:
         thread_id = f"schedule-{schedule_id}"
         cur.execute(
             "INSERT INTO schedules"
-            " (id, name, message, cadence, interval_minutes, daily_time, agent_runtime,"
-            " model, effort, revision, deleted_at, next_run_at, created_at, updated_at,"
-            " thread_id, purpose)"
-            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 1, NULL, %s, %s, %s, %s, %s)"
+            " (id, name, triggers, agent_runtime, model, effort, revision,"
+            " deleted_at, next_run_at, created_at, updated_at, thread_id, purpose)"
+            " VALUES (%s, %s, %s::jsonb, %s, %s, %s, 1, NULL, %s, %s, %s, %s, %s)"
             f" RETURNING {SCHEDULE_COLUMNS}",
             (
-                schedule_id, fields["name"], fields["message"], fields["cadence"],
-                fields["interval_minutes"], fields["daily_time"],
+                schedule_id, fields["name"], json.dumps(fields["triggers"]),
                 fields["agent_runtime"], fields["model"], fields["effort"],
                 next_run, now_ts, now_ts, thread_id, fields["purpose"],
             ),
@@ -221,10 +222,10 @@ def create_schedule(body: Any, *, actor: str) -> dict[str, Any]:
 def update_schedule(schedule_id: int, body: Any, *, actor: str) -> dict[str, Any]:
     request = _object(body, "schedule request")
     required = {
-        "expected_revision", "name", "message", "cadence", "agent_runtime",
+        "expected_revision", "name", "triggers", "agent_runtime",
         "model", "effort",
     }
-    _require_keys(request, required | {"interval_minutes", "daily_time", "purpose"}, required)
+    _require_keys(request, required | {"purpose"}, required)
     expected = _expected_revision(request["expected_revision"])
     fields = _validated_fields(request)
     now = datetime.now(timezone.utc)
@@ -235,32 +236,23 @@ def update_schedule(schedule_id: int, body: Any, *, actor: str) -> dict[str, Any
             (schedule_id,),
         )
         row = cur.fetchone()
-        if row is None or row[10] is not None:
+        if row is None or row[7] is not None:
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "schedule not found")
         current = _schedule_row(row)
         if "purpose" not in request:
             fields["purpose"] = current["purpose"]
         if current["revision"] != expected:
             raise WorkspaceError(HTTPStatus.CONFLICT, "schedule changed; reload and retry")
-        cadence_changed = any(
-            fields[key] != current[key]
-            for key in ("cadence", "interval_minutes", "daily_time")
-        )
-        next_run = (
-            _format_ts(_next_run(fields, now))
-            if cadence_changed
-            else current["next_run_at"]
-        )
+        timing_changed = _timings(fields) != _timings(current)
+        next_run = _next_run(fields, now) if timing_changed else current["next_run_at"]
         revision = expected + 1
         cur.execute(
-            "UPDATE schedules SET name = %s, message = %s, cadence = %s,"
-            " interval_minutes = %s, daily_time = %s, agent_runtime = %s, model = %s,"
-            " effort = %s, revision = %s, next_run_at = %s,"
-            " updated_at = %s, purpose = %s WHERE id = %s"
+            "UPDATE schedules SET name = %s, triggers = %s::jsonb,"
+            " agent_runtime = %s, model = %s, effort = %s, revision = %s,"
+            " next_run_at = %s, updated_at = %s, purpose = %s WHERE id = %s"
             f" RETURNING {SCHEDULE_COLUMNS}",
             (
-                fields["name"], fields["message"], fields["cadence"],
-                fields["interval_minutes"], fields["daily_time"], fields["agent_runtime"],
+                fields["name"], json.dumps(fields["triggers"]), fields["agent_runtime"],
                 fields["model"], fields["effort"], revision,
                 next_run, now_ts, fields["purpose"], schedule_id,
             ),
@@ -319,7 +311,7 @@ def delete_schedule(
             (schedule_id,),
         )
         row = cur.fetchone()
-        if row is None or row[10] is not None:
+        if row is None or row[7] is not None:
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "schedule not found")
         current = _schedule_row(row)
         if current["revision"] != expected:
@@ -351,8 +343,8 @@ def list_revisions(schedule_id: int, query: dict[str, list[str]]) -> dict[str, A
         if cur.fetchone() is None:
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "schedule not found")
         cur.execute(
-            "SELECT id, revision, name, message, cadence, interval_minutes, daily_time,"
-            " agent_runtime, model, effort, deleted, actor, created_at, purpose"
+            "SELECT id, revision, name, triggers, agent_runtime, model, effort,"
+            " deleted, actor, created_at, purpose"
             f" FROM schedule_revisions WHERE schedule_id = %s{clause}"
             " ORDER BY id DESC LIMIT %s",
             (*params, limit + 1),
@@ -363,10 +355,10 @@ def list_revisions(schedule_id: int, query: dict[str, list[str]]) -> dict[str, A
     response: dict[str, Any] = {
         "revisions": [
             {
-                "id": row[0], "revision": row[1], "name": row[2], "message": row[3],
-                "cadence": row[4], "interval_minutes": row[5], "daily_time": row[6],
-                "agent_runtime": row[7], "model": row[8], "effort": row[9],
-                "deleted": row[10], "actor": row[11], "created_at": row[12], "purpose": row[13],
+                "id": row[0], "revision": row[1], "name": row[2],
+                "triggers": _json_triggers(row[3]), "agent_runtime": row[4],
+                "model": row[5], "effort": row[6], "deleted": row[7],
+                "actor": row[8], "created_at": row[9], "purpose": row[10],
             }
             for row in rows
         ]
@@ -398,8 +390,8 @@ def restore_revision(schedule_id: int, revision: int, body: Any) -> dict[str, An
         if current["revision"] != expected:
             raise WorkspaceError(HTTPStatus.CONFLICT, "schedule changed; reload and retry")
         cur.execute(
-            "SELECT name, message, cadence, interval_minutes, daily_time, agent_runtime,"
-            " model, effort, deleted, purpose FROM schedule_revisions"
+            "SELECT name, triggers, agent_runtime, model, effort, deleted, purpose"
+            " FROM schedule_revisions"
             " WHERE schedule_id = %s AND revision = %s",
             (schedule_id, revision),
         )
@@ -407,10 +399,9 @@ def restore_revision(schedule_id: int, revision: int, body: Any) -> dict[str, An
         if source is None:
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "schedule revision not found")
         fields = {
-            "name": source[0], "message": source[1], "cadence": source[2],
-            "interval_minutes": source[3], "daily_time": source[4],
-            "agent_runtime": source[5], "model": source[6], "effort": source[7],
-            "purpose": source[9],
+            "name": source[0], "triggers": _json_triggers(source[1]),
+            "agent_runtime": source[2], "model": source[3], "effort": source[4],
+            "purpose": source[6],
         }
         fields = _validated_fields(fields)
         error = session_config_error(
@@ -419,7 +410,7 @@ def restore_revision(schedule_id: int, revision: int, body: Any) -> dict[str, An
         if error is not None:
             raise WorkspaceError(HTTPStatus.CONFLICT, f"schedule revision cannot be restored: {error}")
         new_revision = expected + 1
-        deleted_at = now_ts if source[8] else None
+        deleted_at = now_ts if source[5] else None
         if current["deleted"] and deleted_at is None:
             cur.execute("SELECT COUNT(*) FROM schedules WHERE deleted_at IS NULL")
             count_row = cur.fetchone()
@@ -429,16 +420,14 @@ def restore_revision(schedule_id: int, revision: int, body: Any) -> dict[str, An
                     HTTPStatus.CONFLICT,
                     f"Workspace already has {MAX_SCHEDULES} active schedules",
                 )
-        next_run = _format_ts(_next_run(fields, now))
+        next_run = _next_run(fields, now)
         cur.execute(
-            "UPDATE schedules SET name = %s, message = %s, cadence = %s,"
-            " interval_minutes = %s, daily_time = %s, agent_runtime = %s, model = %s,"
-            " effort = %s, revision = %s, deleted_at = %s,"
-            " next_run_at = %s, updated_at = %s, purpose = %s WHERE id = %s"
+            "UPDATE schedules SET name = %s, triggers = %s::jsonb,"
+            " agent_runtime = %s, model = %s, effort = %s, revision = %s,"
+            " deleted_at = %s, next_run_at = %s, updated_at = %s, purpose = %s WHERE id = %s"
             f" RETURNING {SCHEDULE_COLUMNS}",
             (
-                fields["name"], fields["message"], fields["cadence"],
-                fields["interval_minutes"], fields["daily_time"], fields["agent_runtime"],
+                fields["name"], json.dumps(fields["triggers"]), fields["agent_runtime"],
                 fields["model"], fields["effort"], new_revision,
                 deleted_at, next_run, now_ts, fields["purpose"], schedule_id,
             ),
@@ -467,8 +456,9 @@ def run_due(now: datetime | None = None) -> int:
         delivery = _claim_delivery(schedule_id, instant)
         if delivery is None:
             continue
-        _deliver_message(delivery)
-        delivered += 1
+        for index, trigger in delivery["due_triggers"]:
+            _deliver_message(delivery, trigger["prompt"], index)
+            delivered += 1
     return delivered
 
 
@@ -484,18 +474,25 @@ def _claim_delivery(schedule_id: int, now: datetime) -> dict[str, Any] | None:
         if row is None:
             return None
         schedule = _schedule_row(row)
+        # Only this UTC minute is eligible. Older occurrences are discarded,
+        # including after downtime, without replaying a backlog.
+        schedule["due_triggers"] = [
+            (index, trigger) for index, trigger in enumerate(schedule["triggers"])
+            if _matches(trigger, now)
+        ]
         cur.execute(
             "UPDATE schedules SET next_run_at = %s, last_run_at = %s WHERE id = %s",
-            (_format_ts(_next_run(schedule, now)), now_ts, schedule_id),
+            (_next_run(schedule, now),
+             now_ts if schedule["due_triggers"] else schedule["last_run_at"], schedule_id),
         )
     return schedule
 
 
-def _deliver_message(schedule: dict[str, Any]) -> None:
+def _deliver_message(schedule: dict[str, Any], prompt: str, trigger_index: int) -> None:
     thread_id = schedule["thread_id"]
     assert isinstance(thread_id, str)
     body = {
-        "message": AUTOMATED_TRIGGER_PREFIX + schedule["message"],
+        "message": AUTOMATED_TRIGGER_PREFIX + prompt,
         "agent_runtime": schedule["agent_runtime"],
         "model": schedule["model"],
         "effort": schedule["effort"],
@@ -508,7 +505,7 @@ def _deliver_message(schedule: dict[str, Any]) -> None:
         host_errors.report_warning(
             "workspace.scheduler.delivery",
             exc,
-            context={"thread_id": thread_id},
+            context={"thread_id": thread_id, "trigger_index": trigger_index, "revision": schedule["revision"]},
             kind="scheduled_delivery_failed",
         )
         return
@@ -518,7 +515,7 @@ def _deliver_message(schedule: dict[str, Any]) -> None:
         host_errors.report_warning(
             "workspace.scheduler.delivery",
             "host admin returned invalid acceptance",
-            context={"thread_id": thread_id},
+            context={"thread_id": thread_id, "trigger_index": trigger_index, "revision": schedule["revision"]},
             kind="scheduled_delivery_failed",
         )
 
@@ -533,32 +530,40 @@ def scheduler_loop() -> None:
             host_errors.report_unexpected("workspace.scheduler", exc)
 
 
+def _json_triggers(value: Any) -> list[dict[str, Any]]:
+    return json.loads(value) if isinstance(value, str) else value
+
+
 def _schedule_row(row: tuple[Any, ...]) -> dict[str, Any]:
     return {
-        "id": row[0], "name": row[1], "message": row[2], "cadence": row[3],
-        "interval_minutes": row[4], "daily_time": row[5], "agent_runtime": row[6],
-        "model": row[7], "effort": row[8], "revision": row[9],
-        "deleted": row[10] is not None, "last_run_at": row[11],
-        "next_run_at": row[12], "created_at": row[13], "updated_at": row[14],
-        "thread_id": row[15], "purpose": row[16],
+        "id": row[0], "name": row[1], "triggers": _json_triggers(row[2]),
+        "agent_runtime": row[3], "model": row[4], "effort": row[5],
+        "revision": row[6], "deleted": row[7] is not None, "last_run_at": row[8],
+        "next_run_at": row[9], "created_at": row[10], "updated_at": row[11],
+        "thread_id": row[12], "purpose": row[13],
     }
 
 
 def _schedule_summary(schedule: dict[str, Any]) -> dict[str, Any]:
-    return {key: value for key, value in schedule.items() if key != "message"}
+    return {**schedule, "triggers": _timings(schedule)}
+
+
+def _timings(schedule: dict[str, Any]) -> list[dict[str, Any]]:
+    return [{key: value for key, value in trigger.items() if key != "prompt"}
+            for trigger in schedule["triggers"]]
 
 
 def _insert_revision(cur: Any, schedule: dict[str, Any], actor: str, now: str) -> None:
     cur.execute(
         "INSERT INTO schedule_revisions"
-        " (schedule_id, revision, name, message, cadence, interval_minutes, daily_time,"
-        " agent_runtime, model, effort, deleted, actor, created_at, purpose)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+        " (schedule_id, revision, name, triggers, agent_runtime, model, effort,"
+        " deleted, actor, created_at, purpose)"
+        " VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)",
         (
-            schedule["id"], schedule["revision"], schedule["name"], schedule["message"],
-            schedule["cadence"], schedule["interval_minutes"], schedule["daily_time"],
-            schedule["agent_runtime"], schedule["model"], schedule["effort"],
-            schedule["deleted"], actor, now, schedule["purpose"],
+            schedule["id"], schedule["revision"], schedule["name"],
+            json.dumps(schedule["triggers"]), schedule["agent_runtime"],
+            schedule["model"], schedule["effort"], schedule["deleted"],
+            actor, now, schedule["purpose"],
         ),
     )
 
@@ -606,24 +611,7 @@ def validate_schedule_name(name: Any) -> str:
 
 def _validated_fields(value: dict[str, Any]) -> dict[str, Any]:
     name = validate_schedule_name(value.get("name"))
-    message = value.get("message")
-    if not isinstance(message, str) or not message.strip() or len(message) > MAX_MESSAGE_CHARS:
-        raise WorkspaceError(HTTPStatus.BAD_REQUEST, f"message must be between 1 and {MAX_MESSAGE_CHARS} characters")
-    cadence = value.get("cadence")
-    interval = value.get("interval_minutes")
-    daily = value.get("daily_time")
-    if cadence == "interval":
-        if isinstance(interval, bool) or not isinstance(interval, int) or not MIN_INTERVAL_MINUTES <= interval <= MAX_INTERVAL_MINUTES:
-            raise WorkspaceError(HTTPStatus.BAD_REQUEST, f"interval_minutes must be between {MIN_INTERVAL_MINUTES} and {MAX_INTERVAL_MINUTES}")
-        if daily is not None:
-            raise WorkspaceError(HTTPStatus.BAD_REQUEST, "daily_time does not apply to interval cadence")
-    elif cadence == "daily":
-        if not isinstance(daily, str) or DAILY_TIME_RE.fullmatch(daily) is None:
-            raise WorkspaceError(HTTPStatus.BAD_REQUEST, "daily_time must be HH:MM in UTC")
-        if interval is not None:
-            raise WorkspaceError(HTTPStatus.BAD_REQUEST, "interval_minutes does not apply to daily cadence")
-    else:
-        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "cadence must be interval or daily")
+    triggers = _validated_triggers(value.get("triggers"))
     session = {
         "agent_runtime": value.get("agent_runtime"),
         "model": value.get("model"),
@@ -636,31 +624,79 @@ def _validated_fields(value: dict[str, Any]) -> dict[str, Any]:
                 f"{label} must be between 1 and {MAX_SESSION_VALUE_CHARS} characters",
             )
     if session["agent_runtime"] == SCRIPT_RUNTIME:
-        # A script schedule's message is the script's path, so the one thing
-        # this layer can check about it changes shape entirely. Whether the
-        # file exists is the launcher's decision at run time — the workspace
-        # cannot read the agent's private home — but a path that could never
-        # run is rejected here, while the operator is still editing the form,
-        # instead of becoming a failed run in an hour.
-        error = script_path_error(message)
-        if error is not None:
-            raise WorkspaceError(HTTPStatus.BAD_REQUEST, error)
+        for trigger in triggers:
+            error = script_path_error(trigger["prompt"])
+            if error is not None:
+                raise WorkspaceError(HTTPStatus.BAD_REQUEST, error)
     return {
-        "name": name, "message": message, "cadence": cadence,
-        "purpose": validate_purpose(value.get("purpose", "")),
-        "interval_minutes": interval, "daily_time": daily,
-        **session,
+        "name": name, "triggers": triggers,
+        "purpose": validate_purpose(value.get("purpose", "")), **session,
     }
 
 
-def _next_run(schedule: dict[str, Any], after: datetime) -> datetime:
-    if schedule["cadence"] == "interval":
-        return after + timedelta(minutes=int(schedule["interval_minutes"]))
-    hour, minute = (int(part) for part in str(schedule["daily_time"]).split(":"))
-    candidate = after.astimezone(timezone.utc).replace(
-        hour=hour, minute=minute, second=0, microsecond=0
-    )
-    return candidate if candidate > after else candidate + timedelta(days=1)
+def _validated_triggers(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or len(value) > MAX_TRIGGERS:
+        raise WorkspaceError(HTTPStatus.BAD_REQUEST, f"triggers must be an array of at most {MAX_TRIGGERS} entries")
+    result = []
+    for item in value:
+        trigger = _object(item, "trigger")
+        kind = trigger.get("type")
+        if kind not in ("daily", "weekly"):
+            raise WorkspaceError(HTTPStatus.BAD_REQUEST, "trigger type must be daily or weekly")
+        keys = {"type", "prompt", "times"} if kind == "daily" else {"type", "prompt", "days", "time"}
+        _require_keys(trigger, keys, keys)
+        prompt = trigger["prompt"]
+        if not isinstance(prompt, str) or not prompt.strip() or len(prompt) > MAX_MESSAGE_CHARS:
+            raise WorkspaceError(HTTPStatus.BAD_REQUEST, f"trigger prompt must be between 1 and {MAX_MESSAGE_CHARS} characters")
+        if kind == "daily":
+            times = trigger["times"]
+            if not isinstance(times, list) or not 1 <= len(times) <= MAX_DAILY_TIMES:
+                raise WorkspaceError(HTTPStatus.BAD_REQUEST, "daily times must contain 1–24 distinct UTC times")
+            for time in times:
+                _validate_time(time)
+            if len(set(times)) != len(times):
+                raise WorkspaceError(HTTPStatus.BAD_REQUEST, "daily times must be distinct")
+            result.append({"type": kind, "times": sorted(times), "prompt": prompt})
+        else:
+            _validate_time(trigger["time"])
+            days = trigger["days"]
+            if (not isinstance(days, list) or not 1 <= len(days) <= 7
+                    or any(not isinstance(day, str) or day not in WEEKDAYS for day in days)
+                    or len(set(days)) != len(days)):
+                raise WorkspaceError(HTTPStatus.BAD_REQUEST, "weekly days must contain distinct mon, tue, wed, thu, fri, sat or sun values")
+            result.append({"type": kind, "days": sorted(days, key=WEEKDAYS.index),
+                           "time": trigger["time"], "prompt": prompt})
+    return result
+
+
+def _validate_time(value: Any) -> None:
+    if not isinstance(value, str) or DAILY_TIME_RE.fullmatch(value) is None:
+        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "trigger times must be HH:MM in UTC")
+
+
+def _matches(trigger: dict[str, Any], instant: datetime) -> bool:
+    utc = instant.astimezone(timezone.utc)
+    time = utc.strftime("%H:%M")
+    if trigger["type"] == "daily":
+        return time in trigger["times"]
+    return WEEKDAYS[utc.weekday()] in trigger["days"] and time == trigger["time"]
+
+
+def _next_run(schedule: dict[str, Any], after: datetime) -> str | None:
+    utc = after.astimezone(timezone.utc)
+    candidates = []
+    for trigger in schedule["triggers"]:
+        times = trigger["times"] if trigger["type"] == "daily" else [trigger["time"]]
+        for offset in range(8):
+            date = utc + timedelta(days=offset)
+            if trigger["type"] == "weekly" and WEEKDAYS[date.weekday()] not in trigger["days"]:
+                continue
+            for time in times:
+                hour, minute = map(int, time.split(":"))
+                candidate = date.replace(hour=hour, minute=minute, second=0, microsecond=0)
+                if candidate > utc:
+                    candidates.append(candidate)
+    return _format_ts(min(candidates)) if candidates else None
 
 
 def _object(value: Any, label: str) -> dict[str, Any]:

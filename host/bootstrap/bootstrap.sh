@@ -6,7 +6,7 @@ umask 077
 # cwd so runuser children do not inherit an unreadable directory.
 cd /
 NODE_VERSION=22.12.0
-CODEX_CLI_VERSION=0.155.1
+CODEX_CLI_VERSION=0.159.0
 CLAUDE_CODE_VERSION=2.1.284
 # Grok Build, xAI's coding agent. The npm package is a JS trampoline plus a
 # per-platform optional dependency carrying a brotli-compressed binary; see
@@ -226,7 +226,7 @@ ensure_user cloudflared "$CLOUDFLARED_UID" cloudflared /nonexistent
 # The tools service holds no durable state of its own (its state lives in the
 # tool tables, reached with a scoped Postgres role), so it needs no home.
 ensure_user kern-tools "$KERN_TOOLS_UID" kern-tools /nonexistent
-ensure_user kern-browser "$KERN_BROWSER_UID" kern-browser /mnt/kern-admin/browser-state
+ensure_user kern-browser "$KERN_BROWSER_UID" kern-browser /nonexistent
 # The agent-network service serves read-only policy introspection with no
 # filesystem state or egress.
 ensure_user kern-agent-network "$KERN_AGENT_NETWORK_UID" kern-agent-network /nonexistent
@@ -310,7 +310,6 @@ for directory in (
     # a symlink that a later root write follows.
     admin_state,
     admin_mount / "admin-home",
-    admin_mount / "browser-state",
     admin_mount / "postgres",
     pgdata.parent,
     pgdata,
@@ -717,6 +716,7 @@ cat > "$PGDATA_DIR/pg_hba.conf" <<'PGHBA'
 local  kern_admin  kern-admin  peer
 local  kern_admin  kern-proxy  peer
 local  kern_admin  kern-tools  peer
+local  kern_admin  kern-browser  peer
 local  kern_admin  kern-host-inference  peer
 local  kern_admin  kern-agent-network  peer
 local  kern_admin  kern-workspace  peer
@@ -772,6 +772,9 @@ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-proxy') THEN
     CREATE ROLE "kern-proxy" LOGIN;
   END IF;
+  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-browser') THEN
+    CREATE ROLE "kern-browser" LOGIN;
+  END IF;
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'kern-tools') THEN
     CREATE ROLE "kern-tools" LOGIN;
   END IF;
@@ -802,6 +805,7 @@ runuser -u postgres -- psql -d kern_admin -v ON_ERROR_STOP=1 --quiet \
   -c "GRANT CREATE ON SCHEMA public TO \"kern-admin\";" \
   -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-proxy\";" \
   -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-tools\";" \
+  -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-browser\";" \
   -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-host-inference\";" \
   -c "GRANT CONNECT ON DATABASE kern_admin TO \"kern-agent-network\";" \
   -c 'GRANT CONNECT ON DATABASE kern_admin TO "kern-workspace";'
@@ -870,6 +874,23 @@ echo "== migrating admin state schema =="
 runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.migrate up --to 13
 adopt_workspace_migration_history
 runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.migrate up
+# Discard retired Browser disk state; durable Browser state now lives in Postgres.
+# Stop an older service before removing files it could still write.
+if systemctl cat kern-browser.service >/dev/null 2>&1; then
+  systemctl stop kern-browser.service
+fi
+python3 - <<'BROWSER_CLEANUP'
+from pathlib import Path
+import shutil
+
+legacy = Path("/mnt/kern-admin/browser-state")
+if legacy.is_symlink():
+    legacy.unlink()
+elif legacy.is_dir():
+    shutil.rmtree(legacy)
+else:
+    legacy.unlink(missing_ok=True)
+BROWSER_CLEANUP
 python3 - <<'PY' | runuser -u kern-admin -- env PYTHONPATH=/opt/kern-host python3 -m host.runtime.deploy.write_config > /tmp/kern_effective_config.json
 import json, pathlib
 payload = json.loads(pathlib.Path('/tmp/kern_payload.json').read_text())
@@ -1316,7 +1337,6 @@ DURABLE_PATH_OWNERSHIP="
 /mnt/kern-admin/proxy-state/generated-certs kern-proxy:kern-proxy 700
 /mnt/kern-admin/proxy-state/network_proxy_ca.key kern-proxy:kern-proxy 600
 /mnt/kern-admin/proxy-state/network_proxy_ca.crt kern-proxy:kern-proxy 644
-/mnt/kern-admin/browser-state kern-browser:kern-browser 700
 /mnt/kern-admin/tools-state kern-tools:kern-tools 700
 /mnt/kern-admin/tools-state/assets kern-tools:kern-tools 700
 /mnt/kern-admin/tools-state/whatsapp kern-tools:kern-tools 700
@@ -1482,14 +1502,18 @@ $(cat /tmp/kern_cloudflare_rules)
     meta skuid "kern-proxy" udp dport 53 accept
     meta skuid "kern-proxy" tcp dport 53 accept
     meta skuid "kern-proxy" tcp dport { 80, 443 } accept
-    # Browser DNS matches kern-tools, including local resolvers. Other traffic
-    # may reach public HTTPS only. Block internal and metadata destinations
-    # before established-flow and broad loopback rules.
+    # Only Browser can use its in-process HTTPS relay. Browser proxy routing
+    # is configured in Chromium; the UID retains public HTTPS and DNS egress.
+    # Deny other callers before general loopback rules.
+    oif lo ip daddr 127.0.0.1 tcp dport @BROWSER_NETWORK_PORT@ meta skuid "kern-browser" accept
+    oif lo tcp dport @BROWSER_NETWORK_PORT@ drop
+    oif lo tcp sport @BROWSER_NETWORK_PORT@ meta skuid "kern-browser" ct state established accept
+    oif lo tcp sport @BROWSER_NETWORK_PORT@ drop
     meta skuid "kern-browser" udp dport 53 accept
     meta skuid "kern-browser" tcp dport 53 accept
     meta skuid "kern-browser" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 } drop
     meta skuid "kern-browser" ip6 daddr != 2000::/3 drop
-    meta skuid "kern-browser" tcp dport 443 accept
+    meta skuid "kern-browser" tcp dport { 443, 7000 } accept
     meta skuid "kern-browser" drop
     meta skuid "kern-tools" udp dport 53 accept
     meta skuid "kern-tools" tcp dport 53 accept
@@ -1725,8 +1749,8 @@ UNIT
 cat > /etc/systemd/system/kern-browser.service <<'UNIT'
 [Unit]
 Description=Kern Private Browser Sessions
-After=network-online.target
-Wants=network-online.target
+After=network-online.target kern-postgres.service
+Wants=network-online.target kern-postgres.service
 
 [Service]
 User=kern-browser
@@ -1748,8 +1772,7 @@ NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
-ReadWritePaths=/mnt/kern-admin/browser-state
-InaccessiblePaths=/mnt/kern-agent /mnt/kern-admin/admin-state /mnt/kern-admin/admin-home /mnt/kern-admin/proxy-state /mnt/kern-admin/tools-state /mnt/kern-admin/postgres /run/postgresql
+InaccessiblePaths=/mnt/kern-agent /mnt/kern-admin
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 CPUQuota=100%
 CPUWeight=25

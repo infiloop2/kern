@@ -28,7 +28,7 @@ actually needs:
 - `openai_text_completion(...)` sends a bounded prompt and strict JSON schema.
   The caller supplies `model`, `instructions`, `reasoning_effort`,
   `max_output_tokens` (1 to 4096), and `timeout_seconds` (0.1 to 60 seconds).
-  Supported models are `gpt-6-luna` and `gpt-6-sol`. The shared socket client adds a fixed 100 ms
+  Supported models are `gpt-6-luna` and `gpt-6.1-sol`. The shared socket client adds a fixed 100 ms
   for local dispatch and response overhead.
   There is no feature-purpose field or purpose-to-model mapping.
   Task titles keep their Luna/none/400-token settings and existing timeout.
@@ -101,7 +101,13 @@ GitHub pushes are outside this feature.
 
 The admin service starts one serial review loop after binding its listener.
 It schedules checks 25 to 35 minutes apart, after the previous run finishes,
-and pauses from 00:00 to 08:00 UTC. Startup schedules the next check rather than
+and pauses during a saved daily sleep window (00:00 to 08:00 UTC by default).
+Operators can set sleep and wake times in Approvals > Auto-approval. The window
+may cross midnight and must last at least six hours; equal times are invalid.
+The settings persist across restarts and redeploys. Saving reschedules the worker
+without restarting it, and each request checks the current window before review.
+An in-progress review may finish after a settings change.
+Startup schedules the next check rather than
 replaying missed runs. Each run takes up to 20 eligible requests in oldest-first order. A provider
 failure ends the batch after recording that failed check. A disabled or
 unconfigured provider records that specific reason for each request with a policy,
@@ -115,9 +121,11 @@ and a Set/Edit policy action. Saving a policy takes effect at the next scheduled
 review; the editor does not run inference or approve requests.
 
 The auto-approver owns its prompt, strict `{approve, reason}` schema, and
-`gpt-6-sol`/medium/4096-token/60-second settings. It uses the shared
+`gpt-6.1-sol`/medium/4096-token/60-second settings. It uses the shared
 `/openai/text-completion` socket route, with the same credential redaction,
-request bounds and usage metering as other Host AI calls. The inference service
+request bounds and usage metering as other Host AI calls. Old Sol is no longer accepted
+for new requests or metering; historical review and usage records retain their original
+model and stored cost. Sol 6.1 uses its own published cached-input price. The inference service
 has no approval-specific route or logic. Operator instructions and exact request data are separate
 JSON fields under host-authored instructions that treat request content as
 untrusted evidence. Missing, redacted or unverifiable material facts leave the

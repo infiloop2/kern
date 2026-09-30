@@ -690,7 +690,7 @@ Send message request:
 ```json
 {
   "agent_runtime": "codex",
-  "model": "gpt-6-sol",
+  "model": "gpt-6.1-sol",
   "effort": "high",
   "message": "Implement this change and report the result."
 }
@@ -702,8 +702,8 @@ Send message request fields:
 | --- | --- | --- | --- |
 | `message` | Yes | string | Message for the agent runtime. Must be 1 to 50,000 characters. The host handles idle and running threads; callers use the same operation for both. |
 | `agent_runtime` | New thread or configuration change | enum | Runtime for the thread: `codex`, `codex-2`, `codex-3`, `claude_code`, `grok`, `grok-2`, or `hermes`. Supply it together with `model` and `effort`. On an existing thread, a matching triple resumes or steers the current provider session; a different triple starts a fresh provider session only while the thread is idle. |
-| `model` | New thread or configuration change | enum | Model for this session. Codex accepts `gpt-6-sol`, `gpt-6-luna`, or `gpt-6-astra`; Claude Code accepts `claude-opus-5-5`, `claude-fable-5-1`, or `claude-sonnet-5-5`; Grok accepts `grok-4.7`; Hermes accepts the Bedrock model ids `deepseek.v3.2`, `qwen.qwen3-coder-next`, `moonshotai.kimi-k2.5`, or `zai.glm-5`. Must be supplied together with `agent_runtime` and `effort`. A thread created under an earlier catalog keeps its recorded model and stays readable. It can continue by switching to an offered complete triple while idle; the superseded value cannot start a new provider session. |
-| `effort` | New thread or configuration change | enum | Effort for this session. Codex accepts `high`, `max`, or `ultra`, except Luna accepts only `high` or `max`. Claude Code accepts `high`, `max`, or `ultracode`; `ultracode` enables its xhigh effort plus dynamic workflow orchestration. Grok accepts `xhigh` or `high`. Hermes accepts `high` (its headless CLI exposes no effort control). Must be supplied together with `agent_runtime` and `model`. |
+| `model` | New thread or configuration change | enum | Model for this session. Codex accepts `gpt-6.1-sol`, `gpt-6-luna`, or `gpt-6-astra`; Claude Code accepts `claude-opus-5-5`, `claude-fable-5-1`, or `claude-sonnet-5-5`; Grok accepts `grok-4.7`; Hermes accepts the Bedrock model ids `deepseek.v3.2`, `qwen.qwen3-coder-next`, `moonshotai.kimi-k2.5`, or `zai.glm-5`. Must be supplied together with `agent_runtime` and `effort`. A thread created under an earlier catalog keeps its recorded model and stays readable. It can continue by switching to an offered complete triple while idle; the superseded value cannot start a new provider session. |
+| `effort` | New thread or configuration change | enum | Effort for this session. Codex accepts `high`, `max`, `ultra`, `high-fast`, or `high-ultrafast`, except Luna accepts only `high` and `max`. The two speed presets request High reasoning with Fast or Ultrafast processing; the other presets send no speed override. Model, plan, and workspace availability are enforced by Codex; Kern surfaces provider errors without falling back. Claude Code accepts `high`, `max`, or `ultracode`; `ultracode` enables its xhigh effort plus dynamic workflow orchestration. Grok accepts `xhigh` or `high`. Hermes accepts `high` (its headless CLI exposes no effort control). Must be supplied together with `agent_runtime` and `model`. |
 
 The path's `thread_id` must be a lowercase slug of at most 64 characters
 beginning with `app-`, `thread-`, or `schedule-`; any other value is `404` (no
@@ -745,7 +745,7 @@ Send message response:
   "thread": {
     "thread_id": "feature-chat-1",
     "agent_runtime": "codex",
-    "model": "gpt-6-sol",
+    "model": "gpt-6.1-sol",
     "effort": "high",
     "last_used_at": "2026-06-08T00:00:00Z",
     "status": "running"
@@ -804,7 +804,7 @@ Thread list response:
     {
       "thread_id": "feature-chat-1",
       "agent_runtime": "codex",
-      "model": "gpt-6-sol",
+      "model": "gpt-6.1-sol",
       "effort": "high",
       "last_used_at": "2026-06-08T00:05:00Z",
       "status": "running"
@@ -1923,3 +1923,22 @@ The endpoint sums UTC-day counters updated when a new charge row is inserted.
 Charge rows and daily counters retain action attribution for future reports.
 Repeated charge IDs do not change the original amount, attribution, or month.
 This endpoint does not contact providers or recalculate historical prices.
+
+### Auto-approval sleep settings
+
+`GET /v1/auto-approvals` includes `settings` with `sleep_start_minute` and
+`sleep_end_minute`, as well as the current `quiet` flag and `next_review_at`.
+Both settings are whole minutes after midnight UTC (0–1439); defaults are
+0 and 480 (00:00–08:00 UTC).
+
+`PUT /v1/auto-approvals/settings` accepts exactly these two integer fields:
+
+```json
+{"sleep_start_minute": 1320, "sleep_end_minute": 360}
+```
+
+This example sleeps from 22:00 through 06:00 UTC. The forward interval must
+be at least 360 minutes; equal times and shorter intervals return HTTP 400.
+Success returns `{"saved": true}` and wakes the scheduler to recompute its
+next review. Configuration is stored durably; an already running review may
+finish. Both routes require an operator session and are unavailable to agents.

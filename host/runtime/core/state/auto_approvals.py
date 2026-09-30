@@ -6,6 +6,23 @@ from host.runtime.core.state._base import mutation
 from host.runtime.core.state.tools import _approval_id, _approval_number, _TOOL_APPROVAL_FIELDS, _tool_approval_dict
 
 
+def auto_approval_settings() -> dict[str, int]:
+    with db.transaction() as cur:
+        cur.execute("SELECT sleep_start_minute, sleep_end_minute FROM auto_approval_settings WHERE singleton = TRUE")
+        row = cur.fetchone()
+    return {"sleep_start_minute": row[0] if row else 0, "sleep_end_minute": row[1] if row else 480}
+
+
+def set_auto_approval_settings(start: int, end: int) -> None:
+    with mutation() as cur:
+        cur.execute(
+            "INSERT INTO auto_approval_settings (singleton, sleep_start_minute, sleep_end_minute)"
+            " VALUES (TRUE, %s, %s) ON CONFLICT (singleton) DO UPDATE"
+            " SET sleep_start_minute = EXCLUDED.sleep_start_minute, sleep_end_minute = EXCLUDED.sleep_end_minute",
+            (start, end),
+        )
+
+
 def auto_approval_policies() -> list[dict[str, Any]]:
     with db.transaction() as cur:
         cur.execute("SELECT tool_id, action_id, instructions FROM auto_approval_policies ORDER BY tool_id, action_id")

@@ -905,16 +905,16 @@ def run_turn(
     else:
         thread = _start_thread(server, model)
     thread_id = str(thread["id"])
-    turn = server.call(
-        "turn/start",
-        {
-            "threadId": thread_id,
-            "input": [{"type": "text", "text": input_message}],
-            "model": model,
-            "effort": effort,
-        },
-        timeout=30,
-    )["turn"]
+    turn_params: dict[str, Any] = {
+        "threadId": thread_id,
+        "input": [{"type": "text", "text": input_message}],
+        "model": model,
+        "effort": effort,
+    }
+    if effort in {"high-fast", "high-ultrafast"}:
+        turn_params["effort"] = "high"
+        turn_params["serviceTier"] = effort.removeprefix("high-")
+    turn = server.call("turn/start", turn_params, timeout=30)["turn"]
     # Publish the session id only after turn/start accepts the input. A new
     # thread whose first turn fails has no conversation worth resuming.
     server.last_known_session_id = thread_id

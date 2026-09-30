@@ -226,8 +226,8 @@ class AgentMessageDatabaseTests(unittest.TestCase):
         self.addCleanup(db.close_pool)
 
     def test_schedule_purpose_survives_edit_history_restore_and_delete(self):
-        schedule = schedules.create_schedule({**SESSION, "name": "Research", "message": "Research", "cadence": "daily", "daily_time": "09:00", "purpose": "Research companies"}, actor="agent")
-        fields = {key: schedule[key] for key in ("name", "message", "cadence", "daily_time", "agent_runtime", "model", "effort")}
+        schedule = schedules.create_schedule({**SESSION, "name": "Research", "triggers": [{"type": "daily", "times": ["09:00"], "prompt": "Research"}],   "purpose": "Research companies"}, actor="agent")
+        fields = {key: schedule[key] for key in ("name", "triggers", "agent_runtime", "model", "effort")}
         edited = schedules.update_schedule(schedule["id"], {**fields, "expected_revision": schedule["revision"], "purpose": "Review research"}, actor="agent")
         preserved = schedules.update_schedule(schedule["id"], {**fields, "expected_revision": edited["revision"]}, actor="agent")
         self.assertEqual(preserved["purpose"], "Review research")
@@ -259,8 +259,7 @@ class AgentMessageDatabaseTests(unittest.TestCase):
         with patch.object(apps, "active_agent_runtimes", return_value=["codex"]):
             app = apps.create_web_app()
         schedule = schedules.create_schedule({
-            **SESSION, "name": "Research", "message": "Research",
-            "cadence": "daily", "daily_time": "09:00",
+            **SESSION, "name": "Research", "triggers": [{"type": "daily", "times": ["09:00"], "prompt": "Research"}],
         }, actor="agent")
         with db.transaction() as cur:
             cur.execute("INSERT INTO chat_threads (thread_id) VALUES ('thread-34')")

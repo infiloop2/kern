@@ -2,7 +2,7 @@
 import json
 from typing import Any
 
-MODEL = "gpt-6-sol"
+MODEL = "gpt-6.1-sol"
 TIMEOUT_SECONDS = 60.0
 SCHEMA = {
     "type": "object", "additionalProperties": False,

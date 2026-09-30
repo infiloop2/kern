@@ -14,7 +14,7 @@ from unittest.mock import patch
 import pg_harness
 
 from host.runtime.deploy import migrate
-from host.runtime.core import db
+from host.runtime.core import db, pgclient, state
 
 
 def _write(directory: Path, name: str, up: str, down: str = "") -> None:
@@ -46,10 +46,231 @@ class MigrateRunnerTests(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.migrations = Path(self.temp_dir.name)
 
+    def test_browser_state_migration_round_trip_and_constraints(self) -> None:
+        migrate.up(target=77, quiet=True)
+        self.assertEqual(migrate.up(target=78, quiet=True), [78])
+        with db.transaction() as cur:
+            cur.execute("INSERT INTO browser_settings (mode) VALUES ('direct')")
+        with self.assertRaises(Exception):
+            with db.transaction() as cur:
+                cur.execute("UPDATE browser_settings SET mode='decodo'")
+        self.assertEqual(migrate.down(target=77, quiet=True), [78])
+        self.assertNotIn("browser_accounts", self.table_names())
+        self.assertNotIn("browser_settings", self.table_names())
+        self.assertEqual(migrate.up(target=78, quiet=True), [78])
+
     def table_names(self) -> set[str]:
         with db.transaction() as cur:
             cur.execute("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
             return {row[0] for row in cur.fetchall()}
+
+    def test_codex_sol_6_1_speed_migration_and_rollback(self) -> None:
+        migrate.up(target=80, quiet=True)
+        runtimes = ("codex", "codex-2", "codex-3")
+        with db.transaction() as cur:
+            for index, runtime in enumerate(runtimes, 780):
+                cur.execute(
+                    "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort, provider_session_id)"
+                    " VALUES (%s, %s, 'gpt-6-sol', 'ultra', 'old-provider')",
+                    (runtime, f"old-sol-{runtime}"),
+                )
+                cur.execute(
+                    "INSERT INTO web_apps (app_id, name, revision, agent_runtime, agent_model,"
+                    " agent_effort, created_at, updated_at)"
+                    " VALUES (%s, 'Sol app', 0, %s, 'gpt-6-sol', 'high', 'now', 'now')",
+                    (f"app-{index}", runtime),
+                )
+                cur.execute(
+                    "INSERT INTO schedules (id, thread_id, name, triggers,"
+                    " agent_runtime, model, effort, next_run_at, created_at, updated_at)"
+                    " VALUES (%s, %s, 'Sol job', %s::jsonb, %s,"
+                    " 'gpt-6-sol', 'max', 'now', 'now', 'now')",
+                    (index, f"schedule-{index}", '[{"type":"daily","times":["09:00"],"prompt":"hello"}]', runtime),
+                )
+        self.assertEqual(migrate.up(target=81, quiet=True), [81])
+        with db.transaction() as cur:
+            cur.execute("SELECT agent_model, agent_effort FROM web_apps ORDER BY app_id")
+            self.assertEqual(cur.fetchall(), [("gpt-6.1-sol", "high")] * 3)
+            cur.execute("SELECT model, effort FROM schedules ORDER BY id")
+            self.assertEqual(cur.fetchall(), [("gpt-6.1-sol", "max")] * 3)
+            cur.execute("SELECT model, effort, provider_session_id FROM thread_sessions ORDER BY thread_id")
+            self.assertEqual(cur.fetchall(), [("gpt-6-sol", "ultra", "old-provider")] * 3)
+            for runtime in runtimes:
+                for model in ("gpt-6.1-sol", "gpt-6-astra", "gpt-6-luna"):
+                    for effort in ("high-fast", "high-ultrafast"):
+                        cur.execute(
+                            "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort, provider_session_id)"
+                            " VALUES (%s, %s, %s, %s, 'new-provider')",
+                            (runtime, f"new-{runtime}-{model}-{effort}", model, effort),
+                        )
+            cur.execute("UPDATE web_apps SET agent_effort = 'high-ultrafast'")
+            cur.execute("UPDATE schedules SET effort = 'high-fast'")
+            cur.execute(
+                "INSERT INTO agent_events (created_at, event_type, thread_id, message, source)"
+                " VALUES ('2026-09-29T00:00:00Z', 'thread.message', 'old-sol-codex', 'retained', 'agent')"
+            )
+        self.assertEqual(migrate.down(target=80, quiet=True), [81])
+        with db.transaction() as cur:
+            cur.execute("SELECT agent_model, agent_effort FROM web_apps ORDER BY app_id")
+            self.assertEqual(cur.fetchall(), [("gpt-6-sol", "high")] * 3)
+            cur.execute("SELECT model, effort FROM schedules ORDER BY id")
+            self.assertEqual(cur.fetchall(), [("gpt-6-sol", "high")] * 3)
+            cur.execute("SELECT model, effort, provider_session_id FROM thread_sessions WHERE thread_id LIKE 'old-%'")
+            self.assertEqual(cur.fetchall(), [("gpt-6-sol", "ultra", "old-provider")] * 3)
+            cur.execute("SELECT model, effort, provider_session_id FROM thread_sessions WHERE thread_id LIKE 'new-%'")
+            self.assertCountEqual(cur.fetchall(), [(model, "high", None)
+                for _ in runtimes for model in ("gpt-6-sol", "gpt-6-astra", "gpt-6-luna") for _ in range(2)])
+            cur.execute("SELECT message FROM agent_events WHERE thread_id = 'old-sol-codex'")
+            self.assertEqual(cur.fetchall(), [("retained",)])
+
+    def test_sol_6_1_host_usage_migration_preserves_history_and_rolls_back(self) -> None:
+        migrate.up(target=80, quiet=True)
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO host_inference_usage (provider, model, day, requests, cost_usd)"
+                " VALUES ('openai', 'gpt-6-sol', CURRENT_DATE, 2, 0.02)"
+            )
+        migrate.up(target=81, quiet=True)
+        state.record_host_inference_usage("openai", "gpt-6.1-sol", {
+            "input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 10,
+        }, 0.000262)
+        with db.transaction() as cur:
+            cur.execute("SELECT model, requests, cost_usd FROM host_inference_usage ORDER BY model")
+            rows = cur.fetchall()
+            by_model = {row[0]: (row[1], float(row[2])) for row in rows}
+            self.assertEqual(by_model, {"gpt-6-sol": (2, 0.02), "gpt-6.1-sol": (1, 0.000262)})
+        migrate.down(target=80, quiet=True)
+        with db.transaction() as cur:
+            cur.execute("SELECT model, requests, cost_usd FROM host_inference_usage")
+            rows = cur.fetchall()
+            self.assertEqual([(row[0], row[1]) for row in rows], [("gpt-6-sol", 2)])
+            self.assertAlmostEqual(float(rows[0][2]), 0.02)
+        with self.assertRaises(pgclient.Error):
+            state.record_host_inference_usage("openai", "gpt-6.1-sol", None, None)
+
+    def test_custom_content_guard_migration_preserves_existing_domains(self) -> None:
+        version = next(item.version for item in migrate.load_migrations()
+                       if item.name == "custom_domain_parameter_guard")
+        migrate.up(target=version - 1, quiet=True)
+        with db.transaction() as cur:
+            cur.execute("INSERT INTO allowed_domains (domain) VALUES ('api.example.com')")
+        migrate.up(target=version, quiet=True)
+        with db.transaction() as cur:
+            cur.execute("SELECT domain, guard_request_content FROM allowed_domains")
+            self.assertEqual(cur.fetchall(), [("api.example.com", False)])
+            cur.execute("UPDATE allowed_domains SET guard_request_content = TRUE")
+        migrate.down(target=version - 1, quiet=True)
+        with db.transaction() as cur:
+            cur.execute("SELECT domain FROM allowed_domains")
+            self.assertEqual(cur.fetchall(), [("api.example.com",)])
+
+    def test_calendar_trigger_migration_preserves_cadences_and_history(self) -> None:
+        import json
+        from datetime import datetime, timedelta, timezone
+        from host.runtime.workspace import schedules
+
+        migrate.up(target=78, quiet=True)
+        # Exact daily/weekly mappings, both trigger limits, and irregular edges.
+        intervals = [360, 10080, 1000, 30, 60, 480, 720, 12, 10, 5,
+                     1440, 2016, 2520, 3360, 5040, 1680, 2880, 1439]
+        fixtures = [(1, "daily", None, "09:00"),
+                    *[(i, "interval", minutes, None) for i, minutes in enumerate(intervals, 2)]]
+        live_metadata = ("id, thread_id, name, agent_runtime, model, effort, revision,"
+                         " deleted_at, last_run_at, created_at, updated_at, purpose")
+        history_metadata = ("id, schedule_id, revision, name, agent_runtime, model, effort,"
+                            " deleted, actor, created_at, purpose")
+        with db.transaction() as cur:
+            for identity, cadence, minutes, time in fixtures:
+                cur.execute(
+                    "INSERT INTO schedules (id, thread_id, name, message, cadence, interval_minutes, daily_time,"
+                    " agent_runtime, model, effort, revision, next_run_at, last_run_at, created_at, updated_at, purpose)"
+                    " VALUES (%s, %s, 'Retained', 'Original prompt', %s, %s, %s,"
+                    " 'codex', 'gpt-6-astra', 'high', 2, %s, '2026-09-20T00:00:00Z',"
+                    " '2026-09-19T00:00:00Z', '2026-09-20T00:00:00Z', 'Retained purpose')",
+                    (identity, f"schedule-{identity}", cadence, minutes, time,
+                     "2026-09-29T09:00:00Z" if time else "2026-09-29T15:55:14+02:00"),
+                )
+            for revision, prompt, actor in [(1, "Earlier prompt", "agent"), (2, "Original prompt", "user")]:
+                cur.execute(
+                    "INSERT INTO schedule_revisions (schedule_id, revision, name, message, cadence, interval_minutes, daily_time,"
+                    " agent_runtime, model, effort, deleted, actor, created_at, purpose)"
+                    " SELECT id, %s, name, %s, cadence, interval_minutes, daily_time,"
+                    " agent_runtime, model, effort, FALSE, %s, updated_at, purpose FROM schedules",
+                    (revision, prompt, actor),
+                )
+            # A prior revision has its own cadence; deletion keeps older restore points.
+            cur.execute("UPDATE schedule_revisions SET cadence = 'daily', interval_minutes = NULL, daily_time = '07:15' WHERE schedule_id = 2 AND revision = 1")
+            cur.execute("UPDATE schedules SET deleted_at = updated_at, revision = 3 WHERE id = 5")
+            cur.execute(
+                "INSERT INTO schedule_revisions (schedule_id, revision, name, message, cadence, interval_minutes, daily_time,"
+                " agent_runtime, model, effort, deleted, actor, created_at, purpose)"
+                " SELECT id, revision, name, message, cadence, interval_minutes, daily_time,"
+                " agent_runtime, model, effort, TRUE, 'user', updated_at, purpose FROM schedules WHERE id = 5"
+            )
+            cur.execute(f"SELECT {live_metadata} FROM schedules ORDER BY id")
+            before_live = cur.fetchall()
+            cur.execute(f"SELECT {history_metadata} FROM schedule_revisions ORDER BY id")
+            before_history = cur.fetchall()
+        self.assertEqual(migrate.up(target=79, quiet=True), [79])
+        with db.transaction() as cur:
+            cur.execute(f"SELECT {live_metadata} FROM schedules ORDER BY id")
+            self.assertEqual(cur.fetchall(), before_live)
+            cur.execute(f"SELECT {history_metadata} FROM schedule_revisions ORDER BY id")
+            self.assertEqual(cur.fetchall(), before_history)
+            cur.execute("SELECT id, triggers::text, next_run_at FROM schedules ORDER BY id")
+            rows = cur.fetchall()
+            cur.execute("SELECT schedule_id, revision, triggers::text FROM schedule_revisions ORDER BY schedule_id, revision")
+            history = cur.fetchall()
+            cur.execute("SELECT count(*) FROM pg_proc WHERE proname = 'calendar_triggers'")
+            self.assertEqual(cur.fetchone(), (0,))
+
+        converted = {identity: json.loads(triggers) for identity, triggers, _ in rows}
+        self.assertEqual(converted[1], [{"type": "daily", "times": ["09:00"], "prompt": "Original prompt"}])
+        anchor = datetime(2026, 9, 29, 13, 55, tzinfo=timezone.utc)
+        for (identity, _, minutes, _), (_, _, next_run) in zip(fixtures, rows):
+            with self.subTest(minutes=minutes):
+                triggers = converted[identity]
+                self.assertEqual(schedules._validated_triggers(triggers), triggers)
+                self.assertEqual(next_run, "2026-09-29T09:00:00Z" if identity == 1 else "2026-09-29T13:55:00Z")
+                if minutes is None:
+                    continue
+                exact = (minutes <= 1440 and 1440 % minutes == 0 and 1440 // minutes <= 120
+                         or 10080 % minutes == 0 and 10080 // minutes <= 5)
+                if not exact:
+                    self.assertEqual(triggers, [{"type": "daily", "times": ["13:55"], "prompt": "Original prompt"}])
+                # Compare actual calendar occurrences across two weeks to the
+                # former interval (or the explicit once-daily edge fallback).
+                gap = timedelta(minutes=minutes if exact else 1440)
+                expected = anchor
+                cursor = anchor - timedelta(seconds=1)
+                while expected < anchor + timedelta(days=14):
+                    next_time = schedules._next_run({"triggers": triggers}, cursor)
+                    self.assertEqual(next_time, expected.strftime("%Y-%m-%dT%H:%M:%SZ"))
+                    cursor = expected
+                    expected += gap
+        self.assertEqual(len(converted[9]), 5)  # 12 minutes: 120 times, five triggers.
+        self.assertEqual(len(converted[5]), 2)  # 30 minutes: 48 times, two triggers.
+        for identity, revision, raw in history:
+            triggers = json.loads(raw)
+            self.assertEqual(schedules._validated_triggers(triggers), triggers)
+            if identity == 2 and revision == 1:
+                self.assertEqual(triggers, [{"type": "daily", "times": ["07:15"], "prompt": "Earlier prompt"}])
+            else:
+                prompt = "Earlier prompt" if revision == 1 else "Original prompt"
+                self.assertEqual(triggers, [{**trigger, "prompt": prompt} for trigger in converted[identity]])
+        restored = schedules.restore_revision(5, 2, {"expected_revision": 3})
+        self.assertFalse(restored["deleted"])
+        self.assertEqual(restored["triggers"], converted[5])
+        restored_old = schedules.restore_revision(2, 1, {"expected_revision": 2})
+        self.assertEqual(restored_old["triggers"], [{"type": "daily", "times": ["07:15"], "prompt": "Earlier prompt"}])
+        # Conservative rollback stays unchanged; exercise re-application too.
+        with self.assertRaisesRegex(Exception, "cannot roll back calendar triggers"):
+            migrate.down(target=78, quiet=True)
+        with db.transaction() as cur:
+            cur.execute("DELETE FROM schedules WHERE id <> 1")
+        self.assertEqual(migrate.down(target=78, quiet=True), [79])
+        self.assertEqual(migrate.up(target=79, quiet=True), [79])
+
 
     def test_sonnet_5_5_migration_preserves_history_and_rolls_back_settings(self) -> None:
         migrate.up(target=75, quiet=True)

@@ -176,9 +176,14 @@ Chromium automatically. To use a specific browser binary, set
 `PLAYWRIGHT_CHROMIUM_EXECUTABLE=/path/to/chrome`.
 This override selects the admin UI test browser only. The Browser service adapter
 journey in the `core` and `all` scopes always uses Playwright's managed full
-Chromium, matching the deployed service's `chromium` channel. Install that binary
-with `python3 -m playwright install chromium --no-shell` even when using a custom
-executable for the surrounding UI tests; a headless-shell-only cache is insufficient.
+Chromium on its own authenticated Xvfb display, matching the deployed service's
+windowed `chromium` channel. Install with
+`python3 -m playwright install --with-deps chromium --no-shell` even when using
+a custom executable for the surrounding UI tests; a headless-shell-only cache
+or an installation without Xvfb is insufficient. The adapter also verifies that
+unauthenticated local X11 clients cannot connect and that displays close with
+their browser. It tests native keyboard events and restored authentication with
+fixtures, not live X login acceptance.
 
 ### Choosing browser coverage
 

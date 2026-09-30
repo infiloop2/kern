@@ -328,7 +328,7 @@
   }
 
   function resizeTextarea(id) {
-    const textarea = $(id);
+    const textarea = typeof id === "string" ? $(id) : id;
     textarea.style.height = "auto";
     const borders = textarea.offsetHeight - textarea.clientHeight;
     textarea.style.height = `${textarea.scrollHeight + borders}px`;
@@ -407,12 +407,7 @@
   function resetScheduleForm() {
     $("schedule-name").value = "";
     $("schedule-purpose").value = "";
-    $("schedule-message").value = "";
-    resizeTextarea("schedule-message");
-    $("schedule-cadence").value = "interval";
-    $("schedule-interval").value = "60";
-    $("schedule-time").value = "09:00";
-    syncCadence();
+    renderTriggers([{type: "daily", times: ["09:00"], prompt: ""}]);
   }
 
   async function renderSchedule(sequence) {
@@ -424,21 +419,20 @@
     $("schedule-form").hidden = false;
     $("schedule-name").value = schedule.name;
     $("schedule-purpose").value = schedule.purpose || "";
-    $("schedule-message").value = schedule.message;
-    resizeTextarea("schedule-message");
+    renderTriggers(schedule.triggers || []);
     syncSessionSelectors(schedule.agent_runtime, schedule.model, schedule.effort);
-    $("schedule-cadence").value = schedule.cadence;
-    $("schedule-interval").value = schedule.interval_minutes || 60;
-    $("schedule-time").value = schedule.daily_time || "09:00";
-    syncCadence();
     const script = schedule.agent_runtime === SCRIPT_RUNTIME;
     $("global-title").textContent = script ? "Script schedule" : "Scheduled agent";
     $("global-intro").textContent = script
       ? "Recurring message executed by the time-bounded Bash runtime."
-      : "Persistent agent receiving one recurring automated message.";
-    $("schedule-meta").textContent = `Next ${relativeTime(schedule.next_run_at)} · last delivery ${relativeTime(schedule.last_run_at)}`;
+      : "Persistent agent receiving automated messages at fixed UTC times.";
+    $("schedule-meta").textContent = `${schedule.next_run_at ? "Next " + schedule.next_run_at.replace("T", " ").replace("Z", " UTC") : "No automatic messages"} · last delivery attempt ${relativeTime(schedule.last_run_at)}`;
     $("schedule-delete").hidden = schedule.deleted;
     setFormDisabled($("schedule-form"), schedule.deleted);
+    for (const button of $("schedule-triggers").querySelectorAll("button")) {
+      if (schedule.deleted) button.disabled = true;
+    }
+    if (schedule.deleted) $("schedule-add-trigger").disabled = true;
     const history = await api("GET", `/schedules/${schedule.id}/revisions?limit=10`);
     if (sequence !== state.sequence) return;
     renderHistory(
@@ -486,11 +480,114 @@
   // agent home rather than as a prompt, so the form says which one it wants.
   function syncMessageField() {
     const script = $("schedule-runtime").value === SCRIPT_RUNTIME;
-    const message = $("schedule-message");
-    $("schedule-message-label").textContent = script ? "Script path" : "Message";
-    message.rows = script ? 2 : 7;
-    message.placeholder = script ? SCRIPT_PATH_PLACEHOLDER : "";
-    resizeTextarea("schedule-message");
+    for (const row of $("schedule-triggers").children) {
+      row.querySelector("[data-prompt-label]").textContent = script ? "Script path" : "Prompt";
+      const prompt = row.querySelector("textarea");
+      prompt.placeholder = script ? SCRIPT_PATH_PLACEHOLDER : "What should this agent do at these times?";
+      prompt.rows = script ? 2 : 4;
+      resizeTextarea(prompt);
+    }
+  }
+
+  const triggerWidths = new WeakMap();
+  const triggerResizeObserver = typeof ResizeObserver === "function" ? new ResizeObserver(entries => {
+    for (const entry of entries) {
+      if (triggerWidths.get(entry.target) === entry.contentRect.width) continue;
+      triggerWidths.set(entry.target, entry.contentRect.width);
+      resizeTextarea(entry.target);
+    }
+  }) : null;
+
+  const weekdays = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
+
+  function renderTriggers(triggers) {
+    for (const prompt of $("schedule-triggers").querySelectorAll("textarea")) triggerResizeObserver?.unobserve(prompt);
+    $("schedule-triggers").replaceChildren();
+    triggers.forEach(addTrigger);
+    syncTriggerCount();
+  }
+
+  function syncTriggerCount() {
+    $("schedule-add-trigger").disabled = $("schedule-triggers").children.length >= 5;
+  }
+
+  function addTrigger(trigger = {type: "daily", times: ["09:00"], prompt: ""}) {
+    if ($("schedule-triggers").children.length >= 5) return;
+    const row = document.createElement("fieldset");
+    row.className = "schedule-trigger";
+    // Static markup only; all saved values are assigned as properties below.
+    row.innerHTML = `<legend>Trigger</legend>
+      <div class="form-grid">
+        <label><span>Frequency</span><select data-trigger-type><option value="daily">Daily</option><option value="weekly">Weekly</option></select></label>
+        <div class="wide trigger-days" role="group" aria-label="Weekdays"></div>
+        <div class="wide"><span class="resource-meta" data-times-label>Times (UTC)</span><div class="trigger-times"></div><button type="button" class="ghost sm" data-add-time>Add time</button></div>
+        <label class="wide"><span data-prompt-label>Prompt</span><textarea data-trigger-prompt rows="4" maxlength="12000" required></textarea></label>
+      </div>
+      <button type="button" class="ghost danger sm" data-remove-trigger>Remove trigger</button>`;
+    const type = row.querySelector("[data-trigger-type]");
+    type.value = trigger.type;
+    const days = row.querySelector(".trigger-days");
+    for (const day of weekdays) {
+      const label = document.createElement("label");
+      const input = document.createElement("input");
+      input.type = "checkbox";
+      input.value = day;
+      input.checked = (trigger.days || ["mon"]).includes(day);
+      label.append(input, day[0].toUpperCase() + day.slice(1));
+      days.append(label);
+    }
+    const times = row.querySelector(".trigger-times");
+    const addTimeButton = row.querySelector("[data-add-time]");
+    function syncTimes() {
+      addTimeButton.hidden = type.value === "weekly";
+      row.querySelector("[data-times-label]").textContent = type.value === "weekly" ? "Time (UTC)" : "Times (UTC)";
+      addTimeButton.disabled = times.children.length >= 24;
+      for (const remove of times.querySelectorAll("button")) remove.hidden = times.children.length === 1;
+    }
+    function addTime(value = "09:00") {
+      if (times.children.length >= 24) return;
+      const item = document.createElement("div");
+      item.className = "trigger-time";
+      const input = document.createElement("input");
+      input.type = "time";
+      input.required = true;
+      input.setAttribute("aria-label", "Time (UTC)");
+      input.value = value;
+      const remove = document.createElement("button");
+      remove.type = "button";
+      remove.className = "ghost sm";
+      remove.textContent = "Remove time";
+      remove.addEventListener("click", () => { item.remove(); syncTimes(); });
+      item.append(input, remove);
+      times.append(item);
+      syncTimes();
+    }
+    (trigger.type === "daily" ? trigger.times : [trigger.time]).forEach(addTime);
+    days.hidden = type.value !== "weekly";
+    type.addEventListener("change", () => {
+      days.hidden = type.value !== "weekly";
+      if (type.value === "weekly") while (times.children.length > 1) times.lastElementChild.remove();
+      syncTimes();
+    });
+    addTimeButton.addEventListener("click", () => addTime());
+    row.querySelector("textarea").value = trigger.prompt || "";
+    row.querySelector("[data-remove-trigger]").addEventListener("click", () => { triggerResizeObserver?.unobserve(row.querySelector("textarea")); row.remove(); syncTriggerCount(); });
+    $("schedule-triggers").append(row);
+    const prompt = row.querySelector("textarea");
+    prompt.addEventListener("input", () => resizeTextarea(prompt));
+    triggerResizeObserver?.observe(prompt);
+    syncTriggerCount();
+    syncMessageField();
+  }
+
+  function readTriggers() {
+    return Array.from($("schedule-triggers").children, row => {
+      const type = row.querySelector("[data-trigger-type]").value;
+      const prompt = row.querySelector("textarea").value.trim();
+      const times = Array.from(row.querySelectorAll("input[type=time]"), input => input.value);
+      if (type === "daily") return {type, times, prompt};
+      return {type, days: Array.from(row.querySelectorAll("input[type=checkbox]:checked"), input => input.value), time: times[0], prompt};
+    });
   }
 
   function fillSelect(select, values, selected, unavailable = null) {
@@ -508,15 +605,12 @@
     }
   }
 
-  function syncCadence() {
-    const daily = $("schedule-cadence").value === "daily";
-    $("schedule-interval-wrap").hidden = daily;
-    $("schedule-time-wrap").hidden = !daily;
-  }
-
   function cadenceLabel(schedule) {
-    if (schedule.cadence === "daily") return `Daily ${schedule.daily_time} UTC`;
-    return `Every ${schedule.interval_minutes} minutes`;
+    if (!schedule.triggers?.length) return "No automatic messages";
+    return schedule.triggers.map(trigger => trigger.type === "daily"
+      ? `Daily ${trigger.times.join(", ")} UTC`
+      : `${trigger.days.map(day => day[0].toUpperCase() + day.slice(1)).join(", ")} ${trigger.time} UTC`
+    ).join(" · ");
   }
 
   function scheduleOperationIsCurrent(operationSequence, operationRoute) {
@@ -532,14 +626,11 @@
     const body = {
       name: $("schedule-name").value.trim(),
       purpose: $("schedule-purpose").value.trim(),
-      message: $("schedule-message").value.trim(),
-      cadence: $("schedule-cadence").value,
+      triggers: readTriggers(),
       agent_runtime: $("schedule-runtime").value,
       model: $("schedule-model").value,
       effort: $("schedule-effort").value,
     };
-    if (body.cadence === "daily") body.daily_time = $("schedule-time").value;
-    else body.interval_minutes = Number($("schedule-interval").value);
     try {
       let response;
       if (state.creating) response = await api("POST", "/schedules", body);
@@ -718,7 +809,7 @@
     clearTimeout(searchTimer);
     searchTimer = setTimeout(() => void loadItems(false, $("memory-search").value), 250);
   });
-  const growingEditorIds = ["memory-content", "schedule-message"];
+  const growingEditorIds = ["memory-content"];
   for (const id of growingEditorIds) $(id).addEventListener("input", () => resizeTextarea(id));
   if (typeof ResizeObserver === "function") {
     const observedWidths = new WeakMap();
@@ -742,7 +833,7 @@
   $("schedule-form").addEventListener("submit", saveSchedule);
   $("schedule-delete").addEventListener("click", () => void deleteSchedule());
   $("schedule-cancel").addEventListener("click", cancelItem);
-  $("schedule-cadence").addEventListener("change", syncCadence);
+  $("schedule-add-trigger").addEventListener("click", () => addTrigger());
   $("schedule-runtime").addEventListener("change", () => syncSessionSelectors($("schedule-runtime").value));
   $("schedule-model").addEventListener("change", () => {
     const efforts = state.sessionOptions?.[$("schedule-runtime").value]?.[$("schedule-model").value] || [];

@@ -33,7 +33,7 @@ SCRIPT_SESSION = {
 }
 
 SCHEDULE_FIELDS = (
-    "name", "message", "cadence", "interval_minutes", "daily_time",
+    "name", "triggers",
     "agent_runtime", "model", "effort",
 )
 
@@ -101,10 +101,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedules.create_schedule(
             {
                 "name": "Daily plan",
-                "message": "Review priorities",
-                "cadence": "daily",
-                "interval_minutes": None,
-                "daily_time": "09:00",
+                "triggers": [{"type": "daily", "times": ["09:00"], "prompt": "Review priorities"}],
                 **SESSION,
             },
             actor="user",
@@ -1377,7 +1374,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
 
         summaries = {"threads": [
             {
-                "thread_id": thread_id, "agent_runtime": "codex", "model": "gpt-6-sol",
+                "thread_id": thread_id, "agent_runtime": "codex", "model": "gpt-6.1-sol",
                 "effort": "high", "status": "idle", "last_used_at": "2026-09-27T12:00:00Z",
             }
             for thread_id in (user_id, spawned_id)
@@ -1460,9 +1457,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Morning review",
-                "message": "Summarize open work.",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Summarize open work."}],
                 **SESSION,
             },
             actor="user",
@@ -1507,21 +1502,17 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Maximum-size prompt",
-                "message": "x" * schedules.MAX_MESSAGE_CHARS,
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "x" * schedules.MAX_MESSAGE_CHARS}],
                 **SESSION,
             },
             actor="agent",
         )
-        self.assertEqual(len(schedule["message"]), schedules.MAX_MESSAGE_CHARS)
+        self.assertEqual(len(schedule["triggers"][0]["prompt"]), schedules.MAX_MESSAGE_CHARS)
         with self.assertRaises(WorkspaceError) as too_long:
             schedules.create_schedule(
                 {
                     "name": "Oversized prompt",
-                    "message": "x" * (schedules.MAX_MESSAGE_CHARS + 1),
-                    "cadence": "interval",
-                    "interval_minutes": 60,
+                    "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "x" * (schedules.MAX_MESSAGE_CHARS + 1)}],
                     **SESSION,
                 },
                 actor="agent",
@@ -1534,9 +1525,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 schedules.create_schedule(
                     {
                         "name": name,
-                        "message": "Do bounded work",
-                        "cadence": "interval",
-                        "interval_minutes": 60,
+                        "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Do bounded work"}],
                         **SESSION,
                     },
                     actor="agent",
@@ -1558,9 +1547,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             removed = schedules.create_schedule(
                 {
                     "name": "Removed",
-                    "message": "Review work",
-                    "cadence": "interval",
-                    "interval_minutes": 60,
+                    "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review work"}],
                     **SESSION,
                 },
                 actor="user",
@@ -1571,9 +1558,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             replacement = schedules.create_schedule(
                 {
                     "name": "Replacement",
-                    "message": "Review work",
-                    "cadence": "interval",
-                    "interval_minutes": 60,
+                    "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review work"}],
                     **SESSION,
                 },
                 actor="user",
@@ -1590,9 +1575,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Independent agent",
-                "message": "Review work",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review work"}],
                 **SESSION,
             },
             actor="user",
@@ -1604,13 +1587,11 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             )
             self.assertIsNone(cur.fetchone())
 
-    def test_schedule_delete_is_the_only_pause_and_restore_reactivates(self) -> None:
+    def test_schedule_delete_hides_and_restore_reactivates(self) -> None:
         schedule = schedules.create_schedule(
             {
                 "name": "Review",
-                "message": "Review open work",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review open work"}],
                 **SESSION,
             },
             actor="user",
@@ -1651,9 +1632,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 schedule = schedules.create_schedule(
                     {
                         "name": "Model review",
-                        "message": "Review work",
-                        "cadence": "interval",
-                        "interval_minutes": 60,
+                        "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review work"}],
                         "agent_runtime": runtime,
                         "model": retired,
                         "effort": "high",
@@ -1679,9 +1658,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Morning review",
-                "message": "Review open work",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review open work"}],
                 **SESSION,
             },
             actor="user",
@@ -1702,9 +1679,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Morning review",
-                "message": "Review open work",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review open work"}],
                 **SESSION,
             },
             actor="user",
@@ -1732,9 +1707,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Cancel claimed work",
-                "message": "Do not deliver after deletion",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Do not deliver after deletion"}],
                 **SESSION,
             },
             actor="user",
@@ -1752,7 +1725,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             "call_admin_api",
             return_value={"status": "accepted", "thread": {}},
         ) as host:
-            schedules._deliver_message(claimed)
+            schedules._deliver_message(claimed, claimed["due_triggers"][0][1]["prompt"], 0)
 
         host.assert_called_once()
 
@@ -1760,9 +1733,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Review",
-                "message": "/mnt/kern-agent/agent-home/first.sh",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "/mnt/kern-agent/agent-home/first.sh"}],
                 **SCRIPT_SESSION,
             },
             actor="agent",
@@ -1781,7 +1752,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             self.assertEqual(schedules.run_due(now), 1)
         updated = schedules.update_schedule(
             schedule["id"],
-            schedule_update(schedule, message="/mnt/kern-agent/agent-home/future.sh"),
+            schedule_update(schedule, triggers=[{**schedule["triggers"][0], "prompt": "/mnt/kern-agent/agent-home/future.sh"}]),
             actor="user",
         )
         self.assertEqual(updated["revision"], 2)
@@ -1795,9 +1766,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             schedules.create_schedule(
                 {
                     "name": f"Review {index}",
-                    "message": f"/mnt/kern-agent/agent-home/work-{index}.sh",
-                    "cadence": "interval",
-                    "interval_minutes": 60,
+                    "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": f"/mnt/kern-agent/agent-home/work-{index}.sh"}],
                     **SCRIPT_SESSION,
                 },
                 actor="user",
@@ -1835,9 +1804,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             schedules.create_schedule(
                 {
                     "name": "Oversized configuration",
-                    "message": "Review open work",
-                    "cadence": "interval",
-                    "interval_minutes": 60,
+                    "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review open work"}],
                     **{**SESSION, "model": "m" * 101},
                 },
                 actor="agent",
@@ -1847,9 +1814,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Invalid configuration",
-                "message": "Review open work",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review open work"}],
                 "agent_runtime": "retired",
                 "model": "retired-model",
                 "effort": "retired-effort",
@@ -1882,9 +1847,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Retry transport",
-                "message": "Review open work",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review open work"}],
                 **SESSION,
             },
             actor="user",
@@ -1916,15 +1879,13 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Invalid response",
-                "message": "Review open work",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review open work"}],
                 **SESSION,
             },
             actor="user",
         )
         with patch.object(schedules, "call_admin_api", return_value={}):
-            schedules._deliver_message(schedule)
+            schedules._deliver_message(schedule, schedule["triggers"][0]["prompt"], 0)
         self.assertEqual(thread_events(schedule["thread_id"]), [])
 
     def test_schedule_failures_have_no_separate_run_api(self) -> None:
@@ -1945,16 +1906,14 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             return schedules.create_schedule(
                 {
                     "name": name,
-                    "message": message,
-                    "cadence": "interval",
-                    "interval_minutes": 60,
+                    "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": message}],
                     **script_session,
                 },
                 actor="agent",
             )
 
         schedule = create("Nightly backup", "/mnt/kern-agent/agent-home/backup.sh")
-        self.assertEqual(schedule["message"], "/mnt/kern-agent/agent-home/backup.sh")
+        self.assertEqual(schedule["triggers"][0]["prompt"], "/mnt/kern-agent/agent-home/backup.sh")
 
         # The message field means something else for this runtime, so a prompt
         # is rejected while the schedule is being written rather than becoming
@@ -1977,9 +1936,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 {
                     "expected_revision": schedule["revision"],
                     "name": schedule["name"],
-                    "message": "Summarize open work.",
-                    "cadence": "interval",
-                    "interval_minutes": 60,
+                    "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Summarize open work."}],
                     **script_session,
                 },
                 actor="user",
@@ -1990,9 +1947,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
             {
                 "expected_revision": schedule["revision"],
                 "name": schedule["name"],
-                "message": "Summarize open work.",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Summarize open work."}],
                 **SESSION,
             },
             actor="user",
@@ -2004,9 +1959,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Nightly backup",
-                "message": "/mnt/kern-agent/agent-home/scripts/backup.sh",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "/mnt/kern-agent/agent-home/scripts/backup.sh"}],
                 "agent_runtime": "script",
                 "model": "bash",
                 "effort": "fixed",
@@ -2056,9 +2009,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Review",
-                "message": "/mnt/kern-agent/agent-home/work.sh",
-                "cadence": "daily",
-                "daily_time": "09:00",
+                "triggers": [{"type": "daily", "times": ["10:00"], "prompt": "/mnt/kern-agent/agent-home/work.sh"}],
                 **SCRIPT_SESSION,
             },
             actor="user",
@@ -2090,9 +2041,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Review",
-                "message": "x" * schedules.MAX_MESSAGE_CHARS,
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "x" * schedules.MAX_MESSAGE_CHARS}],
                 **SESSION,
             },
             actor="user",
@@ -2114,9 +2063,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Temporary",
-                "message": "/mnt/kern-agent/agent-home/temporary.sh",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "/mnt/kern-agent/agent-home/temporary.sh"}],
                 **SCRIPT_SESSION,
             },
             actor="user",
@@ -2140,9 +2087,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Retained agent",
-                "message": "Review work",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review work"}],
                 **SESSION,
             },
             actor="user",

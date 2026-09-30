@@ -18,6 +18,7 @@ from typing import Any
 from host.config import RuntimeOperatorConnection
 from host.constants import (
     ADMIN_API_PORT,
+    BROWSER_NETWORK_PORT,
     AGENT_PREVIEW_PORT_BASE,
     AGENT_PREVIEW_PORT_COUNT,
     WORKSPACE_ADMIN_GROUP_GID,
@@ -186,6 +187,7 @@ def _render_bootstrap() -> str:
     return (
         BOOTSTRAP_TEMPLATE
         .replace("@ADMIN_PORT@", str(ADMIN_API_PORT))
+        .replace("@BROWSER_NETWORK_PORT@", str(BROWSER_NETWORK_PORT))
         .replace("@PROXY_PORT@", str(PROXY_PORT))
         .replace("@GITHUB_REPOSITORY@", PUBLIC_GITHUB_REPOSITORY)
         .replace("@AGENT_PREVIEW_NFTABLES_RULES@", _agent_preview_nftables_rules())

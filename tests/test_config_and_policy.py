@@ -605,6 +605,44 @@ class ConfigTests(unittest.TestCase):
 
 
 class PolicyTests(unittest.TestCase):
+    def test_custom_content_guard_requires_boolean_and_round_trips(self) -> None:
+        for enabled in (False, True):
+            rule = {"allow_http_methods": ["GET"], "guard_request_content": enabled}
+            controls = _controls(_custom_policy({"api.example.com": rule}))
+            saved = controls.to_json()["network_integrations"]["custom"]["domains"]["api.example.com"]
+            self.assertEqual(saved.get("guard_request_content", False), enabled)
+        for bad in (None, 0, 1, "true", [], {}):
+            with self.subTest(value=bad), self.assertRaisesRegex(ConfigError, "guard_request_content must be a boolean"):
+                _controls(_custom_policy({"api.example.com": {
+                    "allow_http_methods": ["GET"], "guard_request_content": bad,
+                }}))
+
+    def test_custom_content_guard_is_per_domain_and_has_no_exceptions(self) -> None:
+        controls = _controls(_custom_policy({
+            "*.example.com": {"allow_http_methods": ["GET"], "guard_request_content": True},
+            "trusted.example.com": {"allow_http_methods": ["GET"]},
+        }))
+        for path, query, reason in (
+            ("/lookup", "q=weather", None),
+            ("/lookup", "api_key=abcdefghijklmnop", "request_param_secret_denied"),
+            ("/lookup", "q=alice%40example.com", "request_param_pii_denied"),
+            ("/alice%40example.com", "", "request_param_pii_denied"),
+            ("/lookup", "q=%FF", "request_param_encoded_blob_denied"),
+            ("/lookup", "q=" + "x" * 200, "request_param_encoded_blob_denied"),
+            ("/lookup", "q=" + "word+" * 250, "request_param_too_large"),
+        ):
+            with self.subTest(path=path, query=query):
+                self.assertEqual(network_integrations.request_denied(
+                    controls, "GET", "api.example.com", path, query, [], b"",
+                ), reason)
+                self.assertIsNone(network_integrations.request_denied(
+                    controls, "GET", "trusted.example.com", path, query, [], b"",
+                ))
+        self.assertEqual(network_integrations.request_denied(
+            controls, "POST", "api.example.com", "/lookup", "api_key=abcdefghijklmnop", [], b"",
+        ), "network_policy_denied")
+
+
     def test_custom_websocket_requires_boolean_opt_in_and_round_trips(self) -> None:
         policy = _custom_policy(
             {

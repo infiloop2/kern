@@ -66,7 +66,7 @@ integration for a host and asks its guard to decide the request; it does not
 generate a parallel domain-rule or guard-field representation.
 
 Direct agent HTTP requests are controlled by the route rules, plus a content
-guard on request URL values for the managed integrations. Request headers are
+guard on request URL values for the managed integrations. Those headers are
 not inspected: GitHub, PyPI and npm reflect no header back, so a header sent
 there cannot reach an attacker, while a requested package name can — npm and
 PyPI publish per-package download statistics — which is what the URL guard
@@ -80,12 +80,13 @@ PyPI publishes a public download dataset whose installer name and version come
 from it, so unlike the rest of a request there it does have a reader. The
 `Host` header is validated against the connected host but forwarded as sent.
 
-Custom domains are not inspected at all. The operator names the domain, its
-methods and its path guards, and that rule is the whole boundary: adding a
-custom domain means trusting that destination with anything the agent can
-reach. There is no knowable client or URL grammar there, and request bodies
-were never scanned, so on a write-capable domain a content rule was never a
-boundary in the first place.
+Custom domains enforce the operator's domain, method and path rule. The optional
+`guard_request_content` flag also applies the standard parameter guard without
+exceptions to hostnames, URL paths/query strings, all header names and values,
+and supported request bodies. It defaults to false, preserving APIs that need
+credentials or opaque payloads. When enabled, unsupported bodies and WebSockets
+are blocked. This heuristic does not prevent all exfiltration; adding a domain
+still means trusting that destination with host data.
 
 This is separate from bundled tool-call filtering and does not apply to
 integrations that use provider-specific request controls.
@@ -703,7 +704,8 @@ sink.
 {
   "allow_http_methods": ["GET", "HEAD"],
   "path_guards": ["^/dist(?:/.*)?$"],
-  "allow_websocket": false
+  "allow_websocket": false,
+  "guard_request_content": false
 }
 ```
 
@@ -711,10 +713,11 @@ sink.
 | --- | --- | --- | --- |
 | `allow_http_methods` | Yes | enum array | HTTP methods allowed for proxied requests to this domain. Valid values are `GET`, `HEAD`, `POST`, `PUT`, `PATCH`, and `DELETE`. An empty array keeps HTTP/HTTPS closed for this domain. |
 | `path_guards` | No | string array | Python `re` regular expressions for allowed request targets, evaluated with `re.fullmatch` against the path plus query string when present. If omitted, paths are not restricted beyond the domain and method rule. |
-| `allow_websocket` | No | boolean | Defaults to `false`. When true, permits a WebSocket after the handshake method/path passes this rule and the upstream returns a final `101`. The proxy validates and bounds the client frame stream, but applies no provider-specific rule to message contents; enable this only for a destination the operator trusts with a long-lived bidirectional channel. |
+| `guard_request_content` | No | boolean | Defaults to `false`. Applies the standard parameter guard without identifier, machine-token, or longer-text exceptions to the hostname, URL, all headers, and supported bodies. May reject credentials. Blocks WebSockets while enabled, even if `allow_websocket` is true. See content inspection below. |
+| `allow_websocket` | No | boolean | Defaults to `false`. When true and `guard_request_content` is false, permits a WebSocket after the handshake method/path passes this rule and the upstream returns a final `101`. The proxy validates and bounds the client frame stream, but applies no provider-specific rule to message contents; enable this only for a destination the operator trusts with a long-lived bidirectional channel. |
 
 WebSockets are not inferred from ordinary HTTP access. On a custom domain,
-`allow_websocket: true` is required in addition to `GET` and any matching
+`allow_websocket: true` and `guard_request_content: false` are required in addition to `GET` and any matching
 `path_guards`. The option is intentionally explicit because custom-domain
 frames are opaque after the verified `101`; each frame is not a separate HTTP
 request. Managed integrations are HTTP-only except OpenAI's guarded API and
@@ -728,12 +731,14 @@ For example, `^/dist(?:/.*)?$` allows `/dist` and `/dist/index.js`. If query
 strings are allowed, include them in the regex, such as
 `^/simple(?:/.*)?(?:\\?.*)?$`.
 
-Custom-domain requests are enforced by the operator's rule alone — domain,
-methods, path guards — and nothing inside the request is inspected: no header
-checks, no URL parameter guard, no body scanning. Adding a domain here is an
-explicit statement that the destination is trusted with whatever the agent can
-send it. Use a managed integration where one exists; those destinations have
-known clients and are guarded accordingly.
+Custom-domain requests must match the configured domain, method, and path.
+With `guard_request_content: true`, the guard checks URLs (including hostnames),
+all headers, and text, JSON, or form bodies. The URL, combined headers, and body
+each have a 1,024-byte limit. Unsupported bodies and WebSocket connections are
+blocked. Requests are either allowed unchanged or rejected.
+
+This does not guarantee prevention of all data leakage and may hamper normal
+use. Use a managed integration where one exists.
 
 For Codex, the host also restricts the agent runtime to cached web search, so
 the OpenAI proxy guard is the second layer rather than the only one.

@@ -172,7 +172,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("const actionSequence = ++workspaceNavigationActionSequence;", app)
         self.assertIn("actionSequence !== workspaceNavigationActionSequence", app)
         self.assertIn("backToHome(actionSequence)", app)
-        self.assertEqual(app.count("backToHome(actionSequence)"), 4)
+        self.assertEqual(app.count("backToHome(actionSequence)"), 3)
         self.assertRegex(
             app,
             r"function backToHome\(workspaceActionSequence = null\) \{\s*"

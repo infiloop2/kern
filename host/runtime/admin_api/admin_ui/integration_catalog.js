@@ -491,7 +491,7 @@ export const HOST_INFERENCE_INTEGRATIONS = {
     summary: "Name agent tasks and review requests against your auto-approval policies.",
     protections: [
       "The key stays encrypted in host state and is used only by the dedicated kern-host-inference service. Agents and agent-facing tools cannot read it or call this provider.",
-      "Kern uses GPT-6 Luna for task titles, and GPT-6 Sol for auto-approval policy reviews.",
+      "Kern uses GPT-6 Luna for task titles, and GPT-6.1 Sol for auto-approval policy reviews.",
     ],
     setupSteps: [
       { title: "Create an API key", description: "Create a project API key at platform.openai.com. This is separate from the ChatGPT account used by Codex." },
@@ -608,12 +608,12 @@ export const CUSTOM_DOMAIN_GUIDE = {
   summary: "Creates an explicit network rule for a domain that is not covered by a managed integration or bundled tool.",
   protections: [
     "Every request must match the configured domain, method, and any path guards. Anything outside the rule is denied and recorded in the network audit log.",
-    "Nothing inside the request is inspected: no header checks, no URL parameter guard, no body scanning. The domain, method and path rule is the whole boundary, so adding a domain here means trusting that destination with anything the agent can send it.",
+    "The optional request-content guard checks hostnames, paths, query strings, all header names and values, and plain-text, JSON, or form bodies for secrets, sensitive identifiers, encoded payloads, and oversized values, with no exceptions. It is off by default. Unsupported bodies and WebSockets are blocked while enabled; this does not prevent all data leakage.",
     "Managed-integration domains are reserved, so a custom rule cannot bypass their account, repository, or request-body protections.",
   ],
   setupSteps: [
     { title: "Identify the narrow boundary", description: "Decide the smallest exact domain, method set, and path surface the workflow needs. Prefer an exact API host over a wildcard." },
-    { title: "Add the rule", description: "Expand Custom Domain Access, enter the domain, comma-separated HTTP methods, and optional path regexes one per line, then choose Add domain rule." },
+    { title: "Add the rule", description: "Expand Custom Domain Access, enter the domain, select HTTP method buttons, optionally enable Guard request content, and enter optional path regexes one per line, then choose Add domain rule." },
     { title: "Verify in the audit log", description: "Run the intended request and inspect Network audit log. A denial gives a dedicated reason; widen only the specific boundary the real request proves necessary." },
   ],
   capabilities: [
@@ -623,7 +623,7 @@ export const CUSTOM_DOMAIN_GUIDE = {
     items: [
       {
         title: "What leaves this host",
-        description: "The configured service receives the complete HTTPS request: hostname, path, query parameters, method, headers, cookies or authorization values, body, and source network metadata. Any host data the agent places in a request can go to that service, and none of it is inspected — the host checks only that the domain, method and path match your rule. Add a domain here only if you trust that destination with your data.",
+        description: "The configured service receives the complete HTTPS request: hostname, path, query parameters, method, headers, cookies or authorization values, body, and source network metadata. Any host data the agent places in a request can go to that service. Kern enforces the domain, method and path rule; the optional parameter guard checks request content before forwarding. It may reject legitimate credentials or API payloads. Add a domain here only if you trust that destination with your data.",
         links: [],
       },
       {
@@ -644,7 +644,7 @@ export const CUSTOM_DOMAIN_GUIDE = {
     ],
   },
   controls: [
-    "No content inspection: the domain, method and path rule is enforced and nothing else. URL values, headers, cookies, credentials and the request body are all forwarded as the agent sent them. Managed integrations are guarded because their clients and destinations are known; a custom domain is not, so trusting the destination is the decision you are making here.",
+    "Guard request content applies the standard parameter guard without token, identifier, or longer-text exceptions. It may reject API keys, cookies, signed URLs, and other credentials. URLs, the combined header block, and request bodies each have a 1,024-byte limit. Supported bodies are uncompressed UTF-8 plain text, JSON, and URL-encoded forms; JSON keys and values and form fields are checked after decoding. Binary, multipart, unsupported or malformed bodies, and WebSockets are blocked while enabled. Trust the destination even with this heuristic enabled.",
     "Rules validate structurally and publish atomically; an invalid replacement leaves the active policy unchanged.",
   ],
   networkScope: [],

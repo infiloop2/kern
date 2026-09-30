@@ -17,14 +17,16 @@ from host.runtime.core import host_errors, state
 
 # Prices reviewed 2026-09-22. Store calculated cost on every response so a
 # future catalog edit changes only future calls.
-# Sol prices reviewed 2026-09-28: https://developers.openai.com/api/docs/models/gpt-6-sol
+# Sol 6.1 prices reviewed 2026-09-29: https://developers.openai.com/api/docs/models/gpt-6.1-sol
 # https://developers.openai.com/api/docs/models/gpt-6-luna
 # https://typesafe.ai/ (Jev.Cost: $42 per billion input tokens)
-_OPENAI_MODEL_RE = re.compile(r"^gpt-6-(luna|sol)(?:-[0-9]{4}-[0-9]{2}-[0-9]{2})?$")
+_OPENAI_MODEL_RE = re.compile(r"^(gpt-6-luna|gpt-6\.1-sol)(?:-[0-9]{4}-[0-9]{2}-[0-9]{2})?$")
 _TYPESAFE_JEV_RE = re.compile(r"^jev-(?:latest|[1-9][0-9]*\.[0-9]+\.[0-9]+)$")
 # USD per token: input, cached input, output.
-_OPENAI_LUNA_PRICES = (0.10 / 1_000_000, 0.01 / 1_000_000, 0.50 / 1_000_000)
-_OPENAI_SOL_PRICES = (2.0 / 1_000_000, 0.2 / 1_000_000, 10.0 / 1_000_000)
+_OPENAI_PRICES = {
+    "gpt-6-luna": (0.10 / 1_000_000, 0.01 / 1_000_000, 0.50 / 1_000_000),
+    "gpt-6.1-sol": (2.0 / 1_000_000, 0.1 / 1_000_000, 10.0 / 1_000_000),
+}
 _TYPESAFE_INPUT_PER_TOKEN = 42.0 / 1_000_000_000
 MAX_RESPONSE_TOKENS = 10_000_000
 _WRITE_SLOTS = threading.BoundedSemaphore(16)
@@ -162,8 +164,8 @@ def record_openai_response(_requested_model: str, response: Any | None) -> None:
                 "cached_input_tokens": cached_tokens,
                 "output_tokens": output_tokens,
             }
-    model = "gpt-6-" + match.group(1)
-    input_price, cached_price, output_price = _OPENAI_SOL_PRICES if model == "gpt-6-sol" else _OPENAI_LUNA_PRICES
+    model = match.group(1)
+    input_price, cached_price, output_price = _OPENAI_PRICES[model]
     cost: float | None = None
     if measured is not None:
         uncached = measured["input_tokens"] - measured["cached_input_tokens"]

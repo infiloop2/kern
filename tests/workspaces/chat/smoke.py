@@ -226,9 +226,26 @@ def desktop_smoke(page: Any) -> None:
     spawned_nav = page.locator(
         "#spawned-agents-nav-items [data-action='open-chat'][data-item-id='thread-6']"
     )
+    spawned_toggle = page.locator('[data-action="toggle-spawned-agents"]')
+    expect(spawned_toggle).to_have_text("Expand")
+    expect(spawned_toggle).to_have_attribute("aria-expanded", "false")
+    expect(spawned_nav).to_be_hidden()
+    expect(page.locator('[data-action="show-spawned-archive"]')).to_have_count(0)
+    spawned_toggle.click()
+    expect(spawned_toggle).to_have_text("Collapse")
+    expect(spawned_toggle).to_have_attribute("aria-expanded", "true")
     expect(spawned_nav).to_be_visible()
     expect(spawned_nav).to_contain_text("Spawned by thread-1")
     expect(page.locator("#chat-nav-items [data-item-id='thread-6']")).to_have_count(0)
+    spawned_toggle.click()
+    expect(spawned_nav).to_be_hidden()
+    spawned_toggle.click()
+    page.evaluate("window.KernHost.api('POST', '/v1/workspace/chat/threads/thread-6/archive', {})")
+    page.evaluate("window.KernHost.refreshNavigation()")
+    expect(spawned_nav).to_have_count(0)
+    page.evaluate("window.KernHost.api('POST', '/v1/workspace/chat/threads/thread-6/unarchive', {})")
+    page.evaluate("window.KernHost.refreshNavigation()")
+    expect(spawned_nav).to_be_visible()
     spawned_nav.click()
     expect(frame.locator(".thread-title")).to_have_text("delegated-research")
     expect(frame.locator("#new-thread")).to_be_hidden()
@@ -472,8 +489,8 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#new-task-model option")).to_have_count(3)
     expect(frame.locator("#new-task-model option[value='gpt-6-astra']")).to_have_count(1)
     frame.locator("#new-task-model").select_option("gpt-6-luna")
-    expect(frame.locator("#new-task-effort option")).to_have_count(2)
-    expect(frame.locator("#new-task-effort")).not_to_contain_text("Ultra")
+    expect(frame.locator("#new-task-effort option")).to_have_text(["High", "Max"])
+    expect(frame.locator("#new-task-effort option[value=ultra]")).to_have_count(0)
     frame.locator("#new-task-effort").select_option("max")
     frame.get_by_role("button", name="Send").click()
     expect(frame.locator("#status")).to_contain_text("This request could not be completed. Please try again.")
@@ -597,8 +614,15 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#new-task-effort")).to_have_value("max")
     _start_host_chat(page)
     expect(frame.locator("#new-task-runtime")).to_have_value("codex")
-    expect(frame.locator("#new-task-model")).to_have_value("gpt-6-sol")
+    expect(frame.locator("#new-task-model")).to_have_value("gpt-6.1-sol")
     expect(frame.locator("#new-task-effort")).to_have_value("high")
+    expect(frame.locator("#new-task-effort option")).to_have_text([
+        "High", "Max", "Ultra", "High Fast", "High Ultrafast",
+    ])
+    frame.locator("#new-task-effort").select_option("high-ultrafast")
+    expect(frame.locator("#new-task-effort")).to_have_value("high-ultrafast")
+    frame.locator("#new-task-effort").select_option("high-fast")
+    expect(frame.locator("#new-task-effort")).to_have_value("high-fast")
     # A new thread uses the named default for its runtime.
     frame.locator("#new-task-runtime").select_option("claude_code")
     expect(frame.locator("#new-task-model")).to_have_value("claude-opus-5-5")
@@ -1132,13 +1156,19 @@ def _assert_mobile_keyboard_viewport_recovery(page: Any, frame: Any) -> None:
         page.set_viewport_size({"width": width, "height": keyboard_height})
         _assert_mobile_app_owns_viewport(page, frame, f"{width}x{full_height} keyboard")
 
-        distance_from_bottom = frame.locator("#chat-scroll").evaluate(
-            "element => element.scrollHeight - element.scrollTop - element.clientHeight"
-        )
-        if distance_from_bottom > 1:
-            raise AssertionError(
-                f"keyboard detached the latest message from the composer: {distance_from_bottom}px"
-            )
+        # ResizeObserver and scroll anchoring settle on animation frames after
+        # the viewport changes. Assert the final position, not the first frame.
+        frame.locator("#chat-scroll").evaluate("""element => new Promise((resolve, reject) => {
+          const deadline = performance.now() + 5000;
+          const check = () => {
+            const distance = element.scrollHeight - element.scrollTop - element.clientHeight;
+            if (distance <= 1) resolve();
+            else if (performance.now() >= deadline) {
+              reject(new Error(`keyboard detached the latest message from the composer: ${distance}px`));
+            } else requestAnimationFrame(check);
+          };
+          requestAnimationFrame(check);
+        })""")
 
         composer.evaluate("element => element.blur()")
         page.set_viewport_size({"width": width, "height": full_height})

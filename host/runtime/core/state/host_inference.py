@@ -151,7 +151,7 @@ def record_host_inference_usage(
     provider = _provider(provider)
     if provider not in {"openai", "typesafe"}:
         raise ValueError("unknown host inference usage provider")
-    if model not in {"gpt-6-luna", "gpt-6-sol", "jev"}:
+    if model not in {"gpt-6-luna", "gpt-6.1-sol", "jev"}:
         raise ValueError("unknown host inference usage model")
     counters = {field: 0 for field in _USAGE_FIELDS}
     if usage is not None:

@@ -1616,14 +1616,8 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
         ):
             self.assertIsNone(google_calendar.CALENDAR_EVENT_ID_RE.fullmatch(prose_id))
 
-    def test_custom_domains_are_not_inspected(self) -> None:
-        """A custom domain's contract is the operator's rule and nothing else.
-
-        The operator names the domain, methods and paths; the host inspects
-        nothing inside the request. There is no knowable client, header set or
-        URL grammar to check against, and request bodies were never scanned, so
-        on any write-capable domain a content guard was never a boundary.
-        """
+    def test_custom_domains_are_not_inspected_by_default(self) -> None:
+        """Existing rules retain their uninspected content contract."""
         from host.network_integrations.custom import guard
         from host.network_integrations.custom.manifest import (
             CustomDomainRule,

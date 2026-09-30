@@ -2612,7 +2612,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
             self.mock_memory_recall.reset_mock()
             for fields in (
-                {"model": "gpt-6-sol", "effort": "high"},
+                {"model": "gpt-6.1-sol", "effort": "high"},
                 {"model": "gpt-6-astra", "effort": "max"},
             ):
                 with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
@@ -3013,7 +3013,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
         set_runtime_statuses(**{r: "active" for r in ("codex", "codex-2", "codex-3")})
         for runtime in ("codex", "codex-2", "codex-3"):
             for old_model, new_model in (
-                ("gpt-5.6-sol", "gpt-6-sol"),
+                ("gpt-5.6-sol", "gpt-6.1-sol"),
+                ("gpt-6-sol", "gpt-6.1-sol"),
                 ("gpt-5.6-luna", "gpt-6-luna"),
                 ("gpt-5.6-terra", "gpt-6-astra"),
             ):
@@ -3416,7 +3417,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 {
                     "message": "fresh start",
                     "agent_runtime": "codex",
-                    "model": "gpt-6-sol",
+                    "model": "gpt-6.1-sol",
                     "effort": "max",
                 },
             )
@@ -3608,7 +3609,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.request(
                 "POST",
                 "/v1/threads/thread-used-by-codex/messages",
-                {"message": "bad", "model": "gpt-6-sol"},
+                {"message": "bad", "model": "gpt-6.1-sol"},
             )
         self.assertEqual(codex_error.exception.code, 400)
 
@@ -3950,13 +3951,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
         body = {
             "network_integrations": {
                 "openai": {"enabled": True},
-                "custom": {"domains": {"api.example.com": {"allow_http_methods": ["GET"], "path_guards": ["^/v1$"]}}},
+                "custom": {"domains": {"api.example.com": {"allow_http_methods": ["GET"], "path_guards": ["^/v1$"], "guard_request_content": True}}},
             },
         }
         _, response = self.request("PUT", "/v1/network/policy", body)
 
         custom = response["network_controls"]["network_integrations"]["custom"]["domains"]
         self.assertEqual(custom["api.example.com"]["allow_http_methods"], ["GET"])
+        self.assertTrue(custom["api.example.com"]["guard_request_content"])
         # The stored policy keeps the operator-facing shape. Provider hosts are
         # owned by their integration, never listed as custom domains.
         self.assertNotIn("api.openai.com", custom)

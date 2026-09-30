@@ -1159,7 +1159,7 @@ _ROUTES: tuple[_Route, ...] = (
         _Route("POST", "/v1/browser/" + operation,
                lambda request: browser_admin.control(request.path.rsplit("/", 1)[-1], request.body),
                operator_only=True, query_keys=frozenset(), query_label="browser")
-        for operation in ("list", "create", "check", "open", "frame", "input", "save", "cancel", "disconnect")
+        for operation in ("list", "create", "check", "open", "frame", "input", "save", "cancel", "disconnect", "network_get", "network_save", "network_test")
     ),
     _Route("GET", "/v1/dictation/ready", lambda request: transcription_client.readiness(),
            operator_only=True, query_keys=frozenset(), query_label="dictation"),
@@ -1228,6 +1228,7 @@ _ROUTES: tuple[_Route, ...] = (
     ),
     _Route("GET", "/v1/auto-approvals", lambda request: auto_approvals.page(request.query),
            operator_only=True, query_keys=frozenset({"page", "outcome"}), query_label="auto-approval history"),
+    _Route("PUT", "/v1/auto-approvals/settings", lambda request: auto_approvals.save_settings(request.body), operator_only=True),
     _Route("PUT", "/v1/auto-approvals/policy", lambda request: auto_approvals.save_policy(request.body), operator_only=True),
     _Route("DELETE", "/v1/auto-approvals/policy", lambda request: auto_approvals.delete_policy(request.body), operator_only=True),
     _Route(

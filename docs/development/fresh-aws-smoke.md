@@ -31,6 +31,14 @@ event pagination, concurrent policy replaces, proxy protocol edge cases, live
 network enforcement, managed provider policy validation, tool-service/socket
 boundaries, credential-free tool calls, and the network event prune race.
 
+Browser coverage makes one call through the deployed service's admin-UID
+readiness operation: launch sandboxed Chromium on Xvfb, load `about:blank`,
+capture a screenshot, and close the browser. It verifies the service stayed
+running and left no child processes or private display/profile directories.
+There are no repeated load cycles, CPU/memory measurements or performance
+thresholds. This checks the basic lifecycle on the standard 2-vCPU/2-GiB host;
+it is not a real-site benchmark or proof of X login/Decodo compatibility.
+
 The workflow installs its pinned Playwright driver before AWS credentials are
 injected. The credential-bearing step launches the hosted runner's preinstalled
 Chrome, so it downloads neither code nor a browser while the credentials are

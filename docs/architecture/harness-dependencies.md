@@ -19,7 +19,7 @@ can break when a harness package is upgraded.
 
 | Harness | Package | Pinned version | Runtime id | Adapter |
 | --- | --- | --- | --- | --- |
-| Codex | `@openai/codex` | `0.155.1` | `codex`, `codex-2`, `codex-3` | `host/runtime/agent_runtime/codex_app_server.py` |
+| Codex | `@openai/codex` | `0.159.0` | `codex`, `codex-2`, `codex-3` | `host/runtime/agent_runtime/codex_app_server.py` |
 | Claude Code | `@anthropic-ai/claude-code` | `2.1.284` | `claude_code` | `host/runtime/agent_runtime/claude_code.py` |
 | Grok Build | `@xai-official/grok` | `1.0.40` | `grok`, `grok-2` | `host/runtime/agent_runtime/grok_agent.py` |
 | Hermes | `hermes-agent[bedrock,mcp]` | `0.18.2` | `hermes` | `host/runtime/agent_runtime/hermes_agent.py` |
@@ -91,13 +91,27 @@ Expected methods:
 | `thread/read` | Metadata-only reads (`includeTurns: false`) return the persisted rollout `path` for size checks after successful turns. |
 | `command/exec` | Runs an argv vector as the agent without a model turn. Rotation uses `/usr/bin/stat` on the rollout path, with a one-second command timeout, and reads `exitCode` and `stdout`. |
 | `thread/delete` | Permanently deletes a persisted thread and its native Codex descendants, including rollout files and associated metadata. Kern detaches its resume mapping before calling this. |
-| `turn/start` | Accepts `threadId`, text input, and the selected `model` and `effort`. Returns `turn.id`. It may emit notifications before the response. |
+| `turn/start` | Accepts `threadId`, text input, and the selected `model`, reasoning `effort`, and `serviceTier` for speed presets. Returns `turn.id`. It may emit notifications before the response. |
 | `turn/steer` | Accepts `threadId`, `expectedTurnId`, and text input. The submitting API request waits for its JSON-RPC response; `no active turn` is returned to the caller as a retryable `409`, not retained by a host mailbox. |
 
-The pinned Codex catalog must advertise `gpt-6-sol` and
-`gpt-6-astra` with `high`, `max`, and `ultra`, plus `gpt-6-luna` with `high` and `max`.
-Kern intentionally exposes only that small subset; the API rejects
-unsupported pairs before a message is accepted.
+Kern offers `gpt-6.1-sol` and `gpt-6-astra` with `high`, `max`, `ultra`,
+`high-fast`, and `high-ultrafast`; `gpt-6-luna` offers only `high` and `max`. All three Codex
+accounts default to `gpt-6.1-sol`. GPT-6 Sol is retired from the picker;
+historical conversations retain their recorded model and can switch while idle.
+Saved App and schedule settings move from GPT-6 Sol to GPT-6.1 Sol on upgrade.
+
+The adapter maps `high-fast` to High reasoning with `serviceTier: "fast"`,
+and `high-ultrafast` to High reasoning with `serviceTier: "ultrafast"`.
+High, Max, and Ultra keep the normal behavior without a speed override.
+Changing runtime, model, or preset starts a fresh provider session; resuming
+keeps the selected preset. Ultra is Codex's delegation mode, independent of Ultrafast.
+The pinned 0.159.0 CLI enables the Fast feature by default, so Kern adds no
+feature flag to its managed config. The app-server accepts the service tier as a string. Kern does not filter these presets by plan, workspace, model catalog, or rollout, and does
+not retry unsupported requests with a different model or tier. Codex's error
+is surfaced to the operator. Codex itself omits tiers absent from its model
+catalog, so an unsupported selection is not guaranteed to fail or run at the
+requested speed. Kern does not override the provider catalog. See the official [model availability](https://learn.chatgpt.com/docs/models)
+and [speed modes](https://learn.chatgpt.com/docs/agent-configuration/speed).
 
 Expected notifications:
 

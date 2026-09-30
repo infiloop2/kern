@@ -3,18 +3,19 @@ from __future__ import annotations
 
 import base64
 import ipaddress
-import json
-import os
-from pathlib import Path
 import re
-from typing import Any
+from typing import Any, TYPE_CHECKING, cast
 from urllib.parse import urlsplit
 
+from host.constants import BROWSER_NETWORK_PORT
 from host.runtime.browser.client import BrowserError
+from host.runtime.browser.display import Display
 from host.runtime.core import host_errors, host_metrics
 
+if TYPE_CHECKING:
+    from playwright.sync_api import StorageState  # type: ignore[import-not-found]
+
 WIDTH, HEIGHT = 1100, 760
-SAVED_STATE_LIMIT_BYTES = 1_000_000_000
 
 
 def permitted_url(url: str) -> bool:
@@ -33,21 +34,27 @@ def permitted_url(url: str) -> bool:
 
 class Browser:
     """Temporary Chromium with private authentication snapshots; no agent cookie access."""
-    def __init__(self, auth_file: Path, site: str) -> None:
+    def __init__(self, storage_state: dict[str, Any] | None, site: str, settings: dict[str, Any]) -> None:
         from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
         self.site = site
-        self.auth_file = auth_file
         self.reported_failures: set[tuple[str, str, str]] = set()
+        if settings.get("error"):
+            raise BrowserError(settings["error"])
         self.runtime = sync_playwright().start()
         try:
+            self.display = Display()
             self.process = self.runtime.chromium.launch(
-                channel="chromium", headless=True, chromium_sandbox=True, timeout=30000,
-                args=["--disable-quic", "--disable-background-networking"],
+                channel="chromium", headless=False, chromium_sandbox=True, timeout=30000,
+                env={**self.display.environment},
+                ignore_default_args=["--enable-automation"],
+                proxy={"server": f"http://127.0.0.1:{BROWSER_NETWORK_PORT}", "bypass": "<-loopback>"},
+                args=["--disable-blink-features=AutomationControlled", "--disable-quic", "--disable-background-networking", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
             )
             self.context = self.process.new_context(
-                storage_state=str(auth_file) if auth_file.exists() else None,
-                viewport={"width": WIDTH, "height": HEIGHT}, locale="en-US",
-                user_agent=f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/{self.process.version} Safari/537.36",
+                storage_state=cast("StorageState | None", storage_state),
+                viewport={"width": WIDTH, "height": HEIGHT},
+                screen={"width": 1280, "height": 960}, device_scale_factor=1, color_scheme="light",
+                locale=settings.get("locale", "en-US"), timezone_id=settings.get("timezone", "UTC"),
                 accept_downloads=False, service_workers="block",
             )
             self.context.set_default_timeout(10000)
@@ -121,30 +128,19 @@ class Browser:
                 self.page = remaining[-1]
         page.on("close", closed)
 
-    def save_state(self) -> None:
-        # The service worker serializes all snapshots. Include the old file while
-        # budgeting the replacement so its temporary copy fits as well.
-        payload = json.dumps(self.context.storage_state(indexed_db=True)).encode("utf-8")
-        used = sum(path.stat().st_size for path in self.auth_file.parent.parent.rglob("*") if path.is_file())
-        if used + len(payload) > SAVED_STATE_LIMIT_BYTES:
-            raise BrowserError("Browser saved state reached its 1 GB total limit. Disconnect an unused account to free space. If submitting a post, check X before approving another attempt.")
-        temporary = self.auth_file.with_suffix(".tmp")
-        try:
-            with temporary.open("wb") as stream:
-                os.chmod(temporary, 0o600)
-                stream.write(payload)
-                stream.flush()
-                os.fsync(stream.fileno())
-            temporary.replace(self.auth_file)
-        finally:
-            temporary.unlink(missing_ok=True)
+    def save_state(self) -> dict[str, Any]:
+        return dict(self.context.storage_state(indexed_db=True))
 
     def close(self) -> None:
         try:
             if hasattr(self, "process"):
                 self.process.close()
         finally:
-            self.runtime.stop()
+            try:
+                self.runtime.stop()
+            finally:
+                if hasattr(self, "display"):
+                    self.display.close()
 
     def origin(self) -> str:
         parsed = urlsplit(self.page.url)
@@ -152,6 +148,13 @@ class Browser:
 
     def frame(self) -> str:
         try:
+            # DOM/font readiness can precede the headed compositor's first
+            # frame. Cross a render cycle before asking it for a capture;
+            # this also works for intentionally blank pages without a paint entry.
+            self.page.wait_for_function(
+                "() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve(true))))",
+                timeout=5000,
+            )
             return base64.b64encode(self.page.screenshot(type="jpeg", quality=75)).decode("ascii")
         except Exception:
             self.report_failure("Screenshot capture failed")
@@ -178,6 +181,13 @@ class Browser:
             if not isinstance(value, str) or not 1 <= len(value) <= 4096:
                 raise BrowserError("Enter at most 4,096 characters at once.")
             self.page.keyboard.insert_text(value)
+        elif kind == "type" and set(body) == {"kind", "text"}:
+            value = body["text"]
+            if not isinstance(value, str) or len(value) != 1 or not value.isprintable():
+                raise BrowserError("Expected one printable character.")
+            # Physical typing needs key events; paste/mobile text stays a single
+            # insertion. Playwright inserts characters outside its keyboard map.
+            self.page.keyboard.type(value)
         elif kind == "key" and set(body) == {"kind", "key"}:
             key = body["key"]
             if key not in {"Enter", "Tab", "Shift+Tab", "Backspace", "Delete", "Escape", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Control+a"}:

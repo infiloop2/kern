@@ -247,6 +247,8 @@ class RunnerBackedCheckTests(unittest.TestCase):
 
     def test_database_access(self) -> None:
         def run(argv: list[str]) -> "subprocess.CompletedProcess[str]":
+            if "kern-browser" in argv:
+                return completed(0, stdout="t\n")
             if "kern-admin" in argv:
                 return completed(0, stdout="1\n")
             return completed(2, stderr="psql: FATAL: pg_hba.conf rejects connection")
@@ -254,7 +256,7 @@ class RunnerBackedCheckTests(unittest.TestCase):
         self.assertEqual(verify_deploy.check_database_access(run), [])
 
         def agent_admitted(argv: list[str]) -> "subprocess.CompletedProcess[str]":
-            return completed(0, stdout="1\n")
+            return completed(0, stdout="t\n" if "kern-browser" in argv else "1\n")
 
         failures = verify_deploy.check_database_access(agent_admitted)
         self.assertEqual(len(failures), 1)

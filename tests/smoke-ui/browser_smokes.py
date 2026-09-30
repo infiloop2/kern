@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 from playwright.sync_api import expect
+from host.runtime.browser_network.config import LOCATIONS
 
 
 def run(page, url, log_in, open_home_integration):
@@ -15,6 +16,7 @@ def run(page, url, log_in, open_home_integration):
     jpeg = base64.b64encode(fixture.screenshot(type="jpeg")).decode()
     fixture.close()
     sessions = {}
+    connection = {"mode": "", "error": "Saved connection settings are invalid. Select and save a connection to resume Browser activity."}
     inputs = []
     fail_cancel = False
     frame_calls = 0
@@ -23,7 +25,16 @@ def run(page, url, log_in, open_home_integration):
         operation = request_route.request.url.rsplit("/", 1)[-1]
         body = request_route.request.post_data_json
         key = body.get("account_id")
-        if operation == "list":
+        if operation == "network_get":
+            result = {**connection, "locations": [{"id": key, "label": value["label"]} for key, value in LOCATIONS.items()]}
+        elif operation == "network_save":
+            connection.clear()
+            connection.update({k: v for k, v in body.items() if k != "password"})
+            connection["has_password"] = bool(body.get("password"))
+            result = {**connection, "locations": [{"id": key, "label": value["label"]} for key, value in LOCATIONS.items()]}
+        elif operation == "network_test":
+            result = {"mode": connection["mode"], "ip": "203.0.113.5"}
+        elif operation == "list":
             result = {"accounts": list(sessions.values())}
         elif operation == "create":
             assert body == {"provider": "x"}
@@ -66,6 +77,34 @@ def run(page, url, log_in, open_home_integration):
     log_in(page, url)
     open_home_integration(page, "tool:browser")
     expect(page.locator("#panel-network .guide-action-cost")).to_have_count(0)
+    form = page.locator("#browser-connection-form")
+    expect(form.locator('[name="mode"]')).to_be_enabled()
+    expect(form.locator('[name="mode"]')).to_have_value("")
+    expect(page.locator("#browser-connection-message")).to_contain_text("Saved connection settings are invalid")
+    form.locator('[name="mode"]').select_option("decodo")
+    form.locator('[name="username"]').fill("fixture")
+    form.locator('[name="password"]').fill("private-fixture-password")
+    expect(form.locator('[name="location"] option')).to_have_text(["Choose a location", "New York", "London"])
+    form.locator('[name="location"]').select_option("new_york")
+    for name in ("country", "city", "locale", "timezone"):
+        expect(form.locator(f'[name="{name}"]')).to_have_count(0)
+    form.get_by_role("button", name="Save connection", exact=True).click()
+    expect(page.locator("#browser-connection-message")).to_contain_text("Connection saved")
+    expect(form.locator('[name="password"]')).to_have_value("")
+    form.get_by_role("button", name="Test saved connection").click()
+    expect(page.locator("#browser-connection-message")).to_contain_text("203.0.113.5")
+    assert connection["location"] == "new_york"
+    form.locator('[name="location"]').select_option("london")
+    form.get_by_role("button", name="Save connection", exact=True).click()
+    expect(page.locator("#browser-connection-message")).to_contain_text("Connection saved")
+    expect(form.locator('[name="location"]')).to_have_value("london")
+    assert connection["location"] == "london"
+    form.locator('[name="mode"]').select_option("direct")
+    expect(form.locator('[name="username"]')).to_be_hidden()
+    form.get_by_role("button", name="Save connection", exact=True).click()
+    expect(page.locator("#browser-connection-message")).to_contain_text("Connection saved")
+    assert connection == {"mode": "direct", "has_password": False}
+
     enable = page.locator('[data-action="enable-tool"][data-tool="browser"]')
     if enable.is_enabled():
         with page.expect_response(lambda response: response.url.endswith("/v1/tools/browser/enable")):
@@ -89,10 +128,38 @@ def run(page, url, log_in, open_home_integration):
         popup.screenshot(path=str(Path(directory) / "browser-popup-mobile.png"), full_page=True)
         popup.set_viewport_size({"width": 1160, "height": 950})
     popup.locator("#browser-screen").click(position={"x": 80, "y": 80})
-    popup.locator("#browser-screen").press("a")
+    with popup.expect_response(lambda response: response.url.endswith("/v1/browser/input") and response.request.post_data_json.get("kind") == "type"):
+        popup.locator("#browser-screen").press("a")
     with popup.expect_response(lambda response: response.url.endswith("/v1/browser/input") and response.request.post_data_json.get("text") == "😀"):
         popup.locator("#browser-screen").dispatch_event("keydown", {"key": "😀"})
     assert any(item.get("text") == "😀" for item in inputs)
+    # Coalesce hover storms, preserving movements on either side of a key.
+    first = len(inputs)
+    with popup.expect_response(lambda response: response.url.endswith("/v1/browser/input") and response.request.post_data_json.get("text") == "c"):
+        popup.evaluate("""() => {
+            const screen = document.getElementById('browser-screen');
+            const box = screen.getBoundingClientRect();
+            function moves(offset) {
+                for (let i = 0; i < 100; i++) screen.dispatchEvent(new PointerEvent('pointermove', {
+                    pointerType: 'mouse', clientX: box.left + offset + i, clientY: box.top + 20,
+                }));
+            }
+            moves(10);
+            screen.dispatchEvent(new KeyboardEvent('keydown', {key: 'b'}));
+            moves(120);
+            screen.dispatchEvent(new KeyboardEvent('keydown', {key: 'c'}));
+        }""")
+    sequence = inputs[first:]
+    assert [item['kind'] for item in sequence] == ['pointer', 'type', 'pointer', 'type'], sequence
+    assert sequence[0]['phase'] == sequence[2]['phase'] == 'move'
+    assert sequence[0]['x'] < sequence[2]['x']
+    with popup.expect_response(lambda response: response.url.endswith("/v1/browser/input") and response.request.post_data_json.get("text") == "pasted fixture"):
+        popup.locator("#browser-screen").evaluate("""screen => {
+            const clipboardData = new DataTransfer();
+            clipboardData.setData('text/plain', 'pasted fixture');
+            screen.dispatchEvent(new ClipboardEvent('paste', {clipboardData}));
+        }""")
+    assert inputs[-1]['kind'] == 'text'
     popup.set_viewport_size({"width": 390, "height": 844})
     expect(popup.locator("#browser-text")).to_be_visible()
     popup.locator("#browser-screen").click(position={"x": 80, "y": 80})

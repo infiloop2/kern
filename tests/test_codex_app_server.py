@@ -42,21 +42,22 @@ for line in sys.stdin:
     if method == "initialize":
         send({"id": msg["id"], "result": {}})
     elif method == "thread/start":
-        assert msg["params"]["model"] == "gpt-6-sol"
+        assert msg["params"]["model"] == "gpt-6.1-sol"
         assert "effort" not in msg["params"]
         send({"id": msg["id"], "result": {"thread": {"id": "thread_1"}}})
     elif method == "thread/resume":
         assert msg["params"]["threadId"] == "thread_existing"
         assert msg["params"]["excludeTurns"] is True
-        assert msg["params"]["model"] == "gpt-6-sol"
+        assert msg["params"]["model"] == "gpt-6.1-sol"
         assert msg["params"]["developerInstructions"].startswith(
             "You are running inside Kern."
         )
         assert "effort" not in msg["params"]
         send({"id": msg["id"], "result": {"thread": {"id": "thread_existing", "turns": []}}})
     elif method == "turn/start":
-        assert msg["params"]["model"] == "gpt-6-sol"
+        assert msg["params"]["model"] == "gpt-6.1-sol"
         assert msg["params"]["effort"] == "ultra"
+        assert "serviceTier" not in msg["params"]
         send({"method": "item/agentMessage/delta", "params": {"delta": "Hel"}})
         send({"id": msg["id"], "result": {"turn": {"id": "turn_1"}}})
         send({"method": "item/agentMessage/delta", "params": {"delta": "lo"}})
@@ -1288,7 +1289,7 @@ class CodexAppServerTests(unittest.TestCase):
                 server,
                 "do the task",
                 None,
-                "gpt-6-sol",
+                "gpt-6.1-sol",
                 "ultra",
                 messages.append,
             )
@@ -1296,6 +1297,34 @@ class CodexAppServerTests(unittest.TestCase):
         self.assertEqual(thread_id, "thread_1")
         self.assertEqual(messages, ["Hello", "Final answer"])
         self.assertEqual(output, "Final answer")
+
+    def test_speed_presets_on_new_and_resumed_turns(self) -> None:
+        # Kern keeps the same preset when resuming. Choosing another preset
+        # rotates the provider session before this adapter is called.
+        for preset, tier in (("high-fast", "fast"), ("high-ultrafast", "ultrafast")):
+            script = FAKE_APP_SERVER.replace(
+                'assert msg["params"]["effort"] == "ultra"',
+                'assert msg["params"]["effort"] == "high"',
+            ).replace(
+                'assert "serviceTier" not in msg["params"]',
+                f'assert msg["params"]["serviceTier"] == {tier!r}',
+            )
+            for existing in (None, "thread_existing"):
+                with self.subTest(preset=preset, existing=existing):
+                    with CodexAppServer([sys.executable, "-u", "-c", script]) as server:
+                        _, output = run_turn(server, "do the task", existing, "gpt-6.1-sol", preset, lambda _: None)
+                        self.assertEqual(output, "Final answer")
+
+    def test_unavailable_speed_tier_surfaces_provider_error_without_fallback(self) -> None:
+        server = MagicMock()
+        server.call.side_effect = [
+            {"thread": {"id": "thread_existing"}},
+            CodexAppServerError("Ultrafast is not available for this plan"),
+        ]
+        with self.assertRaisesRegex(CodexAppServerError, "Ultrafast is not available for this plan"):
+            run_turn(server, "do the task", "thread_existing", "gpt-6.1-sol", "high-ultrafast", lambda _: None)
+        self.assertEqual(server.call.call_count, 2)
+        self.assertEqual(server.call.call_args.args[1]["serviceTier"], "ultrafast")
 
     def test_run_turn_rejects_completion_after_only_an_intermediate_message(self) -> None:
         messages: list[str | dict[str, object]] = []
@@ -1310,7 +1339,7 @@ class CodexAppServerTests(unittest.TestCase):
                     server,
                     "do the task",
                     None,
-                    "gpt-6-sol",
+                    "gpt-6.1-sol",
                     "high",
                     messages.append,
                 )
@@ -1332,7 +1361,7 @@ class CodexAppServerTests(unittest.TestCase):
                     server,
                     "do the task",
                     None,
-                    "gpt-6-sol",
+                    "gpt-6.1-sol",
                     "high",
                     messages.append,
                 )
@@ -1352,7 +1381,7 @@ class CodexAppServerTests(unittest.TestCase):
                     server,
                     "do the task",
                     None,
-                    "gpt-6-sol",
+                    "gpt-6.1-sol",
                     "high",
                     messages.append,
                 )
@@ -1368,7 +1397,7 @@ class CodexAppServerTests(unittest.TestCase):
                 server,
                 "do the task",
                 None,
-                "gpt-6-sol",
+                "gpt-6.1-sol",
                 "high",
                 messages.append,
             )
@@ -1392,7 +1421,7 @@ class CodexAppServerTests(unittest.TestCase):
                     server,
                     "do the task",
                     None,
-                    "gpt-6-sol",
+                    "gpt-6.1-sol",
                     "high",
                     messages.append,
                 )
@@ -1444,7 +1473,7 @@ for line in sys.stdin:
                     server,
                     "do the task",
                     None,
-                    "gpt-6-sol",
+                    "gpt-6.1-sol",
                     "ultra",
                     lambda _m: None,
                 )
@@ -1640,7 +1669,7 @@ for line in sys.stdin:
                 server,
                 "test it",
                 None,
-                "gpt-6-sol",
+                "gpt-6.1-sol",
                 "high",
                 events.append,
             )
@@ -1666,7 +1695,7 @@ for line in sys.stdin:
                 server,
                 "run it",
                 None,
-                "gpt-6-sol",
+                "gpt-6.1-sol",
                 "high",
                 events.append,
             )
@@ -1698,7 +1727,7 @@ for line in sys.stdin:
                 calls.append((method, params))
                 return {"thread": {"id": "thread_1"}}
 
-        thread = codex_app_server_module._start_thread(RecordingServer(), "gpt-6-sol")  # type: ignore[arg-type]
+        thread = codex_app_server_module._start_thread(RecordingServer(), "gpt-6.1-sol")  # type: ignore[arg-type]
 
         self.assertEqual(thread["id"], "thread_1")
         self.assertEqual(calls[0][0], "thread/start")
@@ -1712,7 +1741,7 @@ for line in sys.stdin:
                 server,
                 "continue",
                 "thread_existing",
-                "gpt-6-sol",
+                "gpt-6.1-sol",
                 "ultra",
                 lambda _m: None,
             )
@@ -1742,7 +1771,7 @@ for line in sys.stdin:
                 server,  # type: ignore[arg-type]
                 "continue",
                 None,
-                "gpt-6-sol",
+                "gpt-6.1-sol",
                 "high",
                 lambda _m: None,
             )
@@ -1760,7 +1789,7 @@ for line in sys.stdin:
         with self.assertRaisesRegex(
             codex_app_server_module.ProviderSessionLost, "send the message again"
         ):
-            run_turn(server, "continue", session_id, "gpt-6-sol", "high", lambda _m: None)
+            run_turn(server, "continue", session_id, "gpt-6.1-sol", "high", lambda _m: None)
 
         self.assertEqual([call.args[0] for call in server.call.call_args_list], ["thread/resume"])
         self.assertIsNone(server.last_known_session_id)
@@ -1778,7 +1807,7 @@ for line in sys.stdin:
                 server = MagicMock(last_known_session_id=None)
                 server.call.side_effect = error
                 with self.assertRaises(CodexAppServerError) as raised:
-                    run_turn(server, "continue", "saved-session", "gpt-6-sol", "high", lambda _m: None)
+                    run_turn(server, "continue", "saved-session", "gpt-6.1-sol", "high", lambda _m: None)
                 self.assertIs(raised.exception, error)
                 self.assertNotIsInstance(raised.exception, codex_app_server_module.ProviderSessionLost)
                 self.assertEqual([call.args[0] for call in server.call.call_args_list], ["thread/resume"])

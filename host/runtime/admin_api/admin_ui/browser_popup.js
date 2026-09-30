@@ -2,7 +2,7 @@ import { api, setUnauthorizedHandler } from "./api.js";
 const $ = id => document.getElementById(id);
 const params = new URLSearchParams(location.search);
 const reference = params.has("login") ? {login_id: params.get("login")} : {account_id: params.get("account")};
-let lease = "", stopped = false, timer = null, queue = Promise.resolve();
+let lease = "", stopped = false, timer = null, queue = Promise.resolve(), pendingMove = null;
 const screen = $("browser-screen");
 function message(text) { $("browser-message").textContent = text; }
 function frameError(text) { const node = $("browser-frame-error"); node.textContent = text; node.hidden = !text; }
@@ -31,7 +31,18 @@ function scheduleFrame() {
   if (stopped) return;
   timer = setTimeout(() => enqueue(frame).then(scheduleFrame), 1200);
 }
-function input(payload) { return enqueue(async () => { if (!stopped && lease) { await call("input", payload); } }); }
+function input(payload) {
+  const moving = payload.kind === "pointer" && payload.phase === "move";
+  if (moving && pendingMove) { pendingMove.payload = payload; return queue; }
+  const task = {payload};
+  // Keep the latest unsent movement, but never coalesce across a click, key,
+  // paste or scroll. Slow connections must not build an endless hover queue.
+  pendingMove = moving ? task : null;
+  return enqueue(async () => {
+    if (pendingMove === task) pendingMove = null;
+    if (!stopped && lease) await call("input", task.payload);
+  });
+}
 async function finish(operation) {
   stopped = true;
   clearTimeout(timer);
@@ -53,7 +64,7 @@ $("browser-refresh").onclick = () => input({kind: "reload"});
 $("browser-tab").onclick = () => input({kind: "key", key: "Tab"});
 $("browser-enter").onclick = () => input({kind: "key", key: "Enter"});
 $("browser-insert").onclick = () => { const text = $("browser-text").value; $("browser-text").value = ""; if (text) input({kind: "text", text}); };
-let dragging = false, lastMove = 0;
+let dragging = false;
 function pointer(event, phase) {
   const box = screen.getBoundingClientRect();
   input({kind: "pointer", phase, x: Math.min(1099, Math.max(0, Math.floor((event.clientX - box.left) * 1100 / box.width))), y: Math.min(759, Math.max(0, Math.floor((event.clientY - box.top) * 760 / box.height)))});
@@ -62,7 +73,7 @@ screen.onpointerdown = event => {
   if (event.button !== 0) return;
   screen.focus(); dragging = true; screen.setPointerCapture(event.pointerId); pointer(event, "down");
 };
-screen.onpointermove = event => { if (dragging && Date.now() - lastMove > 50) { lastMove = Date.now(); pointer(event, "move"); } };
+screen.onpointermove = event => { if (event.pointerType === "mouse" || dragging) pointer(event, "move"); };
 function release(event) { if (dragging) { dragging = false; pointer(event, "up"); } }
 screen.onpointerup = release;
 screen.onpointercancel = release;
@@ -75,7 +86,7 @@ screen.onkeydown = event => {
   else if (key === "Tab" && event.shiftKey) key = "Shift+Tab";
   if (["Enter", "Tab", "Shift+Tab", "Backspace", "Delete", "Escape", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End", "Control+a"].includes(key)) {
     event.preventDefault(); input({kind: "key", key});
-  } else if ([...key].length === 1) { event.preventDefault(); input({kind: "text", text: key}); }
+  } else if ([...key].length === 1) { event.preventDefault(); input({kind: "type", text: key}); }
 };
 screen.onpaste = event => { event.preventDefault(); const text = event.clipboardData.getData("text/plain"); if (text) input({kind: "text", text}); };
 screen.addEventListener("wheel", event => { event.preventDefault(); input({kind: "scroll", delta: Math.max(-1000, Math.min(1000, Math.round(event.deltaY)))}); }, {passive: false});

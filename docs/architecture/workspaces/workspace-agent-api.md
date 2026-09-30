@@ -187,9 +187,13 @@ separately. Existing pages keep their ids and are classified in place by this
 prefix rule; the distinction makes the prior individual-memory convention an
 enforced API boundary.
 
-Every schedule owns one stable `schedule-N` thread. A firing submits its saved
-message through the ordinary thread-message path with an automated-trigger
-prefix, then advances the cadence after that single attempt. Model schedules
+Every schedule owns one stable `schedule-N` thread. A due calendar trigger submits its saved
+prompt through the ordinary thread-message path with an automated-trigger
+prefix. Daily triggers choose up to 24 UTC times; weekly triggers choose weekdays
+and one UTC time. All triggers share one revision and one runtime/model/effort
+configuration. An empty list stops automatic messages. Coincident triggers are
+attempted independently; missed minutes are skipped and failures are logged
+without retries. The next fixed calendar time advances before delivery. Model schedules
 reuse their conversation and provider context; a firing steers an active turn
 when the provider supports steering. Script schedules run the saved path under
 the bounded Bash provider. Output is an ordinary agent message and delivery or

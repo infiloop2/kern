@@ -37,12 +37,12 @@ Memory is host-global, not attached to an App. It is a paginated set of small,
 revisioned pages with descriptions, lexical search, soft-delete, history, and
 operator restore. Swarm pages also form a `[[page-id]]` link graph; individual
 pages do not participate in that graph. Schedules are also host-global.
-Each definition stores its own agent runtime, model, effort, cadence, and
-message and owns one stable `schedule-N` host thread. Every firing submits
-`This is an automated trigger.` plus the saved message through the ordinary
+Each definition stores shared agent runtime, model and effort settings, plus a
+list of UTC calendar triggers, and owns one stable `schedule-N` host thread. Every firing submits
+the automated-trigger prefix plus the due trigger prompt through the ordinary
 thread-message path. Model schedules reuse the same conversation and provider
 session, and a firing steers an active turn when that provider supports it.
-The cadence advances after one delivery attempt; there is no retry queue,
+The next calendar time is claimed before independent delivery attempts; there is no retry queue,
 separate run record, success status, or recent-failure API. Failures before the
 host accepts a message are logged operationally; accepted work uses the normal
 thread event path. Deleting a schedule stops future claims while retaining its
@@ -50,9 +50,17 @@ conversation without moving it into Chat; the hidden transcript returns under
 Scheduled agents when restored. An already-claimed firing may still arrive
 once. Restoring it schedules the next occurrence from restoration time.
 
+Daily triggers contain 1–24 fixed UTC times and a prompt. Weekly triggers contain
+selected weekdays, one fixed UTC time, and a prompt. The entire list (0–5
+triggers) belongs to one definition revision; there are no individual trigger
+lifecycles. Empty lists stop automated deliveries without deleting the agent.
+Coincident triggers are attempted separately. Only the current UTC minute is
+eligible, so missed minutes do not accumulate a backlog. Execution time never
+moves the calendar. List responses omit prompts; detail and history retain them.
+
 A schedule may also select the `script` runtime (`bash`/`fixed`), which runs a
 static bash script from the agent home instead of a model turn — recurring work
-that needs no reasoning. Its message field is the script's absolute path, and
+that needs no reasoning. Each trigger prompt is the script's absolute path, and
 that is the one definition field whose shape depends on the runtime: the
 spelling is validated when the schedule is written (`host/agent_scripts.py`),
 while whether the file exists is decided by the launcher at run time, because

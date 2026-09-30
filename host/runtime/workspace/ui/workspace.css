@@ -17,7 +17,7 @@ button:disabled { cursor: not-allowed; opacity: 0.5; }
 .global-search { display: block; margin-bottom: 0.65rem; }
 .global-search input, .resource-form input, .resource-form select, .resource-form textarea { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--text); min-width: 0; padding: 0.62rem 0.7rem; width: 100%; }
 .global-search input:focus, .resource-form input:focus, .resource-form select:focus, .resource-form textarea:focus { border-color: var(--accent); outline: 2px solid color-mix(in srgb, var(--accent) 18%, transparent); }
-#memory-content, #schedule-message { overflow: hidden; overflow-wrap: anywhere; resize: none; white-space: pre-wrap; word-break: break-word; }
+#memory-content, .schedule-trigger textarea { overflow: hidden; overflow-wrap: anywhere; resize: none; white-space: pre-wrap; word-break: break-word; }
 .global-list { display: grid; gap: 0.3rem; }
 .global-list-item { background: transparent; border: 1px solid transparent; border-radius: 9px; color: var(--text); display: grid; gap: 0.22rem; padding: 0.65rem 0.7rem; text-align: left; width: 100%; }
 .global-list-item:hover { background: var(--surface-2); }
@@ -77,3 +77,12 @@ button.danger { color: var(--danger); }
   .form-actions button { min-height: 44px; }
   .form-actions .danger { grid-column: 1 / -1; grid-row: 2; }
 }
+
+.schedule-trigger { border: 1px solid var(--border); border-radius: 10px; margin: 0 0 1rem; min-width: 0; padding: 1rem; }
+.schedule-trigger legend { color: var(--text-dim); font-size: 0.8rem; }
+.schedule-trigger > button { margin-top: 0.8rem; }
+.trigger-days, .trigger-times { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 0.5rem; }
+.trigger-days label { align-items: center; display: flex; gap: 0.35rem; font-size: 0.8rem; }
+.trigger-days input { width: auto; }
+.trigger-time { align-items: center; display: flex; gap: 0.3rem; max-width: 100%; }
+.trigger-time input { width: 10rem; }

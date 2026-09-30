@@ -636,6 +636,7 @@ class AwsSmoke:
             self.check_workspace_backends_without_providers,
             self.check_embedding_index_resource_load,
             self.check_dictation,
+            self.check_browser_lifecycle,
             self.check_initial_disabled_provider_deploy,
             self.check_network_policy,
             self.check_policy_validation_and_concurrency,
@@ -1608,9 +1609,7 @@ class AwsSmoke:
             schedules_base,
             {
                 "name": "Provider-free smoke schedule",
-                "message": "This future task must not run during fresh smoke.",
-                "cadence": "interval",
-                "interval_minutes": 7 * 24 * 60,
+                "triggers": [],
                 "agent_runtime": runtime,
                 "model": model,
                 "effort": efforts[0],
@@ -1701,6 +1700,14 @@ class AwsSmoke:
         if after_pid != pid:
             raise AssertionError("dictation worker restarted during inference")
         self._ok(f"real speech decoded in {time.monotonic() - started:.2f}s; readiness {ready_elapsed:.2f}s; model remains resident")
+
+    def check_browser_lifecycle(self) -> None:
+        self._step("Browser Chromium/Xvfb lifecycle")
+        source = (REPO_ROOT / "tests/smoke/browser_lifecycle.py").read_text()
+        result = self._ssh_code("sudo timeout 200 python3 - 2>&1 <<'KERN_BROWSER_TEST'\n" + source + "\nKERN_BROWSER_TEST")
+        if result != "Browser launch, screenshot and cleanup passed":
+            raise AssertionError(f"Browser lifecycle probe failed: {result[-4000:]}")
+        self._ok(result)
 
     def check_embedding_index_resource_load(self) -> None:
         """Exercise real local inference while proving the host remains responsive."""
@@ -3592,10 +3599,17 @@ class AwsSmoke:
             result = self._ssh_code(f"sudo -u {probe_user} env PYTHONPATH=/opt/kern-host python3 -c {shlex.quote(script)}")
             if result.strip() != expected:
                 raise AssertionError(f"browser must deny {probe_user} on {path} with {expected}: {result!r}")
-        for probe_user in ("kern-agent", "kern-tools", "kern-admin"):
-            result = self._ssh_code(f"sudo -u {probe_user} test -r /mnt/kern-admin/browser-state && echo readable || echo private")
-            if result.strip() != "private":
-                raise AssertionError(f"browser profiles readable by {probe_user}")
+        result = self._ssh_code("sudo test ! -e /mnt/kern-admin/browser-state && sudo test ! -L /mnt/kern-admin/browser-state && echo absent")
+        if result.strip() != "absent":
+            raise AssertionError("retired Browser disk state was not removed")
+        for probe_user in ("kern-agent", "kern-tools"):
+            result = self._ssh_code(
+                f"sudo -u postgres psql -tA -d kern_admin -c \"SELECT EXISTS (SELECT 1 FROM pg_roles "
+                f"WHERE rolname='{probe_user}' AND (has_table_privilege(oid, 'browser_accounts', 'SELECT') OR "
+                "has_table_privilege(oid, 'browser_settings', 'SELECT')))\""
+            )
+            if result.strip() != "f":
+                raise AssertionError(f"Browser database secrets readable by {probe_user}: {result!r}")
 
         network_probe_script = (
             "from host.runtime.agent_shim.mcp_shim import UnixHTTPConnection; "

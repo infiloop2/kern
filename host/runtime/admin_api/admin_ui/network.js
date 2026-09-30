@@ -1012,7 +1012,7 @@ function renderDomainRules() {
     return;
   }
   setHtml($("domain-rules"), `<table>
-    <tr><th>domain</th><th>methods</th><th>WebSocket</th><th>path guards</th><th></th></tr>
+    <tr><th>domain</th><th>methods</th><th>Content guard</th><th>WebSocket</th><th>path guards</th><th></th></tr>
     ${domains.map(domain => {
       const rule = objectValue(rules[domain]);
       const methods = (rule.allow_http_methods || []).join(", ");
@@ -1021,7 +1021,8 @@ function renderDomainRules() {
       <tr>
         <td class="mono">${esc(domain)}</td>
         <td>${esc(methods)}</td>
-        <td>${rule.allow_websocket === true ? "allowed" : "off"}</td>
+        <td>${rule.guard_request_content === true ? "on" : "off"}</td>
+        <td>${rule.allow_websocket === true ? (rule.guard_request_content === true ? "blocked by guard" : "allowed") : "off"}</td>
         <td class="mono">${guards ? `<pre>${esc(guards)}</pre>` : `<span class="muted">any path</span>`}</td>
         <td><button class="ghost sm" data-action="remove-domain-rule" data-domain="${esc(domain)}">Remove</button></td>
       </tr>`;
@@ -1031,22 +1032,25 @@ function renderDomainRules() {
 
 export async function addDomainRule() {
   const domain = $("policy-domain").value.trim().toLowerCase();
-  const methods = $("policy-methods").value.split(",").map(value => value.trim().toUpperCase()).filter(Boolean);
+  const methods = [...$("policy-methods").querySelectorAll('button[aria-pressed="true"]')].map(button => button.value);
   const pathGuards = $("policy-path-guards").value.split("\n").map(value => value.trim()).filter(Boolean);
   const allowWebsocket = $("policy-allow-websocket").checked;
   if (!domain || !methods.length) { policyMessage("custom_domain", "Domain and at least one HTTP method are required.", true); return; }
   const rule = {"allow_http_methods": methods};
   if (pathGuards.length) rule.path_guards = pathGuards;
   if (allowWebsocket) rule.allow_websocket = true;
+  if ($("policy-guard-request-content").checked) rule.guard_request_content = true;
   await publishPolicy("custom_domain", policy => {
     const domains = customDomains(policy);
     domains[domain] = rule;
     policy.network_integrations.custom = {"domains": domains};
   }, `Domain rule for ${domain} saved.`);
   $("policy-domain").value = "";
-  $("policy-methods").value = "";
+  for (const button of $("policy-methods").querySelectorAll("button")) button.setAttribute("aria-pressed", "false");
+  $("policy-guard-request-content").checked = false;
   $("policy-path-guards").value = "";
   $("policy-allow-websocket").checked = false;
+  $("policy-allow-websocket").disabled = false;
 }
 
 export async function removeDomainRule(domain) {

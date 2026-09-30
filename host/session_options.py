@@ -58,9 +58,9 @@ INTERACTIVE_RUNTIMES: tuple[str, ...] = tuple(
 )
 
 _CODEX_SESSION_OPTIONS = {
-    "gpt-6-sol": ("high", "max", "ultra"),
+    "gpt-6.1-sol": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
     "gpt-6-luna": ("high", "max"),
-    "gpt-6-astra": ("high", "max", "ultra"),
+    "gpt-6-astra": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
 }
 
 INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
@@ -98,9 +98,9 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
 # Defaults are named deliberately rather than inferred from catalog order.
 # Model ordering is presentation, not a capability ranking.
 DEFAULT_INTERACTIVE_MODELS: dict[str, str] = {
-    "codex": "gpt-6-sol",
-    "codex-2": "gpt-6-sol",
-    "codex-3": "gpt-6-sol",
+    "codex": "gpt-6.1-sol",
+    "codex-2": "gpt-6.1-sol",
+    "codex-3": "gpt-6.1-sol",
     "claude_code": "claude-opus-5-5",
     "grok": "grok-4.7",
     "grok-2": "grok-4.7",

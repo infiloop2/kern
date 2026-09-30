@@ -41,9 +41,6 @@ def run(page, url, log_in, runtime="grok-2", provider="xai"):
     page.route("**/v1/health", pending_runtime)
     page.route(f"**/v1/agent-runtime/{route_name}-oauth-login", oauth)
     log_in(page, url)
-    # Login starts an immediate asynchronous health tick; let it finish before
-    # opening the card, where it would otherwise race the first recovery read.
-    page.wait_for_load_state("networkidle")
 
     refresh = "() => import('/admin_ui/health.js').then(module => module.refreshHealth())"
     page.evaluate(refresh)
@@ -72,6 +69,7 @@ def run(page, url, log_in, runtime="grok-2", provider="xai"):
     assert methods.count("POST") == 1, methods
     assert login["login_url"] in started_text, started_text
     # A refresh must recover the started login after the card is re-rendered.
+    reads_before_recovery = methods.count("GET")
     page.evaluate(refresh)
     target = page.locator(f'[data-provider-oauth="{runtime}"]')
     expect(target).to_contain_text(login["login_url"])
@@ -79,25 +77,29 @@ def run(page, url, log_in, runtime="grok-2", provider="xai"):
         expect(target.get_by_role("button", name="Submit code")).to_be_visible()
     else:
         expect(target).to_contain_text(login["device_code"])
-    assert methods.count("GET") == 3, methods
+    assert methods.count("GET") > reads_before_recovery, methods
 
-    # A visible, successful login is eligible for a later health tick. This is
-    # the legitimate extra GET that made the old cumulative count race with the
-    # wall clock; advance to a settled tick before hiding the card.
-    page.clock.run_for(15000)
-    page.wait_for_load_state("networkidle")
-    assert methods.count("GET") == 4, methods
+    # Successful recovery clears the pause, so the next visible refresh can
+    # read again. Await that refresh directly: advancing the fake clock does
+    # not await tick()'s async work, and a busy tick can skip interval callbacks.
+    reads_before_refresh = methods.count("GET")
+    page.evaluate(refresh)
+    assert methods.count("GET") > reads_before_refresh, methods
 
     # Leaving the integration suppresses reads even when the code exists.
+    reads_before_hiding = methods.count("GET")
     page.locator("#panel-network .home-back").click()
     page.clock.run_for(31000)
     page.wait_for_load_state("networkidle")
     page.evaluate(refresh)
-    assert methods.count("GET") == 4, methods
+    assert methods.count("GET") == reads_before_hiding, methods
 
     # A reload still recovers a login started earlier (or in another tab).
     page.reload()
     expect(page.locator("#app")).to_be_visible()
+    # The policy render replaces integration cards. Wait for the actual card
+    # instead of networkidle, which can hang behind the app's recurring polls.
+    expect(page.locator(f'#agent-runtime-integrations > section[data-integration="{provider}"]')).to_be_attached()
     page.locator(f'#panel-home .home-card[data-action="open-home-integration"][data-guide="{provider}"]').click()
     expect(page.locator(f'.integration-details[data-integration-details="{provider}"]')).to_be_visible()
     page.evaluate(refresh)

@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from host.network_integrations.base import (
+    DenialReason,
     IntegrationConfigError,
     IntegrationManifest,
     reject_extra,
@@ -21,10 +22,19 @@ MANIFEST = IntegrationManifest(
     display_name="Custom domains",
     description=(
         "Operator-configured HTTPS domains with explicit methods, optional path patterns, and "
-        "an explicit opt-in for WebSockets. Use this integration when no built-in "
+        "an optional request-content guard. WebSockets require a separate opt-in with "
+        "the content guard off. Use this integration when no built-in "
         "provider integration owns the destination."
     ),
     owned_apexes=(),
+    denial_reasons=(
+        DenialReason(
+            "custom_content_uninspectable",
+            "The custom-domain content guard could not inspect this body. "
+            "Use uncompressed UTF-8 plain text, valid JSON, or URL-encoded form data. "
+            "Binary, multipart, unsupported encodings, and malformed bodies are blocked.",
+        ),
+    ),
 )
 
 
@@ -33,6 +43,7 @@ class CustomDomainRule:
     allow_http_methods: tuple[str, ...]
     path_guards: tuple[str, ...] = ()
     allow_websocket: bool = False
+    guard_request_content: bool = False
 
     def to_json(self) -> dict[str, Any]:
         value: dict[str, Any] = {"allow_http_methods": list(self.allow_http_methods)}
@@ -40,6 +51,8 @@ class CustomDomainRule:
             value["path_guards"] = list(self.path_guards)
         if self.allow_websocket:
             value["allow_websocket"] = True
+        if self.guard_request_content:
+            value["guard_request_content"] = True
         return value
 
 
@@ -87,7 +100,7 @@ def parse(raw: dict[str, Any]) -> CustomIntegration:
 
 def _parse_rule(raw: dict[str, Any], domain: str) -> CustomDomainRule:
     context = f"network_integrations.custom.domains[{domain!r}]"
-    reject_extra(raw, {"allow_http_methods", "path_guards", "allow_websocket"}, context)
+    reject_extra(raw, {"allow_http_methods", "path_guards", "allow_websocket", "guard_request_content"}, context)
     methods = tuple(method.upper() for method in _string_list(raw, "allow_http_methods"))
     for method in methods:
         if method not in ALLOWED_HTTP_METHODS:
@@ -105,7 +118,10 @@ def _parse_rule(raw: dict[str, Any], domain: str) -> CustomDomainRule:
     allow_websocket = raw.get("allow_websocket", False)
     if not isinstance(allow_websocket, bool):
         raise IntegrationConfigError(f"{context}.allow_websocket must be a boolean")
-    return CustomDomainRule(methods, path_guards, allow_websocket)
+    guard_request_content = raw.get("guard_request_content", False)
+    if not isinstance(guard_request_content, bool):
+        raise IntegrationConfigError(f"{context}.guard_request_content must be a boolean")
+    return CustomDomainRule(methods, path_guards, allow_websocket, guard_request_content)
 
 
 def _string_list(raw: dict[str, Any], key: str, *, required: bool = True) -> list[str]:

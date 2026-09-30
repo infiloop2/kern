@@ -15,11 +15,13 @@ NOW = 14 * 3600
 RECORD = {"approval_id": "approval_1.token", "tool_id": "gmail", "action_id": "send_email",
           "status": "pending", "summary": "Follow up", "payload": {"to": "customer@example.test", "body": "Hello"},
           "connection_id": "work", "account_id": "account", "account_label": "Support"}
+SETTINGS = {"sleep_start_minute": 0, "sleep_end_minute": 480}
 POLICY = {"tool_id": "gmail", "action_id": "send_email", "instructions": "Routine follow-ups only"}
 
 
 class AutoApprovalTests(unittest.TestCase):
     def setUp(self):
+        self.settings = self.enterContext(patch.object(state, "auto_approval_settings", return_value=SETTINGS))
         # Use a real catalog action, rather than requiring a particular provider's naming.
         choice = worker.catalog()[0]
         self.record = {**RECORD, "tool_id": choice["tool_id"], "action_id": choice["actions"][0]["id"]}
@@ -38,7 +40,7 @@ class AutoApprovalTests(unittest.TestCase):
 
     def test_operator_only_routes_and_invalid_scope(self):
         for method, path in (("GET", "/v1/auto-approvals"), ("PUT", "/v1/auto-approvals/policy"),
-                             ("DELETE", "/v1/auto-approvals/policy")):
+                             ("DELETE", "/v1/auto-approvals/policy"), ("PUT", "/v1/auto-approvals/settings")):
             with self.subTest(path=path), self.assertRaises(ApiError) as error:
                 service.route(method, path, {}, {}, principal=service.WorkspacePrincipal())
             self.assertEqual(error.exception.status, 403)
@@ -49,9 +51,77 @@ class AutoApprovalTests(unittest.TestCase):
 
     def test_schedule_jitter_and_quiet_hours(self):
         with patch.object(worker.random, "randint", side_effect=[1500, 0]):
-            self.assertEqual(worker.next_check(23 * 3600 + 55 * 60), 86400 + 8 * 3600)
+            self.assertEqual(worker.next_check(23 * 3600 + 55 * 60, SETTINGS), 86400 + 8 * 3600)
         with patch.object(worker.random, "randint", return_value=2100):
-            self.assertEqual(worker.next_check(NOW), NOW + 2100)
+            self.assertEqual(worker.next_check(NOW, SETTINGS), NOW + 2100)
+
+    def test_sleep_boundaries_and_midnight(self):
+        for start, end in ((0, 480), (22 * 60, 4 * 60), (10 * 60 + 15, 16 * 60 + 15)):
+            settings = {"sleep_start_minute": start, "sleep_end_minute": end}
+            for day in (0, 86400):
+                with self.subTest(start=start, end=end, day=day):
+                    self.assertEqual(worker.sleep_remaining(day + start * 60 - 1, settings), 0)
+                    self.assertEqual(worker.sleep_remaining(day + start * 60, settings), (end - start) % 1440 * 60)
+                    self.assertEqual(worker.sleep_remaining(day + end * 60 - 1, settings), 1)
+                    self.assertEqual(worker.sleep_remaining(day + end * 60, settings), 0)
+        with patch.object(worker.random, "randint", side_effect=[1500, 120]):
+            self.assertEqual(worker.next_check(21 * 3600 + 50 * 60,
+                             {"sleep_start_minute": 1320, "sleep_end_minute": 240}), 86400 + 4 * 3600 + 120)
+
+    def test_settings_validation_and_save(self):
+        with patch.object(state, "set_auto_approval_settings") as save, \
+                patch.object(worker._settings_changed, "set") as wake:
+            for body in ({}, None, {**SETTINGS, "extra": 1},
+                         *({"sleep_start_minute": start, "sleep_end_minute": end}
+                           for start, end in ((False, 480), (0, "480"), (0, 480.0), (-1, 480),
+                                              (0, 1440), (0, 359), (1320, 239), (480, 480)))):
+                with self.subTest(body=body), self.assertRaises(ApiError) as error:
+                    worker.save_settings(body)
+                self.assertEqual(error.exception.status, 400)
+            save.assert_not_called()
+            wake.assert_not_called()
+            self.assertEqual(worker.save_settings({"sleep_start_minute": 1320, "sleep_end_minute": 240}), {"saved": True})
+            save.assert_called_once_with(1320, 240)
+            wake.assert_called_once()
+
+    def test_current_settings_stop_batch_before_next_review(self):
+        self.worker_context()
+        self.settings.side_effect = [SETTINGS, {"sleep_start_minute": 840, "sleep_end_minute": 1200}]
+        with patch.object(state, "pending_auto_approvals", return_value=[self.record, self.record]):
+            worker.run_once()
+        self.judge.assert_called_once()
+        self.save.assert_called_once()
+
+    def test_settings_change_reschedules_sleeping_worker(self):
+        changed = {"sleep_start_minute": 840, "sleep_end_minute": 1200}
+        self.settings.side_effect = [SETTINGS, changed]
+        with patch.object(worker.time, "time", return_value=NOW), \
+                patch.object(worker.random, "randint", side_effect=[1500, 1500, 0]), \
+                patch.object(worker._settings_changed, "wait", side_effect=[True, KeyboardInterrupt]) as wait, \
+                patch.object(worker, "run_once") as run_once:
+            with self.assertRaises(KeyboardInterrupt):
+                worker.run()
+        self.assertEqual([call.args[0] for call in wait.call_args_list], [1500, 6 * 3600])
+        run_once.assert_not_called()
+
+    def test_scheduler_survives_settings_read_failure(self):
+        self.settings.side_effect = [RuntimeError("database unavailable"), SETTINGS]
+        with patch.object(worker.time, "time", return_value=NOW), \
+                patch.object(worker.random, "randint", return_value=1500), \
+                patch.object(worker._settings_changed, "wait", side_effect=[False, KeyboardInterrupt]) as wait, \
+                patch.object(worker.host_errors, "report_warning") as warning:
+            with self.assertRaises(KeyboardInterrupt):
+                worker.run()
+        self.assertEqual([call.args[0] for call in wait.call_args_list], [60, 1500])
+        warning.assert_called_once()
+
+    def test_page_reports_saved_sleep_window(self):
+        self.worker_context()
+        self.settings.return_value = {"sleep_start_minute": 840, "sleep_end_minute": 1200}
+        with patch.object(state, "auto_approval_history", return_value={"items": []}):
+            result = worker.page({})
+        self.assertTrue(result["quiet"])
+        self.assertEqual(result["settings"], self.settings.return_value)
 
     def test_positive_review_uses_existing_execution_path(self):
         self.worker_context()
@@ -229,7 +299,7 @@ class AutoApprovalTests(unittest.TestCase):
     def test_sol_provider_transport_and_usage(self):
         captured = {}
         result = {"approve": False, "reason": "The recipient cannot be verified."}
-        response = {"model": "gpt-6-sol", "choices": [{"message": {"content": json.dumps(result)}}],
+        response = {"model": "gpt-6.1-sol", "choices": [{"message": {"content": json.dumps(result)}}],
                     "usage": {"prompt_tokens": 100, "completion_tokens": 10, "prompt_tokens_details": {"cached_tokens": 20}}}
         def transport(url, **kwargs):
             captured.update(json.loads(kwargs["data"]))
@@ -241,14 +311,14 @@ class AutoApprovalTests(unittest.TestCase):
              patch.object(worker.client, "_request", side_effect=lambda path, body, *args: api.dispatch(path, body)["result"]):
             actual = worker.review({**self.record, "payload": {"api_key": "sk-hidden"}}, "Only follow-ups")
         self.assertEqual(actual, result)
-        self.assertEqual(captured["model"], "gpt-6-sol")
+        self.assertEqual(captured["model"], "gpt-6.1-sol")
         self.assertEqual(captured["reasoning_effort"], "medium")
         self.assertEqual(captured["timeout"], 60)
         self.assertEqual(captured["response_format"]["json_schema"]["schema"], auto_approval.SCHEMA)
         self.assertIn("untrusted", captured["messages"][0]["content"])
         self.assertNotIn("sk-hidden", captured["messages"][1]["content"])
-        self.assertEqual(meter.call_args.args[:2], ("openai", "gpt-6-sol"))
-        self.assertAlmostEqual(meter.call_args.args[3], 0.000264)
+        self.assertEqual(meter.call_args.args[:2], ("openai", "gpt-6.1-sol"))
+        self.assertAlmostEqual(meter.call_args.args[3], 0.000262)
 
 
 class AutoApprovalStorageTests(unittest.TestCase):
@@ -258,6 +328,14 @@ class AutoApprovalStorageTests(unittest.TestCase):
                                                  pending_limit=1000, origin_thread_id=None)
         self.approval_id = self.record["approval_id"]
         state.set_auto_approval_policy("fake_notes", "write_note", "Allow notes")
+
+    def test_sleep_settings_default_persist_and_survive_host_reconfiguration(self):
+        self.assertEqual(state.auto_approval_settings(), SETTINGS)
+        state.set_auto_approval_settings(1320, 240)
+        state.save_config({"agent_name": "test"})
+        self.assertEqual(state.auto_approval_settings(), {"sleep_start_minute": 1320, "sleep_end_minute": 240})
+        state.set_auto_approval_settings(600, 960)
+        self.assertEqual(state.auto_approval_settings(), {"sleep_start_minute": 600, "sleep_end_minute": 960})
 
     def test_each_request_is_checked_once_despite_policy_changes(self):
         for index, outcome in enumerate(("left_pending", "failed", "no_policy", "approved")):
