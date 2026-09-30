@@ -2,63 +2,53 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-import json
-import os
-from pathlib import Path
-import re
 import secrets
-import shutil
-import tempfile
 import time
 from typing import Any
 
+from host.runtime.browser_network.relay import Network
 from host.runtime.browser.providers import PROVIDERS
 from host.runtime.browser.actions import ACTIONS
 from host.runtime.browser.browser import Browser, WIDTH, HEIGHT
 from host.runtime.browser.client import BrowserError
+from host.runtime.browser.storage import Store, AccountData
 
 LEASE_SECONDS = 600
 
 
 class Profile:
-    def __init__(self, directory: Path, provider_name: str, factory: Any = Browser) -> None:
+    def __init__(self, account_id: str, provider_name: str, factory: Any, store: Store,
+                 data: AccountData | None = None) -> None:
         self.provider = PROVIDERS[provider_name]
-        self.directory = directory
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-        self.file = directory / "state.json"
-        self.data: dict[str, Any] = {"provider_identifier": "", "state": "needs_attention", "checked_at": "", "usage": {}}
-        if self.file.exists():
-            self.data = json.loads(self.file.read_text())
+        self.account_id = account_id
+        self.store = store
+        self.data: AccountData = data if data is not None else {
+            "provider_identifier": "", "state": "needs_attention", "checked_at": "", "usage": {}}
+        self.auth: dict[str, Any] | None = None
         self.browser: Any = None
         self.factory = factory
         self.lease = ""
         self.expires = 0.0
 
     def save(self) -> None:
-        temporary = self.file.with_suffix(".tmp")
-        with temporary.open("w") as stream:
-            os.chmod(temporary, 0o600)
-            json.dump(self.data, stream)
-            stream.flush()
-            os.fsync(stream.fileno())
-        temporary.replace(self.file)
-        fd = os.open(self.directory, os.O_DIRECTORY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        if self.account_id:
+            self.store.save_account(self.account_id, self.provider.name, self.data)
 
     def close(self) -> None:
         browser, self.browser = self.browser, None
         if browser:
             try:
-                browser.save_state()
+                snapshot = browser.save_state()
+                if self.account_id:
+                    self.store.save_account(self.account_id, self.provider.name, self.data, snapshot)
+                else:
+                    self.auth = snapshot
             finally:
                 browser.close()
 
     def launch(self) -> Any:
         if self.browser is None:
-            self.browser = self.factory(self.directory / "auth.json", self.provider.login_url)
+            self.browser = self.factory(self.store.auth(self.account_id) if self.account_id else self.auth, self.provider.login_url)
         return self.browser
 
     def status(self) -> dict[str, Any]:
@@ -127,7 +117,8 @@ class Profile:
                 self.data["state"] = "connected"
                 self.data["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 self.save()
-                self.lease = ""
+                if self.account_id:
+                    self.lease = ""
                 return self.status()
         if operation == "disconnect" and not body:
             browser, self.browser = self.browser, None
@@ -142,28 +133,29 @@ class Profile:
 
 
 class Accounts:
-    """Admin-owned accounts and one temporary login; browser files are internal."""
-    def __init__(self, directory: Path, factory: Any = Browser) -> None:
-        self.directory = directory
-        self.factory = factory
-        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    """Database-backed accounts; unfinished operator logins exist only in memory."""
+    def __init__(self, store: Store | None = None, factory: Any = None) -> None:
+        self.store = store if store is not None else Store()
+        self.network = Network(self.store)
+        self.factory = factory if factory is not None else self.launch_browser
         self.profiles: dict[str, Profile] = {}
         self.pending: dict[str, Profile] = {}
-        for entry in directory.iterdir():
-            if re.fullmatch(r"login_[a-f0-9]{32}", entry.name):
-                shutil.rmtree(entry)  # Incomplete logins never survive restart.
-            elif re.fullmatch(r"acct_[a-f0-9]{32}", entry.name) and (entry / "provider").is_file():
-                profile = Profile(entry, (entry / "provider").read_text(), factory)
-                if profile.data["provider_identifier"]:
-                    self.profiles[entry.name] = profile
-                else:
-                    shutil.rmtree(entry)
+        # Load account metadata lazily, so database recovery does not require a restart.
+        self.loaded = False
+
+    def load(self) -> None:
+        if not self.loaded:
+            self.profiles = {key: Profile(key, provider, self.factory, self.store, data)
+                             for key, (provider, data) in self.store.accounts().items()}
+            self.loaded = True
+
+    def launch_browser(self, auth: dict[str, Any] | None, site: str) -> Browser:
+        return Browser(auth, site, self.network.dispatch("get", {}))
 
     def expire(self) -> None:
         for key, profile in list(self.pending.items()):
             if time.monotonic() > profile.expires:
                 profile.close()
-                shutil.rmtree(profile.directory)
                 del self.pending[key]
         for profile in self.profiles.values():
             if profile.lease and time.monotonic() > profile.expires:
@@ -172,13 +164,19 @@ class Accounts:
 
     def dispatch(self, operation: str, body: dict[str, Any], *, agent_action: bool = False) -> dict[str, Any]:
         self.expire()
+        if operation in {"network_get", "network_save", "network_test"}:
+            if agent_action:
+                raise BrowserError("Browser connection settings are operator-only.")
+            if operation != "network_get" and any(p.browser or p.lease for p in [*self.profiles.values(), *self.pending.values()]):
+                raise BrowserError("Save and close or cancel the browser popup before changing or testing its connection.")
+            return self.network.dispatch(operation.removeprefix("network_"), body)
+        self.load()
         if operation == "ready" and not body:
-            with tempfile.TemporaryDirectory() as temporary:
-                browser = self.factory(Path(temporary) / "auth.json", "about:blank")
-                try:
-                    browser.frame()
-                finally:
-                    browser.close()
+            browser = self.factory(None, "about:blank")
+            try:
+                browser.frame()
+            finally:
+                browser.close()
             return {"ready": True}
         if operation == "list" and not body:
             return {"accounts": [{"account_id": key, **profile.status()} for key, profile in self.profiles.items()]}
@@ -190,8 +188,7 @@ class Accounts:
             if len(self.profiles) >= 5:
                 raise BrowserError("Up to 5 browser accounts can be saved. Disconnect an unused account first.")
             key = "login_" + secrets.token_hex(16)
-            profile = Profile(self.directory / key, body["provider"], self.factory)
-            (profile.directory / "provider").write_text(profile.provider.name)
+            profile = Profile("", body["provider"], self.factory, self.store)
             profile.expires = time.monotonic() + LEASE_SECONDS
             self.pending[key] = profile
             return {"login_id": key}
@@ -214,23 +211,18 @@ class Accounts:
         result = profile.dispatch(operation, payload)
         if pending and operation == "save":
             account_id = "acct_" + key.removeprefix("login_")
-            destination = self.directory / account_id
-            profile.directory.rename(destination)
-            fd = os.open(self.directory, os.O_DIRECTORY)
-            try:
-                os.fsync(fd)
-            finally:
-                os.close(fd)
-            profile.directory, profile.file = destination, destination / "state.json"
+            self.store.save_account(account_id, profile.provider.name, profile.data, profile.auth or {})
+            profile.account_id = account_id
+            profile.lease = ""
+            profile.auth = None
             self.profiles[account_id] = profile
             del self.pending[key]
             return {"account_id": account_id, **result}
         if pending and operation == "cancel":
-            shutil.rmtree(profile.directory)
             del self.pending[key]
             return {"ok": True}
         if operation == "disconnect":
-            shutil.rmtree(profile.directory)
+            self.store.delete_account(key)
             del self.profiles[key]
         if operation in {"save", "check", "cancel"}:
             return {"account_id": key, **result}

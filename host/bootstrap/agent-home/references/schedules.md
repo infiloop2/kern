@@ -3,10 +3,13 @@
 Read this file before listing, creating, editing, deleting, or diagnosing
 schedules. Schedules are shared by every thread.
 
-Every schedule owns one stable `schedule-N` thread. Each firing sends the saved
-message to that thread, steering an active turn when the runtime supports it.
+Every schedule owns one stable `schedule-N` thread. Each trigger sends its saved
+prompt to that thread, steering an active turn when the runtime supports it.
 
-Each firing makes one delivery attempt and advances the cadence immediately.
+All times are fixed UTC calendar times. Each due trigger makes one independent
+delivery attempt, including when several triggers coincide. The host advances
+to the next future calendar time before attempting delivery. Only the current
+UTC minute is eligible; earlier missed minutes are skipped without catch-up.
 There is no retry queue, separate run record, success status, or recent-failure
 API. A failure before the host accepts the message is logged operationally and
 does not create a thread event. Once accepted, ordinary provider and script
@@ -24,19 +27,25 @@ manual messaging nor self-memory controls.
 ## Agent-facing API
 
 - `GET /agent/schedules?limit=40&before=...` lists active schedule summaries,
-  newest first. Summaries omit the saved `message`; fetch the detail when
-  editing it.
+  newest first. Summaries omit trigger `prompt` values; fetch the detail before editing.
 - `GET /agent/schedules/session-options` lists currently valid runtime, model,
   and effort combinations.
-- `GET /agent/schedules/{id}` fetches one active schedule, including its saved
-  message and current revision. Deleted schedules return 404 to agents.
-- `POST /agent/schedules` creates a schedule with `name`, `message`, `cadence`,
-  `agent_runtime`, `model`, and `effort`. Interval schedules also require
-  `interval_minutes` (5–10,080); daily schedules require `daily_time` as
-  `HH:MM` UTC.
+- `GET /agent/schedules/{id}` fetches one active schedule, including its full
+  triggers and current revision. Deleted schedules return 404 to agents.
+- `POST /agent/schedules` creates a schedule with `name`, `triggers`,
+  `agent_runtime`, `model`, and `effort`. Runtime/model/effort are shared by all
+  triggers. `triggers` is an array of 0–5 entries:
+  - Daily: `{"type":"daily","times":["08:00","20:00"],"prompt":"Research"}`.
+    Use 1–24 distinct `HH:MM` UTC times. The prompt runs at each time every day.
+  - Weekly: `{"type":"weekly","days":["mon","wed","fri"],"time":"16:00","prompt":"Review"}`.
+    Use 1–7 distinct days from `mon,tue,wed,thu,fri,sat,sun` and one `HH:MM` UTC
+    time. Use separate triggers for different weekday/time/prompt combinations.
+  There is no timezone or interval field. An empty list stops automatic
+  messages while leaving the agent and conversation available.
 - `PUT /agent/schedules/{id}` replaces the whole definition and requires all
   create fields plus `expected_revision`. Fetch it first and preserve fields
-  that are not changing. Runtime changes keep the same stable schedule thread.
+  that are not changing. All triggers share one revision; there are no
+  per-trigger update/delete/pause routes. Runtime changes keep the same thread.
 - `DELETE /agent/schedules/{id}?expected_revision=N` stops future occurrences;
   DELETE takes no body. A firing already claimed by the scheduler may still be
   delivered once.
@@ -45,9 +54,10 @@ These are the complete agent-facing schedule routes. Revision history and
 restoration belong to the operator UI. There are no per-run or
 recent-failure routes.
 
-Schedule messages may contain up to 12,000 characters. Kern never silently
+Each trigger prompt must be nonblank and may contain up to 12,000 characters.
+The complete request must also fit the Workspace request size limit. Kern never silently
 substitutes a runtime, model, or effort. Deleting a schedule removes only its
-cadence and saved automated message. Its persistent thread remains retained
+triggers. Its persistent thread remains retained
 but hidden; it does not move into Chat, and restoring the schedule reveals it
 under Scheduled agents again during the 90-day restoration window. After the
 definition is pruned, any remaining host thread data follows ordinary host
@@ -60,7 +70,7 @@ script instead of a model turn. Use it for recurring work that needs no
 judgement, such as a backup, sync, or health check; use a model runtime when
 judgement is required.
 
-For a script schedule, `message` is the script's absolute path rather than a
+For a script schedule, each trigger's `prompt` is the script's absolute path rather than a
 prompt: an existing `.sh` file under `/mnt/kern-agent/agent-home`, spelled with
 letters, numbers, `.`, `_`, `-`, and `/` only. Write the script first and make
 it work when run directly before scheduling it.
@@ -79,6 +89,6 @@ returned in list and detail responses. Include it in create/update requests
 to describe the ongoing work in one sentence. Omitting it on update preserves
 its value; an empty string clears it. Purpose is included in schedule history
 and restored with the definition. Model schedules can receive messages through
-`send_agent_message` without changing their cadence; Bash schedules cannot.
+`send_agent_message` without changing their triggers; Bash schedules cannot.
 
 For cross-thread requests and replies, see [agent messaging](agent-messaging.md).

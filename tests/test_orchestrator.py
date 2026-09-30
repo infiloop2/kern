@@ -774,9 +774,7 @@ class OrchestratorTests(unittest.TestCase):
         schedule = schedules.create_schedule(
             {
                 "name": "Failing script",
-                "message": "/mnt/kern-agent/agent-home/failing.sh",
-                "cadence": "interval",
-                "interval_minutes": 60,
+                "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "/mnt/kern-agent/agent-home/failing.sh"}],
                 "agent_runtime": "script",
                 "model": "bash",
                 "effort": "fixed",
@@ -1412,9 +1410,8 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_large_codex_session_rotates_and_next_send_receives_history(self) -> None:
         schedule = schedules.create_schedule({
-            "name": "Long-lived Codex", "message": "continue the work",
+            "name": "Long-lived Codex", "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "continue the work"}],
             "agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high",
-            "cadence": "interval", "interval_minutes": 60,
         }, actor="user")
         for thread_id in ("thread-rotation", schedule["thread_id"]):
             with self.subTest(thread_id=thread_id):

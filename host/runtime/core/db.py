@@ -1,6 +1,6 @@
 """Connection layer for the local host-state Postgres database.
 
-The admin, proxy, tools, network-introspection, host-diagnostics, and Workspace processes
+The admin, proxy, tools, network-introspection, host-diagnostics, Browser, and Workspace processes
 use this module under peer-authenticated database roles. They connect over the
 local Unix socket through the in-repo
 protocol client (``host.runtime.core.pgclient``; standard library only, with no
@@ -11,6 +11,7 @@ grants narrow each non-owner role. No role exists for the agent user,
 
 The admin role owns every table; the proxy writes network events and
 held pushes; the tools role writes tool credentials, approvals, and events;
+the Browser role accesses only Browser tables and the encryption key;
 the network-introspection role reads its narrow policy view; and the Workspace role
 has DML-only access to its named tables in `public`. MVCC transactions,
 constraints, and conditional updates carry cross-process correctness. Schema
@@ -49,10 +50,9 @@ DEFAULT_DB_NAME = "kern_admin"
 # over loopback; a couple of warm connections cover the request handler plus
 # the worker threads without holding dozens of server slots.
 POOL_LIMIT = 4
-# Cap on this process's *active* database sessions. The six long-running
-# database client processes use at most 6 x 14 = 84 of the server's 300 slots,
-# leaving ample room for operator access, the superuser reserve, deployment
-# work, and future fixed host services. Sessions are millisecond-lived (slow
+# Cap on this process's *active* database sessions. Each long-running client
+# stays within 14 of the server's 300 slots, leaving room for operator access,
+# the superuser reserve, deployment work, and other fixed host services. Sessions are millisecond-lived (slow
 # work happens outside transactions), so a burst,
 # such as the proxy's 64 concurrent handlers each logging a decision, queues
 # here briefly instead of failing at the server.

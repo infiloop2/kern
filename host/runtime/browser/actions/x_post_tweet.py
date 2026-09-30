@@ -53,8 +53,8 @@ def execute(profile: Profile, body: dict[str, Any]) -> dict[str, Any]:
     if profile.lease or profile.data["state"] != "connected" or account != profile.data["provider_identifier"]:
         raise BrowserError("Account login needs attention or is under operator control. Check the account in Browser settings.")
     day = datetime.now(timezone.utc).date().isoformat()
-    usage = profile.data["usage"].get("x_post_tweet", {})
-    count = usage.get("count", 0) if usage.get("day") == day else 0
+    usage = profile.data["usage"].get("x_post_tweet")
+    count = usage["count"] if usage and usage["day"] == day else 0
     if count >= X_POST_DAILY_LIMIT:
         raise BrowserError("The daily browser posting limit has been reached.")
     try:
@@ -94,7 +94,10 @@ def prepare_post(page: Any, account: str, text: str, reply_id: str = "") -> None
         expect(target).to_have_count(1, timeout=10000)
         target.get_by_test_id("reply").click()
     composer = page.get_by_role("dialog")
-    composer.get_by_test_id("tweetTextarea_0").fill(text)
+    editor = composer.get_by_test_id("tweetTextarea_0")
+    editor.fill("")
+    # Use the editor's normal keyboard handlers as well as its input handlers.
+    editor.press_sequentially(text, delay=50, timeout=30000)
     expect(composer.get_by_test_id("tweetButton")).to_be_enabled(timeout=10000)
 
 

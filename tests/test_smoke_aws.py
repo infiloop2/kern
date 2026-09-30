@@ -254,7 +254,7 @@ class AwsSmokeTeardownTests(unittest.TestCase):
                     "schedules": ([{"id": 7}] if schedule_created else [])
                 }
             if (method, path) == ("POST", schedules_base):
-                self.assertEqual(body and body.get("interval_minutes"), 7 * 24 * 60)
+                self.assertEqual(body and body.get("triggers"), [])
                 schedule_created = True
                 return {
                     "schedule": {

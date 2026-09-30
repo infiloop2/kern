@@ -80,8 +80,11 @@ reflecting requests back. A future integration that echoes requests — a webhoo
 receiver, a paste service — would need that judgment made again before its
 headers were forwarded unread.
 
-Custom domains are not inspected at all; the operator's domain, method and path
-rule is the whole boundary. See `docs/api/NetworkControls.md`.
+Custom domains optionally enable `guard_request_content` per rule. It defaults
+to false and applies standard checks without exceptions to hostnames, URLs,
+all headers, and supported plain-text, JSON, and form bodies. Unsupported body
+formats and WebSockets are blocked while enabled. It remains a heuristic, not
+a complete exfiltration boundary. See `docs/api/NetworkControls.md`.
 
 Any finding denies the action. The guard never redacts, truncates, or
 rewrites: a silently modified query or side effect is an action the caller
@@ -237,15 +240,18 @@ third-party destinations:
   denied; personal identifiers (including one-time codes) allowed as search
   syntax.
 
-Custom-domain requests are deliberately absent from that list: nothing inside
-them is inspected, and the operator's domain/method/path rule is the whole
-boundary.
+Custom-domain rules with `guard_request_content: true` use the standard guard
+without any of those exceptions. Coverage includes the hostname, URL, all header
+names and values, and supported text, JSON, and form bodies. Unsupported bodies
+and WebSockets are blocked. With the flag omitted or false, request content
+remains uninspected and the domain/method/path rule is the boundary.
 
-On the proxy path the whole reconstructed URL (`https://host<path>?<query>`)
-is scanned before and after percent/form decoding. The first scan preserves
-the exact request structure; the second inspects the semantic values sent
-upstream. G10
-also parses a complete URL value even when decoded spaces divide its ordinary
+The managed-integration proxy helper scans a reconstructed URL
+(`https://host<path>?<query>`) before and after percent/form decoding. The
+custom-domain content guard includes the actual hostname instead of the
+placeholder and checks each percent-decoded form until decoding is stable.
+Both inspect the original request structure and the semantic values sent
+upstream. G10 also parses a complete URL value even when decoded spaces divide its ordinary
 whitespace tokens, so an earlier `q=two+words` cannot hide a later
 `access_token=<long value>`. Percent-decoding is strict — bytes that are not
 valid UTF-8 deny outright rather than being smoothed into replacement

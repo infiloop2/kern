@@ -98,7 +98,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
                 backend.default_app_agent_settings(),
                 {
                     "agent_runtime": "codex",
-                    "model": "gpt-6-sol",
+                    "model": "gpt-6.1-sol",
                     "effort": "high",
                 },
             )
@@ -190,7 +190,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("selectedAgentSettings = app.agent_settings;", source)
         self.assertIn("selectedAgentSettings = response.app.agent_settings;", source)
         self.assertIn("runtimeRunnable(savedSettings.agent_runtime)", source)
-        self.assertIn('codex: "gpt-6-sol"', source)
+        self.assertIn('codex: "gpt-6.1-sol"', source)
         self.assertIn('claude_code: "claude-opus-5-5"', source)
         self.assertIn('hermes: "moonshotai.kimi-k2.5"', source)
         self.assertIn("await agentSettingsSaveQueue", source)
@@ -488,7 +488,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         source = (
             REPO_ROOT / "host" / "runtime" / "workspace" / "ui" / "workspace.js"
         ).read_text()
-        self.assertIn('const growingEditorIds = ["memory-content", "schedule-message"]', source)
+        self.assertIn('const growingEditorIds = ["memory-content"]', source)
         self.assertIn("new ResizeObserver(entries =>", source)
         self.assertIn("observedWidths.get(entry.target) === width", source)
         self.assertIn("resizeTextarea(entry.target.id)", source)
@@ -503,7 +503,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn('data-memory-scope="swarm"', markup)
         self.assertIn('data-memory-scope="individual"', markup)
         self.assertIn('id="memory-content" maxlength="2000"', markup)
-        self.assertIn('id="schedule-message" maxlength="12000"', markup)
+        self.assertIn('data-trigger-prompt rows="4" maxlength="12000"', source)
         self.assertIn('params.set("scope", state.memoryScope)', source)
         self.assertIn('state.memoryScope === "individual"', source)
 
@@ -542,7 +542,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("Global schedules", instructions)
         self.assertIn("content is up to 2,000 characters", memory)
         self.assertIn(
-            "Schedule messages may contain up to 12,000 characters", schedules
+            "Each trigger prompt must be nonblank and may contain up to 12,000 characters", schedules
         )
         self.assertIn("GET /agent/identity", instructions)
         self.assertIn("search_conversation_history", instructions)
@@ -809,7 +809,7 @@ class BrowserRoutingTests(unittest.TestCase):
     def test_browser_app_creation_rejects_agent_configuration(self) -> None:
         settings = {
             "agent_runtime": "codex",
-            "model": "gpt-6-sol",
+            "model": "gpt-6.1-sol",
             "effort": "high",
         }
         with self.assertRaises(backend.WorkspaceError) as error:
@@ -1054,7 +1054,7 @@ class BrowserRoutingTests(unittest.TestCase):
         apply.assert_not_called()
 
     def test_agent_can_read_app_session_options(self) -> None:
-        options = {"codex": {"gpt-6-sol": ["high"]}}
+        options = {"codex": {"gpt-6.1-sol": ["high"]}}
         with (
             patch.object(backend, "public_session_options", return_value=options),
             patch.object(backend, "active_agent_runtimes", return_value=["codex"]),
@@ -1073,7 +1073,7 @@ class BrowserRoutingTests(unittest.TestCase):
         for resource, function, body in (
             ("name", "rename_web_app", {"name": "Marketing HQ"}),
             ("agent-settings", "set_app_agent_settings", {
-                "agent_runtime": "codex", "model": "gpt-6-sol", "effort": "high",
+                "agent_runtime": "codex", "model": "gpt-6.1-sol", "effort": "high",
             }),
         ):
             with (
@@ -1098,7 +1098,7 @@ class BrowserRoutingTests(unittest.TestCase):
 
     def test_agent_metadata_routes_validate_before_writing(self) -> None:
         settings = {
-            "agent_runtime": "codex", "model": "gpt-6-sol", "effort": "high",
+            "agent_runtime": "codex", "model": "gpt-6.1-sol", "effort": "high",
         }
         with (
             patch.object(backend, "_require_web_app"),
@@ -1145,7 +1145,7 @@ class BrowserRoutingTests(unittest.TestCase):
             (
                 {
                     "agent_runtime": "codex",
-                    "model": "gpt-6-sol",
+                    "model": "gpt-6.1-sol",
                     "effort": "high",
                 },
                 None,
@@ -2495,7 +2495,7 @@ class AgenticWebAppDbTests(unittest.TestCase):
             created["agent_settings"],
             {
                 "agent_runtime": "codex",
-                "model": "gpt-6-sol",
+                "model": "gpt-6.1-sol",
                 "effort": "high",
             },
         )

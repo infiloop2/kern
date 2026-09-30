@@ -387,6 +387,21 @@ class ProxyCapacityTests(unittest.TestCase):
 
 
 class NetworkProxyTests(unittest.TestCase):
+    def test_custom_content_guard_persists_and_reaches_proxy_enforcement(self) -> None:
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                rule = {"allow_http_methods": ["GET"]}
+                if enabled:
+                    rule["guard_request_content"] = True
+                self.save_policy({"api.example.com": rule})
+                policy = network_proxy._load_enforcement_policy()
+                self.assertEqual(
+                    policy.to_json()["network_integrations"]["custom"]["domains"]["api.example.com"], rule,
+                )
+                self.assertEqual(network_proxy.integrations.request_denied(
+                    policy, "GET", "api.example.com", "/lookup", "api_key=abcdefghijklmnop", [], b"",
+                ), "request_param_secret_denied" if enabled else None)
+
     def setUp(self) -> None:
         pg_harness.reset_database()
         self.temp_dir = tempfile.TemporaryDirectory()
@@ -691,6 +706,42 @@ class NetworkProxyTests(unittest.TestCase):
 
         self.assertIn(b"200 OK", response)
         self.assertIn(b"echo:hello world", response)
+
+    def test_custom_content_guard_blocks_before_upstream_and_forwards_safe_json(self) -> None:
+        self.proxy_ca()
+        upstream = self.start_http_server(tls=True)
+        proxy = self.start_proxy()
+        self.save_policy({"127.0.0.1": {
+            "allow_http_methods": ["POST"], "guard_request_content": True,
+        }})
+        json_types = (b"", b"Content-Type: text/plain\r\n", b"Content-Type: application/json\r\n")
+        form_types = (b"", b"Content-Type: text/plain\r\n", b"Content-Type: application/x-www-form-urlencoded\r\n")
+        for extra_headers, body, content_types in (
+            (b"X-Note: alice@example.com\r\n", b'{"query":"weather"}', json_types),
+            (b"", br'{"email":"alice\u0040example.com"}', json_types),
+            (b"", b"phone=415+555+1234", form_types),
+            (b"", b"phone+415+555+1234", form_types),
+        ):
+            for content_type in content_types:
+                request = (b"POST /lookup HTTP/1.1\r\nHost: 127.0.0.1\r\n" +
+                           content_type + extra_headers +
+                           f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+                with patch.object(network_proxy, "connect_public") as connect:
+                    response = self.https_via_proxy(proxy.server_address[1], request)
+                self.assertIn(b"403 Forbidden", response)
+                self.assertIn(b"request_param_pii_denied", response)
+                self.assertNotIn(b"alice", response)
+                connect.assert_not_called()
+        body = b'{"query":"weather"}'
+        # Transfer framing is decoded before the body guard, then normalized
+        # for forwarding. The safe body itself must remain byte-for-byte intact.
+        request = (b"POST /lookup HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+                   b"Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n" +
+                   f"{len(body):x}\r\n".encode() + body + b"\r\n0\r\n\r\n")
+        with self.map_upstream(443, upstream.server_address[1], tls=True):
+            response = self.https_via_proxy(proxy.server_address[1], request)
+        self.assertIn(b"200 OK", response)
+        self.assertIn(b"echo:" + body, response)
 
     def test_invalid_content_length_is_denied_without_reading_body(self) -> None:
         class Reader:

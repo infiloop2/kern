@@ -288,11 +288,11 @@ def _schedule_fields(body: Any, api_error: Any, *, update: bool = False) -> dict
     if not isinstance(body, dict):
         raise api_error(HTTPStatus.BAD_REQUEST, "schedule request must be an object")
     required = {
-        "name", "message", "cadence", "agent_runtime", "model", "effort",
+        "name", "triggers", "agent_runtime", "model", "effort",
     }
     if update:
         required.add("expected_revision")
-    allowed = required | {"interval_minutes", "daily_time", "purpose"}
+    allowed = required | {"purpose"}
     try:
         schedule_backend._require_keys(body, allowed, required)
         return schedule_backend._validated_fields(body)
@@ -325,7 +325,7 @@ def _revision(schedule: dict[str, Any]) -> dict[str, Any]:
     return {
         "id": schedule["revision"], "revision": schedule["revision"],
         **{key: deepcopy(schedule[key]) for key in (
-            "name", "message", "cadence", "interval_minutes", "daily_time",
+            "name", "triggers",
             "agent_runtime", "model", "effort", "deleted",
         )},
         "actor": "user", "created_at": schedule["updated_at"],
@@ -345,7 +345,7 @@ def _create_schedule(body: Any, api_error: Any) -> dict[str, Any]:
     NEXT_SCHEDULE_ID += 1
     instant = datetime.now(timezone.utc)
     now = schedule_backend._format_ts(instant)
-    next_run = schedule_backend._format_ts(schedule_backend._next_run(fields, instant))
+    next_run = schedule_backend._next_run(fields, instant)
     schedule = {
         "id": schedule_id, **fields, "revision": 1,
         "deleted": False,
@@ -363,12 +363,10 @@ def _update_schedule(schedule_id: int, body: Any, api_error: Any) -> dict[str, A
     assert isinstance(body, dict)
     if body.get("expected_revision") != schedule["revision"]:
         raise api_error(HTTPStatus.CONFLICT, "schedule changed; reload and retry")
-    cadence_changed = any(fields[key] != schedule[key] for key in ("cadence", "interval_minutes", "daily_time"))
+    cadence_changed = schedule_backend._timings(fields) != schedule_backend._timings(schedule)
     schedule.update(fields)
     if cadence_changed:
-        schedule["next_run_at"] = schedule_backend._format_ts(
-            schedule_backend._next_run(fields, datetime.now(timezone.utc))
-        )
+        schedule["next_run_at"] = schedule_backend._next_run(fields, datetime.now(timezone.utc))
     schedule["revision"] += 1
     schedule["updated_at"] = _now()
     SCHEDULE_HISTORY[schedule_id].append(_revision(schedule))
@@ -398,13 +396,11 @@ def _restore_schedule(schedule_id: int, revision: int, body: Any, api_error: Any
     if body.get("expected_revision") != schedule["revision"]:
         raise api_error(HTTPStatus.CONFLICT, "schedule changed; reload and retry")
     schedule.update({key: deepcopy(source[key]) for key in (
-        "name", "message", "cadence", "interval_minutes", "daily_time",
+        "name", "triggers",
         "agent_runtime", "model", "effort",
     )})
     schedule["deleted"] = source["deleted"]
-    schedule["next_run_at"] = schedule_backend._format_ts(
-        schedule_backend._next_run(schedule, datetime.now(timezone.utc))
-    )
+    schedule["next_run_at"] = schedule_backend._next_run(schedule, datetime.now(timezone.utc))
     schedule["revision"] += 1
     schedule["updated_at"] = _now()
     SCHEDULE_HISTORY[schedule_id].append(_revision(schedule))
@@ -455,8 +451,7 @@ def _seed_demo() -> None:
             MEMORY_HISTORY[page["page_id"]].append({**first, "id": 2, "revision": 2, "deleted": page["deleted"], "created_at": page["updated_at"]})
     schedules = [
         {
-            "id": 1, "name": "Morning release review", "message": "Summarize open release work and identify blockers.",
-            "cadence": "daily", "interval_minutes": None, "daily_time": "09:00",
+            "id": 1, "name": "Morning release review", "triggers": [{"type": "daily", "times": ["09:00"], "prompt": "Summarize open release work and identify blockers."}],
             "agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high",
             "revision": 2, "deleted": False,
             "thread_id": "schedule-1",
@@ -465,8 +460,7 @@ def _seed_demo() -> None:
             "created_at": older, "updated_at": schedule_backend._format_ts(daily_finished),
         },
         {
-            "id": 2, "name": "Dependency snapshot", "message": "/mnt/kern-agent/agent-home/scripts/dependency-snapshot.sh",
-            "cadence": "interval", "interval_minutes": 360, "daily_time": None,
+            "id": 2, "name": "Dependency snapshot", "triggers": [{"type": "daily", "times": ['00:00', '06:00', '12:00', '18:00'], "prompt": "/mnt/kern-agent/agent-home/scripts/dependency-snapshot.sh"}],
             "agent_runtime": "script", "model": "bash", "effort": "fixed",
             "revision": 1, "deleted": False, "last_run_at": recent,
             "thread_id": "schedule-2",
@@ -553,7 +547,7 @@ def desktop_smoke(page: Any) -> None:
     expect(surface.locator("#schedule-runs-section")).to_have_count(0)
     surface.locator("#schedule-name").fill("Morning review")
     surface.locator("#schedule-purpose").fill("Summarize release work")
-    schedule_message = surface.locator("#schedule-message")
+    schedule_message = surface.locator("[data-trigger-prompt]")
     schedule_message.fill("Summarize open release work.\n" + "unbroken-schedule-message-" * 24)
     expect(schedule_message).to_have_css("overflow-x", "hidden")
     expect(schedule_message).to_have_css("overflow-y", "hidden")
@@ -566,13 +560,31 @@ def desktop_smoke(page: Any) -> None:
         raise AssertionError(f"schedule message should grow instead of scrolling: {dimensions}")
     if dimensions["scrollWidth"] > dimensions["clientWidth"] + 1:
         raise AssertionError(f"schedule message should wrap instead of scrolling: {dimensions}")
-    expect(surface.locator("#schedule-message-label")).to_have_text("Message")
+    expect(surface.locator("[data-prompt-label]")).to_have_text("Prompt")
     expect(surface.locator("#schedule-runtime option[value='script']")).to_have_count(1)
     # A provider the operator has not activated is omitted from the selector.
     hermes = surface.locator("#schedule-runtime option[value='hermes']")
     expect(hermes).to_have_count(0)
-    surface.locator("#schedule-cadence").select_option("daily")
-    surface.locator("#schedule-time").fill("09:00")
+    surface.locator("[data-trigger-type]").select_option("daily")
+    surface.locator(".trigger-time input").fill("09:00")
+    surface.get_by_role("button", name="Add time", exact=True).click()
+    surface.locator(".trigger-time input").nth(1).fill("18:00")
+    surface.get_by_role("button", name="Add trigger", exact=True).click()
+    weekly = surface.locator(".schedule-trigger").nth(1)
+    weekly.locator("[data-trigger-type]").select_option("weekly")
+    weekly.get_by_label("Mon", exact=True).uncheck()
+    weekly.get_by_label("Fri", exact=True).check()
+    weekly.locator(".trigger-time input").fill("16:30")
+    weekly.locator("[data-trigger-prompt]").fill("Review weekly outcomes.")
+    expect(weekly.get_by_role("button", name="Add time", exact=True)).to_be_hidden()
+    add_trigger = surface.get_by_role("button", name="Add trigger", exact=True)
+    for _ in range(3):
+        add_trigger.click()
+    expect(surface.locator(".schedule-trigger")).to_have_count(5)
+    expect(add_trigger).to_be_disabled()
+    for _ in range(3):
+        surface.locator(".schedule-trigger").last.get_by_role("button", name="Remove trigger", exact=True).click()
+    expect(add_trigger).to_be_enabled()
     surface.get_by_role("button", name="Save schedule", exact=True).click()
     chat = page.locator("#panel-workspace-chat")
     expect(chat).to_be_visible()
@@ -600,6 +612,12 @@ def desktop_smoke(page: Any) -> None:
     expect(surface.locator("#global-title")).to_have_text("Scheduled agent")
     expect(surface.locator("#schedule-name")).to_have_value("Daily release review")
     expect(surface.locator("#schedule-purpose")).to_have_value("Summarize release work")
+    expect(surface.locator(".schedule-trigger")).to_have_count(2)
+    expect(surface.locator(".schedule-trigger").first.locator(".trigger-time input")).to_have_count(2)
+    expect(surface.locator(".schedule-trigger").nth(1).get_by_label("Fri", exact=True)).to_be_checked()
+    saved = page.evaluate("() => window.KernHost.api('GET', '/v1/workspace/schedules/1')")["schedule"]
+    assert saved["triggers"][0]["times"] == ["09:00", "18:00"], saved
+    assert saved["triggers"][1] == {"type": "weekly", "days": ["fri"], "time": "16:30", "prompt": "Review weekly outcomes."}, saved
     expect(surface.locator("#schedule-runs-section")).to_have_count(0)
     expect(page).to_have_url(re.compile(r"#scheduled-agents/1$"))
     page.evaluate("""() => {
@@ -701,13 +719,13 @@ def desktop_smoke(page: Any) -> None:
     script_update = {
         key: schedule_before_switch[key]
         for key in (
-            "name", "message", "cadence", "interval_minutes", "daily_time",
+            "name", "triggers",
             "agent_runtime", "model", "effort",
         )
     }
     script_update["expected_revision"] = schedule_before_switch["revision"]
     script_update.update({
-        "message": "/mnt/kern-agent/agent-home/scripts/release-review.sh",
+        "triggers": [{"type": "daily", "times": ["09:00"], "prompt": "/mnt/kern-agent/agent-home/scripts/release-review.sh"}],
         "agent_runtime": "script",
         "model": "bash",
         "effort": "fixed",
@@ -723,7 +741,7 @@ def desktop_smoke(page: Any) -> None:
     expect(page).to_have_url(re.compile(r"#chat/schedule-1$"))
     model_update = {
         **script_update,
-        "message": schedule_before_switch["message"],
+        "triggers": schedule_before_switch["triggers"],
         "agent_runtime": schedule_before_switch["agent_runtime"],
         "model": schedule_before_switch["model"],
         "effort": schedule_before_switch["effort"],
@@ -740,15 +758,15 @@ def desktop_smoke(page: Any) -> None:
     surface.get_by_role("button", name="New schedule", exact=True).click()
     surface.locator("#schedule-runtime").select_option("script")
     surface.locator("#schedule-name").fill("Dependency snapshot")
-    surface.locator("#schedule-message").fill(
+    surface.locator("[data-trigger-prompt]").fill(
         "/mnt/kern-agent/agent-home/scripts/dependency-snapshot.sh"
     )
-    expect(surface.locator("#schedule-message-label")).to_have_text("Script path")
+    expect(surface.locator("[data-prompt-label]")).to_have_text("Script path")
     expect(surface.locator("#schedule-runtime")).to_have_value("script")
     expect(surface.locator("#schedule-model")).to_have_value("bash")
     expect(surface.locator("#schedule-effort")).to_have_value("fixed")
-    surface.locator("#schedule-cadence").select_option("daily")
-    surface.locator("#schedule-time").fill("09:00")
+    surface.locator("[data-trigger-type]").select_option("daily")
+    surface.locator(".trigger-time input").fill("09:00")
     surface.get_by_role("button", name="Save schedule", exact=True).click()
     expect(page).to_have_url(re.compile(r"#chat/schedule-2$"))
     expect(chat.locator("#thread-title")).to_have_text("Dependency snapshot")
@@ -761,6 +779,18 @@ def desktop_smoke(page: Any) -> None:
     surface.locator("[data-item-id='2']").click()
     expect(surface.locator("#schedule-name")).to_have_value("Dependency snapshot")
     expect(page).to_have_url(re.compile(r"#scheduled-agents/2$"))
+    surface.get_by_role("button", name="Remove trigger", exact=True).click()
+    expect(surface.locator(".schedule-trigger")).to_have_count(0)
+    surface.get_by_role("button", name="Save schedule", exact=True).click()
+    expect(page).to_have_url(re.compile(r"#chat/schedule-2$"))
+    chat.locator("#schedule-settings").click()
+    expect(surface.locator("#schedule-meta")).to_contain_text("No automatic messages")
+    stopped = page.evaluate("() => window.KernHost.api('GET', '/v1/workspace/schedules/2')")["schedule"]
+    assert stopped["triggers"] == [] and stopped["next_run_at"] is None, stopped
+    page.once("dialog", lambda dialog: dialog.accept())
+    surface.locator("#schedule-history [data-restore-revision='1']").click()
+    expect(surface.locator(".schedule-trigger")).to_have_count(1)
+    expect(surface.locator("[data-trigger-prompt]")).to_have_value("/mnt/kern-agent/agent-home/scripts/dependency-snapshot.sh")
     surface.get_by_role("button", name="Cancel", exact=True).click()
     expect(surface.locator("#global-empty")).to_be_visible()
     expect(page).to_have_url(re.compile(r"#scheduled-agents$"))

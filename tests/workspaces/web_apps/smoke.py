@@ -36,7 +36,7 @@ MOCK_LOCK = threading.RLock()
 TURN_DEADLINES: dict[str, float] = {}
 DEFAULT_SESSION = {
     "agent_runtime": "codex",
-    "model": "gpt-6-sol",
+    "model": "gpt-6.1-sol",
     "effort": "high",
 }
 RUNTIME_LABELS = {
@@ -1349,7 +1349,7 @@ def desktop_smoke(page: Any) -> None:
     expect(page).to_have_url(re.compile(rf"#apps/{re.escape(first_app)}$"))
     expect(page.locator(
         f"#web-apps-nav-items .workspace-nav-item[data-item-id='{first_app}'] .workspace-nav-meta"
-    )).to_have_text("Codex · gpt-6-sol · high")
+    )).to_have_text("Codex · gpt-6.1-sol · high")
     page.reload(wait_until="domcontentloaded")
     expect(page.locator("#panel-workspace-web-apps")).to_be_visible()
     expect(frame.locator("#app-title")).to_have_text(first_app)
@@ -1390,8 +1390,16 @@ def desktop_smoke(page: Any) -> None:
     frame.locator("#settings-open").click()
     expect(frame.locator("#settings-popover")).to_be_visible()
     expect(frame.locator("#runtime")).to_have_value("codex")
-    expect(frame.locator("#model")).to_have_value("gpt-6-sol")
+    expect(frame.locator("#model")).to_have_value("gpt-6.1-sol")
     expect(frame.locator("#effort")).to_have_value("high")
+    expect(frame.locator("#effort option")).to_have_text([
+        "High", "Max", "Ultra", "High Fast", "High Ultrafast",
+    ])
+    frame.locator("#effort").select_option("high-ultrafast")
+    expect(frame.locator("#app-subtitle")).to_have_text("Codex · gpt-6.1-sol · High Ultrafast")
+    frame.locator("#effort").select_option("high-fast")
+    expect(frame.locator("#app-subtitle")).to_have_text("Codex · gpt-6.1-sol · High Fast")
+    frame.locator("#effort").select_option("high")
     frame.locator("#runtime").select_option("grok")
     expect(frame.locator("#model")).to_have_value("grok-4.7")
     expect(frame.locator("#effort option")).to_have_count(2)
@@ -1401,7 +1409,7 @@ def desktop_smoke(page: Any) -> None:
     expect(app_sidebar_meta).to_have_text("Grok · grok-4.7 · high")
     frame.locator("#runtime").select_option("codex")
     expect(frame.locator("#app-subtitle")).to_have_text(
-        "Codex · gpt-6-sol · High"
+        "Codex · gpt-6.1-sol · High"
     )
     expect(frame.locator("#agent-command-surface")).to_be_hidden()
     expect(frame.locator("#chat-history")).to_be_hidden()
@@ -1531,7 +1539,7 @@ def desktop_smoke(page: Any) -> None:
     # while it is still opening and leave it open.
     expect(frame.locator("#settings-popover")).to_be_visible()
     expect(frame.locator("#runtime")).to_have_value("codex")
-    expect(frame.locator("#model")).to_have_value("gpt-6-sol")
+    expect(frame.locator("#model")).to_have_value("gpt-6.1-sol")
     expect(frame.locator("#effort")).to_have_value("high")
     frame.locator("#settings-open").click()
     expect(frame.locator("#settings-popover")).to_be_hidden()

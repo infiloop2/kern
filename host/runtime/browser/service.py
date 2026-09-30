@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from pathlib import Path
 import pwd
 import signal
 import socket
@@ -13,10 +12,11 @@ from typing import Any
 from host.constants import BROWSER_SOCKET_PATH
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser.accounts import Accounts
+from host.runtime.browser_network.relay import TunnelServer
 from host.runtime.core import host_errors, host_metrics
 from host.runtime.core.unix_socket_service import UnixSocketRequestHandler, UnixSocketServer
 
-OPERATOR_OPERATIONS = {"ready", "list", "create", "check", "open", "frame", "input", "save", "cancel", "disconnect"}
+OPERATOR_OPERATIONS = {"network_get", "network_save", "network_test", "ready", "list", "create", "check", "open", "frame", "input", "save", "cancel", "disconnect"}
 TOOL_OPERATIONS = {"list", "post_tweet"}
 
 
@@ -69,6 +69,8 @@ class Handler(UnixSocketRequestHandler):
                 context={"operation": operation, **host_metrics.service_resource_snapshot("browser")},
             )
             message = "Browser operation failed. Reopen the browser or check Host diagnostics."
+            if operation in {"network_get", "network_save", "network_test"}:
+                message = "Browser connection failed. Check credentials or provider balance, then test again."
             if operation == "post_tweet":
                 message += " Check X before approving another attempt."
             self._send_json(503, {"error": message})
@@ -81,7 +83,7 @@ class Server(UnixSocketServer):
         self.allowed_uids = frozenset({pwd.getpwnam("kern-admin").pw_uid, pwd.getpwnam("kern-tools").pw_uid})
         self.busy = threading.Lock()
         self.worker = ThreadPoolExecutor(max_workers=1)
-        self.profiles = self.worker.submit(Accounts, Path("/mnt/kern-admin/browser-state")).result()
+        self.profiles = self.worker.submit(Accounts).result()
         super().__init__(BROWSER_SOCKET_PATH, Handler)
 
     def process_request(self, request: Any, client_address: Any) -> None:
@@ -109,9 +111,18 @@ def main() -> int:
     signal.signal(signal.SIGTERM, terminate)
     server = Server()
     try:
-        server.serve_forever()
+        with TunnelServer(server.profiles.network) as tunnel:
+            relay = threading.Thread(target=tunnel.serve_forever, daemon=True)
+            relay.start()
+            try:
+                server.serve_forever()
+            finally:
+                tunnel.shutdown()
+                relay.join()
     finally:
         server.server_close()
+        with server.profiles.network.lock:
+            server.profiles.network.disconnect()
         for profile in [*server.profiles.profiles.values(), *server.profiles.pending.values()]:
             server.worker.submit(profile.close).result()
         server.worker.shutdown()

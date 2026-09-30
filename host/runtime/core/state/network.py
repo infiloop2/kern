@@ -65,11 +65,13 @@ def network_policy_record() -> dict[str, Any] | None:
         if claude_row and claude_row[0] and "claude" in integrations:
             integrations["claude"]["web_search"] = True
         allowed: dict[str, dict[str, Any]] = {}
-        cur.execute("SELECT domain, allow_websocket FROM allowed_domains ORDER BY domain")
-        for domain, allow_websocket in cur.fetchall():
+        cur.execute("SELECT domain, allow_websocket, guard_request_content FROM allowed_domains ORDER BY domain")
+        for domain, allow_websocket, guard_request_content in cur.fetchall():
             allowed[str(domain)] = {"allow_http_methods": []}
             if allow_websocket:
                 allowed[str(domain)]["allow_websocket"] = True
+            if guard_request_content:
+                allowed[str(domain)]["guard_request_content"] = True
         cur.execute("SELECT domain, method FROM domain_methods ORDER BY domain, position")
         for domain, method in cur.fetchall():
             allowed[str(domain)]["allow_http_methods"].append(method)
@@ -238,8 +240,8 @@ def save_network_policy(controls: dict[str, Any], updated_at: str) -> None:
         custom_domains = custom.get("domains") if isinstance(custom, dict) else {}
         for domain, rule in (custom_domains or {}).items():
             cur.execute(
-                "INSERT INTO allowed_domains (domain, allow_websocket) VALUES (%s, %s)",
-                (domain, rule.get("allow_websocket") is True),
+                "INSERT INTO allowed_domains (domain, allow_websocket, guard_request_content) VALUES (%s, %s, %s)",
+                (domain, rule.get("allow_websocket") is True, rule.get("guard_request_content") is True),
             )
             for position, method in enumerate(rule.get("allow_http_methods") or []):
                 cur.execute(

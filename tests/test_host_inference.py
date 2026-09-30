@@ -334,8 +334,19 @@ class HostInferenceUsageTests(unittest.TestCase):
                 self.assertEqual(record.call_args.args[:2], ("openai", "gpt-6-luna"))
                 self.assertAlmostEqual(record.call_args.args[3], 0.0000132)
 
+    def test_sol_6_1_prices_alias_and_snapshot_at_its_own_rate(self) -> None:
+        for model in ("gpt-6.1-sol", "gpt-6.1-sol-2026-09-29"):
+            with self.subTest(model=model), patch.object(usage, "_schedule") as record:
+                usage.record_openai_response("gpt-6.1-sol", {
+                    "model": model,
+                    "usage": {"prompt_tokens": 100, "completion_tokens": 10,
+                              "prompt_tokens_details": {"cached_tokens": 20}},
+                })
+                self.assertEqual(record.call_args.args[:2], ("openai", "gpt-6.1-sol"))
+                self.assertAlmostEqual(record.call_args.args[3], 0.000262)
+
     def test_unsupported_openai_models_are_diagnosed_without_usage_rows(self) -> None:
-        for model in (None, "", "gpt-5.6-luna", "gpt-5.6-luna-2026-09-01", "future-model"):
+        for model in (None, "", "gpt-5.6-luna", "gpt-5.6-luna-2026-09-01", "gpt-6-sol", "gpt-6-sol-2026-09-01", "future-model"):
             with (self.subTest(model=model), patch.object(usage, "_schedule") as record,
                   patch.object(usage.host_errors, "report_warning") as diagnostic):
                 usage.record_openai_response("gpt-6-luna", {
@@ -712,7 +723,7 @@ class HostInferenceBoundaryTests(unittest.TestCase):
 
     def test_service_rejects_unsupported_model_and_invalid_output_budget(self) -> None:
         body = {"prompt": "p", "schema": SCHEMA, "schema_name": "task", "timeout_seconds": 60, **OPENAI_SETTINGS}
-        for override in ({"model": "unknown"}, {"max_output_tokens": True},
+        for override in ({"model": "unknown"}, {"model": "gpt-6-sol"}, {"max_output_tokens": True},
                          {"max_output_tokens": 0}, {"max_output_tokens": 4097}):
             with self.subTest(override=override), patch.object(api.providers, "openai_text_completion") as complete:
                 with self.assertRaises(ValueError):

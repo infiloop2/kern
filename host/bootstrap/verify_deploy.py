@@ -47,6 +47,7 @@ from host.constants import (
     SERVICE_ACCOUNTS,
     TOOLS_SOCKET_PATH,
     BROWSER_SOCKET_PATH,
+    BROWSER_NETWORK_PORT,
 )
 
 Runner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
@@ -122,7 +123,6 @@ PATH_FACTS: tuple[PathFact, ...] = (
         0o644,
         False,
     ),
-    ("/mnt/kern-admin/browser-state", "kern-browser", "kern-browser", 0o700, True),
     ("/usr/local/lib/kern-browser-venv", "root", "root", 0o755, True),
     ("/usr/local/share/kern-browsers", "root", "root", 0o755, True),
     ("/mnt/kern-admin/tools-state", "kern-tools", "kern-tools", 0o700, True),
@@ -395,6 +395,8 @@ def enforced_probes() -> list[Probe]:
     out, and a down or filtered network also times out, so a healthy deploy
     can never false-fail here. The one "reachable" expectation is loopback."""
     return [
+        ("kern-browser", "127.0.0.1", BROWSER_NETWORK_PORT, "reachable", "browser to HTTPS relay"),
+        ("kern-agent", "127.0.0.1", BROWSER_NETWORK_PORT, "blocked", "agent to Browser relay"),
         ("kern-browser", "127.0.0.1", ADMIN_API_PORT, "blocked", "browser to admin API"),
         ("kern-browser", "169.254.169.254", 80, "blocked", "browser to instance metadata"),
         ("kern-browser", "10.0.0.1", 443, "blocked", "browser to private network"),
@@ -447,6 +449,16 @@ def check_database_access(run: Runner = _run) -> list[str]:
     )
     if admin.returncode != 0 or admin.stdout.strip() != "1":
         failures.append(f"database: kern-admin cannot query kern_admin: {admin.stderr.strip()}")
+    browser = run([
+        "runuser", "-u", "kern-browser", "--", "psql", "-d", "kern_admin", "-tAc",
+        "SELECT has_table_privilege('browser_accounts', 'SELECT,INSERT,UPDATE,DELETE')"
+        " AND has_table_privilege('browser_settings', 'SELECT,INSERT,UPDATE,DELETE')"
+        " AND has_table_privilege('secret_keys', 'SELECT')"
+        " AND NOT has_table_privilege('tool_credentials', 'SELECT')"
+        " AND NOT has_table_privilege('provider_accounts', 'SELECT')",
+    ])
+    if browser.returncode != 0 or browser.stdout.strip() != "t":
+        failures.append("database: kern-browser does not have its scoped Browser grants")
     agent = run(
         ["runuser", "-u", "kern-agent", "--", "psql", "-d", "kern_admin", "-tAc", "SELECT 1"]
     )

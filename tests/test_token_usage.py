@@ -113,8 +113,8 @@ class UsageStorageTests(unittest.TestCase):
     def test_report_resolves_all_three_workspace_kinds(self):
         from host.runtime.workspace import schedules
         schedule = schedules.create_schedule({
-            "name": "Daily research", "message": "Research", "cadence": "daily",
-            "daily_time": "12:00", "agent_runtime": "codex", "model": "gpt-6-sol", "effort": "high",
+            "name": "Daily research", "triggers": [{"type": "daily", "times": ["12:00"], "prompt": "Research"}],
+             "agent_runtime": "codex", "model": "gpt-6-sol", "effort": "high",
         }, actor="user")
         with state.mutation() as cur:
             cur.execute("INSERT INTO chat_threads (thread_id, name) VALUES ('thread-1', 'My chat')")

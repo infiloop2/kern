@@ -11,6 +11,8 @@ for an operator login, a login check, readiness probe, or a coded action.
 - `service.py`: socket authorization and serialized request dispatch.
 - `accounts.py`: saved accounts, login state, operator leases and action counts.
 - `browser.py`: Chromium lifecycle, auth snapshots, screenshots and operator input.
+- `display.py`: private authenticated Xvfb lifecycle for windowed Chromium.
+- `browser_network/`: in-process public HTTPS relay, private connection settings and verified Decodo TLS transport.
 - `providers/__init__.py`: provider contract and explicit supported-provider registry.
 - `providers/x.py`: X login URL and verified handle extraction/validation.
 - `actions/x_post_tweet.py`: X connection check, inputs, daily cap and post/reply workflow.
@@ -25,27 +27,45 @@ Agent → Tool API → Browser tool → /actions/*           ┘
              ↳ ordinary Host API approvals
 ```
 
-`kern-browser` (UID 47754) owns `/mnt/kern-admin/browser-state` (0700) on the
-existing private encrypted admin volume. It runs separately from `kern-tools`
-and `kern-admin`; its storage is beside `tools-state`, not inside it. It has
-no database credentials, agent-home access, or public TCP/CDP listener.
+`kern-browser` (UID 47754) runs separately from `kern-tools` and `kern-admin`.
+Its peer-authenticated Postgres role has access only to `browser_settings`,
+`browser_accounts`, and the existing secretbox encryption key. The agent and
+tools roles cannot read those tables. No database password or new Linux account
+is introduced. The service cannot access agent-home or the admin volume directly,
+and has no public TCP/CDP listener. Postgres persists Browser state on the admin
+volume alongside other host state.
 Chromium and Playwright are root-owned deploy artifacts. Deployment installs full
-Chromium (`--no-shell`), and the service selects `channel="chromium"` for its
-unified headless mode, which uses the normal browser implementation. It does not
-use Playwright's separate headless shell. Chromium's sandbox is
+Chromium (`--no-shell`), and the service selects `channel="chromium"` in windowed
+mode on a temporary Xvfb display. Xvfb is included in Playwright's installed
+Linux dependencies. Each browser owns a display with TCP listening disabled and
+a random MIT-MAGIC-COOKIE-1 credential in a mode-0600 Xauthority file inside a
+mode-0700 temporary directory. This also protects the abstract Unix socket from
+other local users. Display readiness is bounded; failed launches and browser
+closure terminate the display and remove its credentials. Both processes remain
+inside the Browser service's resource and filesystem boundaries. Chromium's sandbox is
 enabled on the Ubuntu 22.04 images used by AWS and Lima. No custom AppArmor
-profile or global user-namespace override is installed. Public HTTPS egress is allowed. DNS over TCP/UDP port 53 is allowed to any
-destination, matching the tools service and supporting local resolvers without
-deployment-time DNS configuration. This deliberately includes private addresses
-on port 53. All other private, loopback, and metadata destinations are denied,
-including browser background traffic. These blocks prevent access to services
-on the same host (such as `127.0.0.1`), internal networks (such as `10.0.0.0/8`),
-and cloud instance metadata (`169.254.169.254`).
+profile or global user-namespace override is installed. Chromium uses a local
+HTTPS relay on port 7447, running as a thread in the same Browser service and UID.
+Connection settings use a constrained database row; the proxy password is encrypted
+using Kern's existing secretbox mechanism. Before any tunnel, the relay resolves the website hostname,
+rejects mixed public/private DNS answers and non-public IPs, and pins a public
+address in the direct dial or upstream CONNECT request. Only HTTPS on port 443
+is admitted; website TLS remains end to end. This also blocks private and
+metadata destinations behind a remote proxy.
+Chromium's implicit loopback proxy bypass is disabled, no Direct fallback is
+configured, and non-proxied WebRTC UDP, QUIC and background networking are disabled.
+The shared Browser UID can reach public TCP 443/7000 and DNS; its firewall blocks
+private/metadata destinations and keeps other UIDs off the relay. Proxy routing
+is enforced by Chromium configuration and relay code, not a separate egress UID.
+A compromised Browser process could therefore bypass the configured proxy to a
+public destination. DNS resolves on the host, including through local resolvers
+on port 53.
 Browser routing also rejects non-HTTPS resources. This disables Chromium's HTTP
 cache, an accepted cost of the URL policy. Agent proxy policy is unchanged.
-The browser uses a Linux desktop Chrome user agent matching its installed
-version. It still exposes normal automation signals; login acceptance is not
-guaranteed and login challenges remain operator-controlled.
+Chromium supplies its own user agent and client hints; Kern does not override
+them. Automation-specific launch signals are reduced using Chromium options. Windowed operation and native input
+events improve browser compatibility; they do not make automation undetectable.
+Login acceptance is not guaranteed and challenges remain operator-controlled.
 
 Browser joins `kern_workspace.slice`, alongside transcription and embeddings,
 so it has lower CPU priority than the admin control plane. Its whole process
@@ -67,6 +87,15 @@ cannot use operator routes, and the admin process cannot submit tool actions.
 Screens, typed input, passwords, and cookies never enter agent tool results.
 
 ## Connected accounts
+
+The operator popup forwards pointer hover, drag, button and wheel events. It
+coalesces unsent movement without crossing a key, button, text or scroll event,
+so a slow connection does not accumulate an unbounded hover queue. Desktop
+characters use keyboard events (with Chromium text insertion for characters
+outside Playwright's keyboard map). Paste and the mobile text bar remain bulk
+text insertion. Approved X posts use sequential keyboard input at a fixed 50 ms
+per character, then wait for an enabled submit button. This pacing is not a
+human-presence claim or a substitute for a successful live-site test.
 
 A saved account is the first-class service object:
 
@@ -118,7 +147,7 @@ Daily limits are scoped to each Kern connection.
 
 The admin API forwards `POST /v1/browser/{operation}` to the identically named
 `POST /operator/{operation}` (except `ready`, which is a service-only host probe). It requires the ordinary admin cookie and CSRF
-checks; Workspace principals are rejected. Except for list, disconnect, and cancel, the Browser integration must be enabled.
+checks; Workspace principals are rejected. Except for list, disconnect, cancel and connection settings/test operations, the Browser integration must be enabled.
 
 All bodies are JSON objects. Below, `account` means `{account_id: string}`;
 `reference` means exactly one of `{account_id: string}` or `{login_id: string}`.
@@ -205,22 +234,34 @@ general browser control.
 
 ## Action usage and limits
 
-Each account directory contains a private `auth.json` snapshot and an atomically
-replaced, fsynced `state.json`. Chromium does not use this directory as its user
-data directory. Each launch creates a fresh non-persistent context, restores
-cookies, local storage and IndexedDB from `auth.json`, and saves updated state
-before closing after operator use, login checks and actions. Disconnect closes
-without saving. Readiness probes never save authentication state.
+Account identity, status and daily posting usage use typed database columns.
+Cookies, localStorage and IndexedDB are serialized and encrypted in the account's
+`auth_ciphertext` column. Each launch creates a fresh context and restores the
+decrypted snapshot directly from memory; no auth snapshot file is written.
+Updated snapshots are saved before closing after operator use, login checks and
+actions. Disconnect closes without saving and deletes the complete account row.
+Unfinished logins stay only in memory and disappear on restart or cancellation.
+Readiness probes never save authentication state.
 
-Only the browser service reads or writes snapshots. Files are mode 0600 in
-mode 0700 account directories. Snapshot writes share a **1 GB total saved-state
-budget** across the service directory, including space for the old snapshot
-and its atomic replacement. A rejected write keeps the previous snapshot and
-closes Chromium; disconnect remains available to free space. This is an
-application write budget, not a filesystem quota or a bound on RAM or temporary
-files. The service's private `/tmp` holds Chromium's temporary working files;
-HOME and XDG cache/config paths point there too. Closing Chromium removes its
-normal temporary profile. Temporary files do not live on the admin volume.
+Snapshots have a **64 MiB serialized limit per account** to leave encryption and
+decryption headroom within the service memory limit. Accumulation is bounded
+before encryption, and a conservative ciphertext-size estimate is checked before
+calling OpenSSL. Snapshot writes also share a **1 GB total ciphertext budget**
+across saved accounts.
+A transaction locks the account table while checking capacity and saving, so a
+rejected write retains the previous snapshot. This limits live stored values,
+not Postgres WAL, old row versions, RAM or temporary files. Database failures
+surface as failed operations; unavailable settings never silently select Direct.
+Secretbox encryption reduces accidental exposure; its key is in the database,
+so it does not protect against a full database dump or host compromise.
+
+The service's private `/tmp` holds Chromium's temporary working files; HOME and
+XDG cache/config paths point there too. Closing Chromium removes its normal
+temporary profile. Temporary files do not live on the admin volume.
+Deployment stops the old Browser service and deletes the retired
+`/mnt/kern-admin/browser-state` directory without importing its files. Existing
+file-based logins and proxy settings must be entered again. Browser state already
+stored in Postgres is preserved across deployments.
 
 This uses Playwright 1.60's [storage-state API](https://playwright.dev/python/docs/auth#reusing-signed-in-state),
 with IndexedDB explicitly included. Snapshots do not include HTTP cache,
@@ -229,10 +270,9 @@ IndexedDB and local storage can contain application data as well as credentials,
 so a snapshot is not necessarily a tiny cookies-only file. A crash before saving
 may lose refreshed login state and require another operator login.
 
-Alongside account identity and login state, `state.json`
-stores a small `usage` mapping keyed by action name. Each entry contains only
-the latest UTC `day` and `count`. Account listing excludes usage. There is no
-browser posting-history archive; normal approval history records execution.
+Alongside account identity and login state, the `browser_accounts` row
+stores the latest UTC `usage_day` and `usage_count` for posting. Account listing
+excludes usage. There is no browser posting-history archive; normal approval history records execution.
 
 `x_post_tweet` enforces **50 submission attempts per connected account per UTC
 day**, shared by posts and replies. This is a Kern action policy, not an X quota
@@ -292,3 +332,87 @@ Host smoke covers service ownership, private paths,
 socket admission, and blocked internal-network access. Fixtures and green CI do
 not establish compatibility with live X: a real login and submission require
 an explicitly authorized live-account test.
+
+
+## Browser connection settings
+
+Under Home > Integrations > Browser, the operator chooses Direct or optional
+Decodo Residential. A residential proxy is preferred on AWS because websites
+may restrict datacenter addresses. This is not proof of the cause of a login
+failure and does not guarantee website acceptance.
+
+Decodo uses its documented `https://gate.decodo.com:7000` Residential gateway.
+The operator enters a base proxy username/password and chooses one location.
+The hardcoded presets in `browser_network/config.py` supply all targeting and
+browser identity fields; there are no separate overrides:
+
+| Location | Country | Decodo city | Browser language | Timezone |
+| --- | --- | --- | --- | --- |
+| New York | `us` | `new_york` | `en-US` | `America/New_York` |
+| London | `gb` | `london` | `en-GB` | `Europe/London` |
+
+Only the location ID is saved. Public settings include the supported choices
+and derived identity fields, so the UI and browser share one source of truth.
+The gateway is fixed: arbitrary, static ISP and datacenter endpoints cannot be
+configured. Kern trusts Decodo's product classification rather than claiming to
+certify each exit IP. API keys are not proxy credentials.
+
+Kern generates and saves a random sticky session ID, reused across connections
+and restarts. It requests 1,440 minutes (24 hours). Saving the same route keeps
+that ID; changing username/location creates a new one. Peer availability can
+shorten the assignment and IPs can change. Kern keeps country/city filters and
+never widens them or falls back to Direct. Website geolocation may disagree.
+
+The selected preset supplies the browser language and IANA timezone, including
+daylight-saving transitions. These drive native Chromium locale/Accept-Language and date formatting rather
+than JavaScript property replacements. The headed sandboxed browser keeps its
+native UA/client hints, a consistent screen/viewport and scale, and saved
+cookies/localStorage/IndexedDB. The automation infobar flag is omitted and
+Chromium's AutomationControlled feature is disabled. No random fingerprint,
+canvas/GPU/font spoofing, forged Windows/macOS UA, or CAPTCHA solver is added.
+Chromium remains automated and detectable; a custom hosted browser's claims
+cannot be reproduced by promising that a handful of flags makes a human.
+Service workers, WebSockets and nonproxied WebRTC UDP remain restricted.
+
+Settings are operator-only and serialized with Browser actions. Finish the
+login popup before saving/testing. Changing settings closes existing tunnels;
+Direct removes proxy credentials while keeping saved account logins. Blank
+password retains the secret only for the same username. Public responses omit
+password and the internal sticky token. No migration is provided for the
+unreleased earlier draft.
+
+The network service verifies the gateway certificate and hostname before
+sending CONNECT or proxy authentication. It never downgrades to HTTP or ignores
+certificate failures. Destination IPs are resolved, validated and pinned before
+CONNECT; website TLS still runs end to end inside the encrypted proxy tunnel.
+Proxy credentials never reach Chromium or the destination website.
+
+Test saved connection requests `https://api.ipify.org` through the saved route,
+using a second verified TLS layer inside the gateway TLS. It returns only the
+public IP. This is not a location, residential-classification or X login test.
+No raw provider errors, cookies or credentials enter model context or logs.
+
+The relay shares `kern-browser.service` and its resource limits. Settings and
+connection tests use in-process calls from the existing operator-only Browser
+interface. Agents cannot configure connections or use the relay. No separate
+network account, service or control socket is installed. Tunnels, request
+headers, idle time and total lifetime are bounded.
+
+Admin `POST /v1/browser/network_get` and `network_test` take `{}`.
+`network_save` takes exactly one of:
+
+```json
+{"mode":"direct"}
+{"mode":"decodo","username":"example","password":"...","location":"new_york"}
+```
+
+Offline tests cover encrypted authentication, certificate rejection, nested TLS,
+credential lifecycle, sticky identity, location validation, public destination
+pinning and caller isolation. Real Chromium fixtures cover locale/timezone,
+native UA/client hints, language headers/APIs, daylight-saving offsets, input,
+auth restoration and settings UI. They do not
+prove live Decodo delivery or X acceptance; those need an operator account.
+
+Provider references: [Decodo protocols](https://help.decodo.com/docs/residential-proxy-protocols),
+[Decodo targeting](https://help.decodo.com/docs/residential-proxy-user-pass-requests),
+[Decodo sticky sessions](https://help.decodo.com/docs/residential-proxy-custom-sticky-sessions).

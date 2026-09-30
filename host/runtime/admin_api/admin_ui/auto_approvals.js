@@ -33,13 +33,19 @@ export async function refreshAutoApprovals() {
   }
 }
 
+function clockTime(minute) { return `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`; }
+function clockMinute(value) { const [hour, minute] = value.split(":").map(Number); return hour * 60 + minute; }
+
 function toolName(id) { return data?.catalog.find(tool => tool.tool_id === id)?.name || id; }
 function render() {
   const history = data.history;
   $("auto-approval-page").innerHTML = `
     <div class="auto-schedule"><div><span class="auto-status-dot ${data.available ? "ready" : ""}"></span><strong>${!data.available ? "Auto-approval is off" : data.quiet ? "Quiet hours" : "Scheduled reviews"}</strong>
     <p>${!data.available ? "Enable OpenAI under Home > Host AI inference to turn on auto-approval. Add an API key there if you have not configured one." : data.next_review_at ? data.next_review_at * 1000 <= Date.now() ? "Review in progress" : `Next review ${esc(formatUnixTime(data.next_review_at))}` : "The next review is being scheduled."}</p></div>
-    <div class="auto-schedule-details"><span>25 to 35 minutes between batches</span><span>Quiet hours 00:00 to 08:00 UTC</span><span>GPT-6 Sol</span></div></div>
+    <div class="auto-schedule-details"><span>25 to 35 minutes between batches</span><span>Quiet hours ${clockTime(data.settings.sleep_start_minute)} to ${clockTime(data.settings.sleep_end_minute)} UTC</span><span>GPT-6.1 Sol</span></div></div>
+    <section class="auto-section" aria-labelledby="auto-sleep-title"><h2 id="auto-sleep-title">Daily sleep window</h2>
+    <p class="muted">Pause auto-approval for at least 6 hours each day. Times are in UTC and may cross midnight. Reviews already in progress may finish.</p>
+    <form id="auto-sleep-form" class="auto-sleep-form"><label>Sleep time (UTC)<input id="auto-sleep-start" type="time" required value="${clockTime(data.settings.sleep_start_minute)}"></label><label>Wake time (UTC)<input id="auto-sleep-end" type="time" required value="${clockTime(data.settings.sleep_end_minute)}"></label><button type="submit">Save sleep times</button><p id="auto-sleep-error" class="error" role="alert"></p></form></section>
     <section class="auto-section" aria-labelledby="auto-policies-title"><div class="auto-section-heading"><div><h2 id="auto-policies-title">Your policies <span class="muted">${data.policies.length}</span></h2><p class="muted">One policy per action. Save to activate, delete to stop.</p></div><button data-auto-action="add">Add policy</button></div>
     ${data.policies.length ? `<div class="auto-policy-list">${data.policies.map(policy => `<button class="auto-policy-row" data-auto-action="edit" data-tool="${esc(policy.tool_id)}" data-tool-action="${esc(policy.action_id)}"><span class="auto-policy-scope"><strong>${esc(toolName(policy.tool_id))}</strong><span>${esc(policy.action_id)}</span></span><span class="auto-policy-excerpt">${esc(policy.instructions)}</span><span class="auto-edit-label">Edit <span aria-hidden="true">↗</span></span></button>`).join("")}</div>` : `<div class="auto-empty"><h3>Let routine requests move forward</h3><p>Choose an action and describe what Kern may approve. Everything else stays in your review queue.</p><button class="ghost" data-auto-action="add">Create your first policy</button></div>`}</section>
     <section class="auto-section" aria-labelledby="auto-history-title"><div class="auto-section-heading"><div><h2 id="auto-history-title">Review history</h2><p class="muted">What was checked, the policy used, and what happened.</p></div><label class="auto-filter">Outcome<select id="auto-history-filter">${[["", "All outcomes"], ...Object.entries(labels)].map(([value, label]) => `<option value="${value}"${value === outcome ? " selected" : ""}>${label}</option>`).join("")}</select></label></div>
@@ -99,7 +105,31 @@ async function savePolicy(remove = false) {
   finally { editorBusy(false); }
 }
 
+async function saveSleepTimes(form) {
+  const start = clockMinute($("auto-sleep-start").value);
+  const end = clockMinute($("auto-sleep-end").value);
+  const error = $("auto-sleep-error");
+  error.textContent = "";
+  if ((end - start + 1440) % 1440 < 360) {
+    error.textContent = "Sleep must last at least 6 hours; sleep and wake times must differ.";
+    return;
+  }
+  const button = form.querySelector("button");
+  button.disabled = true;
+  try {
+    await api("PUT", "/v1/auto-approvals/settings", { sleep_start_minute: start, sleep_end_minute: end });
+    await refreshAutoApprovals();
+    $("approval-feedback").textContent = "Sleep times saved.";
+  } catch (failure) { error.textContent = failure.message; }
+  finally { button.disabled = false; }
+}
+
 document.addEventListener("submit", event => {
+  if (event.target.id === "auto-sleep-form") {
+    event.preventDefault();
+    saveSleepTimes(event.target);
+    return;
+  }
   if (event.target.id !== "auto-policy-form") return;
   event.preventDefault();
   savePolicy();

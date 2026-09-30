@@ -38,7 +38,7 @@ def dispatch(path: str, body: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("invalid OpenAI text-completion request")
         if not isinstance(body.get("schema"), dict):
             raise ValueError("invalid OpenAI text-completion request")
-        if body["model"] not in ("gpt-6-luna", "gpt-6-sol"):
+        if body["model"] not in ("gpt-6-luna", "gpt-6.1-sol"):
             raise ValueError("unsupported OpenAI model")
         if type(body["max_output_tokens"]) is not int or not 1 <= body["max_output_tokens"] <= 4096:
             raise ValueError("invalid OpenAI output token limit")

@@ -112,7 +112,7 @@ let nextUploadSelectionId = 1;
 const APP_UPLOAD_SELECTION_LIMIT = 10;
 const pendingAppUploads = new Map();
 let chatNavArchived = false;
-let spawnedNavArchived = false;
+let spawnedNavExpanded = false;
 let webAppsNavArchived = false;
 let chatNavItems = [];
 let activeChatNavItems = [];
@@ -980,7 +980,6 @@ function loadWorkspaceScript(src) {
 async function refreshWorkspaceNavigation() {
   const sequence = ++workspaceNavigationRefreshSequence;
   const chatArchived = chatNavArchived;
-  const spawnedArchived = spawnedNavArchived;
   const webAppsArchived = webAppsNavArchived;
   let chat;
   let activeChat;
@@ -992,14 +991,13 @@ async function refreshWorkspaceNavigation() {
       api("GET", `/v1/workspace/chat/threads?spawned=false&archived=${chatArchived}`),
       chatArchived ? api("GET", "/v1/workspace/chat/threads?spawned=false") : Promise.resolve(null),
       api("GET", "/v1/workspace/chat/scheduled-agents"),
-      api("GET", `/v1/workspace/chat/threads?spawned=true&archived=${spawnedArchived}`),
+      api("GET", "/v1/workspace/chat/threads?spawned=true&archived=false"),
       api("GET", webAppsArchived ? "/v1/workspace/web-apps/apps?archived=true" : "/v1/workspace/web-apps/apps"),
     ]);
   } catch (error) {
     if (
       sequence !== workspaceNavigationRefreshSequence
       || chatArchived !== chatNavArchived
-      || spawnedArchived !== spawnedNavArchived
       || webAppsArchived !== webAppsNavArchived
     ) return;
     throw error;
@@ -1007,7 +1005,6 @@ async function refreshWorkspaceNavigation() {
   if (
     sequence !== workspaceNavigationRefreshSequence
     || chatArchived !== chatNavArchived
-    || spawnedArchived !== spawnedNavArchived
     || webAppsArchived !== webAppsNavArchived
   ) return;
   chatNavItems = chat.threads || [];
@@ -1024,13 +1021,16 @@ function renderWorkspaceNavigation() {
   renderWorkspaceRows("chat-nav-items", chatNavItems, "open-chat", chatNavArchived);
   renderWorkspaceRows("web-apps-nav-items", webAppNavItems, "open-web-app", webAppsNavArchived);
   renderWorkspaceRows("scheduled-agents-nav-items", scheduledAgentNavItems, "open-chat", false);
-  renderWorkspaceRows("spawned-agents-nav-items", spawnedAgentNavItems, "open-chat", spawnedNavArchived);
+  renderWorkspaceRows("spawned-agents-nav-items", spawnedAgentNavItems, "open-chat", false);
+  $("spawned-agents-nav-items").hidden = !spawnedNavExpanded;
+  const spawnedToggle = document.querySelector('[data-action="toggle-spawned-agents"]');
+  spawnedToggle.textContent = spawnedNavExpanded ? "Collapse" : "Expand";
+  spawnedToggle.setAttribute("aria-expanded", String(spawnedNavExpanded));
   if (focusedId) {
     document.querySelector(`[data-reorder-id="${CSS.escape(focusedId)}"]`)?.focus({ preventScroll: true });
   }
   const chatArchive = document.querySelector('[data-action="show-chat-archive"]');
   const appArchive = document.querySelector('[data-action="show-web-app-archive"]');
-  const spawnedArchive = document.querySelector('[data-action="show-spawned-archive"]');
   if (chatArchive) {
     chatArchive.textContent = chatNavArchived ? "Active" : "Archived";
     chatArchive.setAttribute("aria-pressed", String(chatNavArchived));
@@ -1038,10 +1038,6 @@ function renderWorkspaceNavigation() {
   if (appArchive) {
     appArchive.textContent = webAppsNavArchived ? "Active" : "Archived";
     appArchive.setAttribute("aria-pressed", String(webAppsNavArchived));
-  }
-  if (spawnedArchive) {
-    spawnedArchive.textContent = spawnedNavArchived ? "Active" : "Archived";
-    spawnedArchive.setAttribute("aria-pressed", String(spawnedNavArchived));
   }
   for (const resource of ["memory"]) {
     $(`tab-workspace-${resource}`).classList.toggle(
@@ -1163,7 +1159,7 @@ async function findChatNavItem(threadId) {
     return thread ? { item: thread, archived: false, scheduled: true, items } : null;
   }
   let spawned = spawnedAgentNavItems.find(item => item.thread_id === threadId);
-  if (spawned) return { item: spawned, archived: spawnedNavArchived, spawned: true, scheduled: false, items: spawnedAgentNavItems };
+  if (spawned) return { item: spawned, archived: false, spawned: true, scheduled: false, items: spawnedAgentNavItems };
   let thread = chatNavItems.find(item => item.thread_id === threadId);
   if (thread) return { item: thread, archived: chatNavArchived, scheduled: false, items: chatNavItems };
   for (const archived of [false, true]) {
@@ -1201,8 +1197,10 @@ async function openWorkspaceChat(threadId, updateHistory = true) {
   if (found.scheduled) {
     scheduledAgentNavItems = found.items;
   } else if (found.spawned) {
-    spawnedNavArchived = found.archived;
-    spawnedAgentNavItems = found.items;
+    if (!found.archived) {
+      spawnedNavExpanded = true;
+      spawnedAgentNavItems = found.items;
+    }
   } else {
     chatNavArchived = found.archived;
     chatNavItems = found.items;
@@ -1373,12 +1371,9 @@ document.addEventListener("click", event => {
       if (actionSequence !== workspaceNavigationActionSequence) return;
       backToHome(actionSequence);
     },
-    "show-spawned-archive": async () => {
-      const actionSequence = ++workspaceNavigationActionSequence;
-      spawnedNavArchived = !spawnedNavArchived;
-      await refreshWorkspaceNavigation();
-      if (actionSequence !== workspaceNavigationActionSequence) return;
-      backToHome(actionSequence);
+    "toggle-spawned-agents": () => {
+      spawnedNavExpanded = !spawnedNavExpanded;
+      renderWorkspaceNavigation();
     },
     "show-web-app-archive": async () => {
       const actionSequence = ++workspaceNavigationActionSequence;
@@ -1438,6 +1433,7 @@ document.addEventListener("click", event => {
     "disable-web-search": () => setProviderWebSearch(button.dataset.provider, false),
     "connect-bedrock-credentials": () => connectBedrockCredentials(button.dataset.integration),
     "add-domain-rule": () => addDomainRule(),
+    "toggle-domain-method": () => button.setAttribute("aria-pressed", String(button.getAttribute("aria-pressed") !== "true")),
     "remove-domain-rule": () => removeDomainRule(button.dataset.domain),
     "set-github-credential": () => setGithubCredential(),
     "save-xai-video-storage": () => saveXaiVideoStorage(),
@@ -1513,6 +1509,11 @@ window.addEventListener("popstate", event => {
 });
 bindIPhoneStandaloneSidebarSwipe();
 $("github-credential-mode").addEventListener("change", toggleGithubCredentialMode);
+$("policy-guard-request-content").addEventListener("change", event => {
+  const websocket = $("policy-allow-websocket");
+  websocket.disabled = event.target.checked;
+  if (websocket.disabled) websocket.checked = false;
+});
 $("password").addEventListener("keydown", event => { if (event.key === "Enter") login(); });
 $("file-path").addEventListener("keydown", event => { if (event.key === "Enter") goToFilePath(); });
 start();

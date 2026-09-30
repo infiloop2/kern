@@ -1,8 +1,9 @@
 import { api } from "./api.js";
 import { esc } from "./helpers.js";
+import { browserConnectionPanel, refreshBrowserConnection } from "./browser_connection.js";
 let popup = null;
 export function browserPanel(enabled) {
-  return `<div class="detail-card"><div class="detail-card-head"><h3>X connections</h3><button data-browser="refresh">Refresh</button></div>
+  return `${browserConnectionPanel()}<div class="detail-card"><div class="detail-card-head"><h3>X connections</h3><button data-browser="refresh">Refresh</button></div>
     <p class="muted">Sign in to X in a private browser popup. Save up to 5 separate accounts on this host.</p>
     <div id="browser-sessions">Choose Refresh to load saved accounts.</div>
     <form id="browser-connect-form" class="browser-connect"><button type="submit" class="primary" data-enabled="${enabled}" ${enabled ? "" : "disabled"}>Connect X account</button></form>
@@ -12,6 +13,7 @@ function message(value) { const el = document.getElementById("browser-settings-m
 export async function refreshBrowserSessions() {
   const node = document.getElementById("browser-sessions");
   if (!node) return;
+  await refreshBrowserConnection();
   try {
     const {accounts} = await api("POST", "/v1/browser/list", {});
     const connect = document.querySelector('#browser-connect-form button');

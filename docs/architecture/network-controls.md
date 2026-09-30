@@ -438,3 +438,17 @@ or the published repository list must never stay injectable — and is retried
 on the next poller cycle. Until it converges, git and gh simply run
 unauthenticated — fail closed; the poller's fixed cadence (well inside the
 App token's refresh margin) is the one retry path.
+
+
+## Browser connections
+
+Browser has its own [connection boundary](../development/browser-sessions.md#browser-connection-settings),
+independent of the agent policy proxy. Chromium is configured to use an HTTPS
+relay on loopback port 7447 inside the same Browser process. The relay resolves
+and pins public destination IPs and chooses Direct or Decodo Residential.
+Private and metadata destinations are rejected before forwarding. Agents cannot
+reach the listener. Proxy credentials are sent only after verified TLS to the
+fixed Residential gateway. A failed configured route never falls back to the
+host's direct connection. The Browser UID allows public TCP 443/7000 and DNS;
+proxy use is enforced by configuration and code, not by UID isolation between
+Chromium and the relay.

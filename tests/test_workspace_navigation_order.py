@@ -104,8 +104,8 @@ class NavigationOrderDatabaseTests(unittest.TestCase):
 
     def test_schedules_have_independent_order_and_deleted_target_is_rejected(self) -> None:
         ids = [schedules.create_schedule({
-            "name": f"Schedule {index}", "message": "Review", "cadence": "interval",
-            "interval_minutes": 60, "agent_runtime": "codex",
+            "name": f"Schedule {index}", "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review"}],
+             "agent_runtime": "codex",
             "model": "gpt-6-astra", "effort": "high",
         }, actor="user")["thread_id"] for index in range(3)]
         ordering.move("schedules", {"item_id": ids[0], "before_id": None})

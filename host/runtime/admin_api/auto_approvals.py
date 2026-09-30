@@ -2,6 +2,7 @@
 from http import HTTPStatus
 import random
 import re
+import threading
 import time
 from typing import Any
 
@@ -12,13 +13,35 @@ from host.runtime.host_inference import client, json_contract
 from host.runtime.tools import tools_host
 
 next_review_at: int | None = None
+_settings_changed = threading.Event()
 
 
-def next_check(now: int) -> int:
+def sleep_remaining(now: int, settings: dict[str, int]) -> int:
+    start = settings["sleep_start_minute"] * 60
+    duration = (settings["sleep_end_minute"] * 60 - start) % 86400
+    elapsed = (now - start) % 86400
+    return max(0, duration - elapsed)
+
+
+def next_check(now: int, settings: dict[str, int]) -> int:
     due = now + random.randint(25 * 60, 35 * 60)
-    if due % 86400 < 8 * 3600:
-        due = due - due % 86400 + 8 * 3600 + random.randint(0, 5 * 60)
+    remaining = sleep_remaining(due, settings)
+    if remaining:
+        due += remaining + random.randint(0, 5 * 60)
     return due
+
+
+def save_settings(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict) or set(body) != {"sleep_start_minute", "sleep_end_minute"}:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Sleep and wake times are required")
+    start, end = body["sleep_start_minute"], body["sleep_end_minute"]
+    if any(type(value) is not int or not 0 <= value < 1440 for value in (start, end)):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Sleep and wake times must be whole UTC minutes from 0 to 1439")
+    if (end - start) % 1440 < 360:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "Sleep must last at least 6 hours; sleep and wake times must differ")
+    state.set_auto_approval_settings(start, end)
+    _settings_changed.set()
+    return {"saved": True}
 
 
 def catalog() -> list[dict[str, Any]]:
@@ -36,9 +59,10 @@ def page(query: dict[str, list[str]]) -> dict[str, Any]:
     if len(outcomes) != 1 or outcomes[0] not in {"", "approved", "left_pending", "no_policy", "failed"}:
         raise ApiError(HTTPStatus.BAD_REQUEST, "unknown review outcome")
     provider = state.host_inference_provider_metadata("openai")
-    return {"policies": state.auto_approval_policies(), "catalog": catalog(),
+    settings = state.auto_approval_settings()
+    return {"settings": settings, "policies": state.auto_approval_policies(), "catalog": catalog(),
             "available": provider["enabled"] and provider["configured"],
-            "next_review_at": next_review_at, "quiet": int(time.time()) % 86400 < 8 * 3600,
+            "next_review_at": next_review_at, "quiet": bool(sleep_remaining(int(time.time()), settings)),
             "history": state.auto_approval_history(int(pages[0]), outcomes[0])}
 
 
@@ -88,7 +112,7 @@ def review(record: dict[str, Any], instructions: str) -> dict[str, Any]:
 def run_once() -> None:
     for record in state.pending_auto_approvals():
         now = int(time.time())
-        if now % 86400 < 8 * 3600:
+        if sleep_remaining(now, state.auto_approval_settings()):
             break
         # Read the current text at the time of each check, including deletions.
         policies = state.auto_approval_policies()
@@ -139,9 +163,13 @@ def run_once() -> None:
 def run() -> None:
     global next_review_at
     while True:
-        next_review_at = next_check(int(time.time()))
-        time.sleep(max(0, next_review_at - time.time()))
+        _settings_changed.clear()
         try:
+            next_review_at = next_check(int(time.time()), state.auto_approval_settings())
+            if _settings_changed.wait(max(0, next_review_at - time.time())):
+                continue
             run_once()
         except Exception as exc:
+            next_review_at = None
             host_errors.report_warning("admin_api.auto_approval_run", exc)
+            _settings_changed.wait(60)

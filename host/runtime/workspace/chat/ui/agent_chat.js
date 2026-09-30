@@ -55,9 +55,9 @@ let activityToggleSequence = 0;
 let sessionOptions = {};
 let activeRuntimes = null;
 const DEFAULT_MODELS = Object.freeze({
-  codex: "gpt-6-sol",
-  "codex-2": "gpt-6-sol",
-  "codex-3": "gpt-6-sol",
+  codex: "gpt-6.1-sol",
+  "codex-2": "gpt-6.1-sol",
+  "codex-3": "gpt-6.1-sol",
   claude_code: "claude-opus-5-5",
   grok: "grok-4.7",
   "grok-2": "grok-4.7",
