@@ -454,3 +454,15 @@ fixed Residential gateway. A failed configured route never falls back to the
 host's direct connection. The Browser UID allows public TCP 443/7000 and DNS;
 proxy use is enforced by configuration and code, not by UID isolation between
 Chromium and the relay.
+
+The AWS security group also allows outbound TCP 7000 for Decodo. Security groups
+apply to the instance, so the existing host UID rules restrict new connections
+on that port to Browser and trusted root; the agent and other services gain no
+new egress. No inbound rule is added. Deployment verification probes TCP 7000
+from the agent, tools, policy proxy, host-inference and Cloudflare users and
+requires them to remain blocked.
+
+This rule is installed by the lifecycle CLI when it creates or reapplies the
+security group, including on upgrade. An existing deployment must run the CLI
+from a checkout containing this fix; selecting a newer host payload with an
+older CLI does not update the CLI's security-group rules.

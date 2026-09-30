@@ -496,13 +496,15 @@ def _ensure_security_group(
     _reset_security_group_rules(env, group_id)
     if ssh_ingress:
         _aws(env, "ec2", "authorize-security-group-ingress", "--group-id", group_id, "--ip-permissions", json.dumps([SSH_INGRESS]))
-    # Egress is pinned to HTTP, HTTPS, and NTP: bootstrap downloads and all
-    # proxied agent traffic use 80/443, timesync uses UDP 123, and DNS to the
+    # Egress is pinned to HTTP, HTTPS, Decodo and NTP. The host firewall
+    # restricts Decodo's TCP 7000 to the Browser UID (and trusted root).
+    # Bootstrap/agent traffic uses 80/443, timesync uses UDP 123, and DNS to the
     # VPC resolver bypasses security groups. The Cloudflare Tunnel connector
     # allowance (7844) is added only when requested.
     for egress in (
         {"IpProtocol": "tcp", "FromPort": 80, "ToPort": 80, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
         {"IpProtocol": "tcp", "FromPort": 443, "ToPort": 443, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
+        {"IpProtocol": "tcp", "FromPort": 7000, "ToPort": 7000, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
         {"IpProtocol": "udp", "FromPort": 123, "ToPort": 123, "IpRanges": [{"CidrIp": "0.0.0.0/0"}]},
         *(CLOUDFLARE_TUNNEL_EGRESS if cloudflare_egress else ()),
     ):
