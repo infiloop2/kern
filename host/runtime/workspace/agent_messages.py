@@ -50,11 +50,12 @@ def spawn_agent(body: Any, sender_thread_id: str | None) -> dict[str, Any]:
     """Create one Chat thread and admit its delegated first message."""
     sender_thread_id = _require_sender_identity(sender_thread_id)
     required = {"message", "agent_runtime", "model", "effort"}
-    if not isinstance(body, dict) or set(body) != required:
+    if not isinstance(body, dict) or not required <= set(body) or set(body) - required - {"name"}:
         raise WorkspaceError(
             HTTPStatus.BAD_REQUEST,
-            "spawn_agent requires exactly message, agent_runtime, model, and effort",
+            "spawn_agent requires message, agent_runtime, model, and effort; name is optional",
         )
+    name = chat.validate_thread_name(body["name"]) if "name" in body else None
     message = body["message"]
     if not isinstance(message, str) or not message.strip():
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "message must be a non-empty string")
@@ -76,7 +77,7 @@ def spawn_agent(body: Any, sender_thread_id: str | None) -> dict[str, Any]:
             "model": model,
             "effort": effort,
         },
-        peer_sender_thread_id=sender_thread_id,
+        peer_sender_thread_id=sender_thread_id, name=name,
     )
     thread_id = response.get("thread_id")
     if (
@@ -86,6 +87,40 @@ def spawn_agent(body: Any, sender_thread_id: str | None) -> dict[str, Any]:
     ):
         raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "Workspace returned invalid spawned agent")
     return {"status": "accepted", "thread_id": thread_id}
+
+
+def list_spawned_agents() -> dict[str, Any]:
+    """Discover active spawned Chats across parents without their transcripts."""
+    fields = ("thread_id", "name", "spawned_by_thread_id", "agent_runtime", "model", "effort", "status")
+    return {"agents": [
+        {key: thread[key] for key in fields}
+        for thread in chat.list_chat_threads(spawned=True)["threads"]
+    ]}
+
+
+def archive_spawned_agent(body: Any, sender_thread_id: str | None) -> dict[str, Any]:
+    """Archive only a Chat created by the authenticated spawning thread."""
+    sender_thread_id = _require_sender_identity(sender_thread_id)
+    if not isinstance(body, dict) or set(body) != {"thread_id"}:
+        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "archive_spawned_agent requires exactly thread_id")
+    thread_id = body["thread_id"]
+    if not isinstance(thread_id, str) or re.fullmatch(r"thread-[1-9][0-9]*", thread_id) is None:
+        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "thread_id must identify a spawned Chat")
+    # Match the UI archive path: Chat sends release their row lock before
+    # posting to Admin, but retain this lock through message admission.
+    with chat._message_send_lock(thread_id):
+        with db.transaction() as cur:
+            cur.execute(
+                "SELECT spawned_by_thread_id FROM chat_threads WHERE thread_id = %s",
+                (thread_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            raise WorkspaceError(HTTPStatus.NOT_FOUND, "thread not found")
+        spawned_by_thread_id = row[0]
+        if sender_thread_id != spawned_by_thread_id:
+            raise WorkspaceError(HTTPStatus.FORBIDDEN, "only the spawning thread can archive this agent")
+        return chat.archive_chat_thread(thread_id)
 
 
 def _require_sender_identity(sender_thread_id: str | None) -> str:

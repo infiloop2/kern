@@ -46,7 +46,7 @@ fails with a short override example instead of producing a full suite of import
 errors. Environment-specific interpreter paths belong in local development
 guidance rather than this repository script.
 
-They need `openssl` (proxy certificate tests), `bash` (rendered-script
+They need `openssl` (proxy certificate tests), `curl` (Browser relay tests), `bash` (rendered-script
 checks), and PostgreSQL server binaries (admin-state tests), but **no network
 and no credentials**: the Codex protocol is exercised against a scripted fake
 app-server, the Claude Code adapter is exercised against scripted CLI

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 import json
 import re
@@ -464,6 +463,7 @@ def list_chat_thread_events(thread_id: str, query: dict[str, list[str]]) -> dict
 
 def send_chat_message(
     body: Any, *, peer_sender_thread_id: str | None = None,
+    name: str | None = None,
 ) -> dict[str, Any]:
     """Send one message into the thread's agent session. The browser never
     chooses between starting work and directing work already in progress.
@@ -482,7 +482,9 @@ def send_chat_message(
         # naming, so the operator never types an id. Reservation is already
         # serialized by its database table lock; the generated id then gets
         # the same per-thread delivery lock as every existing conversation.
-        thread_id = _reserve_generated_thread_id(spawned_by_thread_id=peer_sender_thread_id)
+        thread_id = _reserve_generated_thread_id(
+            spawned_by_thread_id=peer_sender_thread_id, name=name,
+        )
     with _message_send_lock(thread_id):
         schedule_config = _require_sendable_thread(thread_id)
         host_request: dict[str, Any] = {"message": message}
@@ -624,54 +626,23 @@ def unarchive_chat_thread(thread_id: str) -> dict[str, Any]:
     return set_chat_thread_archived(thread_id, archived=False)
 
 
-def archive_idle_spawned_agents() -> int:
-    """Archive spawned Chats whose host summary is idle and over a day old."""
-    cutoff = datetime.now(timezone.utc) - timedelta(days=1)
-    cutoff_text = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
-    with db.transaction() as cur:
-        cur.execute(
-            "SELECT thread_id FROM chat_threads"
-            " WHERE spawned_by_thread_id IS NOT NULL AND archived = FALSE",
-        )
-        candidates = {row[0] for row in cur.fetchall()}
-    if not candidates:
-        return 0
-    archived = 0
-    for summary in _host_thread_summaries("thread-"):
-        thread_id = summary.get("thread_id")
-        if (
-            not isinstance(thread_id, str)
-            or thread_id not in candidates
-            or summary.get("status") != "idle"
-        ):
-            continue
-        if not summary.get("last_used_at"):
-            continue
-        if str(summary["last_used_at"]) >= cutoff_text:
-            continue
-        with _message_send_lock(thread_id):
-            try:
-                archive_chat_thread(thread_id)
-            except WorkspaceError as exc:
-                if exc.status in {HTTPStatus.CONFLICT, HTTPStatus.NOT_FOUND}:
-                    continue
-                raise
-            archived += 1
-    return archived
-
-
 THREAD_NAME_MAX_CHARS = 100
 
 
-def rename_chat_thread(thread_id: str, body: Any) -> dict[str, Any]:
-    if not isinstance(body, dict):
-        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "rename request must be an object")
-    name = _required_text(body.get("name"), "name")
+def validate_thread_name(value: Any) -> str:
+    name = _required_text(value, "name")
     if len(name) > THREAD_NAME_MAX_CHARS:
         raise WorkspaceError(
             HTTPStatus.BAD_REQUEST,
             f"name must be at most {THREAD_NAME_MAX_CHARS} characters",
         )
+    return name
+
+
+def rename_chat_thread(thread_id: str, body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict):
+        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "rename request must be an object")
+    name = validate_thread_name(body.get("name"))
     if SCHEDULE_THREAD_ID_RE.fullmatch(thread_id) is not None:
         # Imported lazily to avoid making the two Workspace route modules
         # depend on each other during service startup.
@@ -694,7 +665,9 @@ def rename_chat_thread(thread_id: str, body: Any) -> dict[str, Any]:
     return {"thread_id": row[0], "name": row[1]}
 
 
-def _reserve_generated_thread_id(*, spawned_by_thread_id: str | None = None) -> str:
+def _reserve_generated_thread_id(
+    *, spawned_by_thread_id: str | None = None, name: str | None = None,
+) -> str:
     """Allocate the next successive thread-N identity with optional origin.
 
     The name is reserved by inserting its thread row before the host call:
@@ -723,10 +696,10 @@ def _reserve_generated_thread_id(*, spawned_by_thread_id: str | None = None) -> 
             ]
             candidate = f"thread-{max(numbers, default=0) + 1}"
             cur.execute(
-                "INSERT INTO chat_threads (thread_id, archived, spawned_by_thread_id)"
-                " VALUES (%s, FALSE, %s)"
+                "INSERT INTO chat_threads (thread_id, archived, spawned_by_thread_id, name)"
+                " VALUES (%s, FALSE, %s, %s)"
                 " ON CONFLICT (thread_id) DO NOTHING RETURNING thread_id",
-                (candidate, spawned_by_thread_id),
+                (candidate, spawned_by_thread_id, name),
             )
             if cur.fetchone() is not None:
                 return candidate

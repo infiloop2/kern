@@ -1,92 +1,78 @@
-"""CONNECT-only public HTTPS routing. Resolve once, then pin the upstream IP."""
+"""HTTPS CONNECT transport. The Browser UID firewall owns host egress policy."""
 from __future__ import annotations
 
 import base64
-import ipaddress
 import socket
 import ssl
 import time
 from urllib.parse import urlsplit
+from typing import Any
 
 from host.runtime.browser.client import BrowserError
+from host.runtime.core import host_errors
 
 
-def is_public(address: str) -> bool:
-    value = ipaddress.ip_address(address)
-    if not value.is_global or value.is_multicast or value.is_reserved:
-        return False
-    if isinstance(value, ipaddress.IPv6Address):
-        return value in ipaddress.IPv6Network("2000::/3") and not value.sixtofour and not value.teredo
-    return True
+def failure(stage: str, exc: Exception, *, host: str = "", status: int | None = None) -> BrowserError:
+    """Expose connection facts, never provider text, headers or credentials."""
+    context: dict[str, Any] = {"stage": stage, "host": host, "error_type": type(exc).__name__}
+    if isinstance(exc, OSError) and isinstance(exc.errno, int):
+        context["errno"] = exc.errno
+    if status is not None:
+        context["proxy_status"] = status
+    suffix = f" (HTTP {status})" if status is not None else ""
+    message = f"Browser connection failed during {stage.replace('_', ' ')}{suffix}. Check Host diagnostics."
+    host_errors.report_warning("browser.network", message, context=context)
+    return BrowserError(message)
 
 
-def public_addresses(host: str, port: int = 443) -> list[str]:
-    try:
-        addresses = list(dict.fromkeys(str(item[4][0]) for item in socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)))
-        if not addresses or any(not is_public(address) for address in addresses):
-            raise ValueError
-        return addresses
-    except (ValueError, OSError) as exc:
-        raise BrowserError("Browser destination must resolve only to public IP addresses.") from exc
-
-
-def target(authority: str) -> list[str]:
+def target(authority: str) -> str:
+    """Accept an HTTPS authority; leave DNS and address selection to the dialer."""
     try:
         value = urlsplit("https://" + authority)
         if (not value.hostname or value.port != 443 or value.username is not None or value.password is not None
                 or value.path or value.query or value.fragment or any(c.isspace() for c in authority)):
             raise ValueError
-        return public_addresses(value.hostname)
+        return value.hostname
     except ValueError as exc:
-        raise BrowserError("Browser connections require a public HTTPS destination on port 443.") from exc
+        raise BrowserError("Browser connections require an HTTPS destination on port 443.") from exc
 
 
-def connect_public(host: str, port: int) -> socket.socket:
-    return connect_addresses(public_addresses(host, port), port)
-
-
-def connect_addresses(addresses: list[str], port: int) -> socket.socket:
-    """Try only the already-validated numeric addresses, without resolving again."""
-    last_error: OSError | None = None
-    for address in addresses:
-        try:
-            return socket.create_connection((address, port), timeout=15)
-        except OSError as exc:
-            last_error = exc
-    raise BrowserError("Browser connection could not reach its destination.") from last_error
-
-
-def connect_proxy(endpoint: tuple[str, int], address: str, credentials: tuple[str, str]) -> socket.socket:
-    stream = connect_public(*endpoint)
+def connect_proxy(endpoint: tuple[str, int], host: str, credentials: tuple[str, str]) -> socket.socket:
+    stream: socket.socket | None = None
+    stage, status_code = "proxy_connection", None
     try:
+        stream = socket.create_connection(endpoint, timeout=10)
         # Verify the gateway before sending any proxy credentials. No HTTP or
         # certificate-verification fallback, even if the provider rejects TLS.
+        stage = "proxy_tls"
         stream = ssl.create_default_context().wrap_socket(stream, server_hostname=endpoint[0])
-        authority = f"[{address}]:443" if ":" in address else f"{address}:443"
+        stage = "proxy_connect"
+        authority = f"[{host}]:443" if ":" in host else f"{host}:443"
         headers = f"CONNECT {authority} HTTP/1.1\r\nHost: {authority}\r\n"
-        if credentials:
-            encoded = base64.b64encode(":".join(credentials).encode("ascii")).decode("ascii")
-            headers += f"Proxy-Authorization: Basic {encoded}\r\n"
-        stream.sendall((headers + "\r\n").encode("ascii"))
+        encoded = base64.b64encode(":".join(credentials).encode("ascii")).decode("ascii")
+        headers += f"Proxy-Authorization: Basic {encoded}\r\n\r\n"
+        stream.sendall(headers.encode("ascii"))
         # Avoid consuming bytes of the TLS tunnel while parsing proxy headers.
         response = bytearray()
         deadline = time.monotonic() + 15
         while not response.endswith(b"\r\n\r\n") and len(response) < 16384:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                raise BrowserError("The selected Browser proxy timed out during connection.")
+                raise TimeoutError
             stream.settimeout(remaining)
             data = stream.recv(1)
             if not data:
                 break
             response.extend(data)
         status = bytes(response).split(b"\r\n", 1)[0].split(b" ")
-        if not response.endswith(b"\r\n\r\n") or len(status) < 2 or status[1] != b"200":
-            code = status[1].decode("ascii", errors="ignore") if len(status) > 1 else ""
-            suffix = f" (HTTP {code})" if len(code) == 3 and code.isdigit() else ""
-            raise BrowserError("The selected Browser connection rejected the tunnel" + suffix + ". Check credentials, balance and provider restrictions.")
+        code = status[1].decode("ascii", errors="ignore") if len(status) > 1 else ""
+        if len(code) == 3 and code.isdigit():
+            status_code = int(code)
+        if not response.endswith(b"\r\n\r\n") or code != "200":
+            raise BrowserError("Proxy rejected CONNECT.")
         stream.settimeout(15)
         return stream
-    except Exception:
-        stream.close()
-        raise
+    except Exception as exc:
+        if stream is not None:
+            stream.close()
+        raise failure(stage, exc, host=host, status=status_code) from exc

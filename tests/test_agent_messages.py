@@ -1,5 +1,8 @@
 """Cross-thread messaging at the peer-authenticated Workspace boundary."""
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from http import HTTPStatus
+from threading import Event
 import json
 import unittest
 from unittest.mock import MagicMock, patch
@@ -94,6 +97,9 @@ class AgentMessageTests(unittest.TestCase):
     def test_spawn_agent_rejects_bad_identity_shape_message_and_configuration(self):
         cases = [
             (None, {"message": "Review", **SESSION}),
+            ("thread-1", {"message": "Review", **SESSION, "name": " "}),
+            ("thread-1", {"message": "Review", **SESSION, "name": "x" * 101}),
+            ("thread-1", {"message": "Review", **SESSION, "purpose": "Review companies"}),
             ("thread-1", {"message": "Review", **SESSION, "thread_id": "thread-2"}),
             ("thread-1", {"message": " ", **SESSION}),
             ("thread-1", {"message": "x" * 10001, **SESSION}),
@@ -113,6 +119,131 @@ class AgentMessageTests(unittest.TestCase):
                 with self.assertRaises(WorkspaceError):
                     agent_messages.spawn_agent(body, sender_thread_id=sender)
                 send.assert_not_called()
+
+    def test_spawn_name_is_validated_before_creation(self):
+        with patch.object(agent_messages.chat, "send_chat_message",
+                          return_value={"action": "accepted", "thread_id": "thread-12"}) as send:
+            agent_messages.spawn_agent(
+                {"message": "Review", **SESSION, "name": " Research "},
+                sender_thread_id="app-3",
+            )
+        self.assertEqual(send.call_args.kwargs, {
+            "peer_sender_thread_id": "app-3", "name": "Research",
+        })
+
+    def test_discovery_lists_spawned_metadata_without_transcript(self):
+        fields = {"thread_id": "thread-2", "name": "Researcher",
+                  "spawned_by_thread_id": "app-3", "status": "idle", **SESSION}
+        with patch.object(agent_messages.chat, "list_chat_threads", return_value={
+            "threads": [{**fields, "task": "Current task", "archived": False}],
+        }) as listed:
+            result = agent_api.dispatch_call("GET", "/agent/spawned-agents", None, peer_thread_id="thread-9")
+        self.assertEqual(result["body"], {"agents": [fields]})
+        listed.assert_called_once_with(spawned=True)
+
+    def test_discovery_rejects_other_methods_queries_and_get_bodies(self):
+        for method, path, body in [
+            ("POST", "/agent/spawned-agents", {}),
+            ("GET", "/agent/spawned-agents?archived=true", None),
+            ("GET", "/agent/spawned-agents", {}),
+        ]:
+            with self.subTest(method=method, path=path), patch.object(agent_messages, "list_spawned_agents") as listed:
+                with self.assertRaises((WorkspaceError, ValueError)):
+                    agent_api.dispatch_call(method, path, body, peer_thread_id="thread-1")
+                listed.assert_not_called()
+
+    def test_archive_requires_host_identity_and_a_chat_target(self):
+        for sender, body in [
+            (None, {"thread_id": "thread-2"}),
+            ("thread-1", {"thread_id": "app-2"}),
+            ("thread-1", {"thread_id": "thread-2", "spawned_by_thread_id": "thread-1"}),
+            ("thread-1", {"thread_id": "../thread-2"}),
+        ]:
+            with self.subTest(sender=sender, body=body), patch.object(
+                agent_messages.chat, "archive_chat_thread"
+            ) as archive, self.assertRaises(WorkspaceError):
+                agent_messages.archive_spawned_agent(body, sender)
+            archive.assert_not_called()
+
+    def test_archive_enforces_parent_and_idle_before_updating(self):
+        for parent, status, expected in [
+            ("thread-1", "idle", 200), ("app-3", "idle", 403),
+            (None, "idle", 403), ("thread-1", "running", 409),
+        ]:
+            with self.subTest(parent=parent, status=status):
+                self.cursor.reset_mock()
+                self.cursor.fetchone.side_effect = [(parent,), (1,), ("thread-2", True)]
+                with patch.object(agent_messages.chat, "call_admin_api",
+                                  return_value={"thread": {"status": status}}) as host:
+                    if expected == 200:
+                        result = agent_api.dispatch_call(
+                            "POST", "/agent/agents/archive", {"thread_id": "thread-2"},
+                            peer_thread_id="thread-1",
+                        )
+                        self.assertEqual(result["body"], {"thread_id": "thread-2", "archived": True})
+                    else:
+                        with self.assertRaises(WorkspaceError) as caught:
+                            agent_messages.archive_spawned_agent({"thread_id": "thread-2"}, "thread-1")
+                        self.assertEqual(caught.exception.status, expected)
+                        self.assertFalse(any(call.args[0].startswith("UPDATE") for call in self.cursor.execute.call_args_list))
+                    if expected == 403:
+                        host.assert_not_called()
+                self.assertIn("SELECT spawned_by_thread_id", self.cursor.execute.call_args_list[0].args[0])
+                if expected != 403:
+                    self.assertIn("FOR UPDATE", self.cursor.execute.call_args_list[1].args[0])
+
+    def test_parent_archive_waits_for_an_operator_send_to_finish_admission(self):
+        chat = agent_messages.chat
+        sending, release_send, running, archive_attempted = Event(), Event(), Event(), Event()
+        original_lock = chat._message_send_lock
+
+        @contextmanager
+        def observed_lock(thread_id):
+            if sending.is_set():
+                archive_attempted.set()
+            with original_lock(thread_id):
+                yield
+
+        def admit(thread_id, request):
+            sending.set()
+            self.assertTrue(release_send.wait(5))
+            running.set()
+            return {"status": "accepted"}
+
+        def status(method, path):
+            self.assertTrue(running.is_set(), "archive checked idle during an admitted send")
+            return {"thread": {"status": "running"}}
+
+        self.cursor.fetchone.return_value = ("thread-1",)
+        with patch.object(chat, "_message_send_lock", side_effect=observed_lock), \
+                patch.object(chat, "_require_sendable_thread", return_value=None), \
+                patch.object(chat, "_send_with_busy_retry", side_effect=admit), \
+                patch.object(chat, "call_admin_api", side_effect=status) as host, \
+                ThreadPoolExecutor(max_workers=2) as workers:
+            send = workers.submit(chat.send_chat_message, {"thread_id": "thread-2", "input_message": "Continue", **SESSION})
+            try:
+                self.assertTrue(sending.wait(5))
+                archive = workers.submit(agent_messages.archive_spawned_agent, {"thread_id": "thread-2"}, "thread-1")
+                self.assertTrue(archive_attempted.wait(5))
+                host.assert_not_called()
+            finally:
+                release_send.set()
+            self.assertEqual(send.result(timeout=5)["action"], "accepted")
+            with self.assertRaises(WorkspaceError) as caught:
+                archive.result(timeout=5)
+            self.assertEqual(caught.exception.status, 409)
+            self.assertFalse(any(call.args[0].startswith("UPDATE") for call in self.cursor.execute.call_args_list))
+
+    def test_archive_tool_is_listed_and_forwards_to_workspace(self):
+        with patch.object(mcp_shim, "_tools_request", return_value={
+            "status": 200, "body": {"thread_id": "thread-2", "archived": True},
+        }) as request:
+            result = mcp_shim._call_tool({"name": "archive_spawned_agent", "arguments": {"thread_id": "thread-2"}})
+        self.assertFalse(result["isError"])
+        self.assertEqual(request.call_args.args[2], {
+            "method": "POST", "path": "/agent/agents/archive", "body": {"thread_id": "thread-2"},
+        })
+        self.assertIn("archive_spawned_agent", [tool["name"] for tool in mcp_shim._list_tools()])
 
     def test_spawn_agent_rejects_an_invalid_chat_response(self):
         with patch.object(
@@ -224,6 +355,40 @@ class AgentMessageDatabaseTests(unittest.TestCase):
     def setUp(self):
         pg_harness.reset_database()
         self.addCleanup(db.close_pool)
+
+    def test_spawn_metadata_is_stored_before_delivery_and_survives_archive(self):
+        from host.runtime.workspace.chat import backend as chat
+        observed = []
+        def deliver(thread_id, request):
+            with db.transaction() as cur:
+                cur.execute("SELECT name, spawned_by_thread_id FROM chat_threads WHERE thread_id = %s", (thread_id,))
+                observed.append(cur.fetchone())
+            return {"status": "accepted"}
+        with patch.object(chat, "_send_with_busy_retry", side_effect=deliver):
+            created = agent_messages.spawn_agent({
+                **SESSION, "message": "Research", "name": "Researcher",
+            }, "app-3")
+        self.assertEqual(observed, [("Researcher", "app-3")])
+        target = created["thread_id"]
+        with self.assertRaises(WorkspaceError) as caught:
+            agent_messages.archive_spawned_agent({"thread_id": target}, "thread-9")
+        self.assertEqual(caught.exception.status, 403)
+        with patch.object(chat, "call_admin_api", return_value={"thread": {"status": "idle"}}):
+            agent_messages.archive_spawned_agent({"thread_id": target}, "app-3")
+            chat.unarchive_chat_thread(target)
+        with db.transaction() as cur:
+            cur.execute("SELECT name, spawned_by_thread_id, archived FROM chat_threads WHERE thread_id = %s", (target,))
+            self.assertEqual(cur.fetchone(), ("Researcher", "app-3", False))
+            cur.execute("INSERT INTO chat_threads (thread_id, archived, spawned_by_thread_id) VALUES"
+                        " ('thread-101', FALSE, NULL), ('thread-102', TRUE, 'app-3')")
+        summaries = [{"thread_id": thread_id, "status": "idle", **SESSION}
+                     for thread_id in (target, "thread-101", "thread-102")]
+        with patch.object(chat, "call_admin_api", return_value={"threads": summaries}):
+            found = agent_messages.list_spawned_agents()["agents"]
+        self.assertEqual([agent["thread_id"] for agent in found], [target])
+        self.assertNotIn("purpose", found[0])
+        self.assertEqual(found[0]["name"], "Researcher")
+        self.assertEqual(found[0]["spawned_by_thread_id"], "app-3")
 
     def test_schedule_purpose_survives_edit_history_restore_and_delete(self):
         schedule = schedules.create_schedule({**SESSION, "name": "Research", "triggers": [{"type": "daily", "times": ["09:00"], "prompt": "Research"}],   "purpose": "Research companies"}, actor="agent")

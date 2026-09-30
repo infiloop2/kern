@@ -236,6 +236,7 @@ def desktop_smoke(page: Any) -> None:
     expect(spawned_toggle).to_have_attribute("aria-expanded", "true")
     expect(spawned_nav).to_be_visible()
     expect(spawned_nav).to_contain_text("Spawned by thread-1")
+    expect(spawned_nav).to_contain_text("delegated-research")
     expect(page.locator("#chat-nav-items [data-item-id='thread-6']")).to_have_count(0)
     spawned_toggle.click()
     expect(spawned_nav).to_be_hidden()

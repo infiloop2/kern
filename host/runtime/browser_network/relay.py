@@ -1,11 +1,11 @@
 """In-process Browser relay for public HTTPS tunnels and private proxy settings."""
 from __future__ import annotations
 
-import http.client
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import select
 import socket
+import subprocess
 import threading
 import time
 from typing import Any
@@ -15,7 +15,8 @@ from host.constants import BROWSER_NETWORK_PORT
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser_network.config import Settings
 from host.runtime.browser.storage import Store
-from host.runtime.browser_network.transport import connect_addresses, connect_proxy, target
+from host.runtime.browser_network.transport import connect_proxy, failure, target
+from host.runtime.core import host_errors
 
 
 class Network:
@@ -30,22 +31,16 @@ class Network:
             value = self.settings.value.copy()
             generation = self.generation
             credentials = (self.settings.proxy_username(), value["password"]) if value["mode"] == "decodo" else None
-        addresses = target(authority)
-        # DNS/TCP/TLS must not serialize independent page resources behind a lock.
+        host = target(authority)
+        # Use normal hostname connections. The Browser UID firewall protects the
+        # host; Decodo resolves destinations at the proxy, like ordinary curl.
         if value["mode"] == "direct":
-            stream = connect_addresses(addresses, 443)
+            try:
+                stream = socket.create_connection((host, 443), timeout=10)
+            except OSError as exc:
+                raise failure("direct_connection", exc, host=host) from exc
         elif credentials is not None:
-            last_error: OSError | BrowserError = BrowserError("Browser destination has no public addresses.")
-            for address in addresses:
-                try:
-                    stream = connect_proxy(("gate.decodo.com", 7000), address, credentials)
-                    break
-                except ssl.SSLError:
-                    raise  # Another destination cannot repair gateway TLS.
-                except (OSError, BrowserError) as exc:
-                    last_error = exc
-            else:
-                raise last_error
+            stream = connect_proxy(("gate.decodo.com", 7000), host, credentials)
         else:
             raise BrowserError("Browser connection settings are invalid.")
         with self.lock:
@@ -89,59 +84,31 @@ class Network:
             raise BrowserError("Unsupported Browser connection operation.")
 
     def test(self) -> dict[str, Any]:
-        stream = self.dial("api.ipify.org:443")
+        # Exercise the same local relay Chromium uses. curl owns TLS and the
+        # whole-request deadline, including a relay stalled in the system resolver.
+        # No proxy secret goes in argv, the environment, or diagnostic output.
         try:
-            # MemoryBIO keeps destination TLS inside the proxy's existing TLS.
-            # wrap_socket on an SSLSocket would discard the outer TLS layer.
-            incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
-            secured = ssl.create_default_context().wrap_bio(incoming, outgoing, server_hostname="api.ipify.org")
-            deadline = time.monotonic() + 30
-            def tls(operation: Any) -> Any:
-                while True:
-                    stream.settimeout(max(0.001, deadline - time.monotonic()))
-                    if time.monotonic() >= deadline:
-                        raise BrowserError("Connection test timed out.")
-                    try:
-                        result = operation()
-                    except ssl.SSLWantReadError:
-                        if outgoing.pending:
-                            stream.sendall(outgoing.read())
-                        chunk = stream.recv(16384)
-                        if not chunk:
-                            raise BrowserError("Connection test ended before the response was complete.")
-                        incoming.write(chunk)
-                    else:
-                        if outgoing.pending:
-                            stream.sendall(outgoing.read())
-                        return result
-            tls(secured.do_handshake)
-            tls(lambda: secured.write(b"GET / HTTP/1.0\r\nHost: api.ipify.org\r\nConnection: close\r\n\r\n"))
-            # HTTPResponse reads exactly one bounded response from the inner TLS.
-            import io
-            class Reader(io.RawIOBase):
-                def readable(self) -> bool:
-                    return True
-                def readinto(self, buffer: Any) -> int:
-                    data = tls(lambda: secured.read(len(buffer)))
-                    buffer[:len(data)] = data
-                    return len(data)
-            class Connection:
-                def makefile(self, *_args: Any, **_kwargs: Any) -> Any:
-                    return io.BufferedReader(Reader())
-            response = http.client.HTTPResponse(Connection())  # type: ignore[arg-type]
-            try:
-                response.begin()
-                raw = response.read(100)
-                if response.status != 200:
-                    raise BrowserError("Connection test failed. Check the selected service.")
-                address = ipaddress.ip_address(raw.decode("ascii").strip())
-                if not address.is_global:
-                    raise BrowserError("Connection test did not return a public IP address.")
-                return {"mode": self.settings.value["mode"], "ip": str(address)}
-            finally:
-                response.close()
-        finally:
-            self.release(stream)
+            result = subprocess.run(
+                ["/usr/bin/curl", "--disable", "--silent", "--fail", "--max-time", "30",
+                 "--max-filesize", "100", "--proxy", f"http://127.0.0.1:{BROWSER_NETWORK_PORT}",
+                 "--noproxy", "", "https://api.ipify.org"],
+                capture_output=True, timeout=35, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise failure("connection_test", exc) from exc
+        if result.returncode:
+            message = ("Browser connection test timed out." if result.returncode == 28
+                       else "Browser connection test failed.")
+            message += " Check Host diagnostics."
+            host_errors.report_warning("browser.network", message, context={"stage": "connection_test", "curl_exit": result.returncode})
+            raise BrowserError(message)
+        try:
+            address = ipaddress.ip_address(result.stdout.decode("ascii").strip())
+            if not address.is_global:
+                raise ValueError
+        except ValueError as exc:
+            raise failure("connection_test_response", exc) from exc
+        return {"mode": self.settings.value["mode"], "ip": str(address)}
 
 
 class TunnelHandler(BaseHTTPRequestHandler):

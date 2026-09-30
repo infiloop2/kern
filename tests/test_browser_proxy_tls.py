@@ -1,4 +1,5 @@
 """Real offline TLS: gateway identity, encrypted auth and nested website TLS."""
+import os
 from pathlib import Path
 import select
 import socket
@@ -9,7 +10,8 @@ import threading
 import unittest
 from unittest.mock import patch
 
-from host.runtime.browser_network.relay import Network
+from host.runtime.browser.client import BrowserError
+from host.runtime.browser_network.relay import Network, TunnelServer
 from host.runtime.browser_network.transport import connect_proxy
 
 
@@ -32,6 +34,9 @@ class BrowserProxyTlsTests(unittest.TestCase):
     def tearDownClass(cls):
         cls.temp.cleanup()
 
+    def setUp(self):
+        self.warning = self.enterContext(patch("host.runtime.browser_network.transport.host_errors.report_warning"))
+
     def test_proxy_certificate_rejected_before_credentials_sent(self):
         for hostname, context in [('gate.decodo.com', ssl.create_default_context()),
                                   ('wrong.example', self.trusted)]:
@@ -47,8 +52,8 @@ class BrowserProxyTlsTests(unittest.TestCase):
                 worker = threading.Thread(target=serve)
                 worker.start()
                 try:
-                    with patch('host.runtime.browser_network.transport.connect_public', return_value=client), patch('ssl.create_default_context', return_value=context):
-                        with self.assertRaises(ssl.SSLCertVerificationError):
+                    with patch('socket.create_connection', return_value=client), patch('ssl.create_default_context', return_value=context):
+                        with self.assertRaises(BrowserError):
                             connect_proxy((hostname, 7000), '93.184.215.14', ('user', 'secret'))
                 finally:
                     client.close()
@@ -56,6 +61,9 @@ class BrowserProxyTlsTests(unittest.TestCase):
                     peer.close()
                 self.assertFalse(worker.is_alive())
                 self.assertEqual(application_data, [])
+                context = self.warning.call_args.kwargs["context"]
+                self.assertEqual(context["stage"], "proxy_tls")
+                self.assertEqual(context["error_type"], "SSLCertVerificationError")
 
     def test_https_ip_check_inside_verified_https_proxy(self):
         client, proxy_peer = socket.socketpair()
@@ -103,8 +111,15 @@ class BrowserProxyTlsTests(unittest.TestCase):
         network.dispatch('save', {'mode': 'decodo', 'username': 'fixture', 'password': 'secret',
                                  'location': 'new_york'})
         try:
-            with patch('host.runtime.browser_network.transport.connect_public', return_value=client), patch('host.runtime.browser_network.relay.target', return_value=['93.184.215.14']), patch('ssl.create_default_context', return_value=self.trusted):
-                self.assertEqual(network.test(), {'mode': 'decodo', 'ip': '93.184.215.14'})
+            with TunnelServer(network, port=8009) as relay:
+                relay_worker = threading.Thread(target=relay.serve_forever)
+                relay_worker.start()
+                try:
+                    with patch('socket.create_connection', return_value=client), patch('ssl.create_default_context', return_value=self.trusted), patch('host.runtime.browser_network.relay.BROWSER_NETWORK_PORT', 8009), patch.dict(os.environ, {'CURL_CA_BUNDLE': str(self.cert)}):
+                        self.assertEqual(network.test(), {'mode': 'decodo', 'ip': '93.184.215.14'})
+                finally:
+                    relay.shutdown()
+                    relay_worker.join(3)
         finally:
             network.disconnect()
             target_pipe.shutdown(socket.SHUT_RDWR)
@@ -113,4 +128,4 @@ class BrowserProxyTlsTests(unittest.TestCase):
         self.assertTrue(all(not worker.is_alive() for worker in workers))
         self.assertFalse(errors, errors)
         self.assertIn(b'Proxy-Authorization: Basic ', headers[0])
-        self.assertTrue(headers[0].startswith(b'CONNECT 93.184.215.14:443 HTTP/1.1'))
+        self.assertTrue(headers[0].startswith(b'CONNECT api.ipify.org:443 HTTP/1.1'))

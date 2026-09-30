@@ -425,14 +425,14 @@ class WorkspaceTests(unittest.TestCase):
 
     def test_workspace_service_owns_workspace_storage_maintenance(self) -> None:
         with (
-            patch.object(service.chat, "archive_idle_spawned_agents") as archive_spawned,
+            patch.object(service, "chat") as chat_backend,
             patch.object(service.memory, "prune_deleted") as prune_memory,
             patch.object(service.schedules, "prune_deleted") as prune_schedules,
             patch.object(service.web_apps, "prune_revisions") as prune_apps,
         ):
             service.maintain_storage()
 
-        archive_spawned.assert_called_once_with()
+        self.assertEqual(chat_backend.mock_calls, [])
         prune_memory.assert_called_once_with()
         prune_schedules.assert_called_once_with()
         prune_apps.assert_called_once_with()

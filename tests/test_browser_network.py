@@ -3,16 +3,17 @@ from __future__ import annotations
 
 import base64
 import socket
-import ssl
+import subprocess
 import threading
+import time
 import unittest
 from unittest.mock import Mock, patch
 
 from browser_fakes import MemoryStore
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser_network.config import LOCATIONS, Settings
-from host.runtime.browser_network.relay import Network, TunnelHandler
-from host.runtime.browser_network.transport import connect_proxy, target, is_public
+from host.runtime.browser_network.relay import Network, TunnelHandler, TunnelServer
+from host.runtime.browser_network.transport import connect_proxy, target
 from host.runtime.browser.accounts import Accounts
 from host.runtime.browser.service import authorized
 
@@ -21,6 +22,7 @@ DECODO = {"mode": "decodo", "username": "example", "password": "private-password
 
 class BrowserNetworkTests(unittest.TestCase):
     def setUp(self):
+        self.warning = self.enterContext(patch("host.runtime.browser_network.transport.host_errors.report_warning"))
         self.store = MemoryStore()
         self.network = Network(self.store)
         self.addCleanup(self.network.disconnect)
@@ -71,21 +73,17 @@ class BrowserNetworkTests(unittest.TestCase):
         with patch.object(self.store, "load_settings", side_effect=OSError("unavailable")):
             recovered = Network(self.store)
             self.assertIn("error", recovered.dispatch("get", {}))
-            with patch("host.runtime.browser_network.relay.target", return_value=["1.1.1.1"]), patch("socket.create_connection") as dial:
+            with patch("socket.create_connection") as dial:
                 with self.assertRaises(BrowserError):
                     recovered.dial("example.com:443")
                 dial.assert_not_called()
         self.assertEqual(recovered.dispatch("get", {})["mode"], "direct")
 
-    def test_direct_tries_remaining_validated_addresses_without_resolving_again(self):
-        ipv6, ipv4 = "2606:4700::1111", "1.1.1.1"
-        answers = [(socket.AF_INET6, socket.SOCK_STREAM, 6, "", (ipv6, 443, 0, 0)),
-                   (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ipv4, 443))]
+    def test_direct_delegates_dns_and_address_selection_to_socket(self):
         upstream = Mock()
-        with patch("socket.getaddrinfo", return_value=answers) as resolve, patch("socket.create_connection", side_effect=[OSError("no IPv6 route"), upstream]) as connect:
+        with patch("socket.create_connection", return_value=upstream) as connect:
             self.assertIs(self.network.dial("example.com:443"), upstream)
-            resolve.assert_called_once_with("example.com", 443, type=socket.SOCK_STREAM)
-            self.assertEqual([entry.args[0] for entry in connect.call_args_list], [(ipv6, 443), (ipv4, 443)])
+        connect.assert_called_once_with(("example.com", 443), timeout=10)
 
     def test_atomic_write_failure_preserves_old_settings(self):
         self.network.dispatch("save", DECODO)
@@ -94,15 +92,10 @@ class BrowserNetworkTests(unittest.TestCase):
                 self.network.dispatch("save", {"mode": "direct"})
         self.assertEqual({k: v for k, v in Settings(self.store).value.items() if k != "session"}, DECODO)
 
-    def test_public_resolution_pins_ip_and_rejects_mixed_private_answers(self):
-        answer = lambda ip: (socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, 443))
-        with patch("socket.getaddrinfo", return_value=[answer("93.184.215.14")]):
-            self.assertEqual(target("example.com:443"), ["93.184.215.14"])
-        with patch("socket.getaddrinfo", return_value=[answer("93.184.215.14"), answer("10.0.0.1")]):
-            with self.assertRaises(BrowserError):
-                target("example.com:443")
-        for address in ("127.0.0.1", "169.254.169.254", "10.0.0.1", "100.101.102.103", "224.0.0.1", "::1", "fc00::1", "::ffff:127.0.0.1", "64:ff9b::a00:1", "2002:0a00:0001::"):
-            self.assertFalse(is_public(address), address)
+    def test_target_validates_https_authority_without_dns(self):
+        with patch("socket.getaddrinfo", side_effect=AssertionError("No DNS preflight")):
+            self.assertEqual(target("example.com:443"), "example.com")
+            self.assertEqual(target("[2606:4700::1111]:443"), "2606:4700::1111")
         for authority in ("example.com:80", "user:pass@example.com:443", "example.com:443/path", "example.com:443?x=1", "example.com:443\r\nX:yes"):
             with self.subTest(authority=authority), self.assertRaises(BrowserError):
                 target(authority)
@@ -110,11 +103,11 @@ class BrowserNetworkTests(unittest.TestCase):
     def test_decodo_preserves_location_and_session_without_fallback(self):
         self.network.dispatch("save", DECODO)
         upstream = Mock()
-        with patch("host.runtime.browser_network.relay.target", return_value=["93.184.215.14"]), patch("host.runtime.browser_network.relay.connect_proxy", return_value=upstream) as proxy:
+        with patch("socket.getaddrinfo", side_effect=AssertionError("Destination DNS must be remote")), patch("host.runtime.browser_network.relay.connect_proxy", return_value=upstream) as proxy:
             self.assertIs(self.network.dial("example.com:443"), upstream)
-            proxy.assert_called_once_with(("gate.decodo.com", 7000), "93.184.215.14", (self.network.settings.proxy_username(), DECODO["password"]))
+            proxy.assert_called_once_with(("gate.decodo.com", 7000), "example.com", (self.network.settings.proxy_username(), DECODO["password"]))
         self.network.release(upstream)
-        with patch("host.runtime.browser_network.relay.target", return_value=["93.184.215.14"]), patch("host.runtime.browser_network.relay.connect_proxy", side_effect=BrowserError("rejected")), patch("socket.create_connection") as direct:
+        with patch("socket.getaddrinfo", side_effect=AssertionError("Destination DNS must be remote")), patch("host.runtime.browser_network.relay.connect_proxy", side_effect=BrowserError("rejected")), patch("socket.create_connection") as direct:
             with self.assertRaises(BrowserError):
                 self.network.dial("example.com:443")
             direct.assert_not_called()
@@ -132,28 +125,84 @@ class BrowserNetworkTests(unittest.TestCase):
         with self.assertRaises(BrowserError):
             self.network.dispatch("save", {**DECODO, "username": "another", "password": ""})
 
-    def test_decodo_tries_pinned_addresses_with_the_same_route_and_credentials(self):
+    def test_decodo_failure_does_not_retry_or_fall_back_to_direct(self):
         self.network.dispatch("save", DECODO)
-        addresses = ["2606:4700::1111", "1.1.1.1", "1.0.0.1"]
-        credentials = (self.network.settings.proxy_username(), DECODO["password"])
-        upstream = Mock()
-        with patch("host.runtime.browser_network.relay.target", return_value=addresses) as resolve, patch("host.runtime.browser_network.relay.connect_proxy", side_effect=[BrowserError("tunnel rejected"), OSError("unreachable"), upstream]) as proxy, patch("host.runtime.browser_network.relay.connect_addresses") as direct:
-            self.assertIs(self.network.dial("example.com:443"), upstream)
-            resolve.assert_called_once_with("example.com:443")
-            self.assertEqual([entry.args for entry in proxy.call_args_list], [(("gate.decodo.com", 7000), address, credentials) for address in addresses])
+        with patch("host.runtime.browser_network.relay.connect_proxy", side_effect=BrowserError("failed")) as proxy, patch("socket.create_connection") as direct:
+            with self.assertRaises(BrowserError):
+                self.network.dial("example.com:443")
+            proxy.assert_called_once()
             direct.assert_not_called()
+            self.assertFalse(self.network.connections)
 
-    def test_decodo_exhaustion_and_tls_errors_never_change_route(self):
+    def test_test_uses_local_relay_without_credentials_and_has_total_deadline(self):
         self.network.dispatch("save", DECODO)
-        for failures, count in (([BrowserError("first"), BrowserError("last")], 2),
-                                ([ssl.SSLCertVerificationError("untrusted gateway")], 1)):
-            with self.subTest(failures=failures), patch("host.runtime.browser_network.relay.target", return_value=["1.1.1.1", "1.0.0.1"]), patch("host.runtime.browser_network.relay.connect_proxy", side_effect=failures) as proxy, patch("host.runtime.browser_network.relay.connect_addresses") as direct:
-                with self.assertRaises(type(failures[-1])) as caught:
-                    self.network.dial("example.com:443")
-                self.assertIs(caught.exception, failures[-1])
-                self.assertEqual(proxy.call_count, count)
-                direct.assert_not_called()
-                self.assertFalse(self.network.connections)
+        with patch("subprocess.run", return_value=Mock(returncode=0, stdout=b"1.1.1.1\n")) as run:
+            self.assertEqual(self.network.test(), {"mode": "decodo", "ip": "1.1.1.1"})
+        command = run.call_args.args[0]
+        self.assertEqual(command[:2], ["/usr/bin/curl", "--disable"])
+        self.assertEqual(command[command.index("--proxy") + 1], "http://127.0.0.1:7447")
+        self.assertEqual(command[command.index("--noproxy") + 1], "")
+        self.assertEqual(command[command.index("--max-time") + 1], "30")
+        self.assertEqual(run.call_args.kwargs["timeout"], 35)
+        self.assertNotIn(DECODO["password"], str(run.call_args))
+        self.assertNotIn(self.network.settings.proxy_username(), str(run.call_args))
+
+    def test_test_timeouts_provider_errors_and_bad_responses_are_redacted(self):
+        for code in (28, 22, 60):
+            with self.subTest(code=code), patch("subprocess.run", return_value=Mock(returncode=code, stdout=b"secret body", stderr=b"secret error")):
+                with self.assertRaises(BrowserError) as caught:
+                    self.network.test()
+                self.assertNotIn("secret", str(caught.exception))
+                self.assertEqual(self.warning.call_args.kwargs["context"]["curl_exit"], code)
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("curl", 35, output=b"secret")):
+            with self.assertRaises(BrowserError):
+                self.network.test()
+        for response in (b"private-password", b"127.0.0.1", b"\xff"):
+            with patch("subprocess.run", return_value=Mock(returncode=0, stdout=response)):
+                with self.assertRaises(BrowserError):
+                    self.network.test()
+        self.assertNotIn("secret", str(self.warning.call_args_list))
+        self.assertNotIn("private-password", str(self.warning.call_args_list))
+
+    def test_real_curl_deadline_returns_while_relay_dns_is_stuck(self):
+        entered, resume = threading.Event(), threading.Event()
+        run = subprocess.run
+        def short_test(command, **kwargs):
+            # Exercise curl's actual deadline without taking 30 seconds in CI.
+            command[command.index("--max-time") + 1] = "0.2"
+            return run(command, **kwargs)
+        def stuck_connection(*args, **kwargs):
+            entered.set()
+            resume.wait(3)
+            raise socket.gaierror("private resolver error")
+        with TunnelServer(self.network, port=8010) as relay:
+            worker = threading.Thread(target=relay.serve_forever)
+            worker.start()
+            try:
+                with patch("socket.create_connection", side_effect=stuck_connection), patch("subprocess.run", side_effect=short_test), patch("host.runtime.browser_network.relay.BROWSER_NETWORK_PORT", 8010):
+                    started = time.monotonic()
+                    with self.assertRaisesRegex(BrowserError, "timed out"):
+                        self.network.test()
+                    self.assertTrue(entered.is_set())
+                    self.assertLess(time.monotonic() - started, 2)
+                    self.assertEqual(self.warning.call_args.kwargs["context"]["curl_exit"], 28)
+            finally:
+                resume.set()
+                relay.shutdown()
+                worker.join(3)
+
+    def test_connection_diagnostics_identify_stage_without_raw_errors(self):
+        for mode, stage in (("direct", "direct_connection"), ("decodo", "proxy_connection")):
+            self.network.dispatch("save", DECODO if mode == "decodo" else {"mode": "direct"})
+            with patch("socket.create_connection", side_effect=OSError(111, "private-password")):
+                with self.assertRaises(BrowserError) as caught:
+                    self.network.dial("x.com:443")
+            context = self.warning.call_args.kwargs["context"]
+            self.assertEqual(context["stage"], stage)
+            self.assertEqual(context["errno"], 111)
+            self.assertEqual(context["host"], "x.com")
+            self.assertNotIn("private-password", str(caught.exception))
+        self.assertNotIn("private-password", str(self.warning.call_args_list))
 
     def test_slow_dial_does_not_block_other_resources_or_settings_changes(self):
         from concurrent.futures import ThreadPoolExecutor
@@ -162,7 +211,7 @@ class BrowserNetworkTests(unittest.TestCase):
                 self.network.dispatch("save", DECODO if mode == "decodo" else {"mode": "direct"})
                 entered, resume = threading.Event(), threading.Event()
                 slow, fast = Mock(), Mock()
-                def connect(*args):
+                def connect(*args, **kwargs):
                     address = args[1] if mode == "decodo" else args[0][0]
                     if address == "1.1.1.1":
                         entered.set()
@@ -170,8 +219,8 @@ class BrowserNetworkTests(unittest.TestCase):
                             raise TimeoutError("fixture was not released")
                         return slow
                     return fast
-                connector = "connect_proxy" if mode == "decodo" else "connect_addresses"
-                with patch("host.runtime.browser_network.relay.target", side_effect=lambda host: [host.split(":")[0]]), patch("host.runtime.browser_network.relay." + connector, side_effect=connect), ThreadPoolExecutor(max_workers=3) as pool:
+                connector = "host.runtime.browser_network.relay.connect_proxy" if mode == "decodo" else "socket.create_connection"
+                with patch(connector, side_effect=connect), ThreadPoolExecutor(max_workers=3) as pool:
                     pending = pool.submit(self.network.dial, "1.1.1.1:443")
                     try:
                         self.assertTrue(entered.wait(2))
@@ -196,7 +245,7 @@ class BrowserNetworkTests(unittest.TestCase):
         upstream.close.assert_called_once()
         self.assertEqual(self.network.connections, set())
 
-    def test_connect_handshake_keeps_proxy_auth_out_of_tunnel_and_pins_target(self):
+    def test_connect_handshake_keeps_proxy_auth_out_of_tunnel_and_sends_hostname(self):
         client, peer = socket.socketpair()
         self.addCleanup(client.close)
         self.addCleanup(peer.close)
@@ -209,12 +258,12 @@ class BrowserNetworkTests(unittest.TestCase):
             peer.sendall(b"HTTP/1.1 200 OK\r\n\r\nTLS-FIXTURE")
         worker = threading.Thread(target=provider)
         worker.start()
-        with patch("host.runtime.browser_network.transport.connect_public", return_value=client), patch("host.runtime.browser_network.transport.ssl.create_default_context") as tls:
+        with patch("socket.create_connection", return_value=client), patch("host.runtime.browser_network.transport.ssl.create_default_context") as tls:
             tls.return_value.wrap_socket.return_value = client
-            stream = connect_proxy(("gate.decodo.com", 7000), "93.184.215.14", ("username", "password"))
+            stream = connect_proxy(("gate.decodo.com", 7000), "example.com", ("username", "password"))
         worker.join(timeout=2)
         self.assertFalse(worker.is_alive())
-        self.assertTrue(received[0].startswith(b"CONNECT 93.184.215.14:443 HTTP/1.1\r\n"))
+        self.assertTrue(received[0].startswith(b"CONNECT example.com:443 HTTP/1.1\r\n"))
         self.assertIn(base64.b64encode(b"username:password"), received[0])
         self.assertEqual(stream.recv(11), b"TLS-FIXTURE")
 
@@ -222,11 +271,15 @@ class BrowserNetworkTests(unittest.TestCase):
         client, peer = socket.socketpair()
         self.addCleanup(peer.close)
         peer.sendall(b"HTTP/1.1 407 secret-provider-message\r\nSecret: private\r\n\r\nprivate-body")
-        with patch("host.runtime.browser_network.transport.connect_public", return_value=client), patch("host.runtime.browser_network.transport.ssl.create_default_context") as tls:
+        with patch("socket.create_connection", return_value=client), patch("host.runtime.browser_network.transport.ssl.create_default_context") as tls:
             tls.return_value.wrap_socket.return_value = client
             with self.assertRaises(BrowserError) as error:
                 connect_proxy(("gate.decodo.com", 7000), "93.184.215.14", ("user", "secret"))
         self.assertIn("407", str(error.exception))
+        context = self.warning.call_args.kwargs["context"]
+        self.assertEqual(context["stage"], "proxy_connect")
+        self.assertEqual(context["proxy_status"], 407)
+        self.assertNotIn("secret", str(self.warning.call_args))
         self.assertNotIn("private", str(error.exception))
         self.assertNotIn("secret", str(error.exception))
         self.assertEqual(client.fileno(), -1)

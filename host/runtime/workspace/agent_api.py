@@ -55,6 +55,7 @@ def _may_return_large_response(path: Any) -> bool:
         "/agent/self/memory",
         "/agent/messages",
         "/agent/agents",
+        "/agent/agents/archive",
     }
 
 
@@ -132,6 +133,14 @@ def dispatch_call(
         if method != "POST" or query:
             raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent spawning accepts only POST without query parameters")
         response = agent_messages.spawn_agent(body, sender_thread_id=peer_thread_id)
+    elif parsed.path == "/agent/spawned-agents":
+        if method != "GET" or query:
+            raise WorkspaceError(HTTPStatus.BAD_REQUEST, "spawned-agent discovery accepts only GET without query parameters")
+        response = agent_messages.list_spawned_agents()
+    elif parsed.path == "/agent/agents/archive":
+        if method != "POST" or query:
+            raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent archiving accepts only POST without query parameters")
+        response = agent_messages.archive_spawned_agent(body, sender_thread_id=peer_thread_id)
     elif parsed.path.startswith("/agent/conversation-history/"):
         response = conversation_history.route_agent(method, parsed.path, body, query)
     elif parsed.path == "/agent/memory" or parsed.path.startswith("/agent/memory/"):
