@@ -370,8 +370,14 @@ The selected preset supplies the browser language and IANA timezone, including
 daylight-saving transitions. These drive native Chromium locale/Accept-Language and date formatting rather
 than JavaScript property replacements. The headed sandboxed browser keeps its
 native UA/client hints, a consistent screen/viewport and scale, and saved
-cookies/localStorage/IndexedDB. The automation infobar flag is omitted and
-Chromium's AutomationControlled feature is disabled. No random fingerprint,
+cookies/localStorage/IndexedDB. Kern starts the managed Chromium executable
+with a private temporary profile, then attaches Playwright over CDP to its
+original context. It does not use Playwright's launch defaults or create a new
+incognito context. Chromium's sandbox stays enabled. CDP binds loopback port
+7448; nftables permits only the Browser UID to connect or answer on that port.
+Deployment probes verify this boundary. Closing the browser stops its process
+group and removes the temporary profile; encrypted snapshots remain the only
+saved authentication state. No random fingerprint,
 canvas/GPU/font spoofing, forged Windows/macOS UA, or CAPTCHA solver is added.
 Chromium remains automated and detectable; a custom hosted browser's claims
 cannot be reproduced by promising that a handful of flags makes a human.

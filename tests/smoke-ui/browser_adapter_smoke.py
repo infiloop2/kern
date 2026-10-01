@@ -1,6 +1,8 @@
 """Exercise the real browser adapter against a local, intercepted X fixture."""
 from __future__ import annotations
+from contextlib import contextmanager
 import json
+import subprocess
 from pathlib import Path
 import socket
 import struct
@@ -9,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from host.runtime.browser.browser import Browser
+from host.runtime.browser.chromium import Chromium
 from host.runtime.browser.providers import x
 from host.runtime.browser.actions import x_post_tweet
 from host.runtime.browser.client import BrowserError
@@ -30,6 +33,54 @@ REPLY_HTML = f'''<!doctype html><html><body>
 </body></html>'''
 
 
+@contextmanager
+def native_fixture(playwright, fixture=None):
+    real_popen = subprocess.Popen
+    processes = []
+    def popen(command, **options):
+        # CI cannot create the nested sandbox; deployed readiness checks it.
+        if command[0] == playwright.chromium.executable_path:
+            command = [*command[:1], "--no-sandbox", *command[1:]]
+        return real_popen(command, **options)
+    def launch(runtime, environment, settings):
+        process = Chromium(runtime, environment, settings)
+        processes.append(process)
+        if fixture:
+            process.context.route("https://x.com/**", fixture)
+        return process
+    runtime = SimpleNamespace(chromium=playwright.chromium, stop=lambda: None)
+    with (patch("playwright.sync_api.sync_playwright", return_value=SimpleNamespace(start=lambda: runtime)),
+          patch("host.runtime.browser.chromium.BROWSER_DEBUG_PORT", 8009),
+          patch("host.runtime.browser.chromium.subprocess.Popen", side_effect=popen),
+          patch("host.runtime.browser.browser.Chromium", side_effect=launch)):
+        yield processes
+    assert all(process.child.poll() is not None and not Path(process.directory.name).exists() for process in processes)
+
+
+def check_presets():
+    settings = Settings(Mock(load_settings=lambda: {"mode": "direct"}))
+    for location in LOCATIONS:
+        settings.save(settings.prepare({"mode": "decodo", "username": "fixture", "password": "fixture", "location": location}))
+        preset = settings.public()
+        browser = Browser(None, "about:blank", preset)
+        try:
+            headers = []
+            def identity_page(route):
+                headers.append(route.request.headers)
+                route.fulfill(status=200, content_type="text/html", body="<!doctype html><title>Identity</title>")
+            browser.context.route("https://x.com/identity", identity_page)
+            page = browser.page
+            page.goto("https://x.com/identity")
+            assert page.evaluate("navigator.language") == preset["locale"]
+            assert page.evaluate("navigator.languages[0]") == preset["locale"]
+            assert headers[0]["accept-language"].split(",")[0] == preset["locale"]
+            assert page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone") == preset["timezone"]
+            offsets = page.evaluate("[new Date('2026-01-15T12:00:00Z').getTimezoneOffset(), new Date('2026-07-15T12:00:00Z').getTimezoneOffset()]")
+            assert offsets == ([300, 240] if location == "new_york" else [0, -60]), offsets
+        finally:
+            browser.close()
+
+
 def run(playwright):
     calls = []
     user_agents = []
@@ -46,21 +97,10 @@ def run(playwright):
             route.fulfill(status=200, content_type="text/html", body="<!doctype html><html><body></body></html>")
         else:
             route.fulfill(status=200, content_type="text/html", body=REPLY_HTML if route.request.url.endswith("/status/12345") else HTML)
-    real_launch = playwright.chromium.launch
-    processes = []
     displays = []
-    def launch(**options):
-        # CI cannot create the nested sandbox; host smoke checks it separately.
-        options.update(chromium_sandbox=False)
-        process = real_launch(**options)
-        processes.append(process)
-        def new_context(**context_options):
-            context = process.new_context(**context_options)
-            context.route("https://x.com/**", fixture)
-            return context
-        return SimpleNamespace(new_context=new_context, close=process.close, version=process.version)
-    runtime = SimpleNamespace(chromium=playwright.chromium, stop=lambda: None)
-    with TemporaryDirectory() as directory, patch("playwright.sync_api.sync_playwright", return_value=SimpleNamespace(start=lambda: runtime)), patch.object(playwright.chromium, "launch", side_effect=launch):
+    with TemporaryDirectory() as directory, native_fixture(playwright, fixture) as processes:
+        check_presets()
+        print("Native Chromium location presets passed.", flush=True)
         account_dir = Path(directory) / "account"
         account_dir.mkdir()
         snapshot = None
@@ -71,7 +111,7 @@ def run(playwright):
             assert browser.origin() == "https://x.com"
             assert browser.frame()
             user_agent = browser.page.evaluate("navigator.userAgent")
-            major = processes[-1].version.split(".")[0]
+            major = processes[-1].browser.version.split(".")[0]
             assert "HeadlessChrome" not in user_agent and f"Chrome/{major}." in user_agent
             assert user_agents[0] == user_agent
             brands = browser.page.evaluate("navigator.userAgentData.brands")
@@ -79,28 +119,15 @@ def run(playwright):
             assert browser.page.evaluate("navigator.webdriver") is False
             assert browser.page.evaluate("navigator.language") == "en-GB"
             assert browser.page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone") == "Europe/London"
-            # Each preset must work in Chromium and agree across headers and JS APIs.
-            settings = Settings(Mock(load_settings=lambda: {"mode": "direct"}))
-            for location in LOCATIONS:
-                settings.save(settings.prepare({"mode": "decodo", "username": "fixture", "password": "fixture", "location": location}))
-                preset = settings.public()
-                context = browser.process.new_context(locale=preset["locale"], timezone_id=preset["timezone"])
-                try:
-                    headers = []
-                    def identity_page(route):
-                        headers.append(route.request.headers)
-                        route.fulfill(status=200, content_type="text/html", body="<!doctype html><title>Identity</title>")
-                    context.route("https://x.com/identity", identity_page)
-                    page = context.new_page()
-                    page.goto("https://x.com/identity")
-                    assert page.evaluate("navigator.language") == preset["locale"]
-                    assert page.evaluate("navigator.languages[0]") == preset["locale"]
-                    assert headers[0]["accept-language"].split(",")[0] == preset["locale"]
-                    assert page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone") == preset["timezone"]
-                    offsets = page.evaluate("[new Date('2026-01-15T12:00:00Z').getTimezoneOffset(), new Date('2026-07-15T12:00:00Z').getTimezoneOffset()]")
-                    assert offsets == ([300, 240] if location == "new_york" else [0, -60]), offsets
-                finally:
-                    context.close()
+            assert browser.context is browser.process.browser.contexts[0]
+            assert browser.page.evaluate("navigator.serviceWorker.register('/worker.js').then(() => true)") is True
+            assert browser.page.evaluate("navigator.serviceWorker.getRegistrations().then(items => items.length)") == 0
+            browser.context.route("https://x.com/download", lambda route: route.fulfill(
+                status=200, headers={"Content-Disposition": "attachment; filename=fixture.txt"}, body="fixture",
+            ))
+            with browser.page.expect_download() as downloading:
+                browser.page.evaluate("() => { const a = document.createElement('a'); a.href='/download'; a.click(); }")
+            assert downloading.value.failure(), "Downloads must remain denied in the native context"
             identity = browser.page.evaluate("({ua: navigator.userAgent, platform: navigator.platform, languages: navigator.languages, screen: [screen.width, screen.height], scale: devicePixelRatio})")
             browser.page.evaluate("""() => {
                 window.pointerEvents = [];
@@ -166,6 +193,7 @@ def run(playwright):
                 except x_post_tweet.PostRejected as exc:
                     assert f"code {code}" in str(exc) and "private" not in str(exc)
             response_override = None
+            print("Native Chromium screenshots, input and posting fixtures passed.", flush=True)
             browser.context.add_cookies([{"name": "session", "value": "fixture", "domain": "x.com", "path": "/", "expires": 2000000000, "secure": True, "httpOnly": True}])
             browser.page.evaluate("""async () => {
                 localStorage.setItem('account', 'example');
@@ -187,7 +215,7 @@ def run(playwright):
             snapshot = browser.save_state()
         finally:
             browser.close()
-        assert not processes[-1].is_connected()
+        assert not processes[-1].browser.is_connected()
         assert list(account_dir.iterdir()) == []
         restored = Browser(snapshot, "https://x.com/", {"locale": "en-GB", "timezone": "Europe/London"})
         displays.append(restored.display)
@@ -227,7 +255,7 @@ def run(playwright):
             assert other.page.evaluate("localStorage.getItem('account')") is None
         finally:
             other.close()
-        assert all(not process.is_connected() for process in processes)
+        assert all(not process.browser.is_connected() for process in processes)
         assert all(display.process.poll() is not None and not Path(display.directory.name).exists() for display in displays)
         print(f"Browser storage restore passed: {len(str(snapshot))} characters of fixture state, cookies/localStorage/IndexedDB restored across process restarts; accounts isolated.")
     run_proxy_failure(playwright)
@@ -282,11 +310,7 @@ def run_proxy_failure(playwright):
                 accounts = Accounts(store)
                 accounts.dispatch("network_save", {"mode": "decodo", "username": "fixture", "password": "secret",
                                   "location": "new_york"})
-                real_launch = playwright.chromium.launch
-                runtime = SimpleNamespace(chromium=playwright.chromium, stop=lambda: None)
-                def launch(**options):
-                    return real_launch(**{**options, "chromium_sandbox": False})
-                with patch("playwright.sync_api.sync_playwright", return_value=SimpleNamespace(start=lambda: runtime)), patch.object(playwright.chromium, "launch", side_effect=launch), patch("host.runtime.browser.browser.BROWSER_NETWORK_PORT", 8011), patch("host.runtime.browser.browser.permitted_url", return_value=True), patch("host.runtime.browser_network.relay.target", return_value="127.0.0.1"), patch("host.runtime.browser_network.relay.connect_proxy", side_effect=BrowserError("fixture gateway unavailable")) as proxy, patch("socket.create_connection") as fallback:
+                with native_fixture(playwright), patch("host.runtime.browser.chromium.BROWSER_NETWORK_PORT", 8011), patch("host.runtime.browser.browser.permitted_url", return_value=True), patch("host.runtime.browser_network.relay.target", return_value="127.0.0.1"), patch("host.runtime.browser_network.relay.connect_proxy", side_effect=BrowserError("fixture gateway unavailable")) as proxy, patch("socket.create_connection") as fallback:
                     with TunnelServer(accounts.network, port=8011) as tunnel:
                         worker = threading.Thread(target=tunnel.serve_forever, daemon=True)
                         worker.start()

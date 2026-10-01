@@ -39,6 +39,7 @@ AGENT_PREVIEW_PORT_COUNT = 16
 # server, its clients, and the deploy verifier cannot drift apart. Servers and
 # clients honor the matching KERN_*_SOCKET environment override in tests.
 BROWSER_NETWORK_PORT = 7447
+BROWSER_DEBUG_PORT = 7448
 BROWSER_SOCKET_PATH = "/run/kern-browser/browser.sock"
 TOOLS_SOCKET_PATH = "/run/kern-tools/tools.sock"
 HOST_INFERENCE_SOCKET_PATH = "/run/kern-host-inference/host-inference.sock"

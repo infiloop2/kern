@@ -27,6 +27,8 @@ class BrowserLifecycleSmokeTests(unittest.TestCase):
                     (cgroup / 'cgroup.procs').write_text('10\n20')
                 if failure == 'file_leak':
                     (private / 'kern-browser-display-fixture').mkdir()
+                if failure == 'profile_leak':
+                    (private / 'kern-browser-profile-fixture').mkdir()
 
             with (patch.object(probe, 'CGROUP', cgroup), patch.object(probe, 'PROC', proc),
                   patch.object(probe, 'service', side_effect=[state, after]),
@@ -37,7 +39,7 @@ class BrowserLifecycleSmokeTests(unittest.TestCase):
         self.run_probe()
 
     def test_failures_cannot_be_reported_as_success(self):
-        for failure in ('restart', 'process_leak', 'file_leak'):
+        for failure in ('restart', 'process_leak', 'file_leak', 'profile_leak'):
             with self.subTest(failure=failure), self.assertRaises(AssertionError):
                 self.run_probe(failure)
         with self.assertRaises(subprocess.CalledProcessError):

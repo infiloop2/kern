@@ -65,10 +65,9 @@ class BrowserDisplayTests(unittest.TestCase):
 
     def test_browser_launch_failure_closes_display_and_playwright(self):
         runtime = Mock()
-        runtime.chromium.launch.side_effect = RuntimeError("launch failed")
         with patch("playwright.sync_api.sync_playwright") as manager, patch(
             "host.runtime.browser.browser.Display",
-        ) as display:
+        ) as display, patch("host.runtime.browser.browser.Chromium", side_effect=RuntimeError("launch failed")):
             manager.return_value.start.return_value = runtime
             with self.assertRaisesRegex(RuntimeError, "launch failed"):
                 Browser(None, "https://x.com/", {"mode": "direct"})

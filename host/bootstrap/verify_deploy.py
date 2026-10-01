@@ -49,6 +49,7 @@ from host.constants import (
     TOOLS_SOCKET_PATH,
     BROWSER_SOCKET_PATH,
     BROWSER_NETWORK_PORT,
+    BROWSER_DEBUG_PORT,
 )
 
 Runner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
@@ -398,6 +399,9 @@ def enforced_probes() -> list[Probe]:
     return [
         ("kern-browser", "127.0.0.1", BROWSER_NETWORK_PORT, "reachable", "browser to HTTPS relay"),
         ("kern-agent", "127.0.0.1", BROWSER_NETWORK_PORT, "blocked", "agent to Browser relay"),
+        ("kern-browser", "127.0.0.1", BROWSER_DEBUG_PORT, "reachable", "browser to Chromium control"),
+        *((user, "127.0.0.1", BROWSER_DEBUG_PORT, "blocked", f"{user} to Chromium control")
+          for user in ("kern-agent", "kern-tools", "kern-proxy", "kern-admin", "kern-host-inference", "cloudflared")),
         ("kern-browser", "127.0.0.1", ADMIN_API_PORT, "blocked", "browser to admin API"),
         ("kern-browser", "169.254.169.254", 80, "blocked", "browser to instance metadata"),
         ("kern-browser", "10.0.0.1", 443, "blocked", "browser to private network"),

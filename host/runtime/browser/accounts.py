@@ -172,6 +172,10 @@ class Accounts:
             return self.network.dispatch(operation.removeprefix("network_"), body)
         self.load()
         if operation == "ready" and not body:
+            for profile in [*self.profiles.values(), *self.pending.values()]:
+                if profile.browser is not None:
+                    profile.browser.frame()
+                    return {"ready": True}
             browser = self.factory(None, "about:blank")
             try:
                 browser.frame()

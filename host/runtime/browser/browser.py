@@ -7,8 +7,8 @@ import re
 from typing import Any, TYPE_CHECKING, cast
 from urllib.parse import urlsplit
 
-from host.constants import BROWSER_NETWORK_PORT
 from host.runtime.browser.client import BrowserError
+from host.runtime.browser.chromium import Chromium
 from host.runtime.browser.display import Display
 from host.runtime.core import host_errors, host_metrics
 
@@ -43,20 +43,10 @@ class Browser:
         self.runtime = sync_playwright().start()
         try:
             self.display = Display()
-            self.process = self.runtime.chromium.launch(
-                channel="chromium", headless=False, chromium_sandbox=True, timeout=30000,
-                env={**self.display.environment},
-                ignore_default_args=["--enable-automation"],
-                proxy={"server": f"http://127.0.0.1:{BROWSER_NETWORK_PORT}", "bypass": "<-loopback>"},
-                args=["--disable-blink-features=AutomationControlled", "--disable-quic", "--disable-background-networking", "--force-webrtc-ip-handling-policy=disable_non_proxied_udp"],
-            )
-            self.context = self.process.new_context(
-                storage_state=cast("StorageState | None", storage_state),
-                viewport={"width": WIDTH, "height": HEIGHT},
-                screen={"width": 1280, "height": 960}, device_scale_factor=1, color_scheme="light",
-                locale=settings.get("locale", "en-US"), timezone_id=settings.get("timezone", "UTC"),
-                accept_downloads=False, service_workers="block",
-            )
+            self.process = Chromium(self.runtime, self.display.environment, settings)
+            self.context = self.process.context
+            if storage_state is not None:
+                self.context.set_storage_state(cast("StorageState", storage_state))
             self.context.set_default_timeout(10000)
             self.context.set_default_navigation_timeout(20000)
             self.context.route("**/*", self.route_request)
@@ -120,6 +110,7 @@ class Browser:
             page.close()
             return
         self.page = page
+        page.set_viewport_size({"width": WIDTH, "height": HEIGHT})
         page.on("pageerror", lambda _error: self.report_failure("Uncaught page script error"))
         page.on("dialog", lambda dialog: dialog.accept() if dialog.type == "beforeunload" else dialog.dismiss())
         def closed() -> None:
