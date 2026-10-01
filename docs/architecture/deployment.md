@@ -32,9 +32,9 @@ The command is intentionally split by lifecycle intent:
 | Command | Preconditions checked before launch | Bootstrap version check | State effect |
 | --- | --- | --- | --- |
 | `host.cli.deploy` | No existing Kern instance or admin/agent data volumes for `agent_name`. | Admin state must be empty. | Creates new admin and agent state at the target `VERSION`. |
-| `host.cli.upgrade` | Existing instance plus existing admin and agent data volumes. | Admin state version must be lower than the target `VERSION`. | Replaces root volume and preserves admin password, operator endpoints, network policy, threads and their event history, account pins, and agent home. |
-| `host.cli.recover` | Existing admin and agent data volumes and no existing Kern instance. | Admin state version must equal the target `VERSION`; with `--allow-upgrade`, it may be older than or equal to the target `VERSION`. | Creates a new root host using preserved admin password and operator endpoints. With `--allow-upgrade`, it can also advance older preserved state. |
-| `host.cli.reconfigure` | Existing instance plus existing admin and agent data volumes. | Admin state version must equal the target `VERSION`. | Replaces root volume, replaces the full operator endpoint list, and installs a new admin password. |
+| `host.cli.upgrade` | Running or stopped instance plus attached admin and agent data volumes. | Admin state version must be lower than the target `VERSION`. | Replaces root volume and preserves admin password, operator endpoints, network policy, threads and their event history, account pins, and agent home. |
+| `host.cli.recover` | Existing admin and agent data volumes; the existing instance is optional. | Admin state version must equal the target `VERSION`; with `--allow-upgrade`, it may be older than or equal to the target `VERSION`. | Deletes the existing instance if present and creates a new host using preserved admin password and operator endpoints. With `--allow-upgrade`, it can also advance older preserved state. |
+| `host.cli.reconfigure` | Running or stopped instance plus attached admin and agent data volumes. | Admin state version must equal the target `VERSION`. | Replaces root volume, replaces the full operator endpoint list, and installs a new admin password. |
 | `host.cli.start` | Exactly one existing Kern instance plus existing admin and agent data volumes. | None. | Starts the EC2 instance and waits for `running`; does not mutate Kern state. |
 | `host.cli.stop` | Exactly one existing Kern instance plus existing admin and agent data volumes. | None. | Stops the EC2 instance and waits for `stopped`; does not mutate Kern state. |
 
@@ -250,12 +250,34 @@ created separately, attached after launch, and explicitly set to
 or replacing the EC2 instance should detach those data volumes and leave them in
 the account until a cleanup path deletes them.
 
-On upgrade or reconfiguration, deploy treats any existing EC2 instance and root
-drive as disposable. It terminates the instance, creates a fresh root drive from
-the current Ubuntu image, reinstalls packages and Kern root-owned code,
-and reattaches the preserved admin and agent state drives for the same
-`agent_name`. `recover` does the same host creation from preserved drives, but
-requires that no current Kern instance exists. Bootstrap refreshes
+On AWS upgrade or reconfiguration, the CLI keeps the instance and both attached
+data drives. It creates a fresh root volume from the current Ubuntu image,
+stops compute through EC2 (unless already stopped), applies the current managed
+instance settings, swaps the root volume, deletes the old root, and starts the
+instance for the normal full bootstrap. Running and stopped instances are
+accepted; all other states require explicit `recover`. A stopped host finishes
+running. There is no automatic fallback to recreation.
+
+Launch and upgrade share the settings for instance type, Unlimited CPU credits,
+IMDSv2, shutdown behavior, root size/type/deletion policy, and instance tags.
+Both reconcile the same security-group rules and render fresh user data. Upgrade
+retains the existing subnet, AZ, primary interface, and instance identity; its
+public IP/DNS can change after stop/start. Manual root swapping does not update
+EC2's original `ImageId`; the root contents and Kern version identify the running
+release. Incompatible image architecture, boot mode, or TPM requirements require
+`recover --allow-upgrade`, as do future changes to immutable instance properties.
+
+For T3, AWS retains earned CPU credits for seven days while stopped; an upgrade
+does not replenish credits already expired or consumed, and stopping can settle
+Unlimited surplus-credit charges. See [AWS credit persistence](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/burstable-performance-instances-monitoring-cpu-credits.html).
+
+`recover` explicitly recreates compute from the preserved drives, terminating an
+existing instance if present and waiting for disk detachment. It can repair the
+same version or advance preserved state with `--allow-upgrade`. It loses the old
+instance's credits. Both upgrade and recover retain the existing data disks'
+size, encryption and contents; changes to those still need explicit migrations.
+
+Bootstrap refreshes
 root-volume code and config, sanitizes managed mount paths against symlink
 attacks, reuses the preserved Postgres data directory, and runs `migrate up` to
 bring the preserved schema to the new code's version; it does not overwrite
@@ -315,16 +337,15 @@ versioned by major, so a future base-image change requires an explicit
 Upgrade/recovery safety checks exist in two layers:
 
 1. The deploy command checks AWS shape before it mutates anything. `deploy`
-   refuses existing resources, `upgrade` requires an existing instance and both
-   preserved volumes, `recover` requires both preserved volumes and no existing
-   instance, and `reconfigure` requires an existing instance plus both
-   preserved volumes. It also validates that preserved volumes are in one
+   refuses existing resources, `upgrade` and `reconfigure` require a running or stopped instance with both
+   preserved volumes attached; `recover` requires both preserved volumes,
+   with or without an existing instance. It also validates that preserved volumes are in one
    availability zone and selects a matching public subnet before terminating an
    existing instance. If an existing instance has a parseable
    `kern-host-version` tag, the command applies the same mode-specific
    version shape bootstrap will enforce: `upgrade` requires an older tag,
    `reconfigure` requires an equal tag, and `recover --allow-upgrade` allows
-   equal or older tags when no instance exists. `start` and `stop` require
+   equal or older tags. `start` and `stop` require
    exactly one existing instance and both preserved volumes but do not check
    version because they do not mutate Kern state.
 2. Bootstrap checks the authoritative admin disk version after the volumes are
@@ -332,6 +353,10 @@ Upgrade/recovery safety checks exist in two layers:
    partially completed previous runs, and any mismatch between AWS discovery and
    the actual preserved state.
 
+A failure before root detachment leaves the original instance (possibly stopped)
+and removes the unused replacement root. Once root replacement begins, a failed
+upgrade terminates incomplete compute and cleans up disposable roots; the operator
+uses `recover --allow-upgrade` to rebuild from the protected data volumes.
 A failed provisioning run leaves no instance, on either delivery. While the
 CLI is attached it terminates the instance itself. After the CLI returns (the
 GitHub delivery), the user-data script shuts the instance down on any failure,

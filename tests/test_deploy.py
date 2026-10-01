@@ -22,6 +22,7 @@ from unittest.mock import patch
 from host.bootstrap import render
 from host.config import ConfigError, build_input_config, build_operator_connections
 from host.cli import aws_checks, aws_resources
+from host.cli.aws_upgrade import RootUpgrade
 from host.cli import lifecycle as deploy
 from host.cli import lifecycle_aws
 from host.cli import power
@@ -55,6 +56,8 @@ SAMPLE_AWS_ENV = {
 def sample_input_config():  # type: ignore[no-untyped-def]
     return build_input_config("kern-test", "us-east-1")
 
+
+SAMPLE_UPGRADE = RootUpgrade({}, {}, {}, {"admin": "vol-admin", "agent": "vol-agent"}, ("vpc-1", "subnet-1", "us-east-1a"))
 
 SAMPLE_ADMIN_PASSWORD_SHA256 = "f" * 64
 SAMPLE_AWS_STORAGE = {
@@ -426,6 +429,8 @@ class DeployUnitTests(unittest.TestCase):
                 ),
                 agent_name,
             )
+            for key in ("aws:ResourceTag/kern-host-agent-name", "aws:RequestTag/kern-host-agent-name"):
+                self.assertEqual(scoped_statements["RefreshKernInstanceTags"]["Condition"]["StringEquals"].pop(key), agent_name)
             self.assertEqual(policy, policy_without_agent_name)
         self.assertNotIn("aws:RequestedRegion", json.dumps(policy))
         statements = {statement["Sid"]: statement for statement in policy["Statement"]}
@@ -441,6 +446,7 @@ class DeployUnitTests(unittest.TestCase):
         )
 
         discovery_actions = statements["Ec2Discovery"]["Action"]
+        self.assertIn("ec2:DescribeInstanceCreditSpecifications", discovery_actions)
         self.assertNotIn("ec2:RunInstances", discovery_actions)
         self.assertNotIn("ec2:CreateVolume", discovery_actions)
         self.assertNotIn("ec2:CreateSecurityGroup", discovery_actions)
@@ -503,8 +509,11 @@ class DeployUnitTests(unittest.TestCase):
                 "ec2:AuthorizeSecurityGroupIngress",
                 "ec2:DeleteSecurityGroup",
                 "ec2:DeleteVolume",
+                "ec2:DetachVolume",
                 "ec2:GetConsoleOutput",
                 "ec2:ModifyInstanceAttribute",
+                "ec2:ModifyInstanceCreditSpecification",
+                "ec2:ModifyInstanceMetadataOptions",
                 "ec2:RevokeSecurityGroupEgress",
                 "ec2:RevokeSecurityGroupIngress",
                 "ec2:StartInstances",
@@ -601,7 +610,7 @@ class DeployUnitTests(unittest.TestCase):
                 )
         self.assertEqual(instance_id, "i-123")
         run = next(call for call in calls if call[:2] == ("ec2", "run-instances"))
-        self.assertEqual(run[run.index("--credit-specification") + 1], "CpuCredits=unlimited")
+        self.assertEqual(json.loads(run[run.index("--credit-specification") + 1]), {"CpuCredits": "unlimited"})
         # An OS-initiated shutdown terminates the instance, so a detached
         # provisioning failure can clean up its own instance.
         self.assertIn("--instance-initiated-shutdown-behavior", run)
@@ -743,7 +752,7 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle_aws._close_security_group_ssh_ingress"), \
                         patch("host.cli.aws_resources._aws", return_value={}), \
                         patch("sys.stdout", _StringOutput()):
-                    self.assertEqual(deploy.main_for_mode("upgrade", ["--agent-name", "kern-test"]), 0)
+                    self.assertEqual(deploy.main_for_mode("recover", ["--agent-name", "kern-test", "--allow-upgrade"]), 0)
             finally:
                 os.chdir(cwd)
 
@@ -773,7 +782,7 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle_aws._launch_instance", side_effect=AssertionError("_launch_instance should not run")), \
                         patch("sys.stdout", _StringOutput()), \
                         patch("sys.stderr", _StringOutput()):
-                    self.assertEqual(deploy.main_for_mode("upgrade", ["--agent-name", "kern-test"]), 2)
+                    self.assertEqual(deploy.main_for_mode("recover", ["--agent-name", "kern-test", "--allow-upgrade"]), 2)
             finally:
                 os.chdir(cwd)
 
@@ -836,7 +845,8 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle_aws._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
                         patch("host.cli.lifecycle_aws._terminate_instances"), \
                         patch("host.cli.lifecycle_aws._generate_deploy_key", side_effect=_fake_deploy_key), \
-                        patch("host.cli.lifecycle_aws._launch_instance", return_value=("i-123", "sg-1")) as launch_instance, \
+                        patch("host.cli.lifecycle_aws.prepare_upgrade", return_value=SAMPLE_UPGRADE), \
+                        patch("host.cli.lifecycle_aws.replace_root", return_value=("i-123", "sg-1")) as launch_instance, \
                         patch(
                             "host.cli.lifecycle_aws._wait_for_instance",
                             return_value={"PublicDnsName": "ec2.example", "Placement": {"AvailabilityZone": "us-east-1a"}},
@@ -869,7 +879,7 @@ class DeployUnitTests(unittest.TestCase):
             # The caller's hash and the replacement connections ride in the
             # payload staged through user data; SSH only delivers code.
             provision.assert_called_once()
-            user_data = launch_instance.call_args.args[1]
+            user_data = launch_instance.call_args.args[2]
             embedded = next(line for line in user_data.splitlines() if line.startswith("{"))
             payload = json.loads(embedded)
             self.assertEqual(payload["operation"]["mode"], "reconfigure")
@@ -1058,7 +1068,8 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle_aws._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
                         patch("host.cli.lifecycle_aws._terminate_instances"), \
                         patch("host.cli.lifecycle_aws._generate_deploy_key", side_effect=_fake_deploy_key), \
-                        patch("host.cli.lifecycle_aws._launch_instance", return_value=("i-123", "sg-1")), \
+                        patch("host.cli.lifecycle_aws.prepare_upgrade", return_value=SAMPLE_UPGRADE), \
+                        patch("host.cli.lifecycle_aws.replace_root", return_value=("i-123", "sg-1")), \
                         patch(
                             "host.cli.lifecycle_aws._wait_for_instance",
                             return_value={"PublicDnsName": "ec2.example", "Placement": {"AvailabilityZone": "us-east-1a"}},
@@ -1369,7 +1380,8 @@ class DeployUnitTests(unittest.TestCase):
                             stack.enter_context(patch("host.cli.lifecycle_aws._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")))
                             stack.enter_context(patch("host.cli.lifecycle_aws._security_group_access_state", return_value=captured))
                             stack.enter_context(patch("host.cli.lifecycle_aws._terminate_instances"))
-                            launch_instance = stack.enter_context(patch("host.cli.lifecycle_aws._launch_instance", return_value=("i-123", "sg-1")))
+                            stack.enter_context(patch("host.cli.lifecycle_aws.prepare_upgrade", return_value=SAMPLE_UPGRADE))
+                            launch_instance = stack.enter_context(patch("host.cli.lifecycle_aws.replace_root", return_value=("i-123", "sg-1")))
                             stack.enter_context(
                                 patch(
                                     "host.cli.lifecycle_aws._wait_for_instance",
@@ -1392,7 +1404,7 @@ class DeployUnitTests(unittest.TestCase):
                     finally:
                         os.chdir(cwd)
 
-                launch_kwargs = launch_instance.call_args.kwargs
+                launch_kwargs = {"ssh_ingress": launch_instance.call_args.args[6], "cloudflare_egress": launch_instance.call_args.args[7]}
                 self.assertEqual(launch_kwargs["ssh_ingress"], expected[0])
                 self.assertEqual(launch_kwargs["cloudflare_egress"], expected[1])
 
@@ -3197,7 +3209,7 @@ class FakeCliIntegrationTests(unittest.TestCase):
             calls = [json.loads(line) for line in log_path.read_text().splitlines()]
             run_call = next(call for call in calls if call[1:3] == ["ec2", "run-instances"])
             self.assertIn("--associate-public-ip-address", run_call)
-            self.assertEqual(run_call[run_call.index("--credit-specification") + 1], "CpuCredits=unlimited")
+            self.assertEqual(json.loads(run_call[run_call.index("--credit-specification") + 1]), {"CpuCredits": "unlimited"})
             self.assertIn("subnet-public", run_call)
             self.assertTrue(any(f"Key=kern-host-version,Value={repo_version()}" in str(item) for item in run_call))
             # User data is passed as fileb:// so the AWS CLI base64-encodes the raw

@@ -1159,6 +1159,29 @@ class McpShimTests(ToolsApiTestCase):
         self.assertEqual(metadata.size_bytes, 512)
         self.assertNotIn(str(video), staged["result"]["content"][0]["text"])
 
+        # X is admitted by both ingress layers only while enabled. Asset ids
+        # stay private to the chosen destination even for the same source file.
+        def stage_x() -> dict[str, Any]:
+            return self.rpc(shim, {
+                "jsonrpc": "2.0", "id": 18, "method": "tools/call",
+                "params": {"name": "stage_video", "arguments": {"path": "/clip.mp4", "for_tool": "twitter"}},
+            })
+        with state.mutation() as cur:
+            state.set_tool_enabled(cur, "twitter", False)
+        self.assertTrue(stage_x()["result"]["isError"])
+        with state.mutation() as cur:
+            state.set_tool_enabled(cur, "twitter", True)
+        staged_x = stage_x()
+        self.assertFalse(staged_x["result"]["isError"])
+        x_asset_id = json.loads(staged_x["result"]["content"][0]["text"])["video_asset_id"]
+        self.assertEqual(server.asset_store.describe("twitter", x_asset_id).size_bytes, 512)
+        with self.assertRaises(AssetError):
+            server.asset_store.describe("instagram", x_asset_id)
+        with self.assertRaises(AssetError):
+            server.asset_store.describe("twitter", staged_result["video_asset_id"])
+        twitter = describe("twitter")
+        self.assertIn("video_asset_id", twitter["post_tweet"]["properties"])
+
         # Both ingress layers admit falAI and preserve per-tool isolation.
         (Path(socket_dir.name) / "voice.mp3").write_bytes(b"a" * 512)
         with state.mutation() as cur:

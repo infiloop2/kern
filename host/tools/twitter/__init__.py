@@ -26,11 +26,12 @@ from host.tools.tool import (
     OAuthStartConnectParams,
     OAuthStartConnectResult,
 )
-from host.tools.twitter import costs
+from host.tools.twitter import costs, video
 from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI, StoredCredential
 from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field, schema as _schema
 from host.tools.shared.oauth2 import (
+    ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
     IntegrationReconnectRequired,
     OAuth2CredentialStore,
     access_token_is_fresh,
@@ -42,6 +43,7 @@ from host.tools.shared.oauth2 import (
     verify_state,
 )
 from host.tools.shared.web import (
+    DEFAULT_TIMEOUT_SECONDS,
     ProviderWarning,
     WebRequestError,
     encode_query,
@@ -56,13 +58,15 @@ X_AUTHORIZE_URL = "https://x.com/i/oauth2/authorize"
 X_TOKEN_URL = "https://api.x.com/2/oauth2/token"
 X_REVOKE_URL = "https://api.x.com/2/oauth2/revoke"
 X_API_BASE_URL = "https://api.x.com/2"
-X_OAUTH_SCOPES = ("tweet.read", "users.read", "tweet.write", "offline.access")
+X_OAUTH_SCOPES = ("tweet.read", "users.read", "tweet.write", "media.write", "offline.access")
 # offline.access is required at connect time: without it X issues no refresh
 # token, and the 2-hour access token would strand the connection.
 REQUIRED_X_READ_SCOPES = frozenset(("tweet.read", "users.read", "offline.access"))
 REQUIRED_X_CONNECT_SCOPES = frozenset(X_OAUTH_SCOPES)
 REQUIRED_X_WRITE_SCOPES = REQUIRED_X_READ_SCOPES | {"tweet.write"}
 X_RECONNECT_MESSAGE = "X (Twitter) is no longer connected. Please reconnect the tool."
+REQUIRED_X_VIDEO_SCOPES = REQUIRED_X_WRITE_SCOPES | {"media.write"}
+X_VIDEO_RECONNECT_MESSAGE = "Reconnect X to grant media.write and tweet.write before publishing video."
 X_WRITE_RECONNECT_MESSAGE = "Reconnect X to grant tweet.write before publishing."
 DEFAULT_TOKEN_LIFETIME_SECONDS = 7200
 MAX_QUERY_CHARS = 512
@@ -199,7 +203,7 @@ MANIFEST = ToolManifest(
     display_name="X (Twitter)",
     description=(
         "Connect one or more X accounts and let your agent search and read X posts, trends, and "
-        "public profiles, and publish posts, replies, or quote posts with your approval. Direct "
+        "public profiles, and publish posts, replies, or quote posts with optional video and your approval. Direct "
         "messages are prepared as X links that you open, review, and send yourself."
     ),
     connection="oauth",
@@ -283,15 +287,16 @@ MANIFEST = ToolManifest(
         ),
         ActionSpec(
             id="post_tweet",
-            cost_description='Preparation and approval execution can incur user/post read charges even if the post is not sent. Confirmed posting costs $0.015, or $0.200 with a URL. Costs with unverifiable reply discounts are not reported.',
+            cost_description='Preparation and approval execution can incur user/post read charges even if the post is not sent. Confirmed posting costs $0.015, or $0.200 with a URL. Media upload charges and costs with unverifiable reply discounts are not reported.',
             description=(
                 "Queue approval to publish exactly one standalone post, reply, or quote post as "
                 "the selected connected account. Set neither target id for a standalone post, or "
-                "exactly one reply/quote id; Kern fetches and shows the target in the approval."
+                "exactly one reply/quote id; Kern fetches and shows the target in the approval. "
+                "Optionally attach one staged MP4 or MOV video (up to 200 MB)."
             ),
             data_policy=(
                 "Publishes a post from the selected X account, visible per that account's audience "
-                "settings. Nothing reaches X until the operator approves it. Posting consumes the "
+                "settings. Video bytes and post text reach X only after operator approval. Posting consumes the "
                 "deployment's X API credits, and the approval stays bound to the selected account."
             ),
             input_schema=_schema(
@@ -299,6 +304,7 @@ MANIFEST = ToolManifest(
                     "text": {"type": "string", "description": "Post text (up to 4,000 characters)."},
                     "in_reply_to_tweet_id": {"type": "string", "description": "Reply to this numeric post id."},
                     "quote_tweet_id": {"type": "string", "description": "Quote this numeric post id."},
+                    "video_asset_id": {"type": "string", "description": "Optional tool-scoped MP4 or MOV reference from stage_video with for_tool=twitter; at most 200 MB."},
                 },
                 ["text"],
             ),
@@ -343,7 +349,10 @@ MANIFEST = ToolManifest(
     technical_details=(PARAM_GUARD_TECHNICAL_DETAIL,),
     agent_notes=(
         "Use post_tweet for an approval-gated standalone post, reply, or quote post from the "
-        "selected connected account. To help the operator send a direct message, draft the text "
+        "selected connected account. For native video, stage_video with for_tool=twitter and "
+        "pass video_asset_id to post_tweet. Reconnect existing accounts for media.write. The "
+        "approval binds the exact video and text; uploads start only after approval. Failed or "
+        "unconfirmed submissions are terminal: check X before requesting another approval. To help the operator send a direct message, draft the text "
         "and return this Markdown link: "
         "https://x.com/messages/compose?recipient_id=<numeric-user-id>&text=<percent-encoded-message>, "
         "resolving a handle to that id with lookup_user first. "
@@ -360,7 +369,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure user authentication",
             show_callback=True,
-            description="Open the app's User authentication settings and choose Set up or Edit. Enable OAuth 2.0, set App permissions to Read and write, and choose Web App, Automated App or Bot so X issues a confidential-client secret. Add the exact callback URI displayed in this guide. Kern requests tweet.read, users.read, tweet.write, and offline.access; it requests no direct-message scope. offline.access lets X issue refresh tokens after the two-hour access token expires.",
+            description="Open the app's User authentication settings and choose Set up or Edit. Enable OAuth 2.0, set App permissions to Read and write, and choose Web App, Automated App or Bot so X issues a confidential-client secret. Add the exact callback URI displayed in this guide. Kern requests tweet.read, users.read, tweet.write, media.write, and offline.access; it requests no direct-message scope. offline.access lets X issue refresh tokens after the two-hour access token expires.",
             link_url="https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code",
             link_label="View X OAuth 2.0 authorization-code documentation",
         ),
@@ -371,7 +380,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure and connect Kern",
             show_config=True,
-            description="Open X under Home > Integrations. Save the OAuth 2.0 values as X_OAUTH_CLIENT_ID and X_OAUTH_CLIENT_SECRET and the app-only token as X_BEARER_TOKEN. Enable the tool, connect every X identity the agent may use, and approve all four displayed scopes. Existing read-only connections keep working for reads but must be reconnected before publishing. Confirm every expected @username appears.",
+            description="Open X under Home > Integrations. Save the OAuth 2.0 values as X_OAUTH_CLIENT_ID and X_OAUTH_CLIENT_SECRET and the app-only token as X_BEARER_TOKEN. Enable the tool, connect every X identity the agent may use, and approve the displayed scopes. Existing read-only connections keep working for reads but must be reconnected before publishing; existing text-posting connections must reconnect for video permission. Confirm every expected @username appears.",
         ),
     ),
     data_summary=DataSummary(
@@ -380,7 +389,7 @@ MANIFEST = ToolManifest(
                 title="What leaves this host",
                 points=(
                     DataSummaryPoint(label="Reads", text="Search queries, post ids, usernames, trend locations, and paging values go to X directly. Query text is received and logged like any other request, so it is itself data sent to X. The search query first passes the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before the request is sent."),
-                    DataSummaryPoint(label="Posts, replies, and quote posts", text="A post, reply, or quote post reaches X only after your approval. Kern sends exactly the approved text and, for a reply or quote post, the target post id as the selected account."),
+                    DataSummaryPoint(label="Posts, replies, and quote posts", text="A post, reply, or quote post reaches X only after your approval. Kern sends exactly the approved text and, for a reply or quote post, the target post id as the selected account. If a video is attached, Kern also sends its approved bytes to X for upload and processing before publishing."),
                     DataSummaryPoint(label="Message drafts", text="Kern does not send direct messages through the API. X receives a message draft only when you open its official compose link in your browser."),
                     DataSummaryPoint(label="Profile lookups", text="A handle or user id you ask the agent to resolve goes to X and returns that account's public id, handle, display name, and public follower, following, and post counts. This is the same public lookup the X website performs and sends no message text."),
                 ),
@@ -395,7 +404,7 @@ MANIFEST = ToolManifest(
             DataSummaryCard(
                 title="What X can do with it",
                 description=(
-                    "X processes searches, retrieved content, API activity, and request metadata under its Privacy Policy and "
+                    "X processes approved video uploads, searches, retrieved content, API activity, and request metadata under its Privacy Policy and "
                     "developer terms: service operation, personalization, analytics, advertising, safety, and legal uses."
                 ),
                 links=(
@@ -585,7 +594,13 @@ class XCredentialStore(OAuth2CredentialStore):
             # A legacy read-only connection remains valid for read actions.
             raise IntegrationReconnectRequired(reconnect_message)
         payload = cast(Mapping[str, object], existing["secret"])
-        if access_token_is_fresh(payload, now()):
+        # A video token must cover identity/target checks, the full upload
+        # deadline, and the final post. The ordinary 60s skew remains for text
+        # and reads; requiring media.write selects the longer operation budget.
+        skew_seconds = ACCESS_TOKEN_REFRESH_SKEW_SECONDS
+        if "media.write" in required_scopes:
+            skew_seconds += video.UPLOAD_TIMEOUT_SECONDS + 3 * DEFAULT_TIMEOUT_SECONDS
+        if access_token_is_fresh(payload, now(), skew_seconds=skew_seconds):
             return str(payload.get("access_token") or "")
         refresh_token = payload.get("refresh_token")
         if not isinstance(refresh_token, str) or not refresh_token:
@@ -655,6 +670,10 @@ class XCredentialStore(OAuth2CredentialStore):
         )
         if required_scopes - refreshed_scopes:
             raise IntegrationReconnectRequired(reconnect_message)
+        if "media.write" in required_scopes and not access_token_is_fresh(
+            updated_payload, now(), skew_seconds=skew_seconds
+        ):
+            raise RuntimeError("X refreshed token is too short-lived for video publishing. Try again later.")
         return str(updated_payload["access_token"])
 
     def refresh_identity(self, api: HostAPI, access_token: str) -> ConnectionAccount:
@@ -982,11 +1001,11 @@ def _lookup_user(access_token: str, tool_input: JSONObject, api: HostAPI) -> JSO
     }
 
 
-def _post_proposal(tool_input: JSONObject) -> JSONObject:
-    extra = set(tool_input) - {"text", "in_reply_to_tweet_id", "quote_tweet_id"}
+def _post_proposal(tool_input: JSONObject, api: HostAPI) -> JSONObject:
+    extra = set(tool_input) - {"text", "in_reply_to_tweet_id", "quote_tweet_id", "video_asset_id"}
     if extra:
         raise ToolInputValidationError(
-            "X post tool input only supports text, in_reply_to_tweet_id, and quote_tweet_id."
+            "X post tool input only supports text, in_reply_to_tweet_id, quote_tweet_id, and video_asset_id."
         )
     text = tool_input.get("text")
     if not isinstance(text, str) or not text.strip():
@@ -1011,6 +1030,8 @@ def _post_proposal(tool_input: JSONObject) -> JSONObject:
         raise ToolInputValidationError(
             "X post supports either in_reply_to_tweet_id or quote_tweet_id, not both."
         )
+    if "video_asset_id" in tool_input:
+        proposal["video_asset"] = video.snapshot(tool_input["video_asset_id"], api)
     return proposal
 
 
@@ -1045,6 +1066,9 @@ def _post_summary(
 ) -> str:
     text = str(proposal.get("text") or "")
     count = f"{len(text)}-char post"
+    asset = proposal.get("video_asset")
+    if isinstance(asset, dict):
+        count += f" with video {clip_text(str(asset.get('filename') or 'video'), 30)} ({asset.get('size_bytes')} bytes, SHA256 {str(asset.get('sha256') or '')[:12]})"
     account_label = clip_text(account_label, 80)
     for text_clip, target_clip in ((240, 120), (160, 80), (100, 40)):
         if target is not None and "in_reply_to_tweet_id" in proposal:
@@ -1065,7 +1089,7 @@ def _post_summary(
             summary = f"Post on X as {account_label}, {count}: \"{clip_text(text, text_clip)}\""
         if len(summary.encode("utf-8")) <= SUMMARY_MAX_BYTES:
             return summary
-    return summary
+    return summary.encode("utf-8")[:SUMMARY_MAX_BYTES - 3].decode("utf-8", "ignore") + "..."
 
 
 class XTool:
@@ -1093,11 +1117,11 @@ class XTool:
             if action == "lookup_user":
                 return ActionExecuted(_lookup_user(X_CREDENTIALS.access_token(api), tool_input, api))
             if action == "post_tweet":
-                proposal = _post_proposal(tool_input)
+                proposal = _post_proposal(tool_input, api)
                 access_token = X_CREDENTIALS.access_token(
                     api,
-                    required_scopes=REQUIRED_X_WRITE_SCOPES,
-                    reconnect_message=X_WRITE_RECONNECT_MESSAGE,
+                    required_scopes=REQUIRED_X_VIDEO_SCOPES if "video_asset" in proposal else REQUIRED_X_WRITE_SCOPES,
+                    reconnect_message=X_VIDEO_RECONNECT_MESSAGE if "video_asset" in proposal else X_WRITE_RECONNECT_MESSAGE,
                 )
                 account = X_CREDENTIALS.refresh_identity(api, access_token)
                 target_id = proposal.get("in_reply_to_tweet_id") or proposal.get("quote_tweet_id")
@@ -1140,8 +1164,8 @@ class XTool:
             proposal_object = cast(JSONObject, proposal)
             access_token = X_CREDENTIALS.access_token(
                 api,
-                required_scopes=REQUIRED_X_WRITE_SCOPES,
-                reconnect_message=X_WRITE_RECONNECT_MESSAGE,
+                required_scopes=REQUIRED_X_VIDEO_SCOPES if "video_asset" in proposal_object else REQUIRED_X_WRITE_SCOPES,
+                reconnect_message=X_VIDEO_RECONNECT_MESSAGE if "video_asset" in proposal_object else X_WRITE_RECONNECT_MESSAGE,
             )
             current_account = X_CREDENTIALS.refresh_identity(api, access_token)
             if approved_account.get("id") != current_account["id"]:
@@ -1169,6 +1193,12 @@ class XTool:
             if isinstance(quote_id, str):
                 body["quote_tweet_id"] = quote_id
             try:
+                if "video_asset" in proposal_object:
+                    approved_video = proposal_object["video_asset"]
+                    if not isinstance(approved_video, dict):
+                        raise ToolInputValidationError("X approved video is invalid.")
+                    media_id = video.upload(access_token, cast(JSONObject, approved_video), api)
+                    body["media"] = {"media_ids": [media_id]}
                 response = json_request(
                     "POST",
                     f"{X_API_BASE_URL}/tweets",
@@ -1178,7 +1208,7 @@ class XTool:
                     invalid_response_message="X post returned an invalid response.",
                 )
             except WebRequestError as exc:
-                raise _mapped_web_error(exc, "post") from exc
+                raise _mapped_web_error(exc, "video upload or post" if "video_asset" in proposal_object else "post") from exc
             data = response.get("data")
             posted_id = data.get("id") if isinstance(data, dict) else None
             valid_posted_id = posted_id if isinstance(posted_id, str) and TWEET_ID_RE.fullmatch(posted_id) else None

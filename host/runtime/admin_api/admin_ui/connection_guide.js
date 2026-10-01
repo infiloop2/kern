@@ -16,6 +16,7 @@ let copyFeedbackTimer = null;
 let copyFeedbackGeneration = 0;
 
 const INTEGRATION_LOGOS = {
+  "tool:openrouter": `<svg viewBox="19.82 17.199 365.556 258.298" fill="currentColor"><path d="M303.9475,17.19926c42.79734,0,77.48933,34.69327,77.48933,77.48933s-34.69199,77.48933-77.48933,77.48933l76.86166,76.86244c9.76367,9.76313,2.84903,26.45667-10.95697,26.45667h-220.88335c-71.32686,0-129.14889-57.82202-129.14889-129.14889S77.64197,17.19926,148.96884,17.19926h154.97866ZM148.96884,68.85881c-42.79607,0-77.48933,34.69327-77.48933,77.48933s34.69327,77.48933,77.48933,77.48933,77.48933-34.69327,77.48933-77.48933-34.69327-77.48933-77.48933-77.48933Z"/></svg>`,
   "tool:browser": `<svg viewBox="0 0 32 32"><rect x="3" y="5" width="26" height="22" rx="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M3 12h26" stroke="currentColor" stroke-width="2"/><circle cx="7" cy="8.5" r="1" fill="currentColor"/><circle cx="11" cy="8.5" r="1" fill="currentColor"/><path d="m13 17 7 4-7 3Z" fill="currentColor"/></svg>`,
   "tool:elevenlabs": `<svg viewBox="0 0 24 24"><path fill="currentColor" d="M5 2h5v20H5zM14 2h5v20h-5z"/></svg>`,
   "tool:upwork": `<span class="integration-logo-word">Up</span>`,

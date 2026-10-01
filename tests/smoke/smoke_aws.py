@@ -313,6 +313,11 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
             },
         ),
     ),
+    "openrouter": (
+        ("create_heygen_video", {"prompt": "Kern smoke", "duration_seconds": "5", "resolution": "480p"}),
+        ("get_task", {"task_id": "gen-vid-0000000000-00000000000000000000"}),
+        ("save_video", {"task_id": "gen-vid-0000000000-00000000000000000000"}),
+    ),
     "fal_ai": (
         ("upscale_image", {"image_asset_id": "$FAL_IMAGE"}),
         ("upscale_video", {"video_asset_id": "$FAL_VIDEO"}),
@@ -480,6 +485,7 @@ def main(argv: list[str] | None = None) -> int:
         smoke.prepare()
         smoke.deploy()
         smoke.open_tunnel()
+        smoke.check_retained_root_reconfigure()
         smoke.check_credential_free_host_surface()
         print(f"\n{smoke.passed}/{smoke.total} checks passed")
         return 0 if smoke.passed == smoke.total else 1
@@ -705,6 +711,64 @@ class AwsSmoke:
         self.result = json.loads(proc.stdout)
         self.result["admin_password"] = admin_password
         self._ok(f"instance {self.result['instance_id']} at {self.result['public_dns']}")
+
+    def check_retained_root_reconfigure(self) -> None:
+        """Exercise the upgrade root-swap path at the same version, from stopped.
+
+        Reconfigure shares the AWS upgrade path but permits this smoke's current
+        version, so the test needs no fabricated database version or old release.
+        """
+        self._step("rebuild stopped compute on a fresh root and reconcile settings")
+        instance_id = self.result["instance_id"]
+        before = self._aws("ec2", "describe-instances", "--instance-ids", instance_id)["Reservations"][0]["Instances"][0]
+        before_disks = {m["DeviceName"]: m["Ebs"]["VolumeId"] for m in before["BlockDeviceMappings"]}
+        marker = self._ssh_code("sudo sh -c 'echo retained > /mnt/kern-agent/root-upgrade-smoke; cat /mnt/kern-agent/root-upgrade-smoke'")
+        if marker != "retained":
+            raise AssertionError("could not write preserved-volume marker")
+        self._aws("ec2", "stop-instances", "--instance-ids", instance_id)
+        self._aws("ec2", "wait", "instance-stopped", "--instance-ids", instance_id)
+        # Deliberately drift managed launch settings while compute is stopped.
+        self._aws("ec2", "modify-instance-attribute", "--instance-id", instance_id,
+                  "--instance-type", "Value=t3.micro")
+        self._aws("ec2", "modify-instance-attribute", "--instance-id", instance_id,
+                  "--instance-initiated-shutdown-behavior", "Value=stop")
+        self._aws("ec2", "modify-instance-metadata-options", "--instance-id", instance_id,
+                  "--http-tokens", "optional")
+        env = {**os.environ, "PYTHONPATH": str(REPO_ROOT), "AWS_REGION": self.region}
+        password = self.result["admin_password"]
+        proc = subprocess.run([
+            sys.executable, "-m", "host.cli.reconfigure", "--agent-name", SMOKE_AGENT_NAME,
+            "--operator-ssh-public-key", self.public_key or "",
+            "--admin-password-sha256", hashlib.sha256(password.encode()).hexdigest(),
+        ], cwd=self.workdir, env=env, check=True, stdout=subprocess.PIPE, text=True, timeout=DEPLOY_TIMEOUT)
+        result = json.loads(proc.stdout)
+        for field in ("instance_id", "admin_volume_id", "agent_volume_id"):
+            if result[field] != self.result[field]:
+                raise AssertionError(f"root rebuild changed {field}")
+        self.result = {**result, "admin_password": password}
+        after = self._aws("ec2", "describe-instances", "--instance-ids", instance_id)["Reservations"][0]["Instances"][0]
+        after_disks = {m["DeviceName"]: m["Ebs"]["VolumeId"] for m in after["BlockDeviceMappings"]}
+        root = before["RootDeviceName"]
+        if before_disks[root] == after_disks[root]:
+            raise AssertionError("root volume was not replaced")
+        if self._aws("ec2", "describe-volumes", "--filters", f"Name=volume-id,Values={before_disks[root]}")["Volumes"]:
+            raise AssertionError("old disposable root was not deleted")
+        if {k: v for k, v in before_disks.items() if k != root} != {k: v for k, v in after_disks.items() if k != root}:
+            raise AssertionError("preserved volume attachments changed")
+        if after["InstanceType"] != before["InstanceType"] or after["MetadataOptions"]["HttpTokens"] != "required":
+            raise AssertionError("upgrade did not converge launch settings")
+        shutdown = self._aws("ec2", "describe-instance-attribute", "--instance-id", instance_id,
+                             "--attribute", "instanceInitiatedShutdownBehavior")
+        if shutdown["InstanceInitiatedShutdownBehavior"]["Value"] != "terminate":
+            raise AssertionError("upgrade did not restore shutdown behavior")
+        self._session_cookie = None
+        # A fresh root has new SSH host keys even if AWS reuses the same IP.
+        (self.workdir / "known_hosts").unlink(missing_ok=True)
+        self._reopen_tunnel()
+        if self._ssh_code("sudo cat /mnt/kern-agent/root-upgrade-smoke") != "retained":
+            raise AssertionError("agent data did not survive the fresh-root boot")
+        self._ssh_code("sudo rm /mnt/kern-agent/root-upgrade-smoke")
+        self._ok("same instance and data volumes, new root, current settings, full bootstrap succeeded")
 
     def open_tunnel(self) -> None:
         self._step("open SSH tunnel to the admin API")

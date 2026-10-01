@@ -19,7 +19,7 @@ def _parse_args(mode: str, argv: list[str] | None) -> LifecycleCommand:
     descriptions = {
         "deploy": "Create a new Kern host with no existing instance or data volumes",
         "upgrade": "Upgrade preserved Kern state without changing admin password or operator access",
-        "recover": "Create a replacement host from preserved data volumes and existing operator access",
+        "recover": "Recreate compute from preserved data volumes, replacing an existing host if present",
         "reconfigure": "Replace operator access and refresh the admin password for preserved Kern state",
     }
     parser = argparse.ArgumentParser(
@@ -86,7 +86,7 @@ def _parse_args(mode: str, argv: list[str] | None) -> LifecycleCommand:
         parser.add_argument(
             "--allow-upgrade",
             action="store_true",
-            help="Allow recovery to also advance preserved state to the target VERSION.",
+            help="Allow recovery to also advance preserved state to the target VERSION. Existing compute is replaced.",
         )
     if mode == "reconfigure":
         parser.add_argument(

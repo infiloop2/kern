@@ -48,11 +48,8 @@ def _validate_command_preflight(
             f"{command.mode} requires an existing Kern instance for {config.agent_name}; "
             "use recover to recreate a missing or broken host"
         )
-    if command.mode == "recover" and existing_instances:
-        raise ConfigError(
-            f"recover requires no existing Kern instance for {config.agent_name}; "
-            "use upgrade for a normal release upgrade, or reconfigure to change admin password or operator access"
-        )
+    if len(existing_instances) > 1:
+        raise ConfigError(f"{command.mode} requires at most one existing Kern instance; found {len(existing_instances)}")
 
 
 def _check_existing_version_hints(

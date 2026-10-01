@@ -81,7 +81,9 @@ from host.cli.aws_resources import (
     _terminate_instances,
     _wait_for_instance,
 )
-from host.cli.lifecycle_bootstrap import _generate_deploy_key, _provision_over_ssh
+from host.cli.lifecycle_bootstrap import CODE_ARCHIVE_NAME, _generate_deploy_key, _provision_over_ssh
+from host.cli.aws_upgrade import prepare_upgrade, replace_root
+from host.bootstrap.render import _write_runtime_code_archive
 from host.cli.aws_checks import _check_existing_version_hints, _validate_command_preflight
 from host.cli.lifecycle_constants import SSH_USER
 from host.cli.lifecycle_logging import _log
@@ -136,7 +138,8 @@ def _main_for_lifecycle_locked(command: LifecycleCommand, config: InputConfig) -
         _validate_command_preflight(command, config, existing, storage_roles)
         _check_existing_version_hints(command, config, aws_env, existing, target_version)
 
-        network = _default_network(
+        upgrade = prepare_upgrade(config, aws_env, existing[0]) if command.mode in {"upgrade", "reconfigure"} else None
+        network = upgrade.network if upgrade is not None else _default_network(
             config,
             aws_env,
             preferred_availability_zone=preferred_availability_zone,
@@ -145,14 +148,14 @@ def _main_for_lifecycle_locked(command: LifecycleCommand, config: InputConfig) -
         ssh_ingress, cloudflare_egress = _launch_access_state(
             config, aws_env, vpc_id, replacement_operator_connections
         )
-        if existing:
+        if existing and upgrade is None:
             _preserve_existing_storage_volumes_on_instance_termination(config, aws_env, existing)
             _log(f"terminating existing instance(s): {', '.join(existing)}")
             _terminate_instances(existing, aws_env)
         created_storage_volumes: list[str] = []
         instance_id: str | None = None
         try:
-            storage_volumes = _ensure_storage_volumes(
+            storage_volumes = upgrade.volumes if upgrade is not None else _ensure_storage_volumes(
                 config,
                 aws_env,
                 availability_zone=availability_zone,
@@ -187,22 +190,31 @@ def _main_for_lifecycle_locked(command: LifecycleCommand, config: InputConfig) -
                     user_data = _render_ssh_user_data(
                         payload, deploy_key.with_suffix(".pub").read_text().strip()
                     )
-                _log("launching EC2 instance")
-                instance_id, security_group_id = _launch_instance(
-                    config,
-                    user_data,
-                    workdir,
-                    aws_env,
-                    target_version=target_version,
-                    network=network,
-                    ssh_ingress=ssh_ingress or deploy_key is not None,
-                    cloudflare_egress=cloudflare_egress,
-                )
-                _log(f"launched {instance_id}; waiting for it to reach 'running'")
+                if deploy_key is not None:
+                    _write_runtime_code_archive(workdir / CODE_ARCHIVE_NAME)
+                if upgrade is not None:
+                    instance_id, security_group_id = replace_root(
+                        config, upgrade, user_data, workdir, aws_env, target_version,
+                        ssh_ingress or deploy_key is not None, cloudflare_egress,
+                    )
+                else:
+                    _log("launching EC2 instance")
+                    instance_id, security_group_id = _launch_instance(
+                        config,
+                        user_data,
+                        workdir,
+                        aws_env,
+                        target_version=target_version,
+                        network=network,
+                        ssh_ingress=ssh_ingress or deploy_key is not None,
+                        cloudflare_egress=cloudflare_egress,
+                    )
+                _log(f"waiting for {instance_id} to reach 'running'")
                 instance = _wait_for_instance(instance_id, aws_env)
                 public_dns = instance["PublicDnsName"]
                 _log(f"instance running at {public_dns}")
-                _attach_storage_volumes(aws_env, instance_id=instance_id, volumes=storage_volumes)
+                if upgrade is None:
+                    _attach_storage_volumes(aws_env, instance_id=instance_id, volumes=storage_volumes)
                 if deploy_key is not None:
                     _provision_over_ssh(public_dns, deploy_key, workdir)
                     # The one step after bootstrap: the deploy key needed SSH
@@ -213,7 +225,7 @@ def _main_for_lifecycle_locked(command: LifecycleCommand, config: InputConfig) -
                     _log("provisioning complete")
                 else:
                     _log(
-                        "instance launched with volumes attached; bootstrap continues on the host "
+                        "instance running with volumes attached; bootstrap continues on the host "
                         "from the pinned commit. Operator endpoints come up when it succeeds."
                     )
         except BaseException:

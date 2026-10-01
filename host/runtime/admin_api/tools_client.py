@@ -44,7 +44,11 @@ TOOLS_SOCKET_PATH = os.environ.get("KERN_TOOLS_SOCKET", DEFAULT_TOOLS_SOCKET_PAT
 # actually completes the side effect.
 # Upwork proposal approval adds MCP initialization, cost verification, private
 # preview creation/read and confirmation, plus optional OAuth refresh and cleanup.
-TOOLS_OPERATOR_TIMEOUT_SECONDS = 300
+# X video approval adds a five-minute upload/processing budget, on top of
+# token refresh, identity/target validation, and the final 30s post request.
+# Leave headroom for the entire approval; timing out here does not cancel
+# an in-flight tools-service operation.
+TOOLS_OPERATOR_TIMEOUT_SECONDS = 600
 
 
 class _ToolsSocketConnection(http.client.HTTPConnection):
