@@ -320,7 +320,7 @@ class ShimVideoStageTests(unittest.TestCase):
                 patch.dict("os.environ", {"HOME": directory}),
                 patch.object(tools_mcp_shim, "UnixHTTPConnection", return_value=connection),
             ):
-                for tool in ("runway", "fal_ai"):
+                for tool in ("runway", "fal_ai", "openrouter", "twitter"):
                     for path in ("/workspace/videos/clip.mp4", str(video)):
                         with self.subTest(path=path, tool=tool):
                             result = tools_mcp_shim._stage_video(
@@ -432,16 +432,16 @@ class ShimVideoStageTests(unittest.TestCase):
             seen = []
             connection.request.side_effect = lambda method, path, **kw: seen.append((path, kw["headers"], kw["body"].read()))
             with patch.dict("os.environ", {"HOME": directory}), patch.object(tools_mcp_shim, "UnixHTTPConnection", return_value=connection):
-                for tool in ("runway", "fal_ai"):
+                for tool in ("runway", "fal_ai", "openrouter"):
                     self.assertEqual(tools_mcp_shim._stage_audio({"path": "/voice.mp3", "for_tool": tool}), {"audio_asset_id": "audio-id"})
                     self.assertEqual(seen[-1][0], "/assets/audio")
                     self.assertEqual(seen[-1][1]["X-Kern-Tool"], tool)
                     self.assertEqual(seen[-1][1]["Content-Type"], "audio/mpeg")
                     self.assertEqual(seen[-1][2], b"a" * 512)
-                for tool in ("instagram", "seedance", "openai_images"):
+                for tool in ("instagram", "seedance", "openai_images", "twitter"):
                     with self.assertRaisesRegex(RuntimeError, "for_tool"):
                         tools_mcp_shim._stage_audio({"path": "/voice.mp3", "for_tool": tool})
-                self.assertEqual(len(seen), 2)
+                self.assertEqual(len(seen), 3)
 
     def test_shim_scopes_image_staging_to_supported_destinations(self) -> None:
         """An image may be staged for Runway, OpenAI image generation or Instagram and
@@ -479,12 +479,14 @@ class ShimVideoStageTests(unittest.TestCase):
                 tools_mcp_shim._stage_image({"path": "/frame.png", "for_tool": "fal_ai"})
                 self.assertEqual(connection.headers["X-Kern-Tool"], "fal_ai")
                 tools_mcp_shim._stage_image({"path": "/frame.png", "for_tool": "instagram"})
-                with self.assertRaisesRegex(RuntimeError, "fal_ai, instagram, openai_images, runway"):
+                tools_mcp_shim._stage_image({"path": "/frame.png", "for_tool": "openrouter"})
+                self.assertEqual(connection.headers["X-Kern-Tool"], "openrouter")
+                with self.assertRaisesRegex(RuntimeError, "fal_ai, instagram, openai_images, openrouter, runway"):
                     tools_mcp_shim._stage_image(
                         {"path": "/frame.png", "for_tool": "gmail"}
                     )
         self.assertEqual(result, {"image_asset_id": "opaque-image-id"})
-        self.assertEqual(connection.headers["X-Kern-Tool"], "instagram")
+        self.assertEqual(connection.headers["X-Kern-Tool"], "openrouter")
 
 
 if __name__ == "__main__":

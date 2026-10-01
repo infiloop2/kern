@@ -91,8 +91,8 @@ print(os.environ['FAKE_STATUS'], end='')
                     self.assertIn("always() && steps.authorize_requester.outcome == 'success'", cleanup)
 
 
-    def test_stage_start_and_stop_check_every_attempt_before_aws_access(self):
-        for operation in ('start', 'stop'):
+    def test_stage_lifecycle_actions_check_every_attempt_before_aws_access(self):
+        for operation in ('start', 'stop', 'recover'):
             with self.subTest(operation=operation):
                 source = (ROOT / f'.github/workflows/kern-stage-{operation}.yml').read_text()
                 self.assertNotIn('needs:', source)
@@ -110,5 +110,6 @@ print(os.environ['FAKE_STATUS'], end='')
                 self.assertIn('"${DISPATCH_REF}" != "refs/heads/main"', dispatch)
                 self.assertIn('exit 1', dispatch)
                 self.assertNotIn('secrets.', dispatch)
+                execute = execute.split('\n      - name:', 1)[0]
                 self.assertNotIn('if:', execute)
                 self.assertIn('secrets.KERN_STAGE_AWS_ACCESS_KEY_ID', execute)

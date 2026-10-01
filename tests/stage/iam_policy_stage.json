@@ -11,7 +11,9 @@
         "ec2:DescribeRouteTables",
         "ec2:DescribeSecurityGroups",
         "ec2:DescribeVolumes",
-        "ec2:DescribeInstanceAttribute"
+        "ec2:DescribeInstanceAttribute",
+        "ec2:DescribeInstanceCreditSpecifications",
+        "ec2:DescribeImages"
       ],
       "Resource": "*"
     },
@@ -30,6 +32,12 @@
           "aws:RequestTag/kern-host-agent-name": "kern-stage"
         }
       }
+    },
+    {
+      "Sid": "UseUbuntuRootSnapshot",
+      "Effect": "Allow",
+      "Action": "ec2:CreateVolume",
+      "Resource": "arn:aws:ec2:*::snapshot/*"
     },
     {
       "Sid": "UseEc2CreateDependencies",
@@ -80,6 +88,7 @@
       "Action": [
         "ec2:GetConsoleOutput",
         "ec2:ModifyInstanceAttribute",
+        "ec2:ModifyInstanceCreditSpecification",
         "ec2:AttachVolume",
         "ec2:AuthorizeSecurityGroupIngress",
         "ec2:AuthorizeSecurityGroupEgress",
@@ -89,7 +98,9 @@
         "ec2:DeleteSecurityGroup",
         "ec2:DeleteVolume",
         "ec2:RevokeSecurityGroupIngress",
-        "ec2:RevokeSecurityGroupEgress"
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:DetachVolume",
+        "ec2:ModifyInstanceMetadataOptions"
       ],
       "Resource": "*",
       "Condition": {
@@ -113,6 +124,28 @@
         "signin:CreateOAuth2Token"
       ],
       "Resource": "arn:aws:signin:*:*:oauth2/public-client/*"
+    },
+    {
+      "Sid": "RefreshKernInstanceTags",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": "arn:aws:ec2:*:*:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/kern-host": "true",
+          "aws:ResourceTag/kern-host-agent-name": "kern-stage",
+          "aws:RequestTag/kern-host": "true",
+          "aws:RequestTag/kern-host-agent-name": "kern-stage"
+        },
+        "ForAllValues:StringEquals": {
+          "aws:TagKeys": [
+            "kern-host",
+            "kern-host-agent-name",
+            "kern-host-version",
+            "Name"
+          ]
+        }
+      }
     }
   ]
 }

@@ -105,7 +105,7 @@ Every provider preserves these invariants:
    durable disks' deletion lifecycle.
 4. `deploy` requires no compute and no durable storage.
 5. `upgrade` and `reconfigure` require compute plus both durable devices.
-6. `recover` requires both durable devices and no compute.
+6. `recover` requires both durable devices and recreates compute, deleting the existing host when present.
 7. Start and stop require exactly one compute host and both durable devices.
 8. Provider metadata is a discovery hint. The mounted admin state and its
    version gate are authoritative before preserved state is modified.

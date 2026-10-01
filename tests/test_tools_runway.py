@@ -508,7 +508,7 @@ class RunwayToolTests(unittest.TestCase):
         @contextmanager
         def fake_stream(method: str, url: str, **kwargs: Any):
             self.assertEqual((method, url), ("GET", "https://cdn.example/speech.mp3?token=private"))
-            self.assertNotIn("headers", kwargs)  # Do not forward the Runway API key to the CDN.
+            self.assertNotIn("authorization", {key.lower() for key in (kwargs.get("headers") or {})})
             yield io.BytesIO(payload), {"content-length": str(len(payload)), "content-type": "audio/mpeg; charset=binary"}
 
         with (

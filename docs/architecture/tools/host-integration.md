@@ -173,7 +173,7 @@ context instead of rewriting its prefix:
   or JPEG/PNG/WebP as the agent, bound it to 512 bytes–200 MB, and stream raw
   bytes through `POST /assets/video` or `POST /assets/image`. The tools service
   returns a random, tool-scoped asset id. The agent passes that id directly to
-  the consuming Runway, OpenAI image generation, or Instagram action and does
+  the consuming Runway, OpenAI image generation, Instagram, or X action and does
   not persist it as app state.
   The shim stores no copy. It streams the opened descriptor over
   `/run/kern-tools/tools.sock`; the socket's kernel peer credentials
@@ -195,7 +195,7 @@ context instead of rewriting its prefix:
   The tools service accepts only the authenticated agent peer, receives
   filename/type/length but no pathname, and stores a mode-0600 private copy in
   its mode-0700 asset directory. The returned random id is scoped to exactly one
-  destination tool: a video to Runway or Instagram, an image to Runway, OpenAI
+  destination tool: a video to Runway, falAI, Instagram, or X, an image to Runway, OpenAI
   image generation, or Instagram. Runway deletes its input copy after Runway accepts the
   generation or editing task. OpenAI image generation deletes its reference
   copies once OpenAI has returned a usable image. Instagram deletes its copy
@@ -209,6 +209,25 @@ context instead of rewriting its prefix:
   either one later fails and the upload must be retried. At most 20 assets and
   1 GB total are staged across both media types. This private spool preserves
   the Instagram approval boundary: Meta receives no image or video bytes until approval.
+
+  X video posts use `stage_video {path, for_tool: "twitter"}`, then
+  `post_tweet {text, video_asset_id}` on the selected X connection. Replies and
+  quote posts accept the same optional video. One approval binds the account,
+  exact caption, target, and video metadata (filename, type, byte count, SHA256).
+  Existing connections can still publish text; video requires reconnecting for
+  `media.write`, which new OAuth connections request alongside `tweet.write`.
+  After approval, the tool revalidates the account and staged bytes, uploads
+  bounded 4 MiB chunks via X v2 initialize/append/finalize, waits for processing,
+  then submits one post with `media.media_ids`. Upload and processing share a
+  five-minute deadline and at most 30 status checks. Expired/changed assets,
+  provider failures, or processing timeouts stop before post submission. Uploads
+  and posts have no automatic retries. X receives bytes directly over HTTPS;
+  this does not use a public asset URL or require a Cloudflare hostname. The
+  staged source remains available until its normal TTL for explicit recovery.
+  X enforces account-specific codec, duration, and posting entitlements; Kern
+  accepts MP4/MOV up to its existing 200 MB staging cap and does not transcode.
+  See [X chunked uploads](https://docs.x.com/x-api/media/quickstart/media-upload-chunked)
+  and [OAuth scopes](https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code).
 
   The reusable `Assets.public_asset_url` context supports only the existing
   staged JPEG, PNG, WebP, MP4 and MOV types. Instagram is its only consumer,

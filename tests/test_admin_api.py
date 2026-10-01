@@ -393,6 +393,34 @@ class AdminRouteTableTests(unittest.TestCase):
         self.assertEqual(error.exception.message, "route not found")
 
 
+class XaiVideoStorageAuthHttpTests(unittest.TestCase):
+    def test_auth_rejects_before_reading_the_advertised_body(self) -> None:
+        start_admin_http_server(self)
+        with (
+            patch.object(admin_api.Handler, "_read_body") as read_body,
+            patch.object(admin_api, "route") as route,
+        ):
+            for method in ("GET", "PUT", "DELETE"):
+                with self.subTest(method=method):
+                    # Advertise a body but withhold it: a 401 must arrive
+                    # without waiting for it or reaching storage handlers.
+                    request = (
+                        f"{method} /v1/network-tools/xai-video-storage HTTP/1.1\r\n"
+                        "Host: localhost\r\nContent-Length: 256\r\n\r\n"
+                    ).encode()
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                        sock.settimeout(5)
+                        sock.connect(self.admin_socket_path)
+                        sock.sendall(request)
+                        response = b""
+                        while chunk := sock.recv(65536):
+                            response += chunk
+                    self.assertIn(b"401 Unauthorized", response)
+                    self.assertIn(b'"error"', response)
+            read_body.assert_not_called()
+            route.assert_not_called()
+
+
 class AgentFileUploadHttpTests(unittest.TestCase):
     def setUp(self) -> None:
         password_hash = hashlib.sha256(b"admin-secret").hexdigest()
@@ -765,15 +793,23 @@ class AdminApiIntegrationTests(unittest.TestCase):
     def test_xai_video_storage_admin_http_round_trip(self) -> None:
         path = "/v1/network-tools/xai-video-storage"
         value = dict(bucket="test-videos", region="us-east-1", access_key_id="AKIA" + "A" * 16, secret_access_key="a" * 40)
-        for method, body in (("GET", None), ("PUT", value), ("DELETE", None)):
+        # Authentication rejects before reading a body. Keep these probes
+        # bodyless so early connection closure cannot race urllib's body send.
+        for method in ("GET", "PUT", "DELETE"):
             with self.assertRaises(urllib.error.HTTPError) as error:
-                self.request(method, path, body, auth=False)
+                self.request(method, path, auth=False)
             self.assertEqual(error.exception.code, 401)
+            self.assertIsNone(state.read_xai_video_storage())
         self.assertEqual(self.request("GET", path), (200, {"configured": False}))
         expected = {"configured": True, "bucket": "test-videos", "region": "us-east-1"}
         self.assertEqual(self.request("PUT", path, value), (200, expected))
         self.assertEqual(state.read_xai_video_storage(), value)
         self.assertEqual(self.request("GET", path), (200, expected))
+        for method in ("PUT", "DELETE"):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(method, path, auth=False)
+            self.assertEqual(error.exception.code, 401)
+            self.assertEqual(state.read_xai_video_storage(), value)
         with self.assertRaises(urllib.error.HTTPError) as error:
             self.request("PUT", path, {"bucket": "partial"})
         self.assertEqual(error.exception.code, 400)

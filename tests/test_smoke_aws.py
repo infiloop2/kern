@@ -846,6 +846,7 @@ class WorkflowSmokeTests(unittest.TestCase):
         stage = Path(".github/workflows/kern-stage.yml").read_text()
         stage_start = Path(".github/workflows/kern-stage-start.yml").read_text()
         stage_stop = Path(".github/workflows/kern-stage-stop.yml").read_text()
+        stage_recover = Path(".github/workflows/kern-stage-recover.yml").read_text()
 
         self.assertIn("python3 -m host.cli.start", stage)
         self.assertIn("python3 -m host.cli.stop", stage)
@@ -854,22 +855,24 @@ class WorkflowSmokeTests(unittest.TestCase):
             "steps.upgrade_stage.outcome == 'failure' && steps.upgrade_stage.outputs.same_version_failure == 'true'",
             stage,
         )
-        self.assertIn("steps.upgrade_stage.outcome == 'failure' && steps.start_current.outcome != 'success'", stage)
+        self.assertIn("steps.upgrade_stage.outcome == 'failure' && steps.upgrade_stage.outputs.same_version_failure != 'true'", stage)
         self.assertIn("2>&1 > kern-stage.json | tee stage-upgrade.log >&2", stage)
-        self.assertIn("2>&1 > kern-stage.json | tee stage-recover.log >&2", stage)
         self.assertNotIn("> >(tee stage-", stage)
-        self.assertIn("first_deploy=true", stage)
-        self.assertIn("else\n              exit 1", stage)
+        self.assertNotIn("host.cli.recover", stage)
+        self.assertNotIn("host.cli.deploy", stage)
+        self.assertIn("python3 -m host.cli.recover", stage_recover)
+        self.assertIn("--allow-upgrade", stage_recover)
+        self.assertNotIn("host.cli.deploy", stage_recover)
         self.assertIn("python3 -m host.cli.start", stage_start)
         self.assertIn("python3 -m host.cli.stop", stage_stop)
         # The CLI takes flags and prints its result to stdout; the workflows
         # write no config files and redirect stdout to the step artifact.
-        for workflow in (stage, stage_start, stage_stop):
+        for workflow in (stage, stage_start, stage_stop, stage_recover):
             self.assertNotIn("--config", workflow)
             self.assertNotIn("config.json", workflow)
         self.assertIn("--agent-name kern-stage", stage_start)
         self.assertIn("--agent-name kern-stage", stage_stop)
-        self.assertIn("--operator-ssh-public-key", stage)
+        self.assertNotIn("--operator-ssh-public-key", stage_recover)
         self.assertIn("> kern-stage.json", stage)
         removed_action = "start-stage" + "-instance"
         self.assertNotIn(removed_action, stage)

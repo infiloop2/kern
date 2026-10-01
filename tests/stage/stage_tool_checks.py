@@ -370,6 +370,7 @@ class StageToolChecks:
             "vercel_analytics": self._check_vercel_analytics_live,
             "whatsapp": self._check_whatsapp_live,
             "openai_images": self._check_openai_images_live,
+            "openrouter": self._check_openrouter_live,
             "runway": self._check_runway_live,
             "zoho_mail": self._check_zoho_mail_live,
         }.get(tool_id)
@@ -1016,6 +1017,16 @@ class StageToolChecks:
             if not result.get("isError") or "not found" not in lowered:
                 raise AssertionError(f"falAI authenticated task probe was unexpected: {text}")
         return "authenticated H3 Max and Topaz probes completed without generation or enhancement spend"
+
+    def _check_openrouter_live(self) -> str:
+        result, text = self._shim_tool_response(
+            "openrouter_get_task", {"task_id": "gen-vid-0000000000-00000000000000000000"}
+        )
+        if "authentication failed" in text.lower() or "denied access" in text.lower():
+            raise CredentialUnavailable(f"openrouter_get_task: {text}")
+        if not result.get("isError") or "could not find" not in text.lower():
+            raise AssertionError(f"OpenRouter authenticated missing-task probe was unexpected: {text}")
+        return "authenticated missing-task probe completed without generation spend"
 
     def _check_elevenlabs_live(self) -> str:
         result = self._successful_tool_call("elevenlabs_list_voices", {"page_size": 1})

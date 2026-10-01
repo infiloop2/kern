@@ -31,6 +31,7 @@ from test_tools import FakeHostAPI
 # (tool_id, action_id, field) -> guarded free-text parameter. The tool's
 # package test and the behavioral tests below exercise each.
 GUARDED_FIELDS = {
+    ("openrouter", "create_heygen_video", "prompt"),
     ("instagram", "get_recent_media", "after"),
     ("cloudwatch_logs", "filter_log_events", "request_id"),
     ("cloudwatch_logs", "filter_log_events", "search_text"),
@@ -146,6 +147,14 @@ APPROVAL_GATED = "approval-gated content: the operator approval is the control"
 TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning"
 
 EXEMPT_FIELDS = {
+    ("openrouter", "create_heygen_video", "mode"): TYPED,
+    **{("openrouter", "create_heygen_video", key): TYPED for key in ("image_asset_id", "reference_image_asset_ids", "reference_video_asset_ids", "reference_audio_asset_ids")},
+    ("openrouter", "create_heygen_video", "duration_seconds"): TYPED,
+    ("openrouter", "create_heygen_video", "resolution"): TYPED,
+    ("openrouter", "create_heygen_video", "aspect_ratio"): TYPED,
+    ("openrouter", "create_heygen_video", "seed"): TYPED,
+    ("openrouter", "get_task", "task_id"): TYPED,
+    ("openrouter", "save_video", "task_id"): TYPED,
     ("browser", "x_post_tweet", "text"): APPROVAL_GATED,
     ("browser", "x_post_tweet", "account_id"): "Stable local browser profile lookup; not sent to a website.",
     ("browser", "x_post_tweet", "in_reply_to_tweet_id"): TYPED,
@@ -471,6 +480,7 @@ EXEMPT_FIELDS = {
     ("twitter", "post_tweet", "text"): APPROVAL_GATED,
     ("twitter", "post_tweet", "in_reply_to_tweet_id"): TYPED,
     ("twitter", "post_tweet", "quote_tweet_id"): TYPED,
+    ("twitter", "post_tweet", "video_asset_id"): "Opaque tool-scoped local asset lookup; only the approved video bytes reach X.",
     ("whatsapp", "list_chats", "limit"): TYPED,
     ("whatsapp", "read_messages", "chat_id"): TYPED,
     ("whatsapp", "read_messages", "limit"): TYPED,
@@ -598,6 +608,15 @@ class BehavioralDenialTest(unittest.TestCase):
         self.assertIsInstance(result, ActionFailed)
         self.assertIn(fragment, result.error)
         self.assertIn("retry", result.error)
+
+    def test_openrouter_prompt_denied_before_provider_request(self) -> None:
+        from host.tools import openrouter
+
+        api = FakeHostAPI(config={"OPENROUTER_API_KEY": "k"})
+        with patch.object(openrouter, "json_request") as request:
+            result = openrouter.BUNDLED_TOOL.execute("create_heygen_video", {"prompt": "my password is hunter2secret"}, api)
+        self.assert_denied(result, "password")
+        request.assert_not_called()
 
     def test_apify_query_and_location_denied(self) -> None:
         from host.tools.apify import BUNDLED_TOOL

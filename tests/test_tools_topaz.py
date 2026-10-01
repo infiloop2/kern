@@ -172,7 +172,7 @@ class TopazTests(unittest.TestCase):
             @contextmanager
             def stream(method, url, **kwargs):
                 self.assertEqual(method, "GET")
-                self.assertNotIn("headers", kwargs)
+                self.assertNotIn("authorization", {key.lower() for key in (kwargs.get("headers") or {})})
                 yield io.BytesIO(content), {"content-length": str(len(content)), "content-type": mime}
             with self.subTest(kind=kind), patch.object(topaz, "json_request", side_effect=[{"status": "COMPLETED"}, {kind: {"url": "https://v3.fal.media/output"}}]), patch.object(media, "open_response_stream", stream):
                 result = self.execute("save_" + kind, {"task_id": "topaz_" + kind + "_" + REQUEST_ID})

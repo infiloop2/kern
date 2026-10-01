@@ -466,7 +466,7 @@ class LimaPreflightMatrixTests(unittest.TestCase):
             ("upgrade", False, {"admin", "agent"}, "upgrade requires an existing Kern Lima instance"),
             ("upgrade", True, {"admin"}, "missing agent"),
             ("upgrade", True, {"admin", "agent"}, None),
-            ("recover", True, {"admin", "agent"}, "recover requires no existing Kern Lima instance"),
+            ("recover", True, {"admin", "agent"}, None),
             ("recover", False, set(), "found none, missing admin, agent"),
             ("recover", False, {"admin", "agent"}, None),
             ("reconfigure", False, {"admin", "agent"}, "reconfigure requires an existing Kern Lima instance"),
@@ -790,6 +790,33 @@ class LimaLifecycleFlowTests(unittest.TestCase):
                 self.assertEqual(stdout, "")
                 self.assertFalse(any(call[0] in {"stop", "delete", "create"} for call in calls))
                 self.assertIsNotNone(fake.instance)
+
+    def test_recover_checks_version_before_replacing_existing_instance(self) -> None:
+        instance_name = lima._instance_name("kern-test")
+        for version, allow_upgrade, accepted in (
+            (repo_version(), False, True), (repo_version(), True, True),
+            ("0.0.0", False, False), ("0.0.0", True, True),
+            ("999.0.0", False, False), ("999.0.0", True, False),
+        ):
+            with self.subTest(version=version, allow_upgrade=allow_upgrade):
+                fake = FakeLimactl(
+                    instance=_existing_instance_record(stored_version=version),
+                    disks=[
+                        {"name": lima._disk_name("kern-test", role), "instance": instance_name}
+                        for role in ("admin", "agent")
+                    ],
+                )
+                command = LifecycleCommand(mode="recover", agent_name="kern-test", provider="lima", allow_upgrade=allow_upgrade)
+                with tempfile.TemporaryDirectory() as home:
+                    exit_code, stdout, calls = self._run_lifecycle(command, fake, home)
+                self.assertEqual(exit_code, 0 if accepted else 2)
+                self.assertFalse(any(call[:2] in {("disk", "create"), ("disk", "delete")} for call in calls))
+                if accepted:
+                    self.assertIn(("delete", "--force", "--tty=false", instance_name), calls)
+                else:
+                    self.assertEqual(stdout, "")
+                    self.assertFalse(any(call[0] in {"stop", "delete", "create"} for call in calls))
+                    self.assertIsNotNone(fake.instance)
 
     def test_replacement_validation_failure_preserves_working_instance(self) -> None:
         instance_name = lima._instance_name("kern-test")

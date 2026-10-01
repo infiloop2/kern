@@ -133,16 +133,18 @@ class KernCloudContractTests(unittest.TestCase):
         policy = json.loads((ROOT / 'iam_policy.json').read_text())
         digest = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         # Digest of Cloud's separately reviewed approved_iam_policy.json.
-        self.assertEqual(digest, 'f191b2861dea951bd864df169bebc2eb9a53e3eef38e6723c097beeca1b2b171')
+        self.assertEqual(digest, '9a6b6705b955d7eb767001e46b2a1dec13894b1dc802c70d18feb931acf95857')
         for declaration in ("PUBLIC_GITHUB_REPOSITORY = 'infiloop2/kern'", "OPERATOR_TUNNEL_TOKEN_ENV_NAME = 'KERN_CLOUDFLARE_TUNNEL_TOKEN'", 'ADMIN_API_PORT = 7443'):
             self.assertIn(declaration, source('host/constants.py').splitlines())
 
     def test_cloud_resource_ownership_tags(self) -> None:
         for declaration in ("OWNER_TAG_KEY = 'kern-host'", "INSTANCE_TAG_KEY = 'kern-host-agent-name'"):
             self.assertIn(declaration, source('host/cli/aws_constants.py').splitlines())
-        tags = source('host/cli/aws_resources.py', '_tag_spec')
-        self.assertIn("tags = [f'{{Key={INSTANCE_TAG_KEY},Value={agent_name}}}', f'{{Key={OWNER_TAG_KEY},Value=true}}',", tags)
-        self.assertIn('return f"ResourceType={resource_type},Tags=[{\',\'.join(tags)}]"', tags)
+        tags = source('host/cli/aws_resources.py', '_resource_tags')
+        for fragment in ("f'Key={INSTANCE_TAG_KEY},Value={agent_name}'", "f'Key={OWNER_TAG_KEY},Value=true'"):
+            self.assertIn(fragment, tags)
+        self.assertIn('_resource_tags(agent_name,', source('host/cli/aws_resources.py', '_tag_spec'))
+        self.assertIn('_resource_tags(config.agent_name, target_version)', source('host/cli/aws_resources.py', '_configure_existing_instance'))
         self.assertIn("return f'ResourceType=volume,Tags=[{{Key={INSTANCE_TAG_KEY},Value={agent_name}}},{{Key={OWNER_TAG_KEY},Value=true}},{{Key={VOLUME_ROLE_TAG_KEY},Value={role}}},{{Key=Name,Value=kern-host-{agent_name}-{role}}}]'", source('host/cli/aws_resources.py', '_volume_tag_spec'))
         for function, call in (
             ('_launch_instance', "_tag_spec('instance', config.agent_name, target_version=target_version)"),

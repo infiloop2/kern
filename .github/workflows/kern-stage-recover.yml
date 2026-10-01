@@ -1,0 +1,105 @@
+name: kern-stage-recover
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: kern-stage
+  cancel-in-progress: false
+
+jobs:
+  recover-stage:
+    if: github.repository == 'infiversehq/kern'
+    name: Recover stage instance
+    runs-on: ubuntu-latest
+    # Cover SSH readiness, archive transfer, bootstrap and AWS provisioning waits.
+    timeout-minutes: 120
+    steps:
+      - name: Checkout trusted workflow actions
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          ref: main
+          persist-credentials: false
+
+      - name: Authorize repo admin
+        uses: ./.github/actions/authorize-repo-admin
+
+      - name: Require main dispatch
+        shell: bash
+        env:
+          DISPATCH_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "${DISPATCH_REF}" != "refs/heads/main" ]]; then
+            echo "Stage recovery can only be dispatched from main; selected ${DISPATCH_REF}." >&2
+            exit 1
+          fi
+
+      - name: Checkout recovery release
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Recover stage EC2 instance
+        id: recover
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.KERN_STAGE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.KERN_STAGE_AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          set -euo pipefail
+          # Recover protects both data disks before terminating old compute,
+          # then provisions a fresh instance at this main commit's VERSION.
+          # Password, provider logins and operator endpoints come from admin state.
+          python3 -m host.cli.recover \
+            --agent-name kern-stage \
+            --allow-upgrade \
+            > kern-stage.json
+
+      - name: Write recovery summary
+        if: ${{ always() && steps.recover.outcome != 'skipped' }}
+        shell: bash
+        env:
+          RECOVER_OUTCOME: ${{ steps.recover.outcome }}
+          STAGE_REF: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          {
+            echo "## Kern stage recovery"
+            echo
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| Result | ${RECOVER_OUTCOME} |"
+            echo "| Ref | ${STAGE_REF} |"
+          } >> "${GITHUB_STEP_SUMMARY}"
+          if [[ "${RECOVER_OUTCOME}" != success ]]; then
+            echo "Recovery failed; inspect the recovery log before retrying." >> "${GITHUB_STEP_SUMMARY}"
+            exit 0
+          fi
+          instance_id="$(jq -r .instance_id kern-stage.json)"
+          public_dns="$(jq -r .public_dns kern-stage.json)"
+          version="$(jq -r .version kern-stage.json)"
+          admin_volume="$(jq -r .admin_volume_id kern-stage.json)"
+          agent_volume="$(jq -r .agent_volume_id kern-stage.json)"
+          {
+            echo "| Version | ${version} |"
+            echo "| Instance | ${instance_id} |"
+            echo "| Public DNS | ${public_dns} |"
+            echo "| Preserved admin volume | ${admin_volume} |"
+            echo "| Preserved agent volume | ${agent_volume} |"
+            echo
+            echo "Stage is running. Run kern-stage to test it, or kern-stage-stop after inspection."
+            echo
+            echo "### SSH tunnel"
+            echo
+            echo '```bash'
+            echo "ssh -i ~/.ssh/kern/stage_operator -o ExitOnForwardFailure=yes -N -L 7443:127.0.0.1:7443 -L 7445:127.0.0.1:7445 kern-operator@${public_dns}"
+            echo '```'
+            echo
+            echo "Admin UI: http://127.0.0.1:7443"
+          } >> "${GITHUB_STEP_SUMMARY}"

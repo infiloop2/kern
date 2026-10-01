@@ -890,8 +890,8 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
         try:
             tool_id = self.headers.get("X-Kern-Tool") or ""
             allowed_tools = (
-                {"runway", "fal_ai"} if kind == "audio" else
-                {"runway", "instagram", "fal_ai"} if kind == "video" else {"runway", "openai_images", "instagram", "fal_ai"}
+                {"runway", "fal_ai", "openrouter"} if kind == "audio" else
+                {"runway", "instagram", "fal_ai", "openrouter", "twitter"} if kind == "video" else {"runway", "openai_images", "instagram", "fal_ai", "openrouter"}
             )
             if tool_id not in allowed_tools:
                 self._send_json(

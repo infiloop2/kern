@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 from pathlib import Path
@@ -71,7 +72,7 @@ def _find_existing_instances(config: InputConfig, env: dict[str, str]) -> list[s
         "--filters",
         f"Name=tag:{INSTANCE_TAG_KEY},Values={config.agent_name}",
         f"Name=tag:{OWNER_TAG_KEY},Values=true",
-        "Name=instance-state-name,Values=pending,running,stopping,stopped",
+        "Name=instance-state-name,Values=pending,running,stopping,stopped,shutting-down",
     )
     ids: list[str] = []
     for reservation in response.get("Reservations", []):
@@ -91,6 +92,65 @@ def _existing_storage_roles(config: InputConfig, env: dict[str, str]) -> set[str
 def _terminate_instances(instance_ids: list[str], env: dict[str, str]) -> None:
     _aws(env, "ec2", "terminate-instances", "--instance-ids", *instance_ids)
     _aws(env, "ec2", "wait", "instance-terminated", "--instance-ids", *instance_ids)
+
+
+def _instance_settings() -> dict[str, Any]:
+    """The instance settings owned by Kern, shared by launch and root rebuild."""
+    return {
+        "InstanceType": INSTANCE_TYPE,
+        "CreditSpecification": {"CpuCredits": "unlimited"},
+        "InstanceInitiatedShutdownBehavior": "terminate",
+        "MetadataOptions": {"HttpTokens": "required", "HttpEndpoint": "enabled"},
+    }
+
+
+def _root_volume_settings() -> dict[str, Any]:
+    return {"VolumeSize": ROOT_VOLUME_SIZE_GB, "VolumeType": "gp3", "DeleteOnTermination": True}
+
+
+def _write_user_data(user_data: str, workdir: Path) -> Path:
+    path = workdir / "user_data.sh"
+    path.touch(mode=0o600)
+    path.chmod(0o600)
+    path.write_text(user_data)
+    return path
+
+
+def _configure_existing_instance(
+    config: InputConfig,
+    env: dict[str, str],
+    instance_id: str,
+    user_data_path: Path,
+    security_group_id: str,
+    target_version: str,
+) -> None:
+    """Apply the launch settings to a stopped instance before its fresh boot."""
+    settings = _instance_settings()
+    for name, value in (
+        ("--instance-type", settings["InstanceType"]),
+        ("--instance-initiated-shutdown-behavior", settings["InstanceInitiatedShutdownBehavior"]),
+    ):
+        _aws(env, "ec2", "modify-instance-attribute", "--instance-id", instance_id,
+             name, json.dumps({"Value": value}))
+    _aws(env, "ec2", "modify-instance-attribute", "--instance-id", instance_id,
+         "--groups", security_group_id)
+    # The legacy Value attribute takes already-base64 text, consistently in
+    # AWS CLI v1 (Cloud) and v2 (operators); never put the payload in argv.
+    encoded = user_data_path.with_suffix(".base64")
+    encoded.touch(mode=0o600)
+    encoded.chmod(0o600)
+    encoded.write_text(base64.b64encode(user_data_path.read_bytes()).decode("ascii"))
+    _aws(env, "ec2", "modify-instance-attribute", "--instance-id", instance_id,
+         "--attribute", "userData", "--value", f"file://{encoded}")
+    credit_result = _aws(env, "ec2", "modify-instance-credit-specification", "--instance-credit-specifications",
+         json.dumps([{"InstanceId": instance_id, **settings["CreditSpecification"]}]))
+    if credit_result.get("UnsuccessfulInstanceCreditSpecifications"):
+        raise ConfigError(f"failed to apply CPU credit settings: {credit_result['UnsuccessfulInstanceCreditSpecifications']}")
+    metadata = settings["MetadataOptions"]
+    _aws(env, "ec2", "modify-instance-metadata-options", "--instance-id", instance_id,
+         "--http-tokens", metadata["HttpTokens"], "--http-endpoint", metadata["HttpEndpoint"])
+    _aws(env, "ec2", "create-tags", "--resources", instance_id, "--tags",
+         *_resource_tags(config.agent_name, target_version))
 
 
 def _launch_instance(
@@ -119,21 +179,19 @@ def _launch_instance(
     # cli_binary_format is "base64", so a raw --user-data string would be decoded
     # as base64 (corrupting the script and breaking cloud-init). fileb:// reads the
     # bytes as-is and base64-encodes them for EC2 regardless of that setting.
-    user_data_path = workdir / "user_data.sh"
-    user_data_path.touch(mode=0o600)
-    user_data_path.chmod(0o600)  # the GitHub delivery embeds the provisioning payload
-    user_data_path.write_text(user_data)
+    user_data_path = _write_user_data(user_data, workdir)
+    settings = _instance_settings()
     response = _aws(env,
         "ec2",
         "run-instances",
         "--image-id",
         ami_id,
         "--instance-type",
-        INSTANCE_TYPE,
+        settings["InstanceType"],
         # Allow bootstrap and agent startup to burst even when earned credits
         # are exhausted, regardless of the account's CPU-credit default.
         "--credit-specification",
-        "CpuCredits=unlimited",
+        json.dumps(settings["CreditSpecification"]),
         "--subnet-id",
         subnet_id,
         "--security-group-ids",
@@ -146,19 +204,15 @@ def _launch_instance(
         # stop command still parks compute through the EC2 API, which this
         # attribute does not affect.
         "--instance-initiated-shutdown-behavior",
-        "terminate",
+        settings["InstanceInitiatedShutdownBehavior"],
         "--metadata-options",
-        "HttpTokens=required,HttpEndpoint=enabled",
+        json.dumps(settings["MetadataOptions"]),
         "--block-device-mappings",
         json.dumps(
             [
                 {
                     "DeviceName": "/dev/sda1",
-                    "Ebs": {
-                        "VolumeSize": ROOT_VOLUME_SIZE_GB,
-                        "VolumeType": "gp3",
-                        "DeleteOnTermination": True,
-                    },
+                    "Ebs": _root_volume_settings(),
                 }
             ]
         ),
@@ -604,15 +658,20 @@ def _ubuntu_ami(env: dict[str, str]) -> str:
     return response["Parameter"]["Value"]
 
 
-def _tag_spec(resource_type: str, agent_name: str, *, target_version: str | None = None) -> str:
+def _resource_tags(agent_name: str, target_version: str | None) -> list[str]:
     tags = [
-        f"{{Key={INSTANCE_TAG_KEY},Value={agent_name}}}",
-        f"{{Key={OWNER_TAG_KEY},Value=true}}",
-        f"{{Key=Name,Value=kern-host-{agent_name}}}",
+        f"Key={INSTANCE_TAG_KEY},Value={agent_name}",
+        f"Key={OWNER_TAG_KEY},Value=true",
+        f"Key=Name,Value=kern-host-{agent_name}",
     ]
-    if resource_type == "instance" and target_version is not None:
-        tags.append(f"{{Key={VERSION_TAG_KEY},Value={target_version}}}")
-    return f"ResourceType={resource_type},Tags=[{','.join(tags)}]"
+    if target_version is not None:
+        tags.append(f"Key={VERSION_TAG_KEY},Value={target_version}")
+    return tags
+
+
+def _tag_spec(resource_type: str, agent_name: str, *, target_version: str | None = None) -> str:
+    tags = _resource_tags(agent_name, target_version if resource_type == "instance" else None)
+    return f"ResourceType={resource_type},Tags=[" + ",".join("{" + tag + "}" for tag in tags) + "]"
 
 
 def _volume_tag_spec(agent_name: str, role: str) -> str:

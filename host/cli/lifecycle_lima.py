@@ -382,12 +382,6 @@ def _validate_lima_preflight(command: LifecycleCommand, inventory: LimaInventory
             f"{command.mode} requires an existing Kern Lima instance for {agent_name}; "
             "use recover to recreate a missing or broken host"
         )
-    if command.mode == "recover" and inventory.instance is not None:
-        raise ConfigError(
-            f"recover requires no existing Kern Lima instance for {agent_name}; "
-            "use upgrade for a normal release upgrade, or reconfigure to change admin password "
-            "or operator access"
-        )
 
 
 # The system provision script is the only provider-specific code inside the
@@ -928,6 +922,14 @@ def _check_stored_version_hint(
             f"existing Kern Lima instance {instance.name} records version {version}; "
             f"upgrade requires preserved state older than target VERSION {target_version}; "
             "run recover for same-version repair, or target a newer Kern version for newer state"
+        )
+    if command.mode == "recover" and (
+        comparison > 0 or (comparison != 0 and not command.allow_upgrade)
+    ):
+        raise ConfigError(
+            f"existing Kern Lima instance {instance.name} records version {version}; "
+            f"recover requires state matching target VERSION {target_version}; "
+            "use --allow-upgrade for older state, or target a newer version for newer state"
         )
     if command.mode == "reconfigure" and comparison != 0:
         raise ConfigError(

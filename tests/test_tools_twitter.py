@@ -26,13 +26,13 @@ def connected_api(*, expires_at: int = FRESH_EXPIRES_AT) -> FakeHostAPI:
             "account": {
                 "id": "111",
                 "label": "@claw",
-                "scopes": ["tweet.read", "users.read", "tweet.write", "offline.access"],
+                "scopes": ["tweet.read", "users.read", "tweet.write", "media.write", "offline.access"],
             },
             "secret": {
                 "access_token": "x-access",
                 "expires_at": expires_at,
                 "refresh_token": "x-refresh-1",
-                "scope": "tweet.read users.read tweet.write offline.access",
+                "scope": "tweet.read users.read tweet.write media.write offline.access",
                 "token_type": "bearer",
             },
             "metadata": {"created_at": 1, "updated_at": 1},
@@ -678,7 +678,7 @@ class XCredentialFlowTests(unittest.TestCase):
                 self.assertEqual(kwargs["form"]["grant_type"], "authorization_code")
                 self.assertTrue(kwargs["form"]["code_verifier"])
                 return {"access_token": "x-access", "refresh_token": "x-refresh", "expires_in": 7200,
-                        "scope": "tweet.read users.read tweet.write offline.access",
+                        "scope": "tweet.read users.read tweet.write media.write offline.access",
                         "token_type": "bearer"}
             if "/users/me" in url:
                 return me_response()
@@ -703,7 +703,7 @@ class XCredentialFlowTests(unittest.TestCase):
 
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
             return {"access_token": "x-access", "expires_in": 7200,
-                    "scope": "tweet.read users.read tweet.write offline.access",
+                    "scope": "tweet.read users.read tweet.write media.write offline.access",
                     "token_type": "bearer"}
 
         with patch.object(twitter, "json_request", fake_json_request):

@@ -1,7 +1,7 @@
 # Persistent AWS Stage
 
 Stage is the long-lived environment for login-dependent checks. The workflow
-upgrades or recreates one fixed host, `kern-stage` in `us-east-1`, using a
+upgrades one fixed host, `kern-stage` in `us-east-1`, using a
 stable admin password and a persistent operator SSH endpoint. The admin and
 agent data volumes are preserved, so Codex, Claude, and Grok OAuth sessions and
 the validated AWS Bedrock credential survive across upgrades.
@@ -12,27 +12,48 @@ when earned credits run out. Surplus CPU-credit charges may apply. Starting an
 existing stage instance preserves its credit mode: upgrade it to this release
 or change its mode in EC2 to convert an existing Standard instance.
 
-The stage workflow uses the lifecycle commands in this order:
+The stage workflow first runs
+`python3 -m host.cli.upgrade --agent-name kern-stage > kern-stage.json`.
+Normal upgrades retain the EC2 instance and both data volumes while replacing
+the disposable root disk. If upgrade fails only because the preserved state is
+already at the repo `VERSION`, the workflow instead runs
+`python3 -m host.cli.start --agent-name kern-stage > kern-stage.json` and tests
+that instance as-is. Any other upgrade failure, or a failed start, fails the
+workflow. It never automatically recovers or first-deploys stage.
 
-1. `python3 -m host.cli.upgrade --agent-name kern-stage > kern-stage.json`
-2. If upgrade fails only because the preserved state is already at the repo
-   `VERSION`, the workflow starts the tagged EC2 instance with
-   `python3 -m host.cli.start --agent-name kern-stage > kern-stage.json`,
-   without changing password or operator access.
-3. If the instance is missing but preserved volumes exist,
-   `python3 -m host.cli.recover --agent-name kern-stage --allow-upgrade > kern-stage.json`
-4. If this is the first-ever stage run and no preserved volumes exist,
-   `python3 -m host.cli.deploy --agent-name kern-stage --operator-ssh-public-key "$KERN_STAGE_SSH_PUBLIC_KEY" --admin-password-sha256 "$(printf %s "$KERN_STAGE_ADMIN_PASSWORD" | sha256sum | cut -d' ' -f1)" > kern-stage.json`
+For explicit recovery, dispatch `.github/workflows/kern-stage-recover.yml`
+from `main`. This admin-only action runs
+`python3 -m host.cli.recover --agent-name kern-stage --allow-upgrade` using the
+latest main commit captured at dispatch. Recovery protects both existing admin
+and agent disks, terminates existing stage compute if present, and provisions a
+fresh instance at that commit's `VERSION`. It retains the admin password,
+operator endpoints, provider sessions, and application data. It requires both
+initialized data disks and refuses downgrades; it never falls back to a fresh
+install or deletes data volumes. Recovery shares the stage concurrency group
+with testing and start/stop actions. It leaves the recovered instance running
+and prints its connection details; run `kern-stage` afterward to test it, or
+`kern-stage-stop` after manual inspection.
 
-Normal release runs should take the upgrade path, which preserves the existing
-admin password and operator endpoints from admin state. Same-version reruns
-start the existing instance and test it as-is. First deploy installs the
-configured stage SSH endpoint. Upgrade, recovery, and power commands
-intentionally take no operator endpoints and the CLI only ever sees the
-password hash. The stage test receives `KERN_STAGE_ADMIN_PASSWORD`
-through its own `--admin-password-env` flag for admin API auth, and the
-workflow passes the generated stage SSH key path through `--ssh-key-env
-KERN_STAGE_SSH_KEY`.
+Upgrade failures can still terminate incomplete compute under the CLI's
+provisioning-failure policy. Inspect the original failure before explicitly
+recovering; the stage workflow does not hide it behind an automatic rebuild.
+
+The first-ever deployment remains a separate operator setup step:
+
+```bash
+python3 -m host.cli.deploy \
+  --agent-name kern-stage \
+  --operator-ssh-public-key "$(ssh-keygen -y -f ~/.ssh/kern/stage_operator)" \
+  --admin-password-sha256 "$(printf %s "$KERN_STAGE_ADMIN_PASSWORD" | sha256sum | cut -d' ' -f1)" \
+  > kern-stage.json
+```
+
+Run it from the current main checkout with the stage AWS credentials and stable
+admin password configured. Upgrade, recovery, and power commands intentionally
+take no operator endpoints and the CLI only ever sees the password hash. The
+stage test receives `KERN_STAGE_ADMIN_PASSWORD` through its own
+`--admin-password-env` flag for admin API auth, and the workflow passes the
+stage SSH key path through `--ssh-key-env KERN_STAGE_SSH_KEY`.
 
 The stage test takes a `--suite` argument selecting which checks run: `claude`,
 `codex`, `grok`, `hermes`, or `github` run that integration's checks plus the shared preamble,
@@ -356,8 +377,9 @@ succeeds. A concurrency group keeps two stage operations from racing, and the
 rate limit rejects the eleventh authorized run started within a rolling
 one-hour window.
 After the stage test step finishes, the workflow stops the EC2 instance even if
-the test failed. The preserved admin and agent EBS volumes remain for the next
-stage operation.
+startup or the test failed. Cleanup discovers the instance by its Kern ownership
+tags, so it does not require successful startup to have written a result file. The preserved admin and agent EBS volumes remain
+for the next stage operation.
 
 On the first run, or after an OAuth provider session expires, `all` reports and skips
 that provider. A focused `codex`, `claude`, or `grok` run fails. To restore OAuth coverage,

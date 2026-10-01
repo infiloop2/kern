@@ -15,6 +15,7 @@ apart — the same reason ``is_public_https_url`` is shared.
 from __future__ import annotations
 
 from contextlib import contextmanager
+from collections.abc import Mapping
 from typing import Callable, Iterator
 
 from host.tools.results import OpenedStreamingAsset, StreamingAssetError
@@ -38,6 +39,7 @@ def open_downloaded_video(
     filename_stem: str,
     map_failure: Callable[[WebRequestError], str],
     timeout: int = 120,
+    headers: Mapping[str, str] | None = None,
 ) -> Iterator[OpenedStreamingAsset]:
     """Open a provider's finished video for the host to stream into the workspace.
 
@@ -49,6 +51,7 @@ def open_downloaded_video(
         url, provider=provider, filename_stem=filename_stem, map_failure=map_failure,
         kind="video", suffixes=VIDEO_SUFFIXES, min_bytes=MIN_VIDEO_BYTES,
         timeout=timeout,
+        headers=headers,
     ) as opened:
         yield opened
 
@@ -61,12 +64,13 @@ def open_downloaded_image(
     filename_stem: str,
     map_failure: Callable[[WebRequestError], str],
     timeout: int = 120,
+    headers: Mapping[str, str] | None = None,
 ) -> Iterator[OpenedStreamingAsset]:
     """Stream a completed image with the same size/type bounds as video."""
     with _open_downloaded_media(
         url, provider=provider, filename_stem=filename_stem, map_failure=map_failure,
         kind="image", suffixes={"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"},
-        min_bytes=1, timeout=timeout,
+        min_bytes=1, timeout=timeout, headers=headers,
     ) as opened:
         yield opened
 
@@ -79,12 +83,13 @@ def open_downloaded_audio(
     filename_stem: str,
     map_failure: Callable[[WebRequestError], str],
     timeout: int = 120,
+    headers: Mapping[str, str] | None = None,
 ) -> Iterator[OpenedStreamingAsset]:
     """Stream generated MP3 speech through the same bounded asset handoff."""
     with _open_downloaded_media(
         url, provider=provider, filename_stem=filename_stem, map_failure=map_failure,
         kind="audio", suffixes={"audio/mpeg": ".mp3"}, min_bytes=1,
-        timeout=timeout,
+        timeout=timeout, headers=headers,
     ) as opened:
         yield opened
 
@@ -100,11 +105,12 @@ def _open_downloaded_media(
     suffixes: dict[str, str],
     min_bytes: int,
     timeout: int,
+    headers: Mapping[str, str] | None = None,
 ) -> Iterator[OpenedStreamingAsset]:
     failure_message = f"{provider} {kind} download failed."
     try:
         with open_response_stream(
-            "GET", url, failure_message=failure_message, timeout=timeout
+            "GET", url, headers=headers, failure_message=failure_message, timeout=timeout
         ) as (source, response_headers):
             raw_length = response_headers.get("content-length", "")
             if not raw_length.isascii() or not raw_length.isdecimal():
