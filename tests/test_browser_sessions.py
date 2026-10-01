@@ -84,6 +84,17 @@ class BrowserSessionsTests(unittest.TestCase):
         lease = self.engine.dispatch("open", {})["lease"]
         self.engine.dispatch("save", {"lease": lease})
 
+    def test_readiness_uses_open_browser_without_closing_operator_window(self):
+        accounts = Accounts(self.store, factory=FakeBrowser)
+        login = accounts.dispatch("create", {"provider": "x"})
+        accounts.dispatch("open", login)
+        profile = accounts.pending[login["login_id"]]
+        with patch.object(profile.browser, "frame", return_value="image") as frame, patch.object(profile.browser, "close") as close:
+            self.assertEqual(accounts.dispatch("ready", {}), {"ready": True})
+        frame.assert_called_once()
+        close.assert_not_called()
+        self.assertTrue(profile.lease)
+
     def test_takeover_pauses_until_saved_or_checked(self):
         self.connect()
         self.assertEqual(self.engine.status()["state"], "connected")
@@ -362,6 +373,11 @@ class BrowserSessionsTests(unittest.TestCase):
         for protocol in ("udp", "tcp"):
             self.assertLess(bootstrap.index(f'meta skuid "kern-browser" {protocol} dport 53 accept'), private_drop)
         self.assertNotIn("kern-browser-network", bootstrap)
+        debug_allow = bootstrap.index('tcp dport @BROWSER_DEBUG_PORT@ meta skuid "kern-browser" accept')
+        debug_drop = bootstrap.index('oif lo tcp dport @BROWSER_DEBUG_PORT@ drop')
+        self.assertLess(debug_allow, debug_drop)
+        self.assertLess(debug_drop, private_drop)
+        self.assertLess(bootstrap.index('oif lo tcp sport @BROWSER_DEBUG_PORT@ drop'), private_drop)
 
     def test_input_and_origin_validation(self):
         for url in ["file:///etc/passwd", "http://x.com", "https://127.0.0.1", "https://[::1]", "https://169.254.169.254", "https://user:password@x.com", "https://x.com:7443"]:

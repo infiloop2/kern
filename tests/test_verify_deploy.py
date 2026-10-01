@@ -266,6 +266,11 @@ class RunnerBackedCheckTests(unittest.TestCase):
             (user, verify_deploy.EXTERNAL_PROBE_HOST, "blocked")
             for user in ("kern-agent", "kern-tools", "kern-proxy", "kern-host-inference", "cloudflared")
         })
+        debug_probes = {(user, expectation) for user, host, port, expectation, _ in enforced
+                        if port == verify_deploy.BROWSER_DEBUG_PORT and host == "127.0.0.1"}
+        self.assertEqual(debug_probes, {("kern-browser", "reachable"), *(
+            (user, "blocked") for user in ("kern-agent", "kern-tools", "kern-proxy", "kern-admin", "kern-host-inference", "cloudflared")
+        )})
         # Every enforced "reachable" expectation is loopback: a healthy deploy
         # on an egress-restricted customer network can never false-fail, since
         # blocked expectations pass vacuously when the network is down.

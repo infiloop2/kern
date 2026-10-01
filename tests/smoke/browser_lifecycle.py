@@ -26,7 +26,7 @@ def probe() -> None:
     temporary = PROC / before['MainPID'] / 'root/tmp'
 
     def files() -> set[str]:
-        return {str(path) for pattern in ('kern-browser-display-*', 'playwright_chromiumdev_profile-*')
+        return {str(path) for pattern in ('kern-browser-display-*', 'kern-browser-profile-*')
                 for path in temporary.glob(pattern)}
 
     baseline_files = files()
