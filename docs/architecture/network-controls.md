@@ -338,8 +338,15 @@ Guard inputs that are secrets or account pins live where the proxy can read
 no more than it needs: `proxy_provider_pins` tells the proxy which approved
 OpenAI/Claude account is currently allowed (SELECT-only for the proxy role).
 The admin service may clear that temporary permission when a runtime becomes
-inactive, while the user-controlled anchor remains in `provider_accounts`. The
-GitHub credential — a pasted PAT or a GitHub App key with its minted
+inactive, while the user-controlled anchor remains in `provider_accounts`.
+
+Codex's exact bodyless, queryless workspace-discovery GET is an authentication
+read: its bearer claim must match its account header, but it needs no pin or
+pending operator login. Other requests, including WebSocket upgrades, still
+require the data-plane pin. Discovery alone never approves an account or
+enables inference; the proxy needs no access to OAuth rows or account metadata.
+
+The GitHub credential — a pasted PAT or a GitHub App key with its minted
 installation tokens — lives in the admin-owned `github_credential` table with
 no proxy grant at all, because the network guard only decides repository
 reachability and never needs the secret; its secret columns are additionally

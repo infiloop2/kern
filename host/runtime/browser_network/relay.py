@@ -4,6 +4,7 @@ from __future__ import annotations
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import ipaddress
 import select
+import secrets
 import socket
 import subprocess
 import threading
@@ -15,7 +16,7 @@ from host.constants import BROWSER_NETWORK_PORT
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser_network.config import Settings
 from host.runtime.browser.storage import Store
-from host.runtime.browser_network.transport import ConnectionFailure, connect_proxy, failure, target
+from host.runtime.browser_network.transport import ConnectionFailure, SessionEnded, connect_proxy, failure, target
 from host.runtime.core import host_errors
 
 
@@ -40,7 +41,19 @@ class Network:
             except OSError as exc:
                 raise failure("direct_connection", exc, host=host) from exc
         elif credentials is not None:
-            stream = connect_proxy(("gate.decodo.com", 7000), host, credentials)
+            try:
+                stream = connect_proxy(("gate.decodo.com", 7000), host, credentials)
+            except SessionEnded:
+                with self.lock:
+                    if generation != self.generation:
+                        raise BrowserError("Browser connection settings changed during connection. Retry.")
+                    # Concurrent failures of the same session share one renewal.
+                    # Keep established tunnels alive: they may carry a submission.
+                    if self.settings.value["session"] == value["session"]:
+                        self.settings.save({**self.settings.value, "session": secrets.token_hex(12)})
+                    credentials = (self.settings.proxy_username(), self.settings.value["password"])
+                # Only the rejected CONNECT is retried, at most once per dial.
+                stream = connect_proxy(("gate.decodo.com", 7000), host, credentials)
         else:
             raise BrowserError("Browser connection settings are invalid.")
         with self.lock:

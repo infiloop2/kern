@@ -150,7 +150,7 @@ class AdminUiStaticTests(unittest.TestCase):
             app,
         )
         self.assertIn(
-            "body.viewport-panel-open.workspace-input-focused .runtime-overview",
+            "body.viewport-panel-open.workspace-keyboard-open .runtime-overview",
             admin_css,
         )
         self.assertIn("keepLatestMessageAboveComposer", (

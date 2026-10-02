@@ -13,7 +13,7 @@ from browser_fakes import MemoryStore
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser_network.config import LOCATIONS, Settings
 from host.runtime.browser_network.relay import Network, TunnelHandler, TunnelServer
-from host.runtime.browser_network.transport import connect_proxy, proxy_details, target
+from host.runtime.browser_network.transport import ConnectionFailure, SessionEnded, connect_proxy, proxy_details, target
 from host.runtime.browser.accounts import Accounts
 from host.runtime.browser.service import authorized
 
@@ -133,6 +133,91 @@ class BrowserNetworkTests(unittest.TestCase):
             proxy.assert_called_once()
             direct.assert_not_called()
             self.assertFalse(self.network.connections)
+
+    def test_ended_session_renews_once_persists_and_keeps_active_tunnels(self):
+        self.network.dispatch("save", DECODO)
+        original = self.network.settings.value.copy()
+        active, upstream = Mock(), Mock()
+        self.network.connections.add(active)
+        with patch("host.runtime.browser_network.relay.connect_proxy", side_effect=[SessionEnded("ended"), upstream]) as proxy:
+            self.assertIs(self.network.dial("x.com:443"), upstream)
+        self.assertEqual(proxy.call_count, 2)
+        self.assertNotEqual(proxy.call_args_list[0].args[2], proxy.call_args_list[1].args[2])
+        renewed = Settings(self.store).value
+        self.assertNotEqual(renewed["session"], original["session"])
+        self.assertEqual({**renewed, "session": original["session"]}, original)
+        self.assertEqual(proxy.call_args.args[2], (Settings(self.store).proxy_username(), DECODO["password"]))
+        active.close.assert_not_called()
+        active.shutdown.assert_not_called()
+
+    def test_second_session_failure_stops_without_fallback(self):
+        self.network.dispatch("save", DECODO)
+        with patch("host.runtime.browser_network.relay.connect_proxy", side_effect=SessionEnded("ended")) as proxy, patch("socket.create_connection") as direct:
+            with self.assertRaises(SessionEnded):
+                self.network.dial("x.com:443")
+            self.assertEqual(proxy.call_count, 2)
+            direct.assert_not_called()
+        self.assertFalse(self.network.connections)
+
+    def test_failed_renewal_persistence_does_not_dial_unstored_session(self):
+        self.network.dispatch("save", DECODO)
+        original = self.network.settings.value.copy()
+        with patch.object(self.store, "save_settings", side_effect=OSError("unavailable")), patch("host.runtime.browser_network.relay.connect_proxy", side_effect=SessionEnded("ended")) as proxy:
+            with self.assertRaises(OSError):
+                self.network.dial("x.com:443")
+            proxy.assert_called_once()
+        self.assertEqual(self.network.settings.value, original)
+
+    def test_concurrent_ended_sessions_share_renewal(self):
+        from concurrent.futures import ThreadPoolExecutor
+        self.network.dispatch("save", DECODO)
+        original = self.network.settings.proxy_username()
+        barrier = threading.Barrier(2)
+        def connect(endpoint, host, credentials):
+            if credentials[0] == original:
+                barrier.wait(timeout=3)
+                raise SessionEnded("ended")
+            return Mock()
+        with patch.object(self.store, "save_settings", wraps=self.store.save_settings) as save, patch("host.runtime.browser_network.relay.connect_proxy", side_effect=connect) as proxy, ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(self.network.dial, "x.com:443") for _ in range(2)]
+            for future in futures:
+                future.result(timeout=4)
+            save.assert_called_once()
+            self.assertEqual(proxy.call_count, 4)
+            renewed = [call.args[2][0] for call in proxy.call_args_list if call.args[2][0] != original]
+            self.assertEqual(renewed, [self.network.settings.proxy_username()] * 2)
+
+    def test_settings_change_during_session_failure_prevents_renewal(self):
+        self.network.dispatch("save", DECODO)
+        def connect(*args):
+            self.network.dispatch("save", {**DECODO, "location": "london"})
+            raise SessionEnded("ended")
+        with patch("host.runtime.browser_network.relay.connect_proxy", side_effect=connect) as proxy:
+            with self.assertRaisesRegex(BrowserError, "changed during connection"):
+                self.network.dial("x.com:443")
+            proxy.assert_called_once()
+        self.assertEqual(self.network.settings.value["location"], "london")
+
+    def test_only_explicit_complete_session_rejection_is_retryable(self):
+        cases = [
+            (502, "Bad gateway. The session has ended.", True, True),
+            (502, "Bad gateway. The session has failed. Please start a new session.", True, True),
+            (502, "Bad gateway. Routing failed.", True, False),
+            (407, "The session has ended.", True, False),
+            (502, "The session has ended.", False, False),
+        ]
+        for status, reason, complete, retryable in cases:
+            with self.subTest(status=status, reason=reason, complete=complete):
+                client, peer = socket.socketpair()
+                with peer:
+                    peer.sendall(f"HTTP/1.1 {status} Error\r\nx-error-message: {reason}\r\n".encode() + (b"\r\n" if complete else b""))
+                    peer.shutdown(socket.SHUT_WR)
+                    with patch("socket.create_connection", return_value=client), patch("host.runtime.browser_network.transport.ssl.create_default_context") as tls:
+                        tls.return_value.wrap_socket.return_value = client
+                        with self.assertRaises(ConnectionFailure) as caught:
+                            connect_proxy(("gate.decodo.com", 7000), "x.com", ("example", "session"))
+                    self.assertEqual(isinstance(caught.exception, SessionEnded), retryable)
+                    self.assertEqual(client.fileno(), -1)
 
     def test_test_uses_local_relay_without_credentials_and_has_total_deadline(self):
         self.network.dispatch("save", DECODO)

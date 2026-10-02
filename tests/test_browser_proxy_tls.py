@@ -66,12 +66,32 @@ class BrowserProxyTlsTests(unittest.TestCase):
                 self.assertEqual(context["error_type"], "SSLCertVerificationError")
 
     def test_https_ip_check_inside_verified_https_proxy(self):
+        self.check_https_ip()
+
+    def test_https_ip_check_recovers_ended_session_through_shared_relay(self):
+        self.check_https_ip(renew=True)
+
+    def check_https_ip(self, *, renew=False):
         client, proxy_peer = socket.socketpair()
         target_pipe, website_peer = socket.socketpair()
         for stream in (client, proxy_peer, target_pipe, website_peer):
             stream.settimeout(3)
             self.addCleanup(stream.close)
         headers, errors = [], []
+        expired_client, expired_peer = socket.socketpair()
+        for stream in (expired_client, expired_peer):
+            stream.settimeout(3)
+            self.addCleanup(stream.close)
+        def expired_proxy():
+            try:
+                with self.server_context.wrap_socket(expired_peer, server_side=True) as secure:
+                    data = b''
+                    while not data.endswith(b'\r\n\r\n'):
+                        data += secure.recv(1)
+                    headers.append(data)
+                    secure.sendall(b"HTTP/1.1 502 Bad Gateway\r\nx-error-message: Bad gateway. We couldn't find a suitable exit node and the session has ended. Please adjust your filters or start a new session and try again.\r\n\r\n")
+            except Exception as exc:
+                errors.append(exc)
         def proxy():
             try:
                 with self.server_context.wrap_socket(proxy_peer, server_side=True) as secure:
@@ -103,19 +123,20 @@ class BrowserProxyTlsTests(unittest.TestCase):
                     secure.sendall(b'HTTP/1.0 200 OK\r\nContent-Length: 14\r\n\r\n93.184.215.14\n')
             except Exception as exc:
                 errors.append(exc)
-        workers = [threading.Thread(target=fn) for fn in (proxy, website)]
+        workers = [threading.Thread(target=fn) for fn in ([expired_proxy] if renew else []) + [proxy, website]]
         for worker in workers:
             worker.start()
         from browser_fakes import MemoryStore
         network = Network(MemoryStore())
         network.dispatch('save', {'mode': 'decodo', 'username': 'fixture', 'password': 'secret',
                                  'location': 'new_york'})
+        original = network.settings.proxy_username()
         try:
             with TunnelServer(network, port=8009) as relay:
                 relay_worker = threading.Thread(target=relay.serve_forever)
                 relay_worker.start()
                 try:
-                    with patch('socket.create_connection', return_value=client), patch('ssl.create_default_context', return_value=self.trusted), patch('host.runtime.browser_network.relay.BROWSER_NETWORK_PORT', 8009), patch.dict(os.environ, {'CURL_CA_BUNDLE': str(self.cert)}):
+                    with patch('socket.create_connection', side_effect=([expired_client] if renew else []) + [client]), patch('ssl.create_default_context', return_value=self.trusted), patch('host.runtime.browser_network.relay.BROWSER_NETWORK_PORT', 8009), patch.dict(os.environ, {'CURL_CA_BUNDLE': str(self.cert)}):
                         self.assertEqual(network.test(), {'mode': 'decodo', 'ip': '93.184.215.14'})
                 finally:
                     relay.shutdown()
@@ -127,5 +148,10 @@ class BrowserProxyTlsTests(unittest.TestCase):
                 worker.join(4)
         self.assertTrue(all(not worker.is_alive() for worker in workers))
         self.assertFalse(errors, errors)
+        self.assertEqual(len(headers), 2 if renew else 1)
+        if renew:
+            self.assertNotEqual(headers[0], headers[1])
+            self.assertNotEqual(network.settings.proxy_username(), original)
+            self.assertEqual(Network(network.settings.store).settings.proxy_username(), network.settings.proxy_username())
         self.assertIn(b'Proxy-Authorization: Basic ', headers[0])
         self.assertTrue(headers[0].startswith(b'CONNECT api.ipify.org:443 HTTP/1.1'))

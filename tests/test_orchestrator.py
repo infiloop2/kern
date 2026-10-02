@@ -28,6 +28,8 @@ from host.runtime.workspace import schedules
 from host.runtime.workspace.chat import backend as chat
 from host.network_integrations.claude import guard as claude_guard
 from host.network_integrations.claude.manifest import ClaudeIntegration
+from host.network_integrations.openai import guard as openai_guard
+from test_network_proxy import openai_bearer
 
 
 def anthropic_request_denied(config, method, host, path, headers, attest_account=None):
@@ -2704,6 +2706,54 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(read_proxy_openai_account_id(), "acct-local")
         self.assertIsNone(state.oauth_login("codex"))
 
+    def test_codex_reconnect_requires_discovery_before_login_completion(self) -> None:
+        from test_codex_app_server import FakeLoginServer
+
+        for runtime in ("codex", "codex-2", "codex-3"):
+            with self.subTest(runtime=runtime):
+                state.save_openai_account({"account_id": "old", "operator_approval": "codex_device_login"}, runtime_type=runtime)
+                state.save_proxy_openai_account_id("old", runtime_type=runtime)
+                orchestrator.reset_linked_account(runtime)
+                headers = [("ChatGPT-Account-ID", "new"), ("Authorization", openai_bearer("new"))]
+                self.assertIsNone(openai_guard.request_denied(
+                    object(), "GET", "chatgpt.com", openai_guard.WORKSPACE_DISCOVERY_PATH, "", headers, b"",
+                ))
+                self.assertIsNone(state.read_openai_account(runtime_type=runtime).get("account_id"))
+                self.assertIsNone(state.read_proxy_openai_account_id(runtime_type=runtime))
+                self.assertIsNotNone(openai_guard.request_denied(
+                    object(), "POST", "chatgpt.com", "/backend-api/codex/responses", "", headers, b"{}",
+                ))
+                seed_oauth_login(runtime, {
+                    "status": "awaiting_login", "device_code": "CODE", "login_id": "login",
+                    "login_url": "https://auth.openai.com/device", "expires_at": "2099-01-01T00:00:00Z",
+                })
+
+                class RoutingLoginServer(FakeLoginServer):
+                    def call(self, method, params, *, timeout=60.0):
+                        if method == "account/read":
+                            denial = openai_guard.request_denied(
+                                object(), "GET", "chatgpt.com", openai_guard.WORKSPACE_DISCOVERY_PATH, "", headers, b"",
+                            )
+                            if denial is not None:
+                                raise orchestrator.codex_app_server.CodexAppServerError("workspace routing discovery failed")
+                            # Codex 0.159 emits success only after discovery.
+                            self.completed.add("login")
+                        return super().call(method, params, timeout=timeout)
+
+                server = RoutingLoginServer({"email": "user@example.com"}, runtime_type=runtime)
+                with orchestrator.codex_app_server._login_lock:
+                    orchestrator.codex_app_server._parked_logins[runtime] = orchestrator.codex_app_server._ParkedLogin(server=server, login_id="login")
+                try:
+                    with patch.object(orchestrator.codex_app_server, "read_codex_account_id", return_value="new"):
+                        self.assertEqual(orchestrator.refresh_runtime_status(runtime), "active")
+                    self.assertEqual(state.read_openai_account(runtime_type=runtime)["account_id"], "new")
+                    self.assertEqual(state.read_proxy_openai_account_id(runtime_type=runtime), "new")
+                    self.assertIsNone(state.oauth_login(runtime))
+                    self.assertTrue(server.closed)
+                finally:
+                    orchestrator.codex_app_server.close_login_server(runtime)
+                    orchestrator.reset_linked_account(runtime)
+
     def test_grok_initial_login_uses_status_only_pin_before_entitlement_probe(self) -> None:
         save_policy(
             {"network_integrations": {"xai": {"enabled": True}}},
@@ -3548,6 +3598,45 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(state.read_bedrock_account(), {})
         self.assertIsNone(state.read_bedrock_credential_secret())
         self.assertEqual(orchestrator.runtime_status("hermes"), "awaiting_login")
+
+
+class RuntimeStatusDiagnosticTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(patch.dict(orchestrator._RUNTIME_STATUSES, {}, clear=True))
+        self.warning = self.enterContext(patch.object(orchestrator.host_errors, "report_warning"))
+
+    def test_codex_error_transitions_are_reported_without_repeating_polls(self) -> None:
+        for runtime in ("codex", "codex-2", "codex-3"):
+            with self.subTest(runtime=runtime):
+                self.warning.reset_mock()
+                orchestrator._set_runtime_status(runtime, "awaiting_login")
+                self.warning.assert_not_called()
+                orchestrator._set_runtime_status(runtime, "error", "workspace routing discovery failed; secret bearer token")
+                self.warning.assert_called_once_with(
+                    "orchestrator.runtime_status", "Codex account validation failed",
+                    kind="provider_failure",
+                    context={"agent_runtime": runtime, "previous_status": "awaiting_login",
+                             "failure_code": "workspace_routing_failed", "stage": "workspace_discovery"},
+                )
+                for _ in range(3):
+                    orchestrator._set_runtime_status(runtime, "error", "workspace routing discovery failed; different raw stderr")
+                self.assertEqual(self.warning.call_count, 1)
+                orchestrator._set_runtime_status(runtime, "error", "OpenAI account changed; reset the linked account")
+                self.assertEqual(self.warning.call_count, 2)
+                self.assertEqual(self.warning.call_args.kwargs["context"]["failure_code"], "account_mismatch")
+                orchestrator._set_runtime_status(runtime, "active")
+                orchestrator._set_runtime_status(runtime, "error", "workspace routing discovery failed")
+                self.assertEqual(self.warning.call_count, 3)
+
+    def test_unknown_provider_details_are_not_copied_to_diagnostics(self) -> None:
+        for message, code in (("timed out; private response body", "provider_timeout"),
+                              ("account without a supported account id; email", "account_id_unavailable"),
+                              ("unknown token=secret", "provider_error")):
+            with self.subTest(message=message):
+                orchestrator._set_runtime_status("codex-2", "active")
+                orchestrator._set_runtime_status("codex-2", "error", message)
+                self.assertEqual(self.warning.call_args.kwargs["context"]["failure_code"], code)
+                self.assertNotIn(message, str(self.warning.call_args))
 
 
 class StartBackgroundLoopsOrderTests(unittest.TestCase):

@@ -30,6 +30,20 @@ def journal_row(
 
 
 class HostErrorReporterTests(unittest.TestCase):
+    @patch("host.runtime.core.host_errors.emit_record")
+    def test_codex_validation_failure_reaches_the_diagnostic_collector(self, emit: Mock) -> None:
+        from host.runtime.agent_runtime import orchestrator
+
+        with patch.dict(orchestrator._RUNTIME_STATUSES, {}, clear=True):
+            orchestrator._set_runtime_status("codex-2", "error", "workspace routing discovery failed; private token")
+        record = emit.call_args.args[0]
+        _, event = collector.parse_journal_record(journal_row(record))
+        self.assertIsNotNone(event)
+        self.assertEqual(event["kind"], "provider_failure")
+        self.assertEqual(event["context"]["agent_runtime"], "codex-2")
+        self.assertEqual(event["context"]["failure_code"], "workspace_routing_failed")
+        self.assertNotIn("private token", json.dumps(event))
+
     def test_exception_record_is_bounded_and_omits_arbitrary_context(self) -> None:
         secret = object()
         try:

@@ -12,6 +12,10 @@ request data are denied while cache-backed search remains allowed. The upstream
 enables search and remote MCP only from parsed request fields, so prompt text
 that merely mentions a tool name carries no capability and enforcement is
 structural. The same decision applies per-message on WebSocket connections.
+
+The exact bodyless, queryless workspace-discovery GET is an authentication
+read. Its bearer claim must match its account header, but it needs no account
+pin or pending login. Inference continues to require the approved pin.
 """
 
 from __future__ import annotations
@@ -44,6 +48,7 @@ ROUTES = {
 }
 GUARDED_HOSTS = frozenset({"api.openai.com", "chatgpt.com"})
 RESPONSES_WEBSOCKET_PATH = "/v1/responses"
+WORKSPACE_DISCOVERY_PATH = "/backend-api/wham/accounts/check"
 
 
 def host_allowed(config: ManagedIntegration, host: str) -> bool:
@@ -80,8 +85,19 @@ def request_denied(
         return "network_policy_denied"
     if lowered_host not in GUARDED_HOSTS:
         return None
-    account_ids = read_proxy_openai_account_ids()
-    if not account_ids:
+    # Codex 0.159 discovers routing before account/read and device-login
+    # completion. Treat this exact metadata read as authentication bootstrap;
+    # discovery itself neither approves an account nor permits inference.
+    workspace_discovery = (
+        lowered_host == "chatgpt.com"
+        and method.upper() == "GET"
+        and path == WORKSPACE_DISCOVERY_PATH
+        and not query
+        and not body
+        and not any(key.lower() == "upgrade" for key, _ in headers)
+    )
+    account_ids = set() if workspace_discovery else read_proxy_openai_account_ids()
+    if not account_ids and not workspace_discovery:
         return "openai_account_unavailable"
     # The header must be present AND match. A missing header is a denial:
     # otherwise the agent omits it and OpenAI resolves the account from the
@@ -90,7 +106,11 @@ def request_denied(
     if not presented:
         return "openai_account_header_required"
     account_id = presented[0]
-    if account_id not in account_ids or any(value != account_id for value in presented):
+    if (
+        not account_id
+        or any(value != account_id for value in presented)
+        or (account_id not in account_ids and not workspace_discovery)
+    ):
         return "openai_account_mismatch"
     denial = _token_account_denial(headers, account_id)
     if denial is not None:
@@ -99,7 +119,7 @@ def request_denied(
 
 
 def _token_account_denial(headers: list[tuple[str, str]], account_id: str) -> str | None:
-    """Bind the credential, not just the routing header, to the pinned account.
+    """Bind the credential, not just the routing header, to the account id.
 
     The ``chatgpt-account-id`` header names an account but authenticates
     nothing; the Authorization bearer is the credential the upstream acts on,

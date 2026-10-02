@@ -16,6 +16,10 @@ class ConnectionFailure(BrowserError):
     """A sanitized connection error safe to return through the local relay."""
 
 
+class SessionEnded(ConnectionFailure):
+    """Decodo explicitly rejected CONNECT because its sticky session ended."""
+
+
 def failure(stage: str, exc: Exception, *, host: str = "", status: int | None = None,
             detail: str = "", facts: dict[str, Any] | None = None) -> ConnectionFailure:
     """Expose connection facts and the redacted Decodo error header."""
@@ -132,5 +136,15 @@ def connect_proxy(endpoint: tuple[str, int], host: str, credentials: tuple[str, 
             "error_message": redact(str(exc), credentials),
             **proxy_details(bytes(response), credentials),
         }
-        raise failure(stage, exc, host=host, status=status_code,
-                      detail=facts.get("proxy_error", ""), facts=facts) from exc
+        error = failure(stage, exc, host=host, status=status_code,
+                        detail=facts.get("proxy_error", ""), facts=facts)
+        # Classify only complete gateway CONNECT headers, before diagnostic
+        # redaction/truncation. Never retry generic 502s or tunneled requests.
+        if stage == "proxy_connect" and status_code == 502 and response.endswith(b"\r\n\r\n"):
+            for line in bytes(response).split(b"\r\n")[1:]:
+                name, _, value = line.partition(b":")
+                if name.lower() == b"x-error-message" and any(
+                    reason in value.lower() for reason in (b"the session has ended", b"the session has failed")
+                ):
+                    raise SessionEnded(str(error)) from exc
+        raise error from exc

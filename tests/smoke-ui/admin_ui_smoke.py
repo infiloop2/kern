@@ -2562,7 +2562,9 @@ def iphone_pwa_swipe_smoke(page, url: str) -> None:
     composer = page.locator("#new-task")
     composer.focus()
     expect(page.locator("body")).to_have_class(re.compile(r"\bworkspace-input-focused\b"))
+    expect(page.locator("#runtime-overview")).to_be_visible()
     page.set_viewport_size({"width": IPHONE_VIEWPORT["width"], "height": 500})
+    expect(page.locator("#runtime-overview")).to_be_hidden()
     frozen_keyboard_height = page.evaluate(
         "() => getComputedStyle(document.documentElement)"
         ".getPropertyValue('--kern-viewport-height').trim()"
@@ -2572,6 +2574,45 @@ def iphone_pwa_swipe_smoke(page, url: str) -> None:
             "iPhone PWA resized the host while its keyboard owned the viewport: "
             f"before={full_viewport_height}, keyboard={frozen_keyboard_height}"
         )
+    page.set_viewport_size(IPHONE_VIEWPORT)
+    expect(composer).to_be_focused()
+    expect(page.locator("#runtime-overview")).to_be_visible()
+    # A restored/backgrounded page may resume at full height without a resize
+    # notification. Reconcile the row from the live viewport on each wake path.
+    for wake_event in ("pageshow", "visibilitychange"):
+        page.evaluate("""() => {
+          Object.defineProperty(visualViewport, 'height', {configurable: true, value: 500});
+          visualViewport.dispatchEvent(new Event('resize'));
+        }""")
+        expect(page.locator("#runtime-overview")).to_be_hidden()
+        page.evaluate("""eventName => {
+          delete visualViewport.height;
+          (eventName === 'pageshow' ? window : document).dispatchEvent(new Event(eventName));
+        }""", wake_event)
+        expect(composer).to_be_focused()
+        expect(page.locator("#runtime-overview")).to_be_visible()
+    # Pinch zoom changes CSS viewport height without opening the keyboard.
+    # Normalize by scale while still detecting a keyboard when zoomed.
+    page.evaluate("""() => {
+      Object.defineProperty(visualViewport, 'height', {configurable: true, value: 422});
+      Object.defineProperty(visualViewport, 'scale', {configurable: true, value: 2});
+      visualViewport.dispatchEvent(new Event('resize'));
+    }""")
+    expect(page.locator("#runtime-overview")).to_be_visible()
+    page.evaluate("""() => {
+      Object.defineProperty(visualViewport, 'height', {configurable: true, value: 250});
+      visualViewport.dispatchEvent(new Event('resize'));
+    }""")
+    expect(page.locator("#runtime-overview")).to_be_hidden()
+    page.evaluate("""() => {
+      delete visualViewport.height;
+      delete visualViewport.scale;
+      visualViewport.dispatchEvent(new Event('resize'));
+    }""")
+    expect(composer).to_be_focused()
+    expect(page.locator("#runtime-overview")).to_be_visible()
+    page.set_viewport_size({"width": IPHONE_VIEWPORT["width"], "height": 500})
+    expect(page.locator("#runtime-overview")).to_be_hidden()
     page.set_viewport_size({"width": 844, "height": 390})
     page.wait_for_function(
         "() => getComputedStyle(document.documentElement)"

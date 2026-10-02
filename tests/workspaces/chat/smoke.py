@@ -1150,11 +1150,15 @@ def _assert_mobile_keyboard_viewport_recovery(page: Any, frame: Any) -> None:
         (375, 667, 360),
     ):
         page.set_viewport_size({"width": width, "height": full_height})
+        # Each device size starts with the reader at the latest message; a
+        # resize between devices while blurred may preserve an older anchor.
+        frame.locator("#chat-scroll").evaluate("element => { element.scrollTop = element.scrollHeight; }")
         composer.focus()
         composer.fill("keyboard viewport probe")
         expect(body).to_have_class(re.compile(r"\bworkspace-input-focused\b"))
-        expect(page.locator("#runtime-overview")).to_be_hidden()
+        expect(page.locator("#runtime-overview")).to_be_visible()
         page.set_viewport_size({"width": width, "height": keyboard_height})
+        expect(page.locator("#runtime-overview")).to_be_hidden()
         _assert_mobile_app_owns_viewport(page, frame, f"{width}x{full_height} keyboard")
 
         # ResizeObserver and scroll anchoring settle on animation frames after
@@ -1171,8 +1175,30 @@ def _assert_mobile_keyboard_viewport_recovery(page: Any, frame: Any) -> None:
           requestAnimationFrame(check);
         })""")
 
-        composer.evaluate("element => element.blur()")
+        # iOS can dismiss the keyboard without blurring the composer. The
+        # usage row must return without navigating away from the thread.
         page.set_viewport_size({"width": width, "height": full_height})
+        expect(composer).to_be_focused()
+        expect(page.locator("#runtime-overview")).to_be_visible()
+        if width == 390:
+            # Safari outside standalone mode must distinguish rotation from
+            # keyboard contraction while the dismissed composer keeps focus.
+            page.set_viewport_size({"width": 844, "height": 390})
+            expect(composer).to_be_focused()
+            expect(page.locator("#runtime-overview")).to_be_visible()
+            page.set_viewport_size({"width": 844, "height": 230})
+            expect(page.locator("#runtime-overview")).to_be_hidden()
+            page.set_viewport_size({"width": 844, "height": 390})
+            expect(page.locator("#runtime-overview")).to_be_visible()
+            page.set_viewport_size({"width": width, "height": full_height})
+            expect(page.locator("#runtime-overview")).to_be_visible()
+            # Let the final portrait layout pin the transcript before blur
+            # cancels the composer's pending animation frame.
+            page.wait_for_function("""() => {
+              const element = window.KernWorkspaceRoots.chat.getElementById('chat-scroll');
+              return element.scrollHeight - element.scrollTop - element.clientHeight <= 1;
+            }""")
+        composer.evaluate("element => element.blur()")
         expect(body).not_to_have_class(re.compile(r"\bworkspace-input-focused\b"))
         expect(page.locator("#runtime-overview")).to_be_visible()
         _assert_mobile_app_owns_viewport(page, frame, f"{width}x{full_height} restored")
@@ -1190,6 +1216,8 @@ def _assert_mobile_keyboard_viewport_recovery(page: Any, frame: Any) -> None:
     _open_mobile_host_navigation(page)
     page.get_by_role("button", name="New chat", exact=True).click()
     expect(body).to_have_class(re.compile(r"\bviewport-panel-open\b"))
+    composer.focus()
+    expect(page.locator("#runtime-overview")).to_be_visible()
     _assert_mobile_app_owns_viewport(page, frame, "390x844 app reopened")
 
 

@@ -130,7 +130,11 @@ Saved account states are exactly:
 There is no saved `connecting` or `disconnected` state. New logins are temporary,
 identified by an operator-only `login_id`. Only successful Save creates a saved
 account. Cancel, ten minutes of inactivity, or a service restart discards the
-unfinished login and its browser files. Up to five saved accounts are allowed;
+unfinished login and its browser files. Connect X account also closes existing
+operator control and discards any unfinished login, including one whose popup
+closed without delivering its cancel request. Saved accounts remain paused and
+retain their snapshots; old login IDs and leases cannot control the new login.
+Up to five saved accounts are allowed;
 only one interactive browser can be open at once.
 
 Opening an existing account marks it `needs_attention` before browser control
@@ -160,7 +164,7 @@ All bodies are JSON objects. Below, `account` means `{account_id: string}`;
 | --- | --- | --- |
 | `ready` | `{}` | `{ready: true}` after a temporary Chromium frame probe. |
 | `list` | `{}` | `{accounts: Account[]}`; no temporary logins, usage data, or secrets. |
-| `create` | `{provider: "x"}` | `{login_id}`; allocates one temporary login without creating an account. |
+| `create` | `{provider: "x"}` | `{login_id}`; replaces existing operator control and allocates a fresh temporary login without creating an account. |
 | `open` | reference | `{site, lease, width, height}`; launches the fixed provider URL and grants operator control. |
 | `frame` | control | `{image, origin}`; JPEG base64 plus current origin, with no-store admin responses. |
 | `input` | control plus input fields below | `{ok: true}`; input refreshes the ten-minute lease. |
@@ -195,6 +199,11 @@ the selected remote field. A compact phone text bar supplies native keyboard
 input. Login challenges remain operator-controlled. There is no editable
 address bar; verification providers may be opened by X in the same remote view.
 Downloads, file uploads, service workers, and WebSockets are unsupported.
+Close also dismisses a popup whose Open failed or whose control expired, without
+cancelling another window's browser. Save is enabled only while the popup has
+control; Close during startup waits for Open and releases any acquired control.
+Cancel queues in the service's single worker even while a screenshot is busy,
+then validates its lease and closes the browser when the active operation ends.
 
 ## Tools service interface and approval flow
 
@@ -365,6 +374,14 @@ and restarts. It requests 1,440 minutes (24 hours). Saving the same route keeps
 that ID; changing username/location creates a new one. Peer availability can
 shorten the assignment and IPs can change. Kern keeps country/city filters and
 never widens them or falls back to Direct. Website geolocation may disagree.
+
+When complete Decodo CONNECT headers explicitly report an ended or failed
+session (HTTP 502), the shared relay persists a fresh ID with the same route
+and retries that CONNECT once. This covers connection tests, operator logins
+and tool traffic. Concurrent failures of the old ID share its replacement.
+Existing tunnels remain open, and website requests or submissions are never
+replayed by Kern. Generic gateway, authentication and traffic-limit failures
+are surfaced without rotation. A rejected fresh session is also surfaced.
 
 The selected preset supplies the browser language and IANA timezone, including
 daylight-saving transitions. These drive native Chromium locale/Accept-Language and date formatting rather

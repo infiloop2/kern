@@ -187,10 +187,21 @@ class Accounts:
         if operation == "create" and set(body) == {"provider"}:
             if not isinstance(body["provider"], str) or body["provider"] not in PROVIDERS:
                 raise BrowserError("Unsupported browser provider.")
-            if self.pending or any(profile.lease for profile in self.profiles.values()):
-                raise BrowserError("Another login is open. Close it or wait ten minutes for it to expire.")
             if len(self.profiles) >= 5:
                 raise BrowserError("Up to 5 browser accounts can be saved. Disconnect an unused account first.")
+            if agent_action:
+                raise BrowserError("Starting a browser login is operator-only.")
+            # A fresh Connect replaces abandoned control even when pagehide did
+            # not reach the server. Old IDs/leases cannot control the new login.
+            for pending_id, old in list(self.pending.items()):
+                old.dispatch("disconnect", {})
+                del self.pending[pending_id]
+            for old in self.profiles.values():
+                if old.lease:
+                    try:
+                        old.close()
+                    finally:
+                        old.lease = ""
             key = "login_" + secrets.token_hex(16)
             profile = Profile("", body["provider"], self.factory, self.store)
             profile.expires = time.monotonic() + LEASE_SECONDS
