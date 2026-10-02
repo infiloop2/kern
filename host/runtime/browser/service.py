@@ -45,8 +45,11 @@ class Handler(UnixSocketRequestHandler):
         if body is None:
             return
         server: Any = self.server
-        # Let a brief expiry tick finish without dropping an operator input/action.
-        if not server.busy.acquire(timeout=1):
+        # Cancel must queue behind a slow frame instead of being rejected as
+        # busy. The single worker still serializes it and validates its lease.
+        # Other operations retain the admission guard against request backlog.
+        acquired = operation != "cancel"
+        if acquired and not server.busy.acquire(timeout=1):
             self._send_json(409, {"error": "Browser is busy. Wait for the current action to finish."})
             return
         try:
@@ -75,7 +78,8 @@ class Handler(UnixSocketRequestHandler):
                 message += " Check X before approving another attempt."
             self._send_json(503, {"error": message})
         finally:
-            server.busy.release()
+            if acquired:
+                server.busy.release()
 
 
 class Server(UnixSocketServer):

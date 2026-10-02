@@ -255,11 +255,23 @@ Every trigger funnels into the same provider-connection refresh:
      attests the bearer UUID on its first request and does not depend on the
      stored hash having converged.
    - *Codex*: the `account/rateLimits/read` usage read authenticates live.
+     Codex 0.159 also discovers workspace routing on `account/read` and before
+     reporting device-login success. The proxy admits the exact bodyless
+     queryless `GET /backend-api/wham/accounts/check` as an authentication
+     read without a data-plane pin or pending operator login. The bearer claim
+     must still match the account header; WebSocket upgrades are not exempt.
+     Discovery alone never approves an account or enables inference; first
+     capture still requires the successful notification for the exact login.
      If it fails for a pinned account, one `account/read
      {"refreshToken": true}` asks Codex to validate or refresh through the
      unpinned auth endpoint. An unpinned account never triggers that forced
      refresh: it cannot reach the guarded usage endpoint by construction, and
      its fate belongs to the approval flow, not credential recovery.
+     Returned Codex validation errors create a host diagnostic when entering
+     an error category (workspace discovery, account mismatch, missing account
+     id, timeout, or other provider failure). Repeated polls in the same
+     category add no diagnostics. Records contain fixed failure codes and
+     stages, never provider response bodies, credentials or app-server stderr.
 4. **Login capture.** The poll is the sole reader of a parked Codex device
    login; a completion observed here records the provider-signed account id
    for anchoring in this same refresh. Claude records sha256 of the token its

@@ -4,8 +4,19 @@ import base64
 import json
 import os
 from pathlib import Path
-from playwright.sync_api import expect
+from playwright.sync_api import Error, expect
 from host.runtime.browser_network.config import LOCATIONS
+
+
+def close_popup(popup):
+    # A local Close can destroy the page before Playwright acknowledges the
+    # mouse event. Require the close event, and accept only that specific race.
+    with popup.expect_event("close"):
+        try:
+            popup.get_by_role("button", name="Close", exact=True).click()
+        except Error as error:
+            if not popup.is_closed() or "Target page, context or browser has been closed" not in str(error):
+                raise
 
 
 def run(page, url, log_in, open_home_integration):
@@ -19,9 +30,19 @@ def run(page, url, log_in, open_home_integration):
     connection = {"mode": "", "error": "Saved connection settings are invalid. Select and save a connection to resume Browser activity."}
     inputs = []
     fail_cancel = False
+    fail_open = False
+    expire_control = False
+    cancel_calls = 0
+    cancel_error = ""
+    hold_open = False
+    held_open = None
+    hold_frame = False
+    held_frame = None
+    save_error = ""
     frame_calls = 0
+    login_count = 0
     def route(request_route):
-        nonlocal frame_calls
+        nonlocal frame_calls, login_count, cancel_calls, held_open, held_frame
         operation = request_route.request.url.rsplit("/", 1)[-1]
         body = request_route.request.post_data_json
         key = body.get("account_id")
@@ -38,18 +59,31 @@ def run(page, url, log_in, open_home_integration):
             result = {"accounts": list(sessions.values())}
         elif operation == "create":
             assert body == {"provider": "x"}
-            result = {"login_id": "login_" + "a" * 32}
+            login_count += 1
+            result = {"login_id": "login_" + f"{login_count:032x}"}
         elif operation == "check":
             sessions[key]["state"] = "connected"
             result = sessions[key]
         elif operation == "open":
+            if fail_open:
+                request_route.fulfill(status=409, content_type="application/json", body=json.dumps({"error": {"message": "Another window controls this browser. Close it or wait ten minutes for control to expire."}}))
+                return
             if key:
                 sessions[key]["state"] = "needs_attention"
             else:
-                assert body["login_id"] == "login_" + "a" * 32
+                assert body["login_id"] == "login_" + f"{login_count:032x}"
             result = {"site": "https://x.com/", "lease": "test-operator-lease", "width": 1100, "height": 760}
+            if hold_open:
+                held_open = (request_route, result)
+                return
         elif operation == "frame":
             assert body["lease"] == "test-operator-lease"
+            if hold_frame:
+                held_frame = request_route
+                return
+            if expire_control:
+                request_route.fulfill(status=409, content_type="application/json", body=json.dumps({"error": {"message": "Browser control expired or belongs to another window. Open browser again."}}))
+                return
             frame_calls += 1
             if frame_calls == 1:
                 request_route.fulfill(status=503, content_type="application/json", body=json.dumps({"error": {"message": "Browser image unavailable. Wait for navigation or reopen the browser."}}))
@@ -59,10 +93,22 @@ def run(page, url, log_in, open_home_integration):
             inputs.append(body)
             result = {"ok": True}
         elif operation == "save":
+            if save_error:
+                request_route.fulfill(status=409, content_type="application/json", body=json.dumps({"error": {"message": save_error}}))
+                return
             key = key or "acct_" + "a" * 32
             sessions[key] = {"account_id": key, "provider": "x", "provider_identifier": "example", "state": "connected", "checked_at": "2026-09-28T14:00:00Z"}
             result = sessions[key]
         elif operation == "cancel":
+            cancel_calls += 1
+            assert body["lease"] == "test-operator-lease"
+            if hold_frame and held_frame is not None:
+                # Release the stalled fixture only once Cancel has arrived.
+                held_frame.abort()
+                held_frame = None
+            if cancel_error:
+                request_route.fulfill(status=409, content_type="application/json", body=json.dumps({"error": {"message": cancel_error}}))
+                return
             if fail_cancel:
                 request_route.fulfill(status=409, content_type="application/json", body=json.dumps({"error": {"message": "Fixture close failed"}}))
                 return
@@ -118,6 +164,16 @@ def run(page, url, log_in, open_home_integration):
     expect(popup.locator("#browser-frame-error")).to_be_hidden()
     expect(popup.locator("#browser-message")).to_contain_text("You have control")
     assert frame_calls >= 2  # A transient first capture failure must not stop polling.
+    # Connect must replace even an open popup when its cancel request fails.
+    fail_cancel = True
+    old_popup = popup
+    with page.expect_popup() as replacement:
+        page.get_by_role("button", name="Connect X account", exact=True).click()
+    popup = replacement.value
+    expect(popup.locator("#browser-message")).to_contain_text("You have control")
+    assert old_popup.is_closed()
+    assert login_count == 2
+    fail_cancel = False
     with popup.expect_response(lambda response: response.url.endswith("/v1/browser/input") and response.request.post_data_json.get("kind") == "reload"):
         popup.get_by_role("button", name="Reload page", exact=True).click()
     expect(page.locator("#browser-sessions")).to_contain_text("No saved X accounts yet")
@@ -197,6 +253,85 @@ def run(page, url, log_in, open_home_integration):
     expect(page.locator("#browser-sessions")).to_contain_text("Login needs attention; agent actions paused")
     page.get_by_role("button", name="Check login").click()
     expect(page.locator("#browser-sessions")).to_contain_text("Login verified")
+    # A popup that failed to acquire control must still be dismissible, without
+    # cancelling the browser controlled by a different window.
+    fail_open = True
+    with page.expect_popup() as popup_info:
+        page.get_by_role("button", name="Open browser", exact=True).click()
+    popup = popup_info.value
+    expect(popup.locator("#browser-message")).to_contain_text("Another window controls")
+    expect(popup.get_by_role("button", name="Save and close")).to_be_disabled()
+    before_cancel = cancel_calls
+    close_popup(popup)
+    assert cancel_calls == before_cancel
+    fail_open = False
+    # Expiry already releases server control. Close should dismiss the popup,
+    # rather than submitting the expired token and trapping the operator.
+    with page.expect_popup() as popup_info:
+        page.get_by_role("button", name="Open browser", exact=True).click()
+    popup = popup_info.value
+    expect(popup.locator("#browser-screen")).to_be_visible()
+    expire_control = True
+    expect(popup.locator("#browser-frame-error")).to_contain_text("Browser control expired")
+    expect(popup.get_by_role("button", name="Save and close")).to_be_disabled()
+    before_cancel = cancel_calls
+    close_popup(popup)
+    assert cancel_calls == before_cancel
+    expire_control = False
+    # Control can expire between the last frame and the explicit Close.
+    for cancel_error in (
+        "Browser control expired or belongs to another window. Open browser again.",
+        "Select a saved browser account or start a new login.",
+    ):
+        with page.expect_popup() as popup_info:
+            page.get_by_role("button", name="Open browser", exact=True).click()
+        popup = popup_info.value
+        expect(popup.locator("#browser-screen")).to_be_visible()
+        close_popup(popup)
+    cancel_error = ""
+    # An early Close waits for Open, then releases the token it acquired.
+    hold_open = True
+    with context.expect_event("request", predicate=lambda request: request.url.endswith("/v1/browser/open")), page.expect_popup() as popup_info:
+        page.get_by_role("button", name="Open browser", exact=True).click()
+    popup = popup_info.value
+    expect(popup.locator("#browser-message")).to_have_text("Opening your private browser…")
+    expect(popup.get_by_role("button", name="Save and close")).to_be_disabled()
+    assert held_open is not None
+    before_cancel = cancel_calls
+    popup.get_by_role("button", name="Close", exact=True).click()
+    assert cancel_calls == before_cancel
+    with popup.expect_event("close"):
+        request_route, result = held_open
+        request_route.fulfill(status=200, content_type="application/json", body=json.dumps(result))
+    assert cancel_calls == before_cancel + 1
+    hold_open = False
+    # A stalled initial screenshot must not delay the explicit cancel request.
+    hold_frame = True
+    with context.expect_event("request", predicate=lambda request: request.url.endswith("/v1/browser/frame")), page.expect_popup() as popup_info:
+        page.get_by_role("button", name="Open browser", exact=True).click()
+    popup = popup_info.value
+    expect(popup.locator("#browser-message")).to_contain_text("You have control")
+    assert held_frame is not None
+    before_cancel = cancel_calls
+    close_popup(popup)
+    assert cancel_calls == before_cancel + 1
+    assert held_frame is None
+    hold_frame = False
+    # Save can discover expiry before the next frame. Disable it immediately,
+    # retain the failure message, and let Close dismiss the window locally.
+    save_error = "Browser control expired or belongs to another window. Open browser again."
+    with page.expect_popup() as popup_info:
+        page.get_by_role("button", name="Open browser", exact=True).click()
+    popup = popup_info.value
+    expect(popup.locator("#browser-screen")).to_be_visible()
+    popup.get_by_role("button", name="Save and close").click()
+    expect(popup.locator("#browser-message")).to_have_text(save_error)
+    expect(popup.get_by_role("button", name="Save and close")).to_be_disabled()
+    expect(popup.locator("#browser-screen")).to_be_hidden()
+    before_cancel = cancel_calls
+    close_popup(popup)
+    assert cancel_calls == before_cancel
+    save_error = ""
     page.once("dialog", lambda dialog: dialog.accept())
     page.get_by_role("button", name="Disconnect", exact=True).click()
     expect(page.locator("#browser-sessions")).to_contain_text("No saved X accounts yet")

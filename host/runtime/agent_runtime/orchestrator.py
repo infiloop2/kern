@@ -233,7 +233,38 @@ def _set_runtime_status(runtime_type: str, status: str, error_message: str | Non
     if error_message is not None:
         record["error_message"] = error_message
     with _RUNTIME_STATUS_LOCK:
+        previous = _RUNTIME_STATUSES.get(runtime_type, {"status": "loading"})
         _RUNTIME_STATUSES[runtime_type] = record
+    if runtime_type in codex_app_server.CODEX_RUNTIME_TYPES and status == "error":
+        reason, stage = _codex_account_failure(error_message)
+        if previous["status"] != "error" or _codex_account_failure(previous.get("error_message")) != (reason, stage):
+            # Expected provider errors are returned as status tuples, so they
+            # never reach the exception reporter. Record transitions only and
+            # select fixed codes instead of copying provider bodies/stderr.
+            host_errors.report_warning(
+                "orchestrator.runtime_status",
+                "Codex account validation failed",
+                kind="provider_failure",
+                context={
+                    "agent_runtime": runtime_type,
+                    "previous_status": previous["status"],
+                    "failure_code": reason,
+                    "stage": stage,
+                },
+            )
+
+
+def _codex_account_failure(message: str | None) -> tuple[str, str]:
+    detail = (message or "").lower()
+    if "workspace routing" in detail or "routing discovery" in detail:
+        return "workspace_routing_failed", "workspace_discovery"
+    if "account changed" in detail:
+        return "account_mismatch", "account_approval"
+    if "supported account id" in detail:
+        return "account_id_unavailable", "account_probe"
+    if "timed out" in detail or "timeout" in detail:
+        return "provider_timeout", "account_probe"
+    return "provider_error", "account_probe"
 
 
 def agent_runtime_status() -> dict[str, Any]:

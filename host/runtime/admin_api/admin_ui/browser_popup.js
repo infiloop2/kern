@@ -10,6 +10,20 @@ screen.onload = () => frameError("");
 screen.onerror = () => frameError("The browser image could not be loaded. Reload the page or reopen this window.");
 setUnauthorizedHandler(() => { stopped = true; message("Your Kern login expired. Sign in to Kern again, then reopen this window."); });
 function call(operation, payload = {}) { return api("POST", `/v1/browser/${operation}`, {...reference, lease, ...payload}); }
+function controlEnded(error) {
+  return error.message.startsWith("Browser control expired") || error.message.startsWith("Select a saved browser account or start a new login.");
+}
+function clearControl() {
+  lease = "";
+  $("browser-save").disabled = true;
+  screen.removeAttribute("src"); screen.hidden = true;
+}
+function closePopup(operation) {
+  clearControl();
+  message(operation === "save" ? "Account connected. You can close this window." : "Browser closed. Check login to resume account actions.");
+  window.opener?.postMessage({type: "kern-browser-saved"}, location.origin);
+  window.close();
+}
 function enqueue(task) {
   queue = queue.then(task).catch(error => { message(error.message); });
   return queue;
@@ -19,10 +33,12 @@ async function frame() {
   let result;
   try { result = await call("frame"); }
   catch (error) {
+    if (stopped) return;
     frameError(error.message);
-    if (error.message.includes("control expired")) { stopped = true; screen.removeAttribute("src"); screen.hidden = true; }
+    if (controlEnded(error)) { stopped = true; clearControl(); }
     return;
   }
+  if (stopped || !lease) return;
   $("browser-origin").textContent = result.origin || "X browser";
   screen.src = `data:image/jpeg;base64,${result.image}`;
   screen.hidden = false;
@@ -44,21 +60,26 @@ function input(payload) {
   });
 }
 async function finish(operation) {
+  if (operation === "save" && !lease) return;
   stopped = true;
   clearTimeout(timer);
   try {
-    await call(operation);
-    lease = "";
-    screen.removeAttribute("src"); screen.hidden = true;
-    message(operation === "save" ? "Account connected. You can close this window." : "Browser closed. Check login to resume account actions.");
-    window.opener?.postMessage({type: "kern-browser-saved"}, location.origin);
-    window.close();
+    // Failed Open never granted this window control. Closing it must not try
+    // to cancel a browser belonging to a different window.
+    if (lease) await call(operation);
+    closePopup(operation);
   } catch (error) {
+    if (controlEnded(error)) {
+      clearControl();
+      if (operation === "cancel") closePopup(operation);
+      else message(error.message);
+      return;
+    }
     stopped = false; message(error.message); scheduleFrame();
   }
 }
 $("browser-save").onclick = () => enqueue(() => finish("save"));
-$("browser-cancel").onclick = () => enqueue(() => finish("cancel"));
+$("browser-cancel").onclick = () => opening.then(() => finish("cancel"));
 $("browser-home").onclick = () => input({kind: "home"});
 $("browser-refresh").onclick = () => input({kind: "reload"});
 $("browser-tab").onclick = () => input({kind: "key", key: "Tab"});
@@ -94,10 +115,14 @@ window.addEventListener("pagehide", () => {
   stopped = true; clearTimeout(timer);
   if (lease) fetch("/v1/browser/cancel", {method: "POST", headers: {"Content-Type": "application/json", "X-Kern-Csrf": "1"}, body: JSON.stringify({...reference, lease}), keepalive: true}).catch(() => {});
 });
-try {
+// Close during startup waits for Open's result, so any acquired lease is
+// released rather than arriving after this popup has already closed.
+const opening = enqueue(async () => {
   const state = await api("POST", "/v1/browser/open", {...reference});
   lease = state.lease;
+  $("browser-save").disabled = false;
   $("browser-title").textContent = new URL(state.site).hostname;
   message("You have control. Sign in, then choose Save and close.");
-  await frame(); scheduleFrame();
-} catch (error) { message(error.message); }
+});
+// Screenshots must not hold up Close after Open has granted control.
+opening.then(() => { if (!stopped && lease) frame().then(scheduleFrame); });

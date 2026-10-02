@@ -1898,6 +1898,64 @@ class OpenAIAccountBindingTests(unittest.TestCase):
         )
 
 
+class OpenAIWorkspaceDiscoveryTests(unittest.TestCase):
+    ACCOUNT = "acct-new-login"
+
+    def setUp(self) -> None:
+        self.pins = self.enterContext(patch.object(
+            openai_guard, "read_proxy_openai_account_ids", return_value=set(),
+        ))
+
+    def deny(self, *, method="GET", host="chatgpt.com", path=openai_guard.WORKSPACE_DISCOVERY_PATH,
+             query="", body=b"", headers=None):
+        if headers is None:
+            headers = [("ChatGPT-Account-ID", self.ACCOUNT), ("Authorization", openai_bearer(self.ACCOUNT))]
+        return openai_guard.request_denied(object(), method, host, path, query, headers, body)
+
+    def test_discovery_needs_no_pin_or_pending_operator_login(self) -> None:
+        self.assertIsNone(self.deny())
+        self.pins.return_value = {"acct-other-codex-runtime"}
+        self.assertIsNone(self.deny())
+        self.pins.return_value = {self.ACCOUNT}
+        self.assertIsNone(self.deny())
+        self.pins.assert_not_called()
+
+    def test_discovery_does_not_authorize_inference(self) -> None:
+        self.assertIsNone(self.deny())
+        self.assertEqual(self.deny(method="POST", path="/backend-api/codex/responses"), "openai_account_unavailable")
+        self.pins.return_value = {"acct-other-codex-runtime"}
+        self.assertEqual(self.deny(method="POST", path="/backend-api/codex/responses"), "openai_account_mismatch")
+        self.pins.return_value = {self.ACCOUNT}
+        self.assertIsNone(self.deny(method="POST", path="/backend-api/codex/responses"))
+
+    def test_bootstrap_never_authorizes_other_routes_or_request_data(self) -> None:
+        for changes in (
+            {"method": "POST"}, {"host": "api.openai.com"}, {"query": "x=1"}, {"body": b"data"},
+            {"path": "/backend-api/codex/models"}, {"path": "/backend-api/codex/responses"},
+            {"path": openai_guard.WORKSPACE_DISCOVERY_PATH + "/"},
+            {"path": openai_guard.WORKSPACE_DISCOVERY_PATH + "?x=1"},
+            {"path": "/backend-api/wham/accounts/%63heck"},
+            {"path": "/v1/responses"},
+            {"headers": [("ChatGPT-Account-ID", self.ACCOUNT), ("Authorization", openai_bearer(self.ACCOUNT)), ("Upgrade", "websocket")]},
+        ):
+            with self.subTest(changes=changes):
+                self.assertIsNotNone(self.deny(**changes))
+
+    def test_bootstrap_still_requires_matching_header_and_bearer_claim(self) -> None:
+        pin = ("ChatGPT-Account-ID", self.ACCOUNT)
+        for headers, denial in (
+            ([("Authorization", openai_bearer(self.ACCOUNT))], "openai_account_header_required"),
+            ([("ChatGPT-Account-ID", ""), ("Authorization", openai_bearer(self.ACCOUNT))], "openai_account_mismatch"),
+            ([pin, ("chatgpt-account-id", "other"), ("Authorization", openai_bearer(self.ACCOUNT))], "openai_account_mismatch"),
+            ([pin], "openai_token_account_mismatch"),
+            ([pin, ("Authorization", "Bearer sk-platform-key")], "openai_token_account_mismatch"),
+            ([pin, ("Authorization", openai_bearer("other"))], "openai_token_account_mismatch"),
+            ([pin, ("Authorization", openai_bearer(self.ACCOUNT)), ("authorization", openai_bearer(self.ACCOUNT))], "openai_token_account_mismatch"),
+        ):
+            with self.subTest(headers=headers):
+                self.assertEqual(self.deny(headers=headers), denial)
+
+
 class XaiRouteTests(unittest.TestCase):
     """The xAI integration opens login, the subscription chat proxy, and the
     observed Grok Build Imagine routes. Everything else beneath ``x.ai`` and

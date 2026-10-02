@@ -302,6 +302,7 @@ function bindIPhoneStandaloneSidebarSwipe() {
 
 let iPhoneStandaloneViewportBaseline = null;
 let workspaceKeyboardViewportBaselineHeight = 0;
+let workspaceKeyboardViewportBaselineWidth = 0;
 function layoutViewportSize() {
   return {
     height: document.documentElement.clientHeight || window.innerHeight,
@@ -353,8 +354,24 @@ function visualViewportIsContracted() {
   return Boolean(
     viewport
     && workspaceKeyboardViewportBaselineHeight
-    && viewport.height < workspaceKeyboardViewportBaselineHeight - 80
+    && viewport.height * viewport.scale < workspaceKeyboardViewportBaselineHeight - 80
   );
+}
+
+function syncWorkspaceKeyboardVisibility() {
+  // Programmatic focus when opening a chat does not always open the iOS
+  // keyboard, and dismissing the keyboard can leave the composer focused.
+  // Collapse the usage row only while the visual viewport is reduced.
+  const layout = layoutViewportSize();
+  if (workspaceKeyboardViewportBaselineHeight
+      && Math.abs(layout.width - workspaceKeyboardViewportBaselineWidth) > 80) {
+    // Safari tabs also rotate. Compare against the new orientation's full
+    // layout height, rather than mistaking its shorter height for a keyboard.
+    workspaceKeyboardViewportBaselineHeight = layout.height;
+    workspaceKeyboardViewportBaselineWidth = layout.width;
+  }
+  document.body.classList.toggle("workspace-keyboard-open",
+    document.body.classList.contains("viewport-panel-open") && visualViewportIsContracted());
 }
 
 function workspaceKeyboardOwnsViewport() {
@@ -364,6 +381,7 @@ function workspaceKeyboardOwnsViewport() {
   // The viewport has expanded after focus ended, so later same-width changes
   // are real layout changes rather than the tail of this keyboard session.
   workspaceKeyboardViewportBaselineHeight = 0;
+  workspaceKeyboardViewportBaselineWidth = 0;
   return false;
 }
 
@@ -422,19 +440,25 @@ function releaseWorkspaceInputFocus() {
   focusedWorkspaceInput = null;
   focusedWorkspaceInputObserver.disconnect();
   document.body.classList.remove("workspace-input-focused");
+  syncWorkspaceKeyboardVisibility();
 }
 
 document.addEventListener("focusin", event => {
   const target = event.composedPath()[0];
   if (!isWorkspaceKeyboardInput(target)) return;
   if (!document.body.classList.contains("viewport-panel-open")) return;
-  const currentHeight = window.visualViewport?.height || layoutViewportSize().height;
-  workspaceKeyboardViewportBaselineHeight = iPhoneStandaloneViewportBaseline?.height
-    || Math.max(workspaceKeyboardViewportBaselineHeight, currentHeight);
+  const viewport = window.visualViewport;
+  const layout = layoutViewportSize();
+  const currentHeight = viewport ? viewport.height * viewport.scale : layout.height;
+  workspaceKeyboardViewportBaselineHeight = Math.max(
+    iPhoneStandaloneViewportBaseline?.height || 0,
+    workspaceKeyboardViewportBaselineHeight, currentHeight);
+  workspaceKeyboardViewportBaselineWidth = layout.width;
   focusedWorkspaceInput = target;
   focusedWorkspaceInputObserver.disconnect();
   focusedWorkspaceInputObserver.observe(target.getRootNode(), { childList: true, subtree: true });
   document.body.classList.add("workspace-input-focused");
+  syncWorkspaceKeyboardVisibility();
 }, true);
 
 document.addEventListener("focusout", event => {
@@ -449,6 +473,7 @@ document.addEventListener("focusout", event => {
 }, true);
 if (window.visualViewport) {
   window.visualViewport.addEventListener("resize", syncIPhoneStandaloneViewport, { passive: true });
+  window.visualViewport.addEventListener("resize", syncWorkspaceKeyboardVisibility, { passive: true });
   window.visualViewport.addEventListener("resize", recoverWorkspaceViewport, { passive: true });
 }
 
@@ -457,7 +482,7 @@ function showLogin() {
   hideIPhoneInstallUi();
   releaseWorkspaceInputFocus();
   setSwarmVisible(false);
-  document.body.classList.remove("viewport-panel-open", "workspace-input-focused");
+  document.body.classList.remove("viewport-panel-open", "workspace-input-focused", "workspace-keyboard-open");
   $("login").hidden = false;
   $("app").hidden = true;
   $("logout-button").hidden = true;
@@ -481,6 +506,7 @@ function showTab(name, workspaceActionSequence = null) {
   const viewportPanelOpen = workspaceOpen;
   document.body.classList.toggle("viewport-panel-open", viewportPanelOpen);
   syncIPhoneStandaloneViewport();
+  syncWorkspaceKeyboardVisibility();
   if (!viewportPanelOpen) {
     releaseWorkspaceInputFocus();
   }
@@ -1484,11 +1510,15 @@ window.addEventListener("resize", () => {
 });
 window.addEventListener("pageshow", () => {
   syncIPhoneStandaloneViewport();
+  syncWorkspaceKeyboardVisibility();
   if (isIPhoneStandalone()) hideIPhoneInstallUi();
 });
 window.addEventListener("orientationchange", syncIPhoneStandaloneViewport);
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") syncIPhoneStandaloneViewport();
+  if (document.visibilityState === "visible") {
+    syncIPhoneStandaloneViewport();
+    syncWorkspaceKeyboardVisibility();
+  }
 });
 window.addEventListener("popstate", event => {
   const workspaceRoute = workspaceRouteFromLocation();

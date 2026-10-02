@@ -272,6 +272,49 @@ class BrowserSessionsTests(unittest.TestCase):
         self.assertEqual(restarted.dispatch("list", {}), {"accounts": []})
         self.assertEqual(accounts.store.accounts(), {})
 
+    def test_connect_replaces_abandoned_login_and_rejects_late_old_requests(self):
+        accounts = Accounts(self.store, FakeBrowser)
+        old = accounts.dispatch("create", {"provider": "x"})
+        lease = accounts.dispatch("open", old)["lease"]
+        browser = accounts.pending[old["login_id"]].browser
+        with patch.object(browser, "close") as close, patch.object(browser, "save_state") as snapshot:
+            new = accounts.dispatch("create", {"provider": "x"})
+            close.assert_called_once()
+            snapshot.assert_not_called()
+        self.assertNotEqual(old, new)
+        new_lease = accounts.dispatch("open", new)["lease"]
+        for operation in ("open", "frame", "input", "save", "cancel"):
+            with self.subTest(operation=operation), self.assertRaises(BrowserError):
+                accounts.dispatch(operation, {**old, "lease": lease})
+        self.assertEqual(accounts.dispatch("frame", {**new, "lease": new_lease})["image"], "operator-only-image")
+        self.assertEqual(self.store.accounts(), {})
+
+    def test_connect_replaces_unopened_login_and_saved_account_control(self):
+        accounts = Accounts(self.store, FakeBrowser)
+        account_id = self.connect_account(accounts)
+        lease = accounts.dispatch("open", {"account_id": account_id})["lease"]
+        old = accounts.profiles[account_id]
+        with patch.object(old.browser, "close") as close:
+            first = accounts.dispatch("create", {"provider": "x"})
+            close.assert_called_once()
+        second = accounts.dispatch("create", {"provider": "x"})
+        self.assertNotEqual(first, second)
+        self.assertEqual(list(accounts.pending), [second["login_id"]])
+        self.assertEqual(old.status()["state"], "needs_attention")
+        self.assertIn(account_id, self.store.accounts())
+        with self.assertRaises(BrowserError):
+            accounts.dispatch("cancel", {"account_id": account_id, "lease": lease})
+        accounts.dispatch("open", second)
+
+    def test_invalid_or_agent_create_does_not_replace_operator_login(self):
+        accounts = Accounts(self.store, FakeBrowser)
+        login = accounts.dispatch("create", {"provider": "x"})
+        lease = accounts.dispatch("open", login)["lease"]
+        for body, agent_action in [({"provider": "invalid"}, False), ({"provider": "x"}, True)]:
+            with self.assertRaises(BrowserError):
+                accounts.dispatch("create", body, agent_action=agent_action)
+        self.assertEqual(accounts.dispatch("frame", {**login, "lease": lease})["image"], "operator-only-image")
+
     def test_failed_new_account_save_remains_cancellable_without_saved_state(self):
         accounts = Accounts(self.store, FakeBrowser)
         login = accounts.dispatch("create", {"provider": "x"})
@@ -482,8 +525,9 @@ class BrowserSessionsTests(unittest.TestCase):
         with patch("host.runtime.browser.service.pwd.getpwnam", side_effect=user):
             self.assertEqual(authorized(1, "/operator/frame"), "frame")
             self.assertEqual(authorized(1, "/operator/check"), "check")
+            self.assertEqual(authorized(1, "/operator/cancel"), "cancel")
             self.assertEqual(authorized(2, "/actions/post_tweet"), "post_tweet")
-            for uid, path in [(2, "/operator/frame"), (2, "/operator/check"), (2, "/operator/settings"), (1, "/actions/post_tweet"), (3, "/actions/list"), (3, "/operator/input"), (2, "/actions/evaluate")]:
+            for uid, path in [(2, "/operator/frame"), (2, "/operator/check"), (2, "/operator/cancel"), (2, "/operator/settings"), (1, "/actions/post_tweet"), (3, "/actions/list"), (3, "/operator/input"), (2, "/actions/evaluate")]:
                 self.assertIsNone(authorized(uid, path))
 
     def test_real_socket_rejects_forbidden_peer_before_dispatch(self):
@@ -542,6 +586,70 @@ class BrowserSessionsTests(unittest.TestCase):
         with patch.object(UnixSocketServer, "process_request") as start_handler:
             server.process_request(admitted, None)
         start_handler.assert_called_once_with(admitted, None)
+
+    def test_real_socket_cancel_queues_behind_frame_and_releases_control(self):
+        accounts = Accounts(self.store, FakeBrowser)
+        login = accounts.dispatch("create", {"provider": "x"})
+        lease = accounts.dispatch("open", login)["lease"]
+        profile = accounts.pending[login["login_id"]]
+        control = {**login, "lease": lease}
+        frame_started, release_frame, cancel_queued = (threading.Event() for _ in range(3))
+
+        def frame():
+            frame_started.set()
+            if not release_frame.wait(10):
+                raise AssertionError("fixture frame was never released")
+            return "fixture-image"
+
+        socket_path = str(self.root / "cancel.sock")
+        server = UnixSocketServer(socket_path, Handler)
+        server.busy = threading.Lock()
+        server.worker = ThreadPoolExecutor(max_workers=1)
+        server.profiles = accounts
+        submit = server.worker.submit
+
+        def observe_submit(function, operation, body, **kwargs):
+            future = submit(function, operation, body, **kwargs)
+            if operation == "cancel":
+                cancel_queued.set()
+            return future
+
+        def request(operation):
+            connection = UnixHTTPConnection(socket_path)
+            try:
+                connection.request("POST", "/operator/" + operation, json.dumps(control), {"Content-Type": "application/json"})
+                response = connection.getresponse()
+                return response.status, json.loads(response.read())
+            finally:
+                connection.close()
+
+        thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
+        thread.start()
+        clients = ThreadPoolExecutor(max_workers=2)
+        try:
+            with patch.object(profile.browser, "frame", side_effect=frame), patch.object(server.worker, "submit", side_effect=observe_submit), patch(
+                "host.runtime.browser.service.pwd.getpwnam", return_value=SimpleNamespace(pw_uid=os.getuid()),
+            ):
+                captured = clients.submit(request, "frame")
+                self.assertTrue(frame_started.wait(3), "frame never acquired the worker")
+                cancelled = clients.submit(request, "cancel")
+                self.assertTrue(cancel_queued.wait(3), "Cancel was rejected instead of queued behind the busy frame")
+                self.assertTrue(server.busy.locked())
+                self.assertFalse(cancelled.done())
+                self.assertEqual(profile.lease, lease)
+                release_frame.set()
+                self.assertEqual(captured.result(timeout=3)[0], 200)
+                self.assertEqual(cancelled.result(timeout=3), (200, {"ok": True}))
+                self.assertNotIn(login["login_id"], accounts.pending)
+                self.assertFalse(profile.lease)
+                self.assertIsNone(profile.browser)
+        finally:
+            release_frame.set()
+            clients.shutdown()
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            server.worker.shutdown()
 
     def test_admin_routes_complete_new_login_through_real_account_service(self):
         from host.runtime.admin_api import service as admin_api

@@ -2707,11 +2707,11 @@ a:hover { text-decoration: underline; }
 
   body.viewport-panel-open .topbar { position: relative; }
 
-  /* While a workspace field owns the software keyboard, leave the host
+  /* While the software keyboard reduces the visible workspace, leave the host
      controls available in the first row but collapse the usage row. This
      gives the conversation the vertical room released by the keyboard and
-     restores the usage pill as soon as editing ends. */
-  body.viewport-panel-open.workspace-input-focused .runtime-overview {
+     restores the usage pill as soon as the keyboard closes. */
+  body.viewport-panel-open.workspace-keyboard-open .runtime-overview {
     display: none;
   }
 

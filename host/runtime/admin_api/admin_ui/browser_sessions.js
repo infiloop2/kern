@@ -2,6 +2,7 @@ import { api } from "./api.js";
 import { esc } from "./helpers.js";
 import { browserConnectionPanel, refreshBrowserConnection } from "./browser_connection.js";
 let popup = null;
+let connecting = false;
 export function browserPanel(enabled) {
   return `${browserConnectionPanel()}<div class="detail-card"><div class="detail-card-head"><h3>X connections</h3><button data-browser="refresh">Refresh</button></div>
     <p class="muted">Sign in to X in a private browser popup. Save up to 5 separate accounts on this host.</p>
@@ -32,15 +33,19 @@ function openPopup(accountId) {
 document.addEventListener("submit", async event => {
   if (event.target.id !== "browser-connect-form") return;
   event.preventDefault();
-  if (popup && !popup.closed) { popup.focus(); message("Finish or close the open browser first."); return; }
+  if (connecting) return;
+  if (popup && !popup.closed) popup.close();
   // Reserve the popup in the trusted click before awaiting network work.
-  popup = window.open("about:blank", "kern-browser", "popup,width=1160,height=950");
-  if (!popup) { message("Allow popups for Kern, then choose Connect X account again."); return; }
+  const nextPopup = window.open("about:blank", "kern-browser", "popup,width=1160,height=950");
+  popup = nextPopup;
+  if (!nextPopup) { message("Allow popups for Kern, then choose Connect X account again."); return; }
+  connecting = true;
   try {
     const login = await api("POST", "/v1/browser/create", {provider: "x"});
-    popup.location.href = `/browser.html?login=${encodeURIComponent(login.login_id)}`;
+    if (!nextPopup.closed) nextPopup.location.href = `/browser.html?login=${encodeURIComponent(login.login_id)}`;
     await refreshBrowserSessions();
-  } catch (error) { popup?.close(); message(error.message); }
+  } catch (error) { nextPopup.close(); message(error.message); }
+  finally { connecting = false; }
 });
 document.addEventListener("click", async event => {
   const button = event.target.closest("[data-browser]");
