@@ -1341,6 +1341,9 @@ def swarm_interactions() -> dict[str, Any]:
     return {"interactions": [
         {"sender_thread_id": "operator", "target_thread_id": "app-1", "count": 24},
         {"sender_thread_id": "operator", "target_thread_id": "thread-66", "count": 2},
+        {"sender_thread_id": "kern-host", "target_thread_id": "schedule-31", "count": 14},
+        {"sender_thread_id": "kern-host", "target_thread_id": "app-1", "count": 3},
+        {"sender_thread_id": "kern-host", "target_thread_id": "thread-66", "count": 1},
         {"sender_thread_id": "app-1", "target_thread_id": "app-2", "count": 18},
         {"sender_thread_id": "app-2", "target_thread_id": "app-1", "count": 5},
         {"sender_thread_id": "app-1", "target_thread_id": "thread-56", "count": 3},

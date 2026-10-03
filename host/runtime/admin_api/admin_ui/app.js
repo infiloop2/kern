@@ -1073,7 +1073,7 @@ function renderWorkspaceNavigation() {
   }
 }
 
-async function openWorkspaceGlobal(resource, itemId = null, updateHistory = true) {
+async function openWorkspaceGlobal(resource, itemId = null, updateHistory = true, view = "active") {
   if (resource === "analytics") {
     if (updateHistory) navigateWorkspaceRoute(resource);
     showTab("analytics");
@@ -1084,7 +1084,7 @@ async function openWorkspaceGlobal(resource, itemId = null, updateHistory = true
   if (actionSequence !== workspaceNavigationActionSequence) return;
   if (!showTab("workspace-global", actionSequence)) return;
   if (updateHistory) navigateWorkspaceRoute(resource, itemId);
-  const opened = await window.KernWorkspaceGlobal.open(resource, itemId);
+  const opened = await window.KernWorkspaceGlobal.open(resource, itemId, view);
   renderWorkspaceNavigation();
   return opened;
 }
@@ -1388,6 +1388,8 @@ document.addEventListener("click", event => {
     "open-chat": () => openWorkspaceChat(itemId),
     "open-web-app": () => openWorkspaceWebApp(itemId),
     "open-workspace-global": () => openWorkspaceGlobal(button.dataset.resource),
+    "show-scheduled-agent-archive": () => openWorkspaceGlobal("scheduled-agents", null, true, "archived"),
+    "new-scheduled-agent": () => openWorkspaceGlobal("scheduled-agents", null, true, "new"),
     "unarchive-chat": () => setWorkspaceArchived("chat", itemId, false),
     "unarchive-web-app": () => setWorkspaceArchived("web-apps", itemId, false),
     "show-chat-archive": async () => {

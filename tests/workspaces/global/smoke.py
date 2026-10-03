@@ -558,10 +558,19 @@ def desktop_smoke(page: Any) -> None:
     expect(surface.locator("#global-list")).to_contain_text("release-preferences")
     expect(surface.locator("#global-list")).not_to_contain_text("thread-7")
 
-    page.get_by_role("button", name="Standing agents", exact=True).click()
+    overflow = page.locator(".scheduled-agents-nav-head").evaluate("""element => {
+      const previousFont = element.style.fontFamily;
+      element.style.fontFamily = '"Liberation Sans", Arial, sans-serif';
+      const overflow = element.scrollWidth - element.clientWidth;
+      element.style.fontFamily = previousFont;
+      return overflow;
+    }""")
+    if overflow > 1:
+        raise AssertionError(f"Standing agent sidebar controls overflow by {overflow}px")
+    page.locator('[data-action="new-scheduled-agent"]').click()
     expect(surface.locator("#global-title")).to_have_text("Standing agents")
     expect(page).to_have_url(re.compile(r"#scheduled-agents$"))
-    surface.get_by_role("button", name="New standing agent", exact=True).click()
+    expect(surface.locator("#schedule-name")).to_be_focused()
     expect(surface.locator(".schedule-trigger")).to_have_count(0)
     surface.get_by_role("button", name="Add trigger", exact=True).click()
     expect(surface.locator("#schedule-enabled")).to_have_count(0)
@@ -847,6 +856,16 @@ def desktop_smoke(page: Any) -> None:
     expect(page.locator("#chat-nav-items")).not_to_contain_text(
         "Daily release review"
     )
+    page.locator('[data-action="show-scheduled-agent-archive"]').click()
+    expect(surface.locator("#global-archive-toggle")).to_have_text("Back to active")
+    expect(surface.locator("#global-list")).to_contain_text("Daily release review")
+    expect(surface.locator("#global-list")).not_to_contain_text("Dependency snapshot")
+    surface.locator("[data-item-id='1']").click()
+    expect(surface.locator("#schedule-name")).to_be_disabled()
+    expect(surface.locator("#schedule-history [data-restore-revision='1']")).to_be_enabled()
+    page.get_by_role("button", name="Standing agents", exact=True).click()
+    expect(surface.locator("#global-archive-toggle")).to_have_text("Show archived")
+    expect(surface.locator("#global-list")).to_contain_text("Dependency snapshot")
 
     # A slow item fetch cannot overwrite a newer host-level navigation after
     # the operator has left the global Workspace panel.
@@ -1009,3 +1028,15 @@ def mobile_smoke(page: Any) -> None:
     )
     if overflow > 1:
         raise AssertionError(f"global Workspace UI overflows horizontally by {overflow}px")
+
+    page.locator("#mobile-nav-toggle").click()
+    page.locator('[data-action="show-scheduled-agent-archive"]').click()
+    expect(page.locator("#sidebar")).not_to_have_class(re.compile(r".*mobile-open.*"))
+    expect(surface.locator("#global-archive-toggle")).to_have_text("Back to active")
+    expect(surface.locator("#global-list")).to_contain_text("Daily release review")
+    page.locator("#mobile-nav-toggle").click()
+    page.locator('[data-action="new-scheduled-agent"]').click()
+    expect(surface.locator("#global-archive-toggle")).to_have_text("Show archived")
+    expect(surface.locator("#schedule-name")).to_be_focused()
+    expect(surface.locator(".schedule-trigger")).to_have_count(0)
+    surface.get_by_role("button", name="Cancel", exact=True).click()

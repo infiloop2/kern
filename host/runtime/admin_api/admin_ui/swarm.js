@@ -2,7 +2,7 @@ import { api } from "./api.js";
 import { $, runtimeLabel } from "./helpers.js";
 import { layoutAgents, rankAgents } from "./swarm_layout.js";
 
-const TYPES = { "on-demand": "On-demand", app: "App", standing: "Standing", spawned: "Spawned", operator: "Human" };
+const TYPES = { "on-demand": "On-demand", app: "App", standing: "Standing", spawned: "Spawned", operator: "Human", host: "Host" };
 const STATES = { busy: "Working", failed: "Error", idle: "Idle" };
 let snapshot = null;
 let agentById = new Map();
@@ -37,8 +37,10 @@ function svg(tag, attrs) {
 }
 // All paths are repository-authored. Names and AI text only enter textContent.
 const operator = { thread_id: "operator", name: "Operator", kind: "operator", state: "", pending_approval_count: 0 };
+const kernHost = { thread_id: "kern-host", name: "Kern host", kind: "host", state: "", pending_approval_count: 0 };
 function character(agent) {
   if (agent.kind === "operator") return `<svg viewBox="0 0 64 76" aria-hidden="true"><circle class="operator-head" cx="32" cy="22" r="13"/><path class="operator-body" d="M9 67v-9a23 23 0 0 1 46 0v9z"/><path class="operator-smile" d="M26 25q6 6 12 0"/></svg>`;
+  if (agent.kind === "host") return `<svg viewBox="0 0 64 76" aria-hidden="true"><ellipse class="host-shadow" cx="32" cy="68" rx="23" ry="4"/><g class="host-server"><rect x="10" y="8" width="44" height="56" rx="7"/><path d="M10 27h44M10 46h44"/></g><g class="host-lights"><circle cx="19" cy="18" r="3"/><circle cx="19" cy="37" r="3"/><circle cx="19" cy="56" r="3"/></g><path class="host-slots" d="M30 18h15M30 37h15M30 56h15"/></svg>`;
   const pose = agent.state === "busy" ? "busy" : agent.state === "failed" ? "failed" : agent.pending_approval_count > 0 ? "needs-human" : "idle";
   const variant = Number(agent.thread_id.split("-").pop()) % 3;
   const eyes = pose === "failed"
@@ -68,6 +70,7 @@ function character(agent) {
 
 function description(agent) {
   if (agent.kind === "operator") return "Your messages to the swarm";
+  if (agent.kind === "host") return "Automated messages to the swarm";
   if (agent.kind === "on-demand") return agent.task || "No current task summary";
   if (agent.kind === "spawned") {
     const parent = agentById.get(agent.spawned_by_thread_id);
@@ -126,13 +129,14 @@ function renderDetails() {
   }
   const agent = agentById.get(selectedId);
   if (!agent) {
-    root.append(node("h2", "", "Agent details"), node("p", "muted", "Select an agent or connection. You are at the top. Agents with greater weekly involvement sit higher; collaborators group horizontally. Arrange applies the latest ranking. All agents stay visible; dense maps draw only the 500 strongest message links."));
+    root.append(node("h2", "", "Agent details"), node("p", "muted", "Select a node or connection. You are at the top; Kern host shows automated deliveries. Agents with greater weekly involvement sit higher; collaborators group horizontally. Arrange applies the latest ranking. All agents stay visible; dense maps draw only the 500 strongest message links."));
     return;
   }
   root.append(node("span", "swarm-type", TYPES[agent.kind]), node("h2", "", agent.name),
     node("p", "", description(agent)), node("span", `swarm-state state-${agent.state}`, STATES[agent.state] || ""));
-  if (agent.kind !== "operator") root.append(node("p", "muted", `${runtimeLabel(agent.agent_runtime)}${agent.model ? ` · ${agent.model}` : ""}`));
-  if (agent.kind !== "operator") {
+  const synthetic = ["operator", "host"].includes(agent.kind);
+  if (!synthetic) root.append(node("p", "muted", `${runtimeLabel(agent.agent_runtime)}${agent.model ? ` · ${agent.model}` : ""}`));
+  if (!synthetic) {
     root.append(node("h3", "", "Involvement · last 7 UTC days"));
     if (metrics) {
       const values = metrics[agent.thread_id];
@@ -165,6 +169,10 @@ function renderDetails() {
   }
   if (agent.kind === "operator") {
     root.append(node("p", "muted", "Counts include accepted operator messages. Automated triggers and agent replies are excluded from operator links."));
+    return;
+  }
+  if (agent.kind === "host") {
+    root.append(node("p", "muted", "Counts include accepted automated messages, including scheduled triggers, approval outcomes and restart notices. Rejected deliveries and Bash jobs are excluded. Host messages start counting after this upgrade and do not contribute to agent involvement scores."));
     return;
   }
   const open = node("button", "primary sm", "Open conversation");
@@ -293,7 +301,7 @@ function render() {
     filter.setAttribute("aria-pressed", String(activeFilter === state));
   }
   const visibleEdges = interactions.filter(edge => ids.has(edge.sender_thread_id) && ids.has(edge.target_thread_id));
-  $("swarm-total").textContent = `${snapshot.agents.length} agents + you · ${visibleEdges.length} connections shown · last 7 UTC days`;
+  $("swarm-total").textContent = `${snapshot.agents.length} agents + you + Kern host · ${visibleEdges.length} connections shown · last 7 UTC days`;
   $("swarm-empty").hidden = snapshot.agents.length > 0;
   renderEdges(); renderAttention(); renderDetails(); applyScale();
 }
@@ -312,7 +320,7 @@ export async function refreshSwarm() {
     const first = !snapshot;
     const changed = JSON.stringify([snapshot?.agents, interactions, metrics]) !== JSON.stringify([next.agents, counts?.interactions || interactions, counts ? counts.metrics || null : metrics]);
     snapshot = next;
-    agentById = new Map([operator, ...next.agents].map(agent => [agent.thread_id, agent]));
+    agentById = new Map([operator, kernHost, ...next.agents].map(agent => [agent.thread_id, agent]));
     if (counts) { interactions = counts.interactions; metrics = counts.metrics || null; }
     scores = rankAgents([...agentById.values()], metrics || {});
     if (selectedEdge) selectedEdge = interactions.find(edge => edge.sender_thread_id === selectedEdge.sender_thread_id && edge.target_thread_id === selectedEdge.target_thread_id) || null;

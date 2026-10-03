@@ -911,6 +911,11 @@ main { min-width: 0; }
   font-size: 0.9rem; margin-bottom: 0; padding-right: 0; white-space: nowrap;
 }
 .workspace-nav-head-actions { align-items: center; display: flex; gap: 0.15rem; }
+@media (min-width: 861px) {
+  .scheduled-agents-nav-head .sidebar-section-title { font-size: 0.85rem; min-width: 0; padding-right: 0; }
+  .scheduled-agents-nav-head button.workspace-nav-archived { padding-inline: 0.2rem; }
+  .scheduled-agents-nav-head button.workspace-nav-new { width: 1.5rem; }
+}
 button.workspace-nav-title-button {
   background: transparent;
   border: 0;
@@ -3227,6 +3232,10 @@ body.swarm-open #app { z-index: 200; }
 .operator-head { fill: #dbaf75; stroke: #6b5942; stroke-width: 2; }
 .operator-body { fill: #527d85; stroke: #365b64; stroke-width: 2; }
 .operator-smile { fill: none; stroke: #6b5942; stroke-width: 2; stroke-linecap: round; }
+.host-shadow { fill: #c2d8d5; }
+.host-server { fill: #dce8eb; stroke: #365b64; stroke-width: 2; }
+.host-lights { fill: #438d87; }
+.host-slots { fill: none; stroke: #365b64; stroke-width: 3; stroke-linecap: round; }
 
 .swarm-edge { cursor: pointer; pointer-events: stroke; }
 .swarm-edge:hover, .swarm-edge:focus { stroke: #153f3c; opacity: 1; outline: none; }

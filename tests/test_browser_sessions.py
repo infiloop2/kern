@@ -164,7 +164,7 @@ class BrowserSessionsTests(unittest.TestCase):
             self.assertIsNone(self.engine.browser)
             warning.assert_called_once()
             self.assertEqual(str(warning.call_args.args[1]), "OSError")
-            self.assertEqual(warning.call_args.kwargs["context"], {"stage": "cleanup"})
+            self.assertEqual(warning.call_args.kwargs["context"], {"stage": "cleanup", "failure_type": "OSError"})
             FakeBrowser.fail_prepare = True
             with self.assertRaisesRegex(BrowserError, "not submitted"):
                 post_tweet(self.engine, self.body)
@@ -188,7 +188,10 @@ class BrowserSessionsTests(unittest.TestCase):
                     post_tweet(self.engine, self.body)
                 record = self.diagnostics.call_args.args[0]
                 self.assertEqual(record["component"], "browser.x_post_tweet")
-                self.assertEqual(record["context"], {"stage": stage})
+                self.assertEqual(record["context"]["stage"], stage)
+                self.assertEqual(record["context"]["failure_type"], type(error).__name__)
+                if stage == "prepare":
+                    self.assertEqual(record["context"]["step"], "prepare_composer")
                 self.assertIn("x_post_tweet.py", record["traceback"])
                 self.assertNotIn("private-live-token", json.dumps(record))
                 self.assertEqual(record["summary"], str(error) if stage == "rejected" else "RuntimeError")
@@ -706,12 +709,16 @@ class BrowserSessionsTests(unittest.TestCase):
         self.assertNotIn("provider_identifier", post_schema["properties"])
         selected = {"accounts": [{"account_id": "a" * 32, "provider": "x", "provider_identifier": "example", "state": "connected"}]}
         reply = {"account_id": "a" * 32, "text": self.body["text"], "in_reply_to_tweet_id": "12345"}
-        with patch("host.tools.browser.client.request", return_value=selected) as request:
+        target = {"id": "12345", "text": "Original target text", "status": "loaded"}
+        with patch("host.tools.browser.client.request", return_value=selected) as request, \
+             patch("host.tools.browser.target_tweet", return_value=target) as context:
             pending = BUNDLED_TOOL.execute("x_post_tweet", reply, api)
             self.assertIsInstance(pending, ActionPendingApproval)
             request.assert_called_once_with("/actions/list")
+            context.assert_called_once_with("12345")
         record = api.approvals.get(pending.approval_id)
         self.assertEqual(record.payload["in_reply_to_tweet_id"], "12345")
+        self.assertEqual(record.payload["target_tweet"], target)
         self.assertIn("https://x.com/i/status/12345", record.summary)
         self.assertIn("hello", record.summary)
         with patch("host.tools.browser.client.request", side_effect=[selected, {"status": "posted", "url": "https://x.com/example/status/67890"}]) as request:

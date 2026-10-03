@@ -127,8 +127,8 @@ def swarm_interactions() -> dict[str, Any]:
                 SELECT sender, target, 0 FROM weekly WHERE sender <> target
             ), communication AS (
                 SELECT thread_id, SUM(operator_messages) AS operator_messages,
-                       COUNT(DISTINCT peer) FILTER (WHERE peer <> 'operator') AS agent_peers
-                FROM endpoints WHERE thread_id <> 'operator' GROUP BY thread_id
+                       COUNT(DISTINCT peer) FILTER (WHERE peer NOT IN ('operator', 'kern-host')) AS agent_peers
+                FROM endpoints WHERE thread_id NOT IN ('operator', 'kern-host') GROUP BY thread_id
             ), tokens AS (
                 SELECT thread_id,
                        SUM(CASE WHEN input_tokens IS NOT NULL OR cached_input_tokens IS NOT NULL

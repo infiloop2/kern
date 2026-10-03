@@ -4,7 +4,7 @@ const compareIds = new Intl.Collator("en", { numeric: true }).compare;
 // Scores describe weekly involvement, not authority. Normalize only against
 // visible identities; an archived agent must not set the scale for this map.
 export function rankAgents(agents, metrics = {}) {
-  const ids = agents.map(agent => agent.thread_id).filter(id => id !== "operator");
+  const ids = agents.map(agent => agent.thread_id).filter(id => !["operator", "kern-host"].includes(id));
   const value = (id, field) => Math.log1p(Math.max(0, metrics[id]?.[field] || 0));
   const maxima = SIGNALS.map(([field]) => ids.reduce((max, id) => Math.max(max, value(id, field)), 0));
   return new Map(ids.map(id => [id, SIGNALS.reduce((score, [field, weight], i) =>
@@ -15,6 +15,8 @@ export function layoutAgents(agents, interactions, metrics = {}) {
   const scores = rankAgents(agents, metrics);
   const ids = [...scores.keys()].sort((a, b) => scores.get(b) - scores.get(a) || compareIds(a, b));
   const hasOperator = agents.some(agent => agent.thread_id === "operator");
+  const hasHost = agents.some(agent => agent.thread_id === "kern-host");
+  const fixedRows = Number(hasOperator) + Number(hasHost);
   if (!agents.length) return { positions: new Map(), width: 340, height: 336 };
 
   // Rank determines vertical placement. Compact rows keep even a large idle
@@ -27,9 +29,10 @@ export function layoutAgents(agents, interactions, metrics = {}) {
   }
   const positions = new Map();
   if (hasOperator) positions.set("operator", { x: 0, y: 0 });
+  if (hasHost) positions.set("kern-host", { x: 0, y: hasOperator ? 280 : 0 });
   const placeRow = (row, rowIndex) => row.forEach((id, column) => {
     positions.set(id, { x: (column - (row.length - 1) / 2) * 260,
-      y: (rowIndex + (hasOperator ? 1 : 0)) * 280 + (1 - scores.get(id)) * 60 });
+      y: (rowIndex + fixedRows) * 280 + (1 - scores.get(id)) * 60 });
   });
   rows.forEach(placeRow);
 
@@ -81,7 +84,7 @@ export function layoutAgents(agents, interactions, metrics = {}) {
     });
   }
 
-  // All rows are centred on the operator, whose card sits alone above them.
+  // Synthetic sender nodes stay centred above the ranked agent rows.
   let minX = 0, maxX = 0, maxY = 0;
   for (const point of positions.values()) {
     minX = Math.min(minX, point.x); maxX = Math.max(maxX, point.x); maxY = Math.max(maxY, point.y);

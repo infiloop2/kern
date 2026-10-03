@@ -20,6 +20,15 @@ class PostRejected(BrowserError):
     """X returned an explicit rejection for this submission."""
 
 
+class PreparationFailed(BrowserError):
+    """A safe preparation step and cause type, without Playwright page content."""
+    def __init__(self, step: str, cause: Exception) -> None:
+        self.step = step
+        self.failure_type = type(cause).__name__
+        detail = str(cause) if isinstance(cause, BrowserError) else self.failure_type
+        super().__init__(f"Preparation failed at {step}: {detail.rstrip('.')}.")
+
+
 def validate_post_request(body: dict[str, Any]) -> tuple[str, str]:
     if set(body) not in ({"text"}, {"text", "in_reply_to_tweet_id"}):
         raise BrowserError("Expected text and an optional reply target ID.")
@@ -38,12 +47,17 @@ def validate_post(body: dict[str, Any]) -> tuple[str, str, str]:
     return account, text, reply_id
 
 
-def _report_failure(stage: str, exc: Exception) -> None:
+def _report_failure(stage: str, exc: Exception, *, step: str = "") -> None:
     # BrowserError messages are ours; Playwright/provider messages may contain
     # page content or credentials. Keep their type and stack, never their text.
     summary = str(exc) if isinstance(exc, BrowserError) else type(exc).__name__
     safe = RuntimeError(summary).with_traceback(exc.__traceback__)
-    host_errors.report_warning("browser.x_post_tweet", safe, context={"stage": stage})
+    context = {"stage": stage, "failure_type": type(exc).__name__}
+    if isinstance(exc, PreparationFailed):
+        context.update(step=exc.step, failure_type=exc.failure_type)
+    elif step:
+        context["step"] = step
+    host_errors.report_warning("browser.x_post_tweet", safe, context=context)
 
 
 def execute(profile: Profile, body: dict[str, Any]) -> dict[str, Any]:
@@ -58,12 +72,15 @@ def execute(profile: Profile, body: dict[str, Any]) -> dict[str, Any]:
     if count >= X_POST_DAILY_LIMIT:
         raise BrowserError("The daily browser posting limit has been reached.")
     try:
+        step = "launch_browser"
         try:
             browser = profile.launch()
+            step = "prepare_composer"
             prepare_post(browser.page, account, text, reply_id)
         except Exception as exc:
-            _report_failure("prepare", exc)
-            raise BrowserError("Post was not submitted. Open the browser to check login, account and composer.") from None
+            _report_failure("prepare", exc, step=step)
+            detail = str(exc) if isinstance(exc, BrowserError) else f"Preparation failed at {step} ({type(exc).__name__})."
+            raise BrowserError(f"Post was not submitted. {detail} Open the browser to check the account; see Host diagnostics for the failed step.") from None
         profile.data["usage"]["x_post_tweet"] = {"day": day, "count": count + 1}
         profile.save()  # Count the attempt before the only submit click.
         try:
@@ -85,20 +102,32 @@ def execute(profile: Profile, body: dict[str, Any]) -> dict[str, Any]:
 
 def prepare_post(page: Any, account: str, text: str, reply_id: str = "") -> None:
     from playwright.sync_api import expect  # type: ignore[import-not-found]
-    page.goto(f"https://x.com/i/status/{reply_id}" if reply_id else "https://x.com/compose/post", wait_until="domcontentloaded")
-    if x.verify_account(page) != account:
-        raise BrowserError("The signed-in account changed. Reconnect in Browser settings.")
-    if reply_id:
-        target = page.locator('article[data-testid="tweet"]').filter(
-            has=page.locator(f'a[href$="/status/{reply_id}"]'))
-        expect(target).to_have_count(1, timeout=10000)
-        target.get_by_test_id("reply").click()
-    composer = page.get_by_role("dialog")
-    editor = composer.get_by_test_id("tweetTextarea_0")
-    editor.fill("")
-    # Use the editor's normal keyboard handlers as well as its input handlers.
-    editor.press_sequentially(text, delay=50, timeout=30000)
-    expect(composer.get_by_test_id("tweetButton")).to_be_enabled(timeout=10000)
+    step = "navigate_to_target" if reply_id else "navigate_to_composer"
+    try:
+        response = page.goto(f"https://x.com/i/status/{reply_id}" if reply_id else "https://x.com/compose/post", wait_until="domcontentloaded")
+        if response is not None and response.status >= 400:
+            raise BrowserError(f"X returned HTTP {response.status} while opening the post page")
+        step = "verify_account"
+        if x.verify_account(page) != account:
+            raise BrowserError("The signed-in account changed. Reconnect in Browser settings.")
+        if reply_id:
+            step = "find_reply_target"
+            target = page.locator('article[data-testid="tweet"]').filter(
+                has=page.locator(f'a[href$="/status/{reply_id}"]'))
+            expect(target).to_have_count(1, timeout=10000)
+            step = "open_reply_composer"
+            target.get_by_test_id("reply").click()
+        step = "clear_composer"
+        composer = page.get_by_role("dialog")
+        editor = composer.get_by_test_id("tweetTextarea_0")
+        editor.fill("")
+        step = "type_post_text"
+        # Use the editor's normal keyboard handlers as well as its input handlers.
+        editor.press_sequentially(text, delay=50, timeout=30000)
+        step = "wait_for_submit_enabled"
+        expect(composer.get_by_test_id("tweetButton")).to_be_enabled(timeout=10000)
+    except Exception as exc:
+        raise PreparationFailed(step, exc).with_traceback(exc.__traceback__) from None
 
 
 def submit_prepared_post(page: Any, account: str, reply_id: str = "") -> str:

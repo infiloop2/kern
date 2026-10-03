@@ -509,6 +509,29 @@ class OrchestratorTests(unittest.TestCase):
         with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
             self.send_message("thread-1", pasted)
             self.wait_until_idle("thread-1")
+        self.assertEqual(state.swarm_interactions()["interactions"], [{
+            "sender_thread_id": "kern-host", "target_thread_id": "thread-1", "count": 1,
+        }])
+
+    def test_host_admission_and_steering_count_accepted_automated_messages(self) -> None:
+        with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
+            self.send_message("thread-1", "This is an automated message from Kern.\n\nScheduled trigger")
+            self.wait_until_idle("thread-1")
+        self.register_live_turn("codex", "thread-1", FakeServer())
+        self.assertTrue(orchestrator.steer_live_turn(
+            "thread-1", "codex", "Approval outcome", operator_sent_message=False,
+        ))
+        self.assertEqual(state.swarm_interactions()["interactions"], [{
+            "sender_thread_id": "kern-host", "target_thread_id": "thread-1", "count": 2,
+        }])
+        values = state.swarm_interactions()["metrics"]["thread-1"]
+        self.assertEqual((values["operator_messages"], values["agent_peers"]), (0, 0))
+
+    def test_rejected_host_delivery_does_not_count(self) -> None:
+        turn = self.register_live_turn("codex", "thread-1", FakeServer())
+        turn.phase = orchestrator.ExecutionPhase.STARTING
+        with self.assertRaises(ApiError):
+            orchestrator.steer_live_turn("thread-1", "codex", "Restart notice", operator_sent_message=False)
         self.assertEqual(state.swarm_interactions()["interactions"], [])
 
     def test_operator_admission_and_steering_count_accepted_messages(self) -> None:
@@ -886,6 +909,7 @@ class OrchestratorTests(unittest.TestCase):
             ],
         )
         self.assertEqual(events[-1]["payload"]["error_message"], str(failure))
+        self.assertEqual(state.swarm_interactions()["interactions"], [])
 
     def test_direct_steers_do_not_accumulate_in_a_host_mailbox(self) -> None:
         model, effort = DEFAULT_SESSION["codex"]

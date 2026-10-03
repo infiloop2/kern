@@ -887,12 +887,22 @@ Scheduled wake-ups, rejected sends and generated replies do not create operator 
 event IDs or summaries. Old buckets are removed on the next accepted delivery;
 reads always exclude expired dates. Counting starts at upgrade.
 
-The Swarm map shows all active agent characters and one synthetic Operator node.
-A deterministic spring layout uses combined bidirectional message volume to place
-frequent collaborators closer together. Large catalogs use spatially local
-repulsion and a bounded relaxation budget. Arrow width shows directed volume; select
+Accepted automated deliveries use the reserved sender ID `kern-host` when
+neither a trusted peer sender nor operator provenance is present. This covers
+scheduled triggers, approval outcomes and restart notices, on admission and live
+steering. Bash jobs stay excluded. Host counts start at this upgrade, without
+historical reconstruction. Host messages contribute neither operator-message
+counts nor distinct agent peers in involvement metrics.
+
+The Swarm map shows all active agent characters plus synthetic Operator and
+Kern host nodes. These sender nodes sit above the agent rows and have no agent
+runtime, involvement score or conversation link. Weekly involvement determines
+vertical agent placement (60% direct operator messages, 25% distinct agent peers,
+15% known tokens, each scaled with diminishing returns across active identities).
+Combined bidirectional message volume groups collaborators horizontally using
+bounded passes. Arrow width shows directed volume; select
 a node or link to inspect exact counts. This represents communication, not formal
-reporting lines. Status/count refreshes preserve positions; new nodes/connections
+reporting lines. Status/count refreshes preserve positions; roster changes
 or Arrange recalculate the layout using current weights. Zoom/fit controls and a
 duplicate attention sidebar keep errors and approvals accessible. State/search
 filters highlight matches without removing other nodes. Communication-count

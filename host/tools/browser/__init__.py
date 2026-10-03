@@ -9,6 +9,7 @@ from host.tools import (ActionExecuted, ActionFailed, ActionPendingApproval, Act
 from host.tools.manifest import protect_inputs
 from host.tools.shared import outputs
 from host.tools.shared.inputs import clip_text
+from host.tools.browser.reply_context import target_tweet
 
 ACCOUNT = outputs.obj({
     "account_id": outputs.text("Stable Kern connected-account identifier."),
@@ -27,7 +28,7 @@ MANIFEST = ToolManifest(
                    input_schema={"type": "object", "properties": {}, "additionalProperties": False},
                    output_schema=outputs.obj({"accounts": outputs.array_of(ACCOUNT, "Connected X accounts.")}, ["accounts"])),
         ActionSpec(id="x_post_tweet", description="Request approval for one original X post or reply from a connected browser account. Set in_reply_to_tweet_id to reply. Each approval authorizes one submission attempt.",
-                   data_policy="Queues the exact text, selected account and optional reply target for Kern approval. Only after approval, and only while its login is verified, sends the text to X through its website.",
+                   data_policy="Queues the exact text and selected account for Kern approval. For replies, reads X's public embed endpoint over HTTPS and saves the target text, author, URL and capture time in approval details for human and AI review. This read needs no browser or API credentials. Only after approval, and only while its login is verified, sends the proposed text to X through its website.",
                    input_schema={"type": "object", "properties": {
                        "account_id": {"type": "string", "description": "Stable Kern account ID returned by x_connection_status. The service resolves its verified X handle."},
                        "text": {"type": "string", "description": "Exact post or reply text, 1–280 characters; X also checks weighted length."},
@@ -42,7 +43,7 @@ MANIFEST = ToolManifest(
                  SetupStep(title="Connect X account", description="Enable Browser, choose Connect X account and sign in in the popup. Save and close creates the connected account. Check login verifies it later."),
                  SetupStep(title="Approve posts and replies", description="Every post or reply requires approval for its exact account, text and reply target. The action allows up to 50 submission attempts per connected account per UTC day.")),
     data_summary=DataSummary(cards=(
-        DataSummaryCard(title="What leaves this host", description="Login and browser traffic go to X and any login providers you choose, through your selected connection. Decodo receives proxy credentials over verified TLS and carries the encrypted website traffic. The connection test contacts ipify. Approved post or reply text goes to X. Cookies, passwords and screenshots never enter model context."),
+        DataSummaryCard(title="What leaves this host", description="Login and browser traffic go to X and any login providers you choose, through your selected connection. Decodo receives proxy credentials over verified TLS and carries the encrypted website traffic. The connection test contacts ipify. Approved post or reply text goes to X. Reply target text and metadata enter approval details and configured AI approval review. Cookies, passwords and screenshots never enter model context."),
         DataSummaryCard(title="Where it can go", description="The popup starts at x.com and has no address bar. X may direct login through its verification providers. The coded posting action targets X only."),
         DataSummaryCard(title="Provider use", description="X handles login and activity under its policies. X prohibits website automation and may restrict the account."),
         DataSummaryCard(title="Retention", description="Saved X profiles survive redeploys until disconnected. Daily action counts stay with the account until disconnect. Login sessions may expire independently."),
@@ -53,7 +54,7 @@ MANIFEST = ToolManifest(
     technical_details=("Decodo authentication uses verified HTTPS to gate.decodo.com:7000; website TLS remains end to end inside that connection. No plaintext proxy-auth or certificate-verification fallback exists. Credentials persist privately until changed. Settings are operator-only. Proxy credentials and saved login snapshots are encrypted in Kern's Postgres database on the private admin volume. Account metadata and settings use database rows; Chromium working files use private temporary storage. Disconnect deletes the account, saved login and usage data.",
                        "Chromium runs headed with its sandbox, native user agent and client hints, saved cookies/storage, consistent display settings, and native keyboard/pointer input. Browser language and timezone follow the configured location settings. Automation-specific launch signals are reduced; GPU, fonts and canvas remain native. This is not a hosted anti-detection engine or CAPTCHA solver, and websites can still identify automation.",
                        "Original text posts and replies to numeric X post IDs are supported. Quotes, DMs and arbitrary browsing are not agent actions."),
-    agent_notes="Use x_connection_status to select account_id. The X handle is account metadata, not a tool input. Login and Check login are operator-only. x_post_tweet queues a per-post approval; it does not publish until approved. The recorded state is from the last check; approved posting verifies the live account again. A failed call is finished. Check X if publication could not be confirmed; another attempt requires a new approval. No action accepts arbitrary code or URLs.",
+    agent_notes="Use x_connection_status to select account_id. The X handle is account metadata, not a tool input. Login and Check login are operator-only. x_post_tweet queues a per-post approval; it does not publish until approved. Replies capture the target text from X's public embed endpoint without launching a browser. Unavailable target content is explicitly marked in approval details; no browser fallback runs. Do not supply target content yourself. The recorded state is from the last check; approved posting verifies the live account again. A failed call is finished. Check X if publication could not be confirmed; another attempt requires a new approval. No action accepts arbitrary code or URLs.",
 )
 
 
@@ -83,9 +84,14 @@ class BrowserTool(Tool):
                 account, _, _ = validate_post({"provider_identifier": selected.get("provider_identifier"), **payload})
                 proposal: JSONObject = {"action": action, "account_id": account_id, "provider_identifier": account,
                                         "text": text}
+                context_note = ""
                 if reply_id:
                     proposal["in_reply_to_tweet_id"] = reply_id
-                summary = clip_text(f"{'Reply to https://x.com/i/status/' + reply_id if reply_id else 'Post on X'} as @{account}: {text}", 500)
+                    target = target_tweet(reply_id)
+                    proposal["target_tweet"] = target
+                    if target.get("status") != "loaded":
+                        context_note = " (target tweet content unavailable)"
+                summary = clip_text(f"{'Reply to https://x.com/i/status/' + reply_id if reply_id else 'Post on X'}{context_note} as @{account}: {text}", 500)
                 approval = api.approvals.request(action_id=action, summary=summary, payload=proposal)
                 return ActionPendingApproval(approval.approval_id, approval.summary)
             return ActionFailed("Unknown browser action.")
@@ -95,7 +101,7 @@ class BrowserTool(Tool):
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
         del api
         payload = approval.payload
-        if approval.action_id != "x_post_tweet" or set(payload) not in ({"action", "account_id", "provider_identifier", "text"}, {"action", "account_id", "provider_identifier", "text", "in_reply_to_tweet_id"}) or payload.get("action") != "x_post_tweet":
+        if approval.action_id != "x_post_tweet" or set(payload) not in ({"action", "account_id", "provider_identifier", "text"}, {"action", "account_id", "provider_identifier", "text", "in_reply_to_tweet_id"}, {"action", "account_id", "provider_identifier", "text", "in_reply_to_tweet_id", "target_tweet"}) or payload.get("action") != "x_post_tweet":
             return ActionFailed("Browser approval payload is invalid.")
         account_id = payload.get("account_id")
         if not isinstance(account_id, str):
@@ -103,6 +109,10 @@ class BrowserTool(Tool):
         proposal = {key: payload[key] for key in ("provider_identifier", "text")}
         if "in_reply_to_tweet_id" in payload:
             proposal["in_reply_to_tweet_id"] = payload["in_reply_to_tweet_id"]
+        if "target_tweet" in payload:
+            target = payload["target_tweet"]
+            if not isinstance(target, dict) or target.get("id") != payload.get("in_reply_to_tweet_id"):
+                return ActionFailed("Browser approval reply target is invalid.")
         try:
             account, _, reply_id = validate_post(proposal)
             accounts = client.request("/actions/list").get("accounts")

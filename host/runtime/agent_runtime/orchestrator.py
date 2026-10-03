@@ -762,9 +762,8 @@ def admit_turn(
     )
     if runtime_type != "script":
         state.reset_swarm_ai(cur, thread_id, run_number)
-        sender = peer_sender_thread_id or ("operator" if operator_sent_message else None)
-        if sender is not None:
-            state.record_swarm_interaction(cur, sender, thread_id)
+        sender = peer_sender_thread_id or ("operator" if operator_sent_message else "kern-host")
+        state.record_swarm_interaction(cur, sender, thread_id)
     return turn
 
 
@@ -841,9 +840,8 @@ def steer_live_turn(
                         {"message": message, "source": "user"},
                         run_number=turn.run_number,
                     )
-                    sender = peer_sender_thread_id or ("operator" if operator_sent_message else None)
-                    if sender is not None:
-                        state.record_swarm_interaction(cur, sender, thread_id)
+                    sender = peer_sender_thread_id or ("operator" if operator_sent_message else "kern-host")
+                    state.record_swarm_interaction(cur, sender, thread_id)
     if server_to_interrupt is not None:
         _interrupt_turn(server_to_interrupt)
     if failure is not None:

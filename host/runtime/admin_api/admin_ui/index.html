@@ -172,8 +172,12 @@
       </div>
       <div class="sidebar-divider" aria-hidden="true"></div>
       <div class="sidebar-section workspace-nav-section" aria-labelledby="scheduled-agents-nav-title">
-        <div class="workspace-nav-head">
+        <div class="workspace-nav-head scheduled-agents-nav-head">
           <button id="scheduled-agents-nav-title" class="sidebar-section-title workspace-nav-title-button" data-action="open-workspace-global" data-resource="scheduled-agents">Standing agents</button>
+          <div class="workspace-nav-head-actions">
+            <button class="workspace-nav-archived" data-action="show-scheduled-agent-archive">Archived</button>
+            <button class="workspace-nav-new" data-action="new-scheduled-agent" aria-label="New standing agent" title="New standing agent">+</button>
+          </div>
         </div>
         <div id="scheduled-agents-nav-items" class="workspace-nav-items"></div>
       </div>
