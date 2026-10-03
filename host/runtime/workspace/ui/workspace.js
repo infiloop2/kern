@@ -45,7 +45,7 @@
     return `${Math.abs(days)}d ${days >= 0 ? "ago" : "from now"}`;
   }
 
-  async function open(resource, itemId = null) {
+  async function open(resource, itemId = null, view = "active") {
     if (!new Set(["memory", "schedules", "scheduled-agents"]).has(resource)) return;
     if (resource === "schedules") resource = "scheduled-agents";
     state.resource = resource;
@@ -54,7 +54,7 @@
         ? "individual"
         : "swarm";
     }
-    state.deleted = false;
+    state.deleted = view === "archived";
     state.selected = null;
     state.creating = false;
     $("global-title").textContent = resource === "memory"
@@ -71,9 +71,15 @@
     renderMemoryScope();
     hideForms();
     const openingRoute = window.location.hash;
-    await loadItems(false);
+    const loading = loadItems(false);
+    const openingSequence = state.sequence;
+    await loading;
+    if (state.sequence !== openingSequence || window.location.hash !== openingRoute) return undefined;
+    if (view === "new") {
+      newItem();
+      return true;
+    }
     if (itemId !== null) {
-      if (window.location.hash !== openingRoute) return undefined;
       const selected = await selectItem(String(itemId), true);
       if (
         resource === "memory"

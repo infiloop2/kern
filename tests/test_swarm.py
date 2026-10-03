@@ -276,6 +276,9 @@ class SwarmPersistenceTests(unittest.TestCase):
                             " ('2026-10-02','operator','app-1',4),"
                             " ('2026-10-02','app-1','thread-1',1),"
                             " ('2026-10-02','app-1','app-1',9),"
+                            " ('2026-10-02','kern-host','app-1',10000),"
+                            " ('2026-10-02','kern-host','schedule-1',3),"
+                            " ('2026-10-02','kern-host','thread-1',2),"
                             " ('2026-09-25','operator','app-1',900),"
                             " ('2026-10-03','operator','app-1',900)")
                 for thread_id, run, measured, buckets in [
@@ -304,6 +307,12 @@ class SwarmPersistenceTests(unittest.TestCase):
             self.assertEqual(result['metrics']['thread-1']['agent_peers'], 1)
             self.assertIsNone(result['metrics']['thread-1']['total_tokens'])
             self.assertNotIn('operator', result['metrics'])
+            self.assertNotIn('kern-host', result['metrics'])
+            self.assertEqual(result['metrics']['schedule-1'], {
+                'operator_messages': 0, 'agent_peers': 0, 'total_tokens': None, 'tokens_partial': True,
+            })
+            self.assertIn({'sender_thread_id': 'kern-host', 'target_thread_id': 'app-1', 'count': 10000},
+                          result['interactions'])
 
     def test_only_on_demand_has_a_task_and_spawned_parent_is_visible(self) -> None:
         self.assertTrue(state.is_on_demand_agent('thread-1'))

@@ -23,8 +23,9 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
         page.locator('#mobile-nav-toggle').click()
     page.route('**/v1/swarm/interactions', lambda route: route.fulfill(status=503, json={'error': 'unavailable'}))
     page.get_by_role('button', name='Swarm view', exact=True).click()
-    expect(page.locator('.swarm-card')).to_have_count(101)
+    expect(page.locator('.swarm-card')).to_have_count(102)
     expect(page.locator('.kind-operator')).to_have_count(1)
+    expect(page.locator('.kind-host')).to_have_count(1)
     expect(page.locator('.kind-app')).to_have_count(30)
     expect(page.locator('.kind-standing')).to_have_count(25)
     expect(page.locator('.kind-spawned')).to_have_count(10)
@@ -33,11 +34,11 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(page.locator('#swarm-error')).to_contain_text('Could not refresh communication counts')
     page.unroute('**/v1/swarm/interactions')
     refresh()
-    expect(page.locator('.swarm-edge')).to_have_count(6)
+    expect(page.locator('.swarm-edge')).to_have_count(9)
     page.route('**/v1/swarm/interactions', lambda route: route.fulfill(status=503, json={'error': 'unavailable'}))
     refresh()
-    expect(page.locator('.swarm-edge')).to_have_count(6)
-    expect(page.locator('.swarm-card')).to_have_count(101)
+    expect(page.locator('.swarm-edge')).to_have_count(9)
+    expect(page.locator('.swarm-card')).to_have_count(102)
     page.unroute('**/v1/swarm/interactions')
     refresh()
     # Recovered metrics rank on Arrange, not during a routine refresh.
@@ -45,6 +46,7 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     positions = page.locator('.swarm-card').evaluate_all(
         'nodes => Object.fromEntries(nodes.map(e => [e.dataset.threadId, [parseFloat(e.style.left), parseFloat(e.style.top)]]))')
     assert all(point[1] > positions['operator'][1] for key, point in positions.items() if key != 'operator')
+    assert positions['operator'][1] < positions['kern-host'][1] < positions['app-1'][1]
     assert positions['app-1'][1] < positions['app-2'][1] < positions['app-30'][1]
     original_counts = page.request.get(url + 'v1/swarm/interactions', headers={'X-Kern-Csrf': '1'}).json()
     changed_counts = {**original_counts, 'metrics': {**original_counts['metrics'],
@@ -65,10 +67,10 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     page.route('**/v1/swarm/interactions', lambda route: route.fulfill(json={'interactions': dense}))
     refresh()
     expect(page.locator('.swarm-edge')).to_have_count(500)
-    expect(page.locator('.swarm-card')).to_have_count(101)
+    expect(page.locator('.swarm-card')).to_have_count(102)
     page.unroute('**/v1/swarm/interactions')
     refresh()
-    expect(page.locator('.swarm-edge')).to_have_count(6)
+    expect(page.locator('.swarm-edge')).to_have_count(9)
     expect(page.locator('#swarm-attention-count')).to_have_text('8')
     panel = page.locator('#panel-swarm')
     assert panel.evaluate('e => { const r=e.getBoundingClientRect(); return r.x === 0 && r.y === 0 && r.width === innerWidth && r.height === innerHeight; }')
@@ -84,6 +86,21 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(page.locator('#swarm-detail button').filter(has_text='Open conversation')).to_have_count(0)
     expect(page.locator('.swarm-edge-count').filter(has_text='24')).to_have_count(1)
     page.get_by_role('button', name='Close agent details', exact=True).click()
+    # Host connections show automated deliveries to different agent categories.
+    host = page.locator('.kind-host')
+    host.click()
+    expect(host.locator('.swarm-agent-name')).to_have_text('Kern host')
+    expect(host.locator('.host-server')).to_have_count(1)
+    expect(page.locator('#swarm-detail')).to_contain_text('→ Standing agent 31 · 14')
+    expect(page.locator('#swarm-detail')).to_contain_text('→ Release notes · 3')
+    expect(page.locator('#swarm-detail')).to_contain_text('→ On-Demand agent 66 · 1')
+    expect(page.locator('#swarm-detail')).to_contain_text('scheduled triggers, approval outcomes and restart notices')
+    expect(page.locator('#swarm-detail')).not_to_contain_text('Involvement ·')
+    expect(page.locator('#swarm-detail button').filter(has_text='Open conversation')).to_have_count(0)
+    page.locator('.swarm-connection').filter(has_text='→ Release notes').click()
+    expect(page.locator('#swarm-detail')).to_contain_text('Kern host → Release notes')
+    expect(page.locator('#swarm-detail')).to_contain_text('3 accepted messages')
+    page.get_by_role('button', name='Close agent details', exact=True).click()
     first = page.locator('.swarm-card[data-thread-id="app-1"]')
     expect(first.locator('.swarm-type')).to_have_text('App')
     expect(first.locator('.swarm-agent-description')).to_have_text('Keep the project moving')
@@ -94,6 +111,7 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(page.locator('#swarm-detail')).to_contain_text('Other agents interacted with: 2')
     expect(page.locator('#swarm-detail')).to_contain_text('Tokens processed: 123,456')
     expect(page.locator('#swarm-detail')).to_contain_text('→ Billing desk · 18')
+    expect(page.locator('#swarm-detail')).to_contain_text('← Kern host · 3')
     expect(first).to_have_css('background-color', 'rgba(0, 0, 0, 0)')
     expect(first.locator('.swarm-avatar svg')).to_have_count(1)
     expect(first.locator('.critter-laptop')).to_have_count(1)
@@ -118,7 +136,7 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     # Highlighting preserves every agent on the map.
     page.locator('[data-swarm-filter="needs-human"]').click()
     expect(page.locator('.swarm-card:not(.is-dimmed)')).to_have_count(5)
-    expect(page.locator('.swarm-card:visible')).to_have_count(101)
+    expect(page.locator('.swarm-card:visible')).to_have_count(102)
     page.locator('[data-swarm-filter="needs-human"]').click()
     page.locator('#swarm-search').fill('On-demand agent 100')
     expect(page.locator('.swarm-card:not(.is-dimmed)')).to_have_count(1)
@@ -128,7 +146,7 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     page.locator('.swarm-attention-item').first.click()
     expect(page.locator('#swarm-detail')).to_contain_text('1 pending Kern approval.')
     expect(page.locator('#swarm-detail')).to_contain_text('View approvals')
-    expect(page.locator('.swarm-card:visible')).to_have_count(101)
+    expect(page.locator('.swarm-card:visible')).to_have_count(102)
     page.get_by_role('button', name='Close agent details', exact=True).click()
     # Same node position survives changes in status/counts, and untrusted text is inert.
     position = first.evaluate('e => [e.style.left, e.style.top]')
@@ -158,7 +176,7 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
                             'kind': 'on-demand', 'name': 'Team lead', 'state': 'idle',
                             'pending_approval_count': 0})
     apply_snapshot(large)
-    expect(page.locator('.swarm-card')).to_have_count(1002)
+    expect(page.locator('.swarm-card')).to_have_count(1003)
     expect(page.locator('.kind-spawned .swarm-agent-description').first).to_have_text('Delegated by Team lead')
     page.evaluate("""() => {
       window.__swarmContentMutations = 0;

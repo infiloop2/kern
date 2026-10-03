@@ -61,6 +61,26 @@ class SwarmLayoutTests(unittest.TestCase):
             if (JSON.stringify([...scores]) !== JSON.stringify([...archived])) throw Error('archived metrics affect ranking');
             const reverse = layoutAgents([...sample].reverse(), [], metrics);
             if (JSON.stringify([...ranked.positions]) !== JSON.stringify([...reverse.positions])) throw Error('unstable rank ties');
+            // Host deliveries have a fixed sender node, outside agent ranking.
+            const withHost = [...sample, {{thread_id: 'kern-host'}}];
+            const hostMetrics = {{...metrics, 'kern-host': {{operator_messages: 1e9, agent_peers: 1e9, total_tokens: 1e20}}}};
+            if (JSON.stringify([...scores]) !== JSON.stringify([...rankAgents(withHost, hostMetrics)])) throw Error('host affects ranking');
+            const hostMap = layoutAgents(withHost, [{{sender_thread_id: 'kern-host', target_thread_id: 'helper', count: 10}}], hostMetrics);
+            if (hostMap.positions.size !== withHost.length) throw Error('host or agents missing');
+            if (hostMap.positions.get('operator').y + 216 > hostMap.positions.get('kern-host').y) throw Error('host overlaps operator');
+            for (const id of scores.keys()) {{
+                if (hostMap.positions.get('kern-host').y + 216 > hostMap.positions.get(id).y) throw Error('host overlaps agents');
+            }}
+            for (const id of ['operator', 'kern-host']) {{
+                if (Math.abs(hostMap.positions.get(id).x + 110 - hostMap.width / 2) > 1e-6) throw Error('sender not centred');
+            }}
+            for (const agents of [[{{thread_id:'kern-host'}}], [{{thread_id:'operator'}}, {{thread_id:'kern-host'}}]]) {{
+                const map = layoutAgents(agents, []);
+                if (map.positions.size !== agents.length) throw Error('empty swarm loses senders');
+                for (const point of map.positions.values()) {{
+                    if (point.x + 220 > map.width || point.y + 216 > map.height) throw Error('sender outside map');
+                }}
+            }}
             // A strong collaborator pulls horizontal placement closer, without
             // changing the ranking or dropping disconnected nodes.
             const peers = Array.from({{length: 9}}, (_, i) => ({{thread_id: `a${{i}}`}}));

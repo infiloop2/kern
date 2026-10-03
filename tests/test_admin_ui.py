@@ -353,7 +353,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertNotIn("task-steer-input", script)
         self.assertNotIn("task.output_message", script)
 
-    def test_scheduled_agent_navigation_opens_management_without_a_plus(self) -> None:
+    def test_scheduled_agent_navigation_has_management_archive_and_new_controls(self) -> None:
         root = Path(__file__).parents[1]
         script = (
             root / "host/runtime/workspace/chat/ui/agent_chat.js"
@@ -378,7 +378,9 @@ class AdminUiStaticTests(unittest.TestCase):
         scheduled_section = admin_html.split(
             'aria-labelledby="scheduled-agents-nav-title"', 1
         )[1].split('<div class="sidebar-divider"', 1)[0]
-        self.assertNotIn("workspace-nav-new", scheduled_section)
+        self.assertIn('data-action="show-scheduled-agent-archive"', scheduled_section)
+        self.assertIn('data-action="new-scheduled-agent"', scheduled_section)
+        self.assertIn('aria-label="New standing agent"', scheduled_section)
         self.assertIn(
             'id="schedule-save" class="soft-primary"', workspace_html
         )

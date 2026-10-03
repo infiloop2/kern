@@ -230,6 +230,25 @@ also checks that the tool remains enabled. Denied approvals send nothing.
 Approval can be given by the operator or an applicable configured auto-approval
 policy. There is no per-account posting-enable flag.
 
+For a reply, the tool makes one anonymous HTTPS GET to
+`https://publish.x.com/oembed` with the numeric target URL and `omit_script=true`.
+It uses the normal shared tool HTTP helper, verifies the returned post URL
+identifies the requested ID, and extracts the embed's post paragraph as plain
+text. The fixed URL contains only a validated numeric ID and needs no free-text
+parameter guard. Requests use HTTPS, refuse redirects, time out after 20 seconds
+and accept at most 100,000 response bytes. It never executes embed HTML or
+JavaScript, uses API credentials,
+or launches Chromium for this read. Original posts make no embed request.
+The immutable `target_tweet` approval field contains the text, author handle,
+URL, source and capture time. Both exact-request details and AI approval review
+receive it through the existing approval payload. The public embed may be
+cached or shortened by X and excludes media and linked pages; its scope is
+explicit in the payload. Failed, missing, ambiguous or oversized content is
+marked `unavailable`, with "target tweet content unavailable" in the visible
+approval summary and no browser fallback. Policies needing the missing
+content leave the request for the operator. Existing approvals still execute
+without this field. The evidence is never forwarded as posting input.
+
 Each approval authorizes one attempt. Only a confirmed X response returns
 success and a post URL. All other outcomes return failure and finish the call.
 If submission may have occurred, the failure tells the operator to check X
@@ -237,6 +256,14 @@ before approving another attempt. There is no automatic retry, duplicate-text
 check, idempotency API, uncertain status, reconciliation endpoint or persistent
 submission-error pause. A new attempt requires a new tool request and approval;
 separately approved calls may intentionally publish identical content.
+
+Preparation failures report the failed step in both the terminal approval
+result and a `browser.x_post_tweet` Host diagnostics warning. Steps distinguish
+browser launch, navigation, account verification, reply-target lookup, reply
+composer opening, clearing/typing the text, and waiting for the submit button.
+Diagnostics preserve the original exception type and safe stack, without raw
+Playwright messages, page text, cookies or credentials. Navigation HTTP failures
+include the status. No preparation failure submits or consumes a posting attempt.
 
 The service applies a common connected-state and operator-control gate to
 account-scoped tool dispatch. Future actions inherit this gate. Each provider file supplies its login URL and identity verification through the
