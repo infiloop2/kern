@@ -70,7 +70,7 @@ The categories are:
 | `workspace_navigation_order` | fixed | Two list rows, for Apps and schedules; stored ids are reconciled with current product identities. |
 | `workspace_onboarding_dismissal` | fixed | Optional singleton operator dismissal. |
 | `swarm_agent_ai` | reachability | At most one current annotation per host thread; cascades with thread-session deletion. |
-| `swarm_peer_deliveries` | retention | Newest 50 text-free peer-delivery records. |
+| `swarm_interaction_days` | retention | Today and six preceding UTC dates; expired buckets excluded on reads and pruned on accepted delivery. |
 | `web_app_collection_state` | quota | At most one row per quota-bounded App. |
 | `web_app_collection_rows` | quota | Per App: 64 collections, 100,000 rows, 50 MiB total; each row at most 128 KiB. |
 | `workspace_seen` | retention | At most one read marker per retained Chat, Web App, or schedule. Schedule markers are removed when their deleted definitions leave the 90-day restore window; Chat and App markers remain bounded by their product quotas. |

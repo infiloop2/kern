@@ -858,38 +858,45 @@ process-management failure and should be recovered with a host restart.
 ### Swarm
 
 `GET /v1/swarm` requires an operator session. Optional `q` searches names,
-purposes, and task titles across the full agent catalog (up to 100 characters).
+purposes, and task titles (up to 100 characters). The response contains
+`generated_at`, all matching active `agents`, and `has_more: false`.
+Idle/disconnected agents are included; Bash jobs are excluded.
 
-The response contains:
+Each agent has `thread_id`, `kind` (`app`, `on-demand`, `standing`, `spawned`),
+`name`, `purpose`, `agent_runtime`, `model`, nullable `next_run_at`, and:
 
-- `generated_at`: snapshot timestamp.
-- `agents`: up to 250 matching non-archived Chats and Apps and non-deleted
-  model schedules, prioritizing agents with pending approvals, then running
-  agents and recent use. Bash schedules are excluded.
-- `has_more`: whether more agents match; narrow `q` to find older agents.
+- `state`: `busy` while running; otherwise `failed` when the latest event is
+  `thread.error`, or `idle`.
+- `task`: nullable generated title for on-demand Chats only. App/Standing
+  agents show their purpose; Spawned agents show their parent and name.
+- `spawned_by_thread_id`: parent identity for Spawned agents, otherwise null.
+- `pending_approval_count`: pending native tool approvals and gated GitHub pushes
+  attributed to the thread, independent of runtime status.
 
-Each agent has `thread_id`, `kind` (`app`, `chat`, `schedule`), `name`,
-`purpose`, `agent_runtime`, `model`, nullable `next_run_at`, and:
+`GET /v1/swarm/interactions` is operator-only, without query parameters. It
+returns `since`, `through` (UTC dates) and `interactions`: directed pairs with
+`sender_thread_id`, `target_thread_id`, and integer `count`. Return at most 500
+directed pairs ranked by aggregate count descending, then sender/target ID for
+stable ties. This bounds layout springs and SVG paths; all agents stay on the map
+and stored daily counts are not truncated. The window is today
+plus the previous six UTC dates. Counts are recorded atomically on accepted
+agent message delivery, including spawning/steering, and accepted operator
+messages. Operator sends use the reserved sender ID `operator`, derived from the
+authenticated operator or trusted Workspace browser path, never message text.
+Scheduled wake-ups, rejected sends and generated replies do not create operator links. Daily buckets contain no message text,
+event IDs or summaries. Old buckets are removed on the next accepted delivery;
+reads always exclude expired dates. Counting starts at upgrade.
 
-- `state`: `busy` while the session is running; otherwise `failed` when its
-  latest event is `thread.error`, or `idle`. This follows the thread error-badge
-  rule; a running session takes precedence over an earlier error.
-- `task`: a nullable GPT-6 Luna title, at most 100 characters, for the current turn.
-- `pending_approval_count`: the number of pending Kern tool approvals and gated
-  GitHub pushes whose recorded origin is this thread. Approvals without an
-  origin thread are omitted. The count is live and independent of runtime state.
-
-App/schedule `purpose` is manually maintained and separate from `task`.
-A new turn clears `task`; clearing working memory also clears it. Missing or
-disabled inference leaves the task title unavailable. Approval counts come
-from native approval records and do not require inference.
-
-`GET /v1/swarm/peer-messages` is a separate operator-only call with no query
-parameters. The response has `messages`, the newest 50 peer deliveries.
-Each record has `seq` (its original event ID), `sender_thread_id`,
-`target_thread_id`, and `timestamp`. It contains no message text or summary.
-Ordinary operator messages do not appear here. The scene requests the last
-30 seconds by timestamp and deduplicates by `seq` before animating dialog icons.
+The Swarm map shows all active agent characters and one synthetic Operator node.
+A deterministic spring layout uses combined bidirectional message volume to place
+frequent collaborators closer together. Large catalogs use spatially local
+repulsion and a bounded relaxation budget. Arrow width shows directed volume; select
+a node or link to inspect exact counts. This represents communication, not formal
+reporting lines. Status/count refreshes preserve positions; new nodes/connections
+or Arrange recalculate the layout using current weights. Zoom/fit controls and a
+duplicate attention sidebar keep errors and approvals accessible. State/search
+filters highlight matches without removing other nodes. Communication-count
+failures leave the agent snapshot usable with no/stale links and an error notice.
 
 ### Events
 

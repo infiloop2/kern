@@ -123,9 +123,10 @@ archive and other writes, then rechecks that the app is active. Optimistic UI
 and data counters reject stale changes. Restore remains operator-only because
 it rewinds the App's UI/data state.
 
-There is intentionally no mapping from the caller's conversation thread to an
-app. Any agent thread can work on any existing app when it knows or lists the
-app id; editable display names are never authorization or identity.
+The agent API requires the authenticated caller's thread id to equal the App
+id for mutations, including metadata, UI, data, and collections. Other agents
+may read/discover the App and message its owner to request changes. Editable
+display names never grant authority; operator browser controls remain available.
 
 `POST /agent/apps/{app_id}/state/data/read` accepts either `path` for its
 original single-branch response or `paths` for up to 16 branches read from one
@@ -191,6 +192,8 @@ kernel-attributed peer thread. They delegate to the ordinary memory page load
 and save behavior, including 404, optimistic revision checks, and size limits;
 the request has no identity or page-id field. Chat, App, and persistent model
 schedule threads all use this same identity-derived self-memory path.
+Self-memory content is limited to 20,000 characters; shared swarm memory
+remains limited to 2,000. Both use a one-line description of up to 100 characters.
 
 Memory page ids beginning with `app-`, `thread-`, or `schedule-` form the
 individual-memory namespace. Agent index, search, and direct page routes expose
@@ -217,12 +220,14 @@ execution failures after acceptance are ordinary `thread.error` events.
 Failures before host acceptance are logged operationally and do not create a
 thread event. There is no retry queue, run record, run-status API, or
 recent-failures route. Bash schedule threads remain visible as read-only
-transcripts under Scheduled agents; they do not expose manual messaging or
+transcripts under Standing agents; they do not expose manual messaging or
 self-memory controls.
 
 Memory and schedule writes use an `expected_revision` compare-and-swap so
-parallel agents cannot silently overwrite each other. Agents have ordinary
-CRUD; the browser-only API exposes deleted resources, revision history, and
+concurrent edits cannot silently overwrite each other. Agents may update only
+their own standing-agent definition. Agents can create new standing agents;
+the new agent owns subsequent edits. Memory
+CRUD remains shared; the browser-only API exposes deleted resources, revision history, and
 restoration. The stable schedule conversation uses the ordinary Chat event
 API. Memory
 list/search responses are paginated and omit page bodies. Swarm page content

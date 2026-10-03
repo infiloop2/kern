@@ -1,17 +1,23 @@
-"""Current task titles, approval state, and bounded peer-delivery history."""
+"""Active agent identities, approval state, and weekly interaction counts."""
 from __future__ import annotations
 
 from typing import Any
+from datetime import datetime, timedelta, timezone
 
 from host.runtime.core import db
 from host.runtime.core.state._base import utc_now
 
-_AGENT_PAGE_LIMIT = 250
-_PEER_DELIVERY_LIMIT = 50
+def is_on_demand_agent(thread_id: str) -> bool:
+    if not thread_id.startswith("thread-"):
+        return False
+    with db.transaction() as cur:
+        cur.execute("SELECT spawned_by_thread_id IS NULL FROM chat_threads WHERE thread_id = %s", (thread_id,))
+        row = cur.fetchone()
+    return bool(row and row[0])
 
 
 def swarm_snapshot(search: str = "") -> dict[str, Any]:
-    """Bound per-agent lookups before returning the agent snapshot."""
+    """All active agents, including idle and disconnected nodes."""
     search = search.strip()[:100]
     with db.transaction() as cur:
         cur.execute("""
@@ -21,12 +27,13 @@ def swarm_snapshot(search: str = "") -> dict[str, Any]:
                        NULL::text AS next_run_at
                 FROM web_apps WHERE archived = FALSE
                 UNION ALL
-                SELECT thread_id, 'chat', COALESCE(name, thread_id), '', NULL, NULL, NULL
+                SELECT thread_id, CASE WHEN spawned_by_thread_id IS NULL THEN 'on-demand' ELSE 'spawned' END,
+                       COALESCE(name, thread_id), '', NULL, NULL, NULL
                 FROM chat_threads WHERE archived = FALSE
                   AND EXISTS (SELECT 1 FROM thread_sessions
                               WHERE thread_sessions.thread_id = chat_threads.thread_id)
                 UNION ALL
-                SELECT thread_id, 'schedule', name, purpose, agent_runtime, model, next_run_at
+                SELECT thread_id, 'standing', name, purpose, agent_runtime, model, next_run_at
                 FROM schedules WHERE deleted_at IS NULL AND agent_runtime <> 'script'
             ), pending_approvals AS (
                 SELECT origin_thread_id AS thread_id, COUNT(*) AS approval_count
@@ -54,13 +61,13 @@ def swarm_snapshot(search: str = "") -> dict[str, Any]:
                 ORDER BY CASE WHEN pending_approvals.approval_count > 0 THEN 0 ELSE 1 END,
                          CASE WHEN session.run_status = 'running' THEN 0 ELSE 1 END,
                          COALESCE(session.last_used_at, '') DESC, identity.thread_id
-                LIMIT %s
             )
             SELECT selected.thread_id, selected.kind, selected.name, selected.purpose,
                    COALESCE(selected.agent_runtime, selected.session_runtime, ''),
                    COALESCE(selected.model, selected.session_model, ''),
                    COALESCE(selected.run_status, 'idle'), selected.next_run_at,
-                   ai.task, selected.approval_count,
+                   CASE WHEN selected.kind = 'on-demand' THEN ai.task END, selected.approval_count,
+                   (SELECT spawned_by_thread_id FROM chat_threads WHERE chat_threads.thread_id = selected.thread_id),
                    (SELECT event_type FROM agent_events
                     WHERE agent_events.thread_id = selected.thread_id
                     ORDER BY seq DESC LIMIT 1)
@@ -70,52 +77,53 @@ def swarm_snapshot(search: str = "") -> dict[str, Any]:
             ORDER BY CASE WHEN selected.approval_count > 0 THEN 0 ELSE 1 END,
                      CASE WHEN selected.run_status = 'running' THEN 0 ELSE 1 END,
                      COALESCE(selected.last_used_at, '') DESC, selected.thread_id
-        """, (search, search, search, search, _AGENT_PAGE_LIMIT + 1))
+        """, (search, search, search, search))
         rows = cur.fetchall()
-        has_more = len(rows) > _AGENT_PAGE_LIMIT
         agents = [
             {"thread_id": thread_id, "kind": kind, "name": name, "purpose": purpose or "",
              "agent_runtime": runtime, "model": model,
              "state": "busy" if run_status == "running" else "failed" if latest_event_type == "thread.error" else "idle",
              "next_run_at": next_run_at,
-             "task": task, "pending_approval_count": approval_count}
+             "task": task, "pending_approval_count": approval_count, "spawned_by_thread_id": parent}
             for thread_id, kind, name, purpose, runtime, model, run_status,
-                next_run_at, task, approval_count, latest_event_type in rows[:_AGENT_PAGE_LIMIT]
+                next_run_at, task, approval_count, parent, latest_event_type in rows
         ]
-    return {"generated_at": utc_now(), "agents": agents, "has_more": has_more}
+    return {"generated_at": utc_now(), "agents": agents, "has_more": False}
 
 
-def swarm_peer_messages() -> dict[str, Any]:
-    """Newest peer deliveries only; message bodies stay in thread history."""
+def _interaction_window() -> tuple[str, str]:
+    today = datetime.now(timezone.utc).date()
+    return (today - timedelta(days=6)).isoformat(), today.isoformat()
+
+
+def swarm_interactions() -> dict[str, Any]:
+    """The 500 strongest directed pairs over seven UTC dates, never message bodies."""
+    since, through = _interaction_window()
     with db.transaction() as cur:
         cur.execute(
-            "SELECT event_seq, sender_thread_id, target_thread_id, created_at"
-            " FROM swarm_peer_deliveries ORDER BY event_seq DESC LIMIT %s",
-            (_PEER_DELIVERY_LIMIT,),
+            "SELECT sender_thread_id, target_thread_id, SUM(interactions) AS message_count"
+            " FROM swarm_interaction_days WHERE day >= %s AND day <= %s"
+            " GROUP BY sender_thread_id, target_thread_id"
+            " ORDER BY message_count DESC, sender_thread_id, target_thread_id LIMIT 500",
+            (since, through),
         )
-        peer_deliveries = [
-            {"seq": seq, "sender_thread_id": sender,
-             "target_thread_id": target, "timestamp": created_at}
-            for seq, sender, target, created_at in cur.fetchall()
+        interactions = [
+            {"sender_thread_id": sender, "target_thread_id": target, "count": int(count)}
+            for sender, target, count in cur.fetchall()
         ]
-    return {"messages": peer_deliveries}
+    return {"interactions": interactions, "since": since, "through": through}
 
 
-def record_swarm_peer_delivery(
-    cur: Any, seq: int, sender_thread_id: str, target_thread_id: str,
-) -> None:
-    """Retain up to 50 authenticated peer deliveries for scene animation."""
+def record_swarm_interaction(cur: Any, sender_thread_id: str, target_thread_id: str) -> None:
+    """Count each accepted delivery in its admission transaction."""
+    since, today = _interaction_window()
     cur.execute(
-        "INSERT INTO swarm_peer_deliveries"
-        " (event_seq, sender_thread_id, target_thread_id, created_at)"
-        " VALUES (%s, %s, %s, %s)",
-        (seq, sender_thread_id, target_thread_id, utc_now()),
+        "INSERT INTO swarm_interaction_days (day, sender_thread_id, target_thread_id, interactions)"
+        " VALUES (%s, %s, %s, 1) ON CONFLICT (day, sender_thread_id, target_thread_id)"
+        " DO UPDATE SET interactions = swarm_interaction_days.interactions + 1",
+        (today, sender_thread_id, target_thread_id),
     )
-    cur.execute(
-        "DELETE FROM swarm_peer_deliveries WHERE event_seq <="
-        " (SELECT event_seq FROM swarm_peer_deliveries ORDER BY event_seq DESC OFFSET %s LIMIT 1)",
-        (_PEER_DELIVERY_LIMIT,),
-    )
+    cur.execute("DELETE FROM swarm_interaction_days WHERE day < %s", (since,))
 
 
 def reset_swarm_ai(cur: Any, thread_id: str, run_number: int) -> None:

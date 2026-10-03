@@ -1008,7 +1008,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(headings).to_have_count(4)
     expect(headings.nth(0)).to_have_text("Chat")
     expect(headings.nth(1)).to_have_text("Apps")
-    expect(headings.nth(2)).to_have_text("Scheduled agents")
+    expect(headings.nth(2)).to_have_text("Standing agents")
     expect(headings.nth(3)).to_have_text("Spawned agents")
     # Home, Swarm, Approvals, Memory, and Analytics are tabs; Schedules is a section heading.
     expect(page.locator("#sidebar .tab-button")).to_have_count(5)

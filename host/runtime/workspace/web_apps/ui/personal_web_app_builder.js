@@ -2328,6 +2328,7 @@ function conversationEntries() {
         message: payload.message || "Context added.",
         memoryPageIds: Array.isArray(payload.memory_page_ids) ? payload.memory_page_ids : [],
         memoryRecallDetails: typeof payload.memory_recall_details === "string" ? payload.memory_recall_details : "",
+        historicalContext: typeof payload.historical_context === "string" ? payload.historical_context : "",
       });
     } else if (event.event_type === "thread.stopped") {
       entries.push({
@@ -2399,7 +2400,7 @@ function renderConversationHistory(forceBottom = false) {
       } else {
         message.textContent = entry.message;
       }
-      if (entry.memoryRecallDetails || entry.memoryPageIds?.length) {
+      if (entry.historicalContext || entry.memoryRecallDetails || entry.memoryPageIds?.length) {
         message.classList.add("memory-notice");
         const trigger = document.createElement("button");
         trigger.type = "button";
@@ -2408,7 +2409,7 @@ function renderConversationHistory(forceBottom = false) {
         pages.className = "memory-pages";
         pages.id = `app-memory-pages-${entry.seq}`;
         pages.setAttribute("role", "tooltip");
-        pages.textContent = entry.memoryRecallDetails || entry.memoryPageIds.join("\n");
+        pages.textContent = entry.historicalContext || entry.memoryRecallDetails || entry.memoryPageIds.join("\n");
         trigger.setAttribute("aria-controls", pages.id);
         const open = openMemoryKeys.has(entry.key);
         trigger.setAttribute("aria-expanded", open ? "true" : "false");

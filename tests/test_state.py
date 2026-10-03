@@ -73,9 +73,9 @@ class EventPayloadTests(unittest.TestCase):
                 sql, parameters = cur.execute.call_args.args
                 self.assertIn("memory_page_ids", sql)
                 self.assertEqual(sql.count("%s"), len(parameters))
-                self.assertIsInstance(parameters[-2], pgclient.Jsonb)
-                self.assertEqual(parameters[-2].value, page_ids)
-                self.assertEqual(parameters[-1], "Current query: screenshot")
+                self.assertIsInstance(parameters[-3], pgclient.Jsonb)
+                self.assertEqual(parameters[-3].value, page_ids)
+                self.assertEqual(parameters[-2], "Current query: screenshot")
 
 
 class StateStorageTests(unittest.TestCase):

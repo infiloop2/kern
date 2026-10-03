@@ -6,18 +6,23 @@ read [web-app-ui.md](web-app-ui.md). Data-only operations need only this file.
 Web Apps have immutable ids such as `app-1`, separate from editable display
 names. `GET /agent/apps` lists active and archived apps, including each App's short `purpose` (up to 100 characters) and
 complete `agent_settings` (`agent_runtime`, `model`, and `effort`) and
-`agent_updates_locked` state. Any agent may read an App by id and may update an
-active, unlocked App; archived and agent-locked Apps are read-only. Use the id
+`agent_updates_locked` state. Any agent may read an App by id. Only the App’s own agent may update its
+active, unlocked App through agent tools; archived and agent-locked Apps are read-only. Use the id
 the operator gives you, or list Apps and confirm the immutable id; never choose
-an App from its editable name alone. Migrated Apps inherit the configuration of
-their linked host thread, or the pinned Codex default if they have no thread.
+an App from its editable name alone.
+
+To change another App, use `send_agent_message` addressed to its `app-N` identity.
+The App agent owns its interface, data, collections, name, purpose and settings.
+It may delegate work, but applies the resulting App changes itself. The operator
+can edit Apps. Ownership uses the authenticated thread identity.
 
 Create a new App with `POST /agent/apps` without a request body, but only when
 the operator explicitly asks you to create one. App creation never accepts an
 agent configuration from the browser or an agent. The backend selects and
 persists the first active runtime, its named default model, and High effort (or
 Codex when none is active). The response contains the new immutable `app_id`
-and complete `agent_settings`; use the id for every subsequent read and write.
+and complete `agent_settings`; use the id for subsequent reads and message that App agent to build or configure
+it. The creator does not gain write access to the new App.
 
 ## App name and agent settings
 
@@ -116,6 +121,6 @@ returned in App lists, separate from the name and data. Set it with
 `PUT /agent/apps/{app_id}/name`, using
 `{"name":"Research desk","purpose":"Review company research"}`. Omitting
 `purpose` preserves it; an empty string clears it. The App details dialog
-edits both fields. Existing archive and agent-update locks apply.
+edits both fields. Archived and agent-locked Apps reject agent updates.
 
 For cross-thread requests and replies, see [agent messaging](agent-messaging.md).

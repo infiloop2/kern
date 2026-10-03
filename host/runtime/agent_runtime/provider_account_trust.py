@@ -319,7 +319,22 @@ def _probe_claude_status(
         return "active", None, refreshed
     if isinstance(probe_error, claude_code.ClaudeAuthenticationError):
         return _memo_claude_probe(token_hash, "awaiting_login", None)
-    if probe_error is not None:
+    if isinstance(probe_error, claude_code.ClaudeTimeout):
+        # An operator-forced recheck may follow an explicit rejection. A
+        # timeout is not evidence that those credentials recovered either.
+        memo = _CLAUDE_LIVE_PROBE
+        if memo is not None and memo["token_hash"] == token_hash and memo["status"] == "awaiting_login":
+            return "awaiting_login", None, None
+        # A slow usage read says nothing about credential validity. Retain
+        # admission for the already-attested token; the normal trust checks
+        # still run before commit and the proxy checks every provider request.
+        # Keep the last successful usage timestamp rather than making this
+        # timeout look like a fresh usage measurement.
+        stored = read_claude_account()
+        prior_usage = stored.get("claude_usage")
+        if _string_field(stored, "access_token_sha256") == token_hash and isinstance(prior_usage, dict):
+            usage = dict(prior_usage)
+    elif probe_error is not None:
         return _memo_claude_probe(
             token_hash, "error", f"could not validate Claude authentication: {probe_error}"
         )

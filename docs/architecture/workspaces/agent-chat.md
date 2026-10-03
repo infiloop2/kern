@@ -1,7 +1,7 @@
 # Chat workspace
 
 Chat is Kern's built-in threaded conversation workspace. Its index selects
-only direct thread ids (`thread-1`, `thread-2`, ...). Scheduled agents are
+only direct thread ids (`thread-1`, `thread-2`, ...). Standing agents are
 indexed separately by `schedules` under stable `schedule-N` identities.
 Messages, activity, errors, provider sessions, runtime, model, and effort
 remain authoritative in the host thread tables under the same direct id.
@@ -29,7 +29,7 @@ history access.
 The backend filters host thread-list queries with `prefix=thread-` and joins
 the results to its own index. The filter is an optimization; the product row
 is the authority for whether a thread is visible, named, archived, or writable.
-Scheduled agents use a separate index request filtered with
+Standing agents use a separate index request filtered with
 `prefix=schedule-`; only active schedules appear there, and schedule threads
 never appear in the Chat index or archive.
 An idle message starts a turn and a running message steers when supported.

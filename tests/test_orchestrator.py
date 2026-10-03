@@ -375,7 +375,8 @@ class OrchestratorTests(unittest.TestCase):
                 cur, runtime, thread_id, None, state.utc_now(), model, effort
             )
             return orchestrator.admit_turn(
-                cur, after_commit, thread_id, runtime, model, effort, message
+                cur, after_commit, thread_id, runtime, model, effort, message,
+                operator_sent_message=False,
             )
 
     def start_turn(
@@ -396,7 +397,8 @@ class OrchestratorTests(unittest.TestCase):
                 cur, runtime, thread_id, provider_session_id, state.utc_now(), model, effort
             )
             turn = orchestrator.admit_turn(
-                cur, after_commit, thread_id, runtime, model, effort, message
+                cur, after_commit, thread_id, runtime, model, effort, message,
+                operator_sent_message=False,
             )
             assert turn is not None
         orchestrator.launch_turn(turn, message, provider_session_id, task_context=message)
@@ -410,7 +412,7 @@ class OrchestratorTests(unittest.TestCase):
         if state.thread_session_config(thread_id) is None:
             model, effort = DEFAULT_SESSION[runtime]
             body |= {"agent_runtime": runtime, "model": model, "effort": effort}
-        return service.send_thread_message(thread_id, body, peer_sender_thread_id)
+        return service.send_thread_message(thread_id, body, peer_sender_thread_id, operator_sent_message=False)
 
     def wait_for(self, condition, message: str = "condition") -> None:
         deadline = time.monotonic() + 10
@@ -498,7 +500,7 @@ class OrchestratorTests(unittest.TestCase):
         with db.transaction() as cur:
             cur.execute("SELECT run_number, task FROM swarm_agent_ai WHERE thread_id = 'thread-1'")
             self.assertEqual(cur.fetchone(), (run, None))
-        latest = state.swarm_peer_messages()["messages"][0]
+        latest = state.swarm_interactions()["interactions"][0]
         self.assertEqual((latest["sender_thread_id"], latest["target_thread_id"]), ("thread-2", "thread-1"))
 
     def test_pasted_peer_header_does_not_create_correspondence(self) -> None:
@@ -507,7 +509,19 @@ class OrchestratorTests(unittest.TestCase):
         with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
             self.send_message("thread-1", pasted)
             self.wait_until_idle("thread-1")
-        self.assertEqual(state.swarm_peer_messages()["messages"], [])
+        self.assertEqual(state.swarm_interactions()["interactions"], [])
+
+    def test_operator_admission_and_steering_count_accepted_messages(self) -> None:
+        with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
+            service.send_thread_message("thread-1", {
+                "message": "hello", "agent_runtime": "codex", "model": DEFAULT_SESSION["codex"][0], "effort": "high",
+            }, None, operator_sent_message=True)
+            self.wait_until_idle("thread-1")
+        self.register_live_turn("codex", "thread-1", FakeServer())
+        self.assertTrue(orchestrator.steer_live_turn("thread-1", "codex", "follow-up", operator_sent_message=True))
+        self.assertEqual(state.swarm_interactions()["interactions"], [{
+            "sender_thread_id": "operator", "target_thread_id": "thread-1", "count": 2,
+        }])
 
     def test_trusted_peer_steer_records_correspondence(self) -> None:
         from host.runtime.workspace.agent_messages import MESSAGE_HEADER
@@ -515,11 +529,12 @@ class OrchestratorTests(unittest.TestCase):
         wrapped = MESSAGE_HEADER.format(sender="thread-2") + "Can you check the release?"
         self.assertTrue(orchestrator.steer_live_turn(
             "thread-chat", "codex", wrapped, peer_sender_thread_id="thread-2",
+            operator_sent_message=True,
         ))
-        message = state.swarm_peer_messages()["messages"][0]
+        message = state.swarm_interactions()["interactions"][0]
         self.assertEqual((message["sender_thread_id"], message["target_thread_id"]),
                          ("thread-2", "thread-chat"))
-        self.assertEqual(set(message), {"seq", "sender_thread_id", "target_thread_id", "timestamp"})
+        self.assertEqual(set(message), {"sender_thread_id", "target_thread_id", "count"})
 
     def test_message_to_idle_thread_runs_and_records_the_message(self) -> None:
         observed_config: list[tuple[str, str]] = []
@@ -601,7 +616,7 @@ class OrchestratorTests(unittest.TestCase):
         turn.server = server
 
         with self.assertRaises(ApiError) as starting:
-            orchestrator.steer_live_turn("thread-chat", "codex", "too early")
+            orchestrator.steer_live_turn("thread-chat", "codex", "too early", operator_sent_message=False)
         self.assertEqual(starting.exception.status.value, 409)
         self.assertEqual(
             starting.exception.message,
@@ -610,7 +625,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(event_summary(thread_events("thread-chat")), [("thread.message", "initial")])
 
         self.assertTrue(orchestrator._provider_ready(turn))
-        self.assertTrue(orchestrator.steer_live_turn("thread-chat", "codex", "accepted"))
+        self.assertTrue(orchestrator.steer_live_turn("thread-chat", "codex", "accepted", operator_sent_message=False))
         self.assertEqual(server.steered, ["accepted"])
         self.assertEqual(
             event_summary(thread_events("thread-chat")),
@@ -633,7 +648,7 @@ class OrchestratorTests(unittest.TestCase):
         turn = self.register_live_turn("codex", "thread-chat", server)
 
         with self.assertRaises(ApiError) as rejected:
-            orchestrator.steer_live_turn("thread-chat", "codex", "new direction")
+            orchestrator.steer_live_turn("thread-chat", "codex", "new direction", operator_sent_message=False)
 
         self.assertEqual(rejected.exception.status.value, 502)
         self.assertIn("rejected the message", rejected.exception.message)
@@ -660,7 +675,7 @@ class OrchestratorTests(unittest.TestCase):
         turn = self.register_live_turn("codex", "thread-chat", server)
 
         with self.assertRaises(ApiError) as finishing:
-            orchestrator.steer_live_turn("thread-chat", "codex", "too late")
+            orchestrator.steer_live_turn("thread-chat", "codex", "too late", operator_sent_message=False)
 
         self.assertEqual(finishing.exception.status.value, 409)
         self.assertEqual(
@@ -795,7 +810,7 @@ class OrchestratorTests(unittest.TestCase):
         server.started = 1
         self.register_live_turn("hermes", "hermes-busy", server)
         with self.assertRaises(ApiError) as caught:
-            orchestrator.steer_live_turn("hermes-busy", "hermes", "hello")
+            orchestrator.steer_live_turn("hermes-busy", "hermes", "hello", operator_sent_message=False)
         self.assertEqual(caught.exception.status.value, 409)
         self.assertIn("Hermes cannot accept another message", caught.exception.message)
 
@@ -807,7 +822,8 @@ class OrchestratorTests(unittest.TestCase):
         self.register_live_turn("script", "schedule-1", server)
         with self.assertRaises(ApiError) as caught:
             orchestrator.steer_live_turn(
-                "schedule-1", "script", "/mnt/kern-agent/agent-home/other.sh"
+                "schedule-1", "script", "/mnt/kern-agent/agent-home/other.sh",
+                operator_sent_message=False,
             )
         self.assertEqual(caught.exception.status.value, 409)
         self.assertIn("Script cannot accept another message", caught.exception.message)
@@ -886,7 +902,7 @@ class OrchestratorTests(unittest.TestCase):
         turn = self.register_live_turn("codex", "thread-chat", FakeServer())
         for index in range(25):
             self.assertTrue(
-                orchestrator.steer_live_turn("thread-chat", "codex", f"steer {index}")
+                orchestrator.steer_live_turn("thread-chat", "codex", f"steer {index}", operator_sent_message=False)
             )
         self.assertEqual(
             turn.server.steered,
@@ -908,7 +924,7 @@ class OrchestratorTests(unittest.TestCase):
         self.register_live_turn("codex", "thread-chat", FakeServer())
 
         with patch.object(orchestrator, "utc_now", return_value="2026-06-08T00:00:09Z"):
-            self.assertTrue(orchestrator.steer_live_turn("thread-chat", "codex", "new direction"))
+            self.assertTrue(orchestrator.steer_live_turn("thread-chat", "codex", "new direction", operator_sent_message=False))
 
         config = state.thread_session_config("thread-chat")
         self.assertIsNotNone(config)
@@ -973,7 +989,7 @@ class OrchestratorTests(unittest.TestCase):
         turn = self.register_live_turn("codex", "thread-chat", FakeServer())
         with patch.object(state, "append_agent_event", side_effect=RuntimeError("write failed")):
             with self.assertRaises(RuntimeError):
-                orchestrator.steer_live_turn("thread-chat", "codex", "possibly delivered")
+                orchestrator.steer_live_turn("thread-chat", "codex", "possibly delivered", operator_sent_message=False)
         self.assertEqual(turn.server.steered, ["possibly delivered"])
         self.assertEqual(thread_events("thread-chat"), [])
         self.assertEqual(
@@ -1299,9 +1315,10 @@ class OrchestratorTests(unittest.TestCase):
                     "effort": "ultracode",
                 },
                 None,
+                operator_sent_message=False,
             )
             self.wait_until_idle("thread-chat")
-            service.send_thread_message("thread-chat", {"message": "again"}, None)
+            service.send_thread_message("thread-chat", {"message": "again"}, None, operator_sent_message=False)
             self.wait_until_idle("thread-chat")
 
         self.assertEqual(seen, [None, "claude-session-1"])
@@ -1335,9 +1352,10 @@ class OrchestratorTests(unittest.TestCase):
                     "effort": "xhigh",
                 },
                 None,
+                operator_sent_message=False,
             )
             self.wait_until_idle("thread-grok")
-            service.send_thread_message("thread-grok", {"message": "again"}, None)
+            service.send_thread_message("thread-grok", {"message": "again"}, None, operator_sent_message=False)
             self.wait_until_idle("thread-grok")
 
         self.assertEqual(seen, [None, "grok-session-1"])
@@ -1390,12 +1408,12 @@ class OrchestratorTests(unittest.TestCase):
             return "replacement-session", "done"
 
         with patch.object(orchestrator.grok_agent, "run_turn", fake_run_turn):
-            service.send_thread_message("thread-stale-grok", {"message": "first retry"}, None)
+            service.send_thread_message("thread-stale-grok", {"message": "first retry"}, None, operator_sent_message=False)
             self.wait_until_idle("thread-stale-grok")
             self.assertIsNone(
                 state.thread_session_config("thread-stale-grok")["provider_session_id"]
             )
-            service.send_thread_message("thread-stale-grok", {"message": "second retry"}, None)
+            service.send_thread_message("thread-stale-grok", {"message": "second retry"}, None, operator_sent_message=False)
             self.wait_until_idle("thread-stale-grok")
 
         self.assertEqual(attempts, ["deleted-session", None])
@@ -1487,7 +1505,7 @@ class OrchestratorTests(unittest.TestCase):
                     self.assertIsNone(state.thread_session_config(thread_id)["provider_session_id"])
                     self.assertFalse(server.closed)
                     with self.assertRaises(ApiError) as conflict:
-                        service.send_thread_message(thread_id, {"message": "too soon"}, None)
+                        service.send_thread_message(thread_id, {"message": "too soon"}, None, operator_sent_message=False)
                     self.assertEqual(conflict.exception.status.value, 409)
 
                 self.rollout_size.side_effect = [
@@ -1555,7 +1573,7 @@ class OrchestratorTests(unittest.TestCase):
             patch.object(orchestrator.codex_app_server, "CodexAppServer", StartingServer),
             patch.object(orchestrator.codex_app_server, "run_turn", fake_run_turn),
         ):
-            service.send_thread_message(thread_id, {"message": "continue the work"}, None)
+            service.send_thread_message(thread_id, {"message": "continue the work"}, None, operator_sent_message=False)
             self.wait_until_idle(thread_id)
             self.assertEqual(len(attempts), 1)
             self.assertEqual(attempts[0][1], "deleted-session")
@@ -1564,7 +1582,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(len(errors), 1)
             self.assertIn("send the message again", errors[0]["payload"]["error_message"])
 
-            service.send_thread_message(thread_id, {"message": "retry now"}, None)
+            service.send_thread_message(thread_id, {"message": "retry now"}, None, operator_sent_message=False)
             self.wait_until_idle(thread_id)
 
         self.assertEqual(len(attempts), 2)
@@ -1626,6 +1644,7 @@ class OrchestratorTests(unittest.TestCase):
                 "thread-stale-claude",
                 {"message": "continue the work"},
                 None,
+                operator_sent_message=False,
             )
             self.assertEqual(response["status"], "accepted")
             self.wait_until_idle("thread-stale-claude")
@@ -1644,6 +1663,7 @@ class OrchestratorTests(unittest.TestCase):
                 "thread-stale-claude",
                 {"message": "retry now"},
                 None,
+                operator_sent_message=False,
             )
             self.assertEqual(retry["status"], "accepted")
             self.wait_until_idle("thread-stale-claude")
@@ -1675,7 +1695,7 @@ class OrchestratorTests(unittest.TestCase):
             results["first_finish"] = finish_turn("claude-session-1", "done")
             results["second_finish"] = finish_turn("claude-session-1", "done")
             try:
-                service.send_thread_message("thread-chat", {"message": "too late"}, None)
+                service.send_thread_message("thread-chat", {"message": "too late"}, None, operator_sent_message=False)
                 results["post_finish"] = "accepted"
             except ApiError as exc:
                 results["post_finish"] = (exc.status.value, exc.message)
@@ -2553,6 +2573,45 @@ class OrchestratorTests(unittest.TestCase):
                 "last_checked_at": "2026-07-16T14:00:00Z",
             },
         )
+
+    def test_claude_usage_timeout_keeps_runtime_and_proxy_pin_active(self) -> None:
+        old_usage = {"current_session_used_percent": 14, "last_checked_at": "old"}
+        save_attested_claude_account("acct-real", access_token_sha256="a" * 64, claude_usage=old_usage)
+        save_proxy_claude_account_id("acct-real")
+        orchestrator._set_runtime_status("claude_code", "active")
+        with (
+            patch.object(orchestrator.claude_code, "account_status", return_value=(
+                "active", None, {"access_token_sha256": "a" * 64},
+            )),
+            patch.object(orchestrator.claude_code, "read_claude_usage", side_effect=orchestrator.claude_code.ClaudeTimeout("slow usage")),
+            patch.object(orchestrator, "_stop_runtime_processes") as stop,
+        ):
+            self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "active")
+            self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "active")
+        self.assertEqual(orchestrator.runtime_status("claude_code"), "active")
+        self.assertEqual(read_proxy_claude_account_id(), "acct-real")
+        self.assertEqual(read_claude_account()["claude_usage"], old_usage)
+        stop.assert_not_called()
+
+    def test_claude_usage_timeout_during_rotation_still_rejects_account_mismatch(self) -> None:
+        save_attested_claude_account("acct-real", access_token_sha256="a" * 64)
+        save_proxy_claude_account_id("acct-real")
+        orchestrator._set_runtime_status("claude_code", "active")
+        with (
+            patch.object(orchestrator.claude_code, "account_status", return_value=(
+                "active", None, {"access_token_sha256": "a" * 64},
+            )),
+            patch.object(orchestrator.claude_code, "read_claude_usage", side_effect=orchestrator.claude_code.ClaudeTimeout("slow usage")),
+            patch.object(orchestrator.claude_code, "read_claude_account", return_value={"access_token_sha256": "b" * 64}),
+            patch.object(orchestrator.claude_code, "read_attested_identity", return_value={
+                "access_token_sha256": "b" * 64, "account_uuid": "another-account",
+            }),
+            patch.object(orchestrator, "_stop_runtime_processes") as stop,
+        ):
+            self.assertEqual(orchestrator.refresh_runtime_status("claude_code"), "error")
+        self.assertIsNone(read_proxy_claude_account_id())
+        self.assertEqual(read_claude_account()["account_id"], "acct-real")
+        stop.assert_called_once()
 
     def test_claude_first_capture_requires_completed_token_hash(self) -> None:
         orchestrator._set_runtime_status("claude_code", "awaiting_login")
@@ -3780,7 +3839,7 @@ class StartBackgroundLoopsOrderTests(unittest.TestCase):
 class ClaudeLiveStatusTests(unittest.TestCase):
     def setUp(self) -> None:
         provider_account_trust._CLAUDE_LIVE_PROBE = None
-        self.addCleanup(setattr, orchestrator, "_CLAUDE_LIVE_PROBE", None)
+        self.addCleanup(setattr, provider_account_trust, "_CLAUDE_LIVE_PROBE", None)
 
     def stored_account(self, token_hash: str) -> dict[str, str]:
         return {
@@ -3801,6 +3860,74 @@ class ClaudeLiveStatusTests(unittest.TestCase):
             patch.object(orchestrator.claude_code, "read_claude_account", return_value=account),
         ):
             self.assertEqual(orchestrator._live_claude_status(account), ("awaiting_login", None, None))
+
+    def test_usage_timeouts_preserve_old_usage_and_retry_without_revoking_admission(self) -> None:
+        account = {"access_token_sha256": "old"}
+        old_usage = {"current_session_used_percent": 14, "last_checked_at": "2026-07-16T14:00:00Z"}
+        with (
+            patch.object(provider_account_trust, "read_claude_account", return_value={
+                **self.stored_account("old"), "claude_usage": old_usage,
+            }),
+            patch.object(orchestrator.claude_code, "read_claude_usage", side_effect=[
+                orchestrator.claude_code.ClaudeTimeout("slow usage"),
+                orchestrator.claude_code.ClaudeTimeout("still slow"),
+                {"current_session_used_percent": 27},
+            ]) as probe,
+            patch.object(orchestrator.claude_code, "read_claude_account", return_value=account),
+            patch.object(provider_account_trust, "utc_now", return_value="2026-07-16T15:00:00Z"),
+        ):
+            expected = ("active", None, {**account, "claude_usage": old_usage})
+            self.assertEqual(orchestrator._live_claude_status(account), expected)
+            self.assertEqual(orchestrator._live_claude_status(account), expected)
+            self.assertEqual(probe.call_count, 1)
+            assert provider_account_trust._CLAUDE_LIVE_PROBE is not None
+            provider_account_trust._CLAUDE_LIVE_PROBE["at"] -= orchestrator.CLAUDE_LIVE_PROBE_RETRY_SECONDS + 1
+            self.assertEqual(orchestrator._live_claude_status(account), expected)
+            self.assertEqual(probe.call_count, 2)
+            recovered = orchestrator._live_claude_status(account, force_probe=True)
+            self.assertEqual(recovered, ("active", None, {**account, "claude_usage": {
+                "current_session_used_percent": 27, "last_checked_at": "2026-07-16T15:00:00Z",
+            }}))
+
+    def test_usage_timeout_without_prior_usage_does_not_hide_a_later_auth_rejection(self) -> None:
+        account = {"access_token_sha256": "old"}
+        with (
+            patch.object(provider_account_trust, "read_claude_account", return_value=self.stored_account("old")),
+            patch.object(orchestrator.claude_code, "read_claude_usage", side_effect=[
+                orchestrator.claude_code.ClaudeTimeout("slow usage"),
+                orchestrator.claude_code.ClaudeAuthenticationError("invalid"),
+            ]),
+            patch.object(orchestrator.claude_code, "read_claude_account", return_value=account),
+        ):
+            self.assertEqual(orchestrator._live_claude_status(account), ("active", None, account))
+            self.assertEqual(orchestrator._live_claude_status(account, force_probe=True), ("awaiting_login", None, None))
+
+    def test_usage_timeout_does_not_hide_missing_token_metadata(self) -> None:
+        with (
+            patch.object(provider_account_trust, "read_claude_account", return_value=self.stored_account("old")),
+            patch.object(orchestrator.claude_code, "read_claude_usage", side_effect=orchestrator.claude_code.ClaudeTimeout("slow usage")),
+            patch.object(orchestrator.claude_code, "read_claude_account", return_value={}),
+        ):
+            status, error, account = orchestrator._live_claude_status({"access_token_sha256": "old"})
+        self.assertEqual(status, "error")
+        self.assertIn("metadata disappeared", error or "")
+        self.assertIsNone(account)
+
+    def test_forced_usage_timeout_does_not_reactivate_a_rejected_token(self) -> None:
+        account = {"access_token_sha256": "old"}
+        with (
+            patch.object(provider_account_trust, "read_claude_account", return_value=self.stored_account("old")),
+            patch.object(orchestrator.claude_code, "read_claude_usage", side_effect=[
+                orchestrator.claude_code.ClaudeAuthenticationError("invalid"),
+                orchestrator.claude_code.ClaudeTimeout("slow usage"),
+            ]) as probe,
+            patch.object(orchestrator.claude_code, "read_claude_account", return_value=account),
+        ):
+            expected = ("awaiting_login", None, None)
+            self.assertEqual(orchestrator._live_claude_status(account), expected)
+            self.assertEqual(orchestrator._live_claude_status(account, force_probe=True), expected)
+            self.assertEqual(orchestrator._live_claude_status(account), expected)
+        self.assertEqual(probe.call_count, 2)
 
     def test_refresh_rotation_is_attested_instead_of_failed_by_the_old_proxy_pin(self) -> None:
         account = {"access_token_sha256": "old", "plan_type": "max"}

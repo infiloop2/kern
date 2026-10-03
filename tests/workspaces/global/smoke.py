@@ -189,7 +189,7 @@ def _save_memory(page_id: str, body: Any, api_error: Any) -> dict[str, Any]:
         {"description", "content", "expected_revision"},
     )
     description = _translate(api_error, memory_backend._description, body["description"])
-    content = _translate(api_error, memory_backend._content, body["content"])
+    content = _translate(api_error, memory_backend._content, body["content"], page_id)
     expected = _translate(api_error, memory_backend._expected_revision, body["expected_revision"])
     current = MEMORY.get(page_id)
     if current is None and len(MEMORY) >= memory_backend.MAX_PAGES:
@@ -486,6 +486,11 @@ def desktop_smoke(page: Any) -> None:
     surface.locator("#memory-page-id").fill("release-preferences")
     surface.locator("#memory-description").fill("Use before planning a release")
     memory_content = surface.locator("#memory-content")
+    expect(memory_content).to_have_attribute("maxlength", "4000")
+    memory_content.fill("😀" * 2000)
+    expect(memory_content).to_have_js_property("validationMessage", "")
+    memory_content.fill("😀" * 1999 + "xx")
+    expect(memory_content).to_have_js_property("validationMessage", "Content must be at most 2000 characters.")
     memory_content.fill(
         "Read [[rollback-plan]] and keep notes concise.\n" + "unbroken-memory-content-" * 18
     )
@@ -532,17 +537,33 @@ def desktop_smoke(page: Any) -> None:
     expect(surface.locator("#memory-link-graph")).to_be_hidden()
     surface.locator("#memory-page-id").fill("thread-7")
     surface.locator("#memory-description").fill("Private context for chat thread 7")
-    surface.locator("#memory-content").fill("Prefer a bounded release checklist.")
+    expect(memory_content).to_have_attribute("maxlength", "40000")
+    self_content = "😀" * 20000
+    memory_content.fill("😀" * 19999 + "xx")
+    expect(memory_content).to_have_js_property("validationMessage", "Content must be at most 20000 characters.")
+    memory_content.fill(self_content)
+    expect(memory_content).to_have_js_property("validationMessage", "")
     surface.get_by_role("button", name="Save page", exact=True).click()
     expect(surface.locator("#global-list")).to_contain_text("thread-7")
+    page.reload(wait_until="domcontentloaded")
+    expect(memory_content).to_have_value(self_content)
+    expect(memory_content).to_have_attribute("maxlength", "40000")
+    expect(memory_content).to_have_js_property("validationMessage", "")
+    surface.locator("#memory-description").fill("Updated self memory context")
+    surface.get_by_role("button", name="Save page", exact=True).click()
+    expect(surface.locator("#global-status")).to_have_text("Memory page saved")
+    expect(memory_content).to_have_value(self_content)
     surface.get_by_role("button", name="Swarm", exact=True).click()
+    expect(memory_content).to_have_attribute("maxlength", "4000")
     expect(surface.locator("#global-list")).to_contain_text("release-preferences")
     expect(surface.locator("#global-list")).not_to_contain_text("thread-7")
 
-    page.get_by_role("button", name="Scheduled agents", exact=True).click()
-    expect(surface.locator("#global-title")).to_have_text("Schedules")
+    page.get_by_role("button", name="Standing agents", exact=True).click()
+    expect(surface.locator("#global-title")).to_have_text("Standing agents")
     expect(page).to_have_url(re.compile(r"#scheduled-agents$"))
-    surface.get_by_role("button", name="New schedule", exact=True).click()
+    surface.get_by_role("button", name="New standing agent", exact=True).click()
+    expect(surface.locator(".schedule-trigger")).to_have_count(0)
+    surface.get_by_role("button", name="Add trigger", exact=True).click()
     expect(surface.locator("#schedule-enabled")).to_have_count(0)
     expect(surface.locator("#schedule-runs-section")).to_have_count(0)
     surface.locator("#schedule-name").fill("Morning review")
@@ -585,7 +606,7 @@ def desktop_smoke(page: Any) -> None:
     for _ in range(3):
         surface.locator(".schedule-trigger").last.get_by_role("button", name="Remove trigger", exact=True).click()
     expect(add_trigger).to_be_enabled()
-    surface.get_by_role("button", name="Save schedule", exact=True).click()
+    surface.get_by_role("button", name="Save agent", exact=True).click()
     chat = page.locator("#panel-workspace-chat")
     expect(chat).to_be_visible()
     expect(chat.locator("#thread-title")).to_have_text("Morning review")
@@ -595,7 +616,7 @@ def desktop_smoke(page: Any) -> None:
     expect(chat.locator("#thread-memory")).to_be_visible()
     expect(chat.locator("#new-task-runtime")).to_be_hidden()
     expect(chat.locator("#archive-thread")).to_be_hidden()
-    chat.get_by_role("button", name="Rename scheduled agent", exact=True).click()
+    chat.get_by_role("button", name="Rename standing agent", exact=True).click()
     chat.locator("#rename-thread-input").fill("Daily release review")
     with page.expect_response(
         lambda response: response.request.method == "PUT"
@@ -609,7 +630,7 @@ def desktop_smoke(page: Any) -> None:
     )
     chat.locator("#schedule-settings").click()
     expect(surface).to_be_visible()
-    expect(surface.locator("#global-title")).to_have_text("Scheduled agent")
+    expect(surface.locator("#global-title")).to_have_text("Standing agent")
     expect(surface.locator("#schedule-name")).to_have_value("Daily release review")
     expect(surface.locator("#schedule-purpose")).to_have_value("Summarize release work")
     expect(surface.locator(".schedule-trigger")).to_have_count(2)
@@ -626,9 +647,9 @@ def desktop_smoke(page: Any) -> None:
         throw new Error("navigation unavailable");
       };
     }""")
-    surface.get_by_role("button", name="Save schedule", exact=True).click()
+    surface.get_by_role("button", name="Save agent", exact=True).click()
     expect(surface.locator("#global-status")).to_contain_text(
-        "Schedule saved, but Chat could not be opened: navigation unavailable"
+        "Agent saved, but Chat could not be opened: navigation unavailable"
     )
     expect(surface.locator("#schedule-name")).to_have_value("Daily release review")
     page.evaluate("""() => {
@@ -643,7 +664,7 @@ def desktop_smoke(page: Any) -> None:
         window.__kernReleaseDelayedRefresh = resolve;
       });
     }""")
-    surface.get_by_role("button", name="Save schedule", exact=True).click()
+    surface.get_by_role("button", name="Save agent", exact=True).click()
     page.wait_for_function("() => window.__kernDelayedRefreshStarted === true")
     page.get_by_role("button", name="Memory", exact=True).click()
     expect(page).to_have_url(re.compile(r"#memory$"))
@@ -661,7 +682,7 @@ def desktop_smoke(page: Any) -> None:
     expect(page).to_have_url(re.compile(r"#memory$"))
     page.go_forward()
     expect(page).to_have_url(re.compile(r"#scheduled-agents/1$"))
-    expect(surface.locator("#global-title")).to_have_text("Scheduled agent")
+    expect(surface.locator("#global-title")).to_have_text("Standing agent")
 
     trigger_message = "This is an automated message from Kern.\n\n---\n\nSummarize open release work."
     chat_index = page.evaluate(
@@ -752,10 +773,12 @@ def desktop_smoke(page: Any) -> None:
         model_update,
     )
 
-    page.get_by_role("button", name="Scheduled agents", exact=True).click()
-    expect(surface.locator("#global-title")).to_have_text("Schedules")
+    page.get_by_role("button", name="Standing agents", exact=True).click()
+    expect(surface.locator("#global-title")).to_have_text("Standing agents")
     expect(page).to_have_url(re.compile(r"#scheduled-agents$"))
-    surface.get_by_role("button", name="New schedule", exact=True).click()
+    surface.get_by_role("button", name="New standing agent", exact=True).click()
+    expect(surface.locator(".schedule-trigger")).to_have_count(0)
+    surface.get_by_role("button", name="Add trigger", exact=True).click()
     surface.locator("#schedule-runtime").select_option("script")
     surface.locator("#schedule-name").fill("Dependency snapshot")
     surface.locator("[data-trigger-prompt]").fill(
@@ -767,7 +790,7 @@ def desktop_smoke(page: Any) -> None:
     expect(surface.locator("#schedule-effort")).to_have_value("fixed")
     surface.locator("[data-trigger-type]").select_option("daily")
     surface.locator(".trigger-time input").fill("09:00")
-    surface.get_by_role("button", name="Save schedule", exact=True).click()
+    surface.get_by_role("button", name="Save agent", exact=True).click()
     expect(page).to_have_url(re.compile(r"#chat/schedule-2$"))
     expect(chat.locator("#thread-title")).to_have_text("Dependency snapshot")
     expect(chat.locator("#composer")).to_be_hidden()
@@ -775,13 +798,13 @@ def desktop_smoke(page: Any) -> None:
     expect(page.locator("#scheduled-agents-nav-items")).to_contain_text(
         "Dependency snapshot"
     )
-    page.get_by_role("button", name="Scheduled agents", exact=True).click()
+    page.get_by_role("button", name="Standing agents", exact=True).click()
     surface.locator("[data-item-id='2']").click()
     expect(surface.locator("#schedule-name")).to_have_value("Dependency snapshot")
     expect(page).to_have_url(re.compile(r"#scheduled-agents/2$"))
     surface.get_by_role("button", name="Remove trigger", exact=True).click()
     expect(surface.locator(".schedule-trigger")).to_have_count(0)
-    surface.get_by_role("button", name="Save schedule", exact=True).click()
+    surface.get_by_role("button", name="Save agent", exact=True).click()
     expect(page).to_have_url(re.compile(r"#chat/schedule-2$"))
     chat.locator("#schedule-settings").click()
     expect(surface.locator("#schedule-meta")).to_contain_text("No automatic messages")
@@ -801,7 +824,7 @@ def desktop_smoke(page: Any) -> None:
     )
 
     surface.locator("[data-item-id='1']").click()
-    expect(surface.locator("#global-title")).to_have_text("Scheduled agent")
+    expect(surface.locator("#global-title")).to_have_text("Standing agent")
     page.evaluate("""() => {
       window.__kernSavedRefreshNavigation = window.KernHost.refreshNavigation;
       window.KernHost.refreshNavigation = async () => {
@@ -809,9 +832,9 @@ def desktop_smoke(page: Any) -> None:
       };
     }""")
     page.once("dialog", lambda dialog: dialog.accept())
-    surface.get_by_role("button", name="Delete", exact=True).click()
+    surface.get_by_role("button", name="Archive", exact=True).click()
     expect(surface.locator("#global-status")).to_contain_text(
-        "Schedule moved to Deleted, but navigation could not refresh: navigation unavailable"
+        "Agent archived, but navigation could not refresh: navigation unavailable"
     )
     page.evaluate("""() => {
       window.KernHost.refreshNavigation = window.__kernSavedRefreshNavigation;
@@ -952,6 +975,25 @@ def desktop_smoke(page: Any) -> None:
     expect(page.locator("#panel-home")).to_be_visible()
     expect(page).to_have_url(re.compile(r"#home$"))
     expect(page.locator("#notice")).to_have_text("That Workspace item is no longer available.")
+
+    # A responsibility can exist without any automatic trigger.
+    page.get_by_role("button", name="Standing agents", exact=True).click()
+    surface.get_by_role("button", name="New standing agent", exact=True).click()
+    expect(surface.locator(".schedule-trigger")).to_have_count(0)
+    surface.locator("#schedule-name").fill("Research desk")
+    surface.locator("#schedule-purpose").fill("Research questions from the team")
+    with page.expect_response(lambda response: response.request.method == "POST"
+                              and response.url.endswith("/v1/workspace/schedules")) as created:
+        surface.get_by_role("button", name="Save agent", exact=True).click()
+    agent = created.value.json()["schedule"]
+    assert agent["triggers"] == [] and agent["next_run_at"] is None, agent
+    expect(chat.locator("#thread-title")).to_have_text("Research desk")
+    chat.locator("#schedule-settings").click()
+    expect(surface.locator("#schedule-purpose")).to_have_value("Research questions from the team")
+    expect(surface.locator("#schedule-meta")).to_contain_text("No automatic messages")
+    page.once("dialog", lambda dialog: dialog.accept())
+    surface.get_by_role("button", name="Archive", exact=True).click()
+    expect(page.locator("#scheduled-agents-nav-items")).not_to_contain_text("Research desk")
 
 
 def mobile_smoke(page: Any) -> None:

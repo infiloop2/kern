@@ -704,6 +704,7 @@ def admit_turn(
     model: str,
     effort: str,
     message: str,
+    operator_sent_message: bool,
     *,
     pre_message_activity: dict[str, Any] | None = None,
     peer_sender_thread_id: str | None = None,
@@ -761,13 +762,15 @@ def admit_turn(
     )
     if runtime_type != "script":
         state.reset_swarm_ai(cur, thread_id, run_number)
-        if peer_sender_thread_id is not None:
-            state.record_swarm_peer_delivery(cur, message_seq, peer_sender_thread_id, thread_id)
+        sender = peer_sender_thread_id or ("operator" if operator_sent_message else None)
+        if sender is not None:
+            state.record_swarm_interaction(cur, sender, thread_id)
     return turn
 
 
 def steer_live_turn(
     thread_id: str, runtime_type: str, message: str,
+    operator_sent_message: bool,
     *, peer_sender_thread_id: str | None = None,
 ) -> bool:
     """Synchronously steer a live turn, returning False when it is idle.
@@ -838,8 +841,9 @@ def steer_live_turn(
                         {"message": message, "source": "user"},
                         run_number=turn.run_number,
                     )
-                    if peer_sender_thread_id is not None:
-                        state.record_swarm_peer_delivery(cur, message_seq, peer_sender_thread_id, thread_id)
+                    sender = peer_sender_thread_id or ("operator" if operator_sent_message else None)
+                    if sender is not None:
+                        state.record_swarm_interaction(cur, sender, thread_id)
     if server_to_interrupt is not None:
         _interrupt_turn(server_to_interrupt)
     if failure is not None:

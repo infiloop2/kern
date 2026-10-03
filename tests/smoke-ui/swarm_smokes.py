@@ -1,190 +1,161 @@
-"""100 selectable characters, live state changes, and phone/reduced-motion UX."""
+"""All four agent categories on a map, weighted links, and actionable attention."""
 from __future__ import annotations
-
-from datetime import datetime, timedelta, timezone
 
 
 def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     from playwright.sync_api import expect
 
+    def refresh():
+        page.evaluate("() => import('/admin_ui/swarm.js').then(m => m.refreshSwarm())")
+
     def apply_snapshot(payload):
         page.route('**/v1/swarm', lambda route: route.fulfill(json=payload))
-        # An existing five-second poll may still own the in-flight request.
-        # Wait for this exact replacement, rather than assuming refresh started it.
         with page.expect_response(lambda response: response.url.endswith('/v1/swarm')
                                   and response.status == 200 and response.json() == payload):
-            page.evaluate("() => import('/admin_ui/swarm.js').then(m => m.refreshSwarm())")
+            refresh()
 
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
     log_in(page, url)
+    page.goto(url + "#home")
+    expect(page.locator("#panel-home")).to_be_visible()
     if mobile:
         page.locator('#mobile-nav-toggle').click()
+    page.route('**/v1/swarm/interactions', lambda route: route.fulfill(status=503, json={'error': 'unavailable'}))
     page.get_by_role('button', name='Swarm view', exact=True).click()
+    expect(page.locator('.swarm-card')).to_have_count(101)
+    expect(page.locator('.kind-operator')).to_have_count(1)
+    expect(page.locator('.kind-app')).to_have_count(30)
+    expect(page.locator('.kind-standing')).to_have_count(25)
+    expect(page.locator('.kind-spawned')).to_have_count(10)
+    expect(page.locator('.kind-on-demand')).to_have_count(35)
+    expect(page.locator('.swarm-edge')).to_have_count(0)
+    expect(page.locator('#swarm-error')).to_contain_text('Could not refresh communication counts')
+    page.unroute('**/v1/swarm/interactions')
+    refresh()
+    expect(page.locator('.swarm-edge')).to_have_count(6)
+    page.route('**/v1/swarm/interactions', lambda route: route.fulfill(status=503, json={'error': 'unavailable'}))
+    refresh()
+    expect(page.locator('.swarm-edge')).to_have_count(6)
+    expect(page.locator('.swarm-card')).to_have_count(101)
+    page.unroute('**/v1/swarm/interactions')
+    refresh()
+    # A capped dense graph still retains every node and exposes all returned links.
+    agents = page.request.get(url + 'v1/swarm', headers={'X-Kern-Csrf': '1'}).json()['agents']
+    ids = [agent['thread_id'] for agent in agents]
+    dense = [{'sender_thread_id': ids[i % 100], 'target_thread_id': ids[(i % 100 + 1 + i // 100) % 100], 'count': i + 1} for i in range(500)]
+    page.route('**/v1/swarm/interactions', lambda route: route.fulfill(json={'interactions': dense}))
+    refresh()
+    expect(page.locator('.swarm-edge')).to_have_count(500)
+    expect(page.locator('.swarm-card')).to_have_count(101)
+    page.unroute('**/v1/swarm/interactions')
+    refresh()
+    expect(page.locator('.swarm-edge')).to_have_count(6)
+    expect(page.locator('#swarm-attention-count')).to_have_text('8')
     panel = page.locator('#panel-swarm')
     assert panel.evaluate('e => { const r=e.getBoundingClientRect(); return r.x === 0 && r.y === 0 && r.width === innerWidth && r.height === innerHeight; }')
     assert page.locator('#sidebar').evaluate('e => e.inert')
-    assert page.locator('#swarm-close').evaluate('e => { const r=e.getBoundingClientRect(); return document.elementFromPoint(r.x+22,r.y+22) === e; }')
     assert page.locator('#tab-swarm').evaluate('e => e.previousElementSibling.id === "tab-approvals"')
-    page.get_by_role('button', name='Close Swarm view', exact=True).click()
-    expect(page.locator('#panel-home')).to_be_visible()
-    assert not page.locator('#sidebar').evaluate('e => e.inert')
-    if mobile:
-        page.locator('#mobile-nav-toggle').click()
-    page.get_by_role('button', name='Swarm view', exact=True).click()
-    figures = page.locator('.swarm-figure')
-    expect(figures).to_have_count(100)
-    expect(page.locator('.pose-busy')).to_have_count(8)
-    expect(page.locator('.pose-needs-human')).to_have_count(5)
-    expect(page.locator('.pose-idle')).to_have_count(84)
-    expect(page.locator('.pose-failed')).to_have_count(3)
-    first = page.locator('.swarm-figure[data-thread-id="app-1"]')
-    expect(first.locator('.swarm-agent-task')).to_have_text('Prepare the next release')
-    expect(first.locator('.swarm-agent-purpose')).to_have_text('Keep the project moving')
-    task_layout = first.evaluate("""figure => {
-      const task = figure.querySelector('.swarm-agent-task');
-      const original = task.textContent;
-      task.textContent = 'Document theming, add tests, and open the pull PR';
-      const layout = {
-        clamp: getComputedStyle(task).webkitLineClamp,
-        fits: task.scrollHeight <= task.clientHeight,
-        insideCard: figure.querySelector('.swarm-agent-label').getBoundingClientRect().bottom
-          <= figure.getBoundingClientRect().bottom,
-      };
-      task.textContent = original;
-      return layout;
-    }""")
-    if task_layout != {'clamp': '3', 'fits': True, 'insideCard': True}:
-        raise AssertionError(f"49-character Swarm task was clipped: {task_layout}")
-    first.click()
-    expect(page.locator('#swarm-detail')).to_contain_text('Prepare the next release')
-    expect(page.locator('#swarm-bubbles')).to_contain_text('Prepare the next release')
-
-    if mobile:
-        expect(page.locator('#swarm-detail')).to_have_css('position', 'fixed')
+    # Fit includes all nodes, including idle and disconnected ones.
+    page.locator('#swarm-fit').click()
+    assert page.locator('#swarm-stage').evaluate('e => e.clientWidth <= e.parentElement.clientWidth && e.clientHeight <= e.parentElement.clientHeight')
+    page.locator('#swarm-actual').click()
+    page.locator('.kind-operator').click()
+    expect(page.locator('#swarm-detail')).to_contain_text('→ Release notes · 24')
+    expect(page.locator('#swarm-detail')).to_contain_text('Automated triggers and agent replies are excluded')
+    expect(page.locator('#swarm-detail button').filter(has_text='Open conversation')).to_have_count(0)
+    expect(page.locator('.swarm-edge-count').filter(has_text='24')).to_have_count(1)
     page.get_by_role('button', name='Close agent details', exact=True).click()
-
-    # Stable snapshots preserve DOM identity, focus, and ongoing animation.
+    first = page.locator('.swarm-card[data-thread-id="app-1"]')
+    expect(first.locator('.swarm-type')).to_have_text('App')
+    expect(first.locator('.swarm-agent-description')).to_have_text('Keep the project moving')
+    expect(first).not_to_contain_text('Prepare the next release')
+    first.click()
+    expect(page.locator('#swarm-detail')).to_contain_text('Keep the project moving')
+    expect(page.locator('#swarm-detail')).to_contain_text('→ Billing desk · 18')
+    expect(first).to_have_css('background-color', 'rgba(0, 0, 0, 0)')
+    expect(first.locator('.swarm-avatar svg')).to_have_count(1)
+    expect(first.locator('.critter-laptop')).to_have_count(1)
+    # Directional counts can be inspected from the accessible detail list.
+    page.locator('.swarm-connection').filter(has_text='→ Billing desk').click()
+    expect(page.locator('#swarm-detail')).to_contain_text('18 accepted messages')
+    first.click()
     first.focus()
-    page.evaluate("window.__swarmFigure = document.activeElement")
-    page.evaluate("() => import('/admin_ui/swarm.js').then(m => m.refreshSwarm())")
+    page.evaluate('window.__swarmCard = document.activeElement')
+    refresh()
     expect(first).to_be_focused()
-    assert page.evaluate('window.__swarmFigure === document.activeElement')
-    first.click()
-
-    page.get_by_role('button', name='Close agent details', exact=True).click()
-    idle = page.locator('[data-swarm-filter="idle"]')
-    assert page.locator('#swarm-agents-idle .swarm-figure').first.evaluate('e => e.offsetWidth < 40')
-    idle.click()
-    expect(page.locator('.swarm-figure:visible')).to_have_count(84)
-    assert page.locator('#swarm-agents-idle .swarm-figure').first.evaluate('e => e.offsetWidth >= 100')
-    idle.click()
-    needs = page.locator('[data-swarm-filter="needs-human"]')
-    needs.click()
-    expect(page.locator('.swarm-figure:visible')).to_have_count(5)
-    needs.click()
-    expect(page.locator('.swarm-figure:visible')).to_have_count(100)
-    with page.expect_response(lambda response: response.url.endswith('/v1/swarm?q=chat%20agent%20100')
-                              and response.status == 200):
-        page.locator('#swarm-search').fill('Chat agent 100')
-    expect(page.locator('.swarm-figure:visible')).to_have_count(1)
-    page.locator('.swarm-figure:visible').click()
-    expect(page.locator('#swarm-detail')).not_to_contain_text('pending Kern approval')
-    page.get_by_role('button', name='Close agent details', exact=True).click()
+    assert page.evaluate('window.__swarmCard === document.activeElement')
+    # Highlighting preserves every agent on the map.
+    page.locator('[data-swarm-filter="needs-human"]').click()
+    expect(page.locator('.swarm-card:not(.is-dimmed)')).to_have_count(5)
+    expect(page.locator('.swarm-card:visible')).to_have_count(101)
+    page.locator('[data-swarm-filter="needs-human"]').click()
+    page.locator('#swarm-search').fill('On-demand agent 100')
+    expect(page.locator('.swarm-card:not(.is-dimmed)')).to_have_count(1)
     page.locator('#swarm-search').fill('')
-
-    # Recent peer messages produce finite walks and text-free dialog icons.
-    payload = page.request.get(url + 'v1/swarm', headers={'X-Kern-Csrf': '1'}).json()
-    now = datetime.now(timezone.utc)
-    peer_feed = {'messages': [
-        {'seq': 99999, 'timestamp': now.isoformat(),
-         'sender_thread_id': 'app-1', 'target_thread_id': 'app-2'},
-        {'seq': 99998, 'timestamp': now.isoformat(),
-         'sender_thread_id': 'app-3', 'target_thread_id': 'app-4'},
-        {'seq': 99997, 'timestamp': (now - timedelta(seconds=60)).isoformat(),
-         'sender_thread_id': 'app-5', 'target_thread_id': 'app-6'},
-    ]}
-    page.route('**/v1/swarm/peer-messages*', lambda route: route.fulfill(json=peer_feed))
-    with page.expect_response(lambda response: response.url.endswith('/v1/swarm/peer-messages')
-                              and response.status == 200):
-        page.evaluate("() => import('/admin_ui/swarm.js').then(m => m.refreshSwarm())")
-    expect(page.locator('.swarm-message-icon')).to_have_count(2)
-    assert page.locator('.swarm-message-icon').all_inner_texts() == ['', '']
-    assert page.locator('.is-walking').count() <= 2
-    page.unroute('**/v1/swarm/peer-messages*')
-    page.unroute('**/v1/swarm')
-
-    # A failed runtime remains distinct from a pending approval.
-    failed = page.locator('[data-swarm-filter="failed"]')
-    failed.click()
-    expect(page.locator('.swarm-figure:visible')).to_have_count(3)
-    page.locator('.swarm-figure:visible').first.click()
-    expect(page.locator('#swarm-detail .swarm-state')).to_have_text('Failed')
     page.get_by_role('button', name='Close agent details', exact=True).click()
-    failed.click()
+    # Sidebar is a duplicate attention view, not a separate home for failed nodes.
+    page.locator('.swarm-attention-item').first.click()
+    expect(page.locator('#swarm-detail')).to_contain_text('1 pending Kern approval.')
+    expect(page.locator('#swarm-detail')).to_contain_text('View approvals')
+    expect(page.locator('.swarm-card:visible')).to_have_count(101)
+    page.get_by_role('button', name='Close agent details', exact=True).click()
+    # Same node position survives changes in status/counts, and untrusted text is inert.
+    position = first.evaluate('e => [e.style.left, e.style.top]')
+    payload = page.request.get(url + 'v1/swarm', headers={'X-Kern-Csrf': '1'}).json()
+    payload['agents'][0]['purpose'] = '<img src=x onerror=alert(1)>'
     payload['agents'][0]['state'] = 'failed'
     payload['agents'][0]['pending_approval_count'] = 1
     apply_snapshot(payload)
-    expect(first).to_have_attribute('data-pose', 'failed')
-    expect(page.locator('#swarm-count-failed')).to_have_text('4')
-    payload['agents'][0]['state'] = 'busy'
-    apply_snapshot(payload)
-    expect(first).to_have_attribute('data-pose', 'busy')
-    page.unroute('**/v1/swarm')
-
-    # Change the server snapshot: busy has priority, then return to idle.
-    payload = page.request.get(url + 'v1/swarm', headers={'X-Kern-Csrf': '1'}).json()
-    payload['agents'][0]['state'] = 'idle'
-    payload['agents'][0]['pending_approval_count'] = 1
-    payload['agents'][0]['task'] = '<img src=x onerror=alert(1)>'
-    apply_snapshot(payload)
-    expect(first).to_have_attribute('data-pose', 'needs-human')
+    expect(first.locator('.swarm-state')).to_have_text('Error')
+    expect(first.locator('.swarm-approval')).to_have_text('1 approval')
+    assert position == first.evaluate('e => [e.style.left, e.style.top]')
     first.click()
     expect(page.locator('#swarm-detail')).to_contain_text('<img src=x onerror=alert(1)>')
     expect(page.locator('#swarm-detail img')).to_have_count(0)
-    expect(page.locator('#swarm-detail')).to_contain_text('1 pending Kern approval.')
-    expect(page.locator('#swarm-detail')).to_contain_text('View approvals')
-    expect(page.locator('#swarm-agents-needs-human .swarm-figure')).to_have_count(6)
-    page.unroute('**/v1/swarm')
-
-    # Navigation failures and failed polls retain the last usable scene.
+    expect(page.locator('#swarm-attention-count')).to_have_text('9')
     page.evaluate("window.__swarmOpen = window.KernHost.openWorkspace; window.KernHost.openWorkspace = () => Promise.resolve(false)")
     page.get_by_role('button', name='Open conversation', exact=True).click()
     expect(page.locator('#swarm-error')).to_contain_text('thread is no longer available')
-    page.evaluate("() => { window.KernHost.openWorkspace = window.__swarmOpen; }")
-    page.route('**/v1/swarm', lambda route: route.abort())
-    # A normal poll may already be in flight, in which case refreshSwarm
-    # intentionally skips this call. Retry until the intercepted failure runs.
-    for _ in range(30):
-        page.evaluate("() => import('/admin_ui/swarm.js').then(m => m.refreshSwarm()).catch(() => {})")
-        if 'Showing the snapshot from' in page.locator('#swarm-error').inner_text():
-            break
-        page.wait_for_timeout(100)
-    expect(page.locator('#swarm-error')).to_contain_text('Showing the snapshot from')
-    expect(figures).to_have_count(100)
+    page.evaluate('() => { window.KernHost.openWorkspace = window.__swarmOpen; }')
+    # Spawned catalogs resolve parent names without repeated full-list scans.
+    large = {**payload, 'agents': [
+        {**payload['agents'][0], 'thread_id': f'thread-{10000 + i}', 'kind': 'spawned',
+         'name': f'Delegate {i}', 'spawned_by_thread_id': 'thread-parent', 'state': 'idle',
+         'pending_approval_count': 0} for i in range(1000)
+    ]}
+    large['agents'].append({**payload['agents'][0], 'thread_id': 'thread-parent',
+                            'kind': 'on-demand', 'name': 'Team lead', 'state': 'idle',
+                            'pending_approval_count': 0})
+    apply_snapshot(large)
+    expect(page.locator('.swarm-card')).to_have_count(1002)
+    expect(page.locator('.kind-spawned .swarm-agent-description').first).to_have_text('Delegated by Team lead')
+    page.evaluate("""() => {
+      window.__swarmContentMutations = 0;
+      window.__swarmContentObserver = new MutationObserver(records => { window.__swarmContentMutations += records.length; });
+      window.__swarmContentObserver.observe(document.querySelector('#swarm-nodes'), {childList: true, subtree: true});
+    }""")
+    page.locator('#swarm-search').fill('Team lead')
+    expect(page.locator('.swarm-card:not(.is-dimmed)')).to_have_count(1001)
+    assert page.evaluate("""() => {
+      const count = window.__swarmContentMutations + window.__swarmContentObserver.takeRecords().length;
+      window.__swarmContentObserver.disconnect();
+      return count;
+    }""") == 0, 'search rewrote unchanged agent content'
+    # Index refreshes when a parent is renamed, and keeps missing-parent fallback.
+    large['agents'][-1]['name'] = 'Renamed lead'
+    large['agents'][0]['spawned_by_thread_id'] = 'thread-missing'
+    apply_snapshot(large)
+    expect(page.locator('.kind-spawned .swarm-agent-description').nth(1)).to_have_text('Delegated by Renamed lead')
+    expect(page.locator('.kind-spawned .swarm-agent-description').first).to_have_text('Delegated by thread-missing')
+    page.locator('#swarm-search').fill('')
     page.unroute('**/v1/swarm')
-    # The shared API pauses reads after the deliberately aborted request.
-    expect(page.locator('#overload-status')).to_be_hidden(timeout=15000)
-
     page.emulate_media(reduced_motion='reduce')
-    expect(first.locator('.critter-body')).to_have_css('animation-name', 'none')
-    # A missing task title does not imply a pending approval.
-    for agent in payload['agents']:
-        agent.pop('task', None)
-        agent['pending_approval_count'] = 0
-    apply_snapshot(payload)
-    expect(page.locator('#swarm-detail')).to_contain_text('No task title yet')
-    expect(page.locator('#swarm-detail')).not_to_contain_text('pending Kern approval')
-    expect(page.locator('#swarm-agents-needs-human .swarm-figure')).to_have_count(0)
-    expect(page.locator('#swarm-messages')).to_have_count(0)
-    expect(page.locator('#swarm-bubbles')).not_to_contain_text('undefined')
-    assert page.locator('.is-walking').count() == 0
-    page.unroute('**/v1/swarm')
+    assert page.locator('#swarm-canvas').evaluate('e => e.getAnimations({subtree:true}).length') == 0
     page.keyboard.press('Escape')
     expect(page.locator('#panel-home')).to_be_visible()
-    expect(page.locator('#swarm-bubbles')).to_be_empty()
+    assert not page.locator('#sidebar').evaluate('e => e.inert')
     assert page.evaluate('document.documentElement.scrollWidth - innerWidth') <= 1
-    # Close returns to the actual entry view; a direct link falls back to Home.
     if mobile:
         page.locator('#mobile-nav-toggle').click()
     page.locator('#tab-approvals').click()

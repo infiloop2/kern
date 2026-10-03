@@ -1,153 +1,44 @@
 import { api } from "./api.js";
 import { $, runtimeLabel } from "./helpers.js";
-import { poseForAgent, SWARM_POSES } from "./swarm_pose.js";
+import { layoutAgents } from "./swarm_layout.js";
 
-const LABELS = { busy: "Busy", failed: "Failed", idle: "Idle", "needs-human": "Approval pending" };
+const TYPES = { "on-demand": "On-demand", app: "App", standing: "Standing", spawned: "Spawned", operator: "Human" };
+const STATES = { busy: "Working", failed: "Error", idle: "Idle" };
 let snapshot = null;
+let agentById = new Map();
+let interactions = [];
+let selectedId = null;
+let selectedEdge = null;
 let activeFilter = "all";
 let search = "";
-let selectedId = null;
 let loading = false;
-let searchTimer = null;
 let refreshPending = false;
 let bound = false;
 let refreshError = "";
 let navigationError = "";
-const figures = new Map();
-let shownMessageSeq = null;
-let sceneTimer = null;
-let captionIndex = 0;
-const walks = new Map();
-const bubbles = new Map();
-const messageIcons = new Map();
-const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+let layout = null;
+let layoutKey = "";
+let scale = 1;
+const cards = new Map();
+const svgNS = "http://www.w3.org/2000/svg";
 
-function clearSceneMotion() {
-  for (const animation of walks.values()) animation.cancel();
-  walks.clear();
-  for (const [bubble, timer] of bubbles) { clearTimeout(timer); bubble.remove(); }
-  bubbles.clear();
-  for (const [icon, timer] of messageIcons) { clearTimeout(timer); icon.remove(); }
-  messageIcons.clear();
-}
-function onScreen(figure) {
-  if (!figure || figure.hidden) return false;
-  const rect = figure.getBoundingClientRect();
-  return rect.width > 0 && rect.top > 150 && rect.bottom < innerHeight - 20;
-}
-function showBubble(agent, text) {
-  const figure = figures.get(agent.thread_id);
-  if (!text || !onScreen(figure)) return;
-  for (const [old, timer] of bubbles) {
-    if (old.dataset.threadId === agent.thread_id) { clearTimeout(timer); old.remove(); bubbles.delete(old); }
-  }
-  // Two brief task captions at most. Full text remains in agent details.
-  if (bubbles.size >= 2) {
-    const [old, timer] = bubbles.entries().next().value;
-    clearTimeout(timer); old.remove(); bubbles.delete(old);
-  }
-  const bubble = node("div", "swarm-caption-bubble");
-  bubble.dataset.threadId = agent.thread_id;
-  bubble.append(node("strong", "", agent.name), node("span", "", text));
-  $("swarm-bubbles").append(bubble);
-  const rect = figure.getBoundingClientRect();
-  const left = Math.max(12, Math.min(innerWidth - bubble.offsetWidth - 12, rect.x + rect.width / 2 - bubble.offsetWidth / 2));
-  bubble.style.left = `${left}px`;
-  bubble.style.top = `${Math.max(110, rect.y - bubble.offsetHeight - 8)}px`;
-  bubbles.set(bubble, setTimeout(() => { bubble.remove(); bubbles.delete(bubble); }, 6500));
-}
-function showMessageIcon(source, target) {
-  if (!onScreen(source) || !onScreen(target)) return;
-  const from = source.getBoundingClientRect();
-  const to = target.getBoundingClientRect();
-  const icon = node("div", "swarm-message-icon");
-  icon.setAttribute("aria-hidden", "true");
-  icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 5.5h16v10H10l-4 3v-3H4z"/><circle cx="8" cy="10.5" r="1"/><circle cx="12" cy="10.5" r="1"/><circle cx="16" cy="10.5" r="1"/></svg>';
-  icon.style.left = `${Math.max(12, Math.min(innerWidth - 44, (from.x + from.width / 2 + to.x + to.width / 2) / 2 - 17))}px`;
-  icon.style.top = `${Math.max(110, Math.min(innerHeight - 44, (from.y + from.height / 2 + to.y + to.height / 2) / 2 - 17))}px`;
-  $("swarm-bubbles").append(icon);
-  messageIcons.set(icon, setTimeout(() => { icon.remove(); messageIcons.delete(icon); }, 2800));
-}
-function walk(figure, dx, dy, returning = true) {
-  if (reducedMotion.matches || document.hidden || walks.size >= 2 || walks.has(figure) || !onScreen(figure)) return;
-  const home = { transform: "translate(0, 0)" };
-  const away = { transform: `translate(${dx}px, ${dy}px)` };
-  const animation = figure.animate(returning ? [home, away, away, home] : [away, home], {
-    duration: returning ? Math.min(3800, Math.max(1600, Math.hypot(dx, dy) * 12)) : 1100, easing: "ease-in-out",
-  });
-  walks.set(figure, animation);
-  figure.classList.add("is-walking");
-  const finish = () => { if (walks.get(figure) === animation) walks.delete(figure); if (!walks.has(figure)) figure.classList.remove("is-walking"); };
-  animation.onfinish = finish;
-  animation.oncancel = finish;
-}
-function sceneBeat() {
-  if (!snapshot || document.hidden || $("panel-swarm").hidden) return;
-  const agents = snapshot.agents.filter(agent => matches(agent) && onScreen(figures.get(agent.thread_id)));
-  if (!agents.length) return;
-  const titled = agents.filter(agent => agent.task || agent.purpose);
-  if (titled.length) {
-    const agent = titled[captionIndex % titled.length];
-    showBubble(agent, agent.task || agent.purpose);
-  }
-  // Working agents take short walks inside their part of the commons.
-  // This is decoration, not another inferred activity or state.
-  const working = agents.filter(agent => poseForAgent(agent) === "busy" && agent.thread_id !== selectedId);
-  if (working.length) {
-    const figure = figures.get(working[captionIndex % working.length].thread_id);
-    const rect = figure.getBoundingClientRect();
-    const room = figure.closest(".swarm-zone").getBoundingClientRect();
-    const dx = Math.min(180, Math.max(0, room.right - rect.right - 12))
-      || -Math.min(180, Math.max(0, rect.left - room.left - 12));
-    const dy = Math.min(90, Math.max(0, room.bottom - rect.bottom - 12));
-    walk(figure, dx, dy);
-  }
-  captionIndex += 1;
-}
-export function setSwarmVisible(visible) {
-  const wasVisible = document.body.classList.contains("swarm-open");
-  document.body.classList.toggle("swarm-open", visible);
-  document.querySelector(".topbar").inert = visible;
-  $("sidebar").inert = visible;
-  if (sceneTimer) clearInterval(sceneTimer);
-  if (searchTimer) clearTimeout(searchTimer);
-  searchTimer = null;
-  sceneTimer = null;
-  clearSceneMotion();
-  if (visible) {
-    sceneTimer = setInterval(sceneBeat, 4500);
-    $("swarm-close").focus({ preventScroll: true });
-  } else if (wasVisible) {
-    const back = window.matchMedia("(max-width: 860px)").matches ? $("mobile-nav-toggle") : $("tab-swarm");
-    back.focus({ preventScroll: true });
-  }
-}
-window.addEventListener("resize", clearSceneMotion);
-document.addEventListener("visibilitychange", clearSceneMotion);
-reducedMotion.addEventListener("change", clearSceneMotion);
-
-function node(tag, className = "", text = "") {
+function node(tag, className, value = "") {
   const element = document.createElement(tag);
   element.className = className;
-  element.textContent = text;
+  element.textContent = value;
   return element;
 }
-function time(value) {
-  const date = new Date(value);
-  return Number.isNaN(date.valueOf()) ? "" : date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+function svg(tag, attrs) {
+  const element = document.createElementNS(svgNS, tag);
+  for (const [key, value] of Object.entries(attrs)) element.setAttribute(key, String(value));
+  return element;
 }
-function hash(id) {
-  return [...id].reduce((value, char) => (value * 31 + char.charCodeAt(0)) >>> 0, 0);
-}
-function matches(agent) {
-  return (activeFilter === "all" || poseForAgent(agent) === activeFilter)
-    && `${agent.name} ${agent.task || ""} ${agent.purpose || ""}`.toLowerCase().includes(search);
-}
-
 // All paths are repository-authored. Names and AI text only enter textContent.
+const operator = { thread_id: "operator", name: "Operator", kind: "operator", state: "", pending_approval_count: 0 };
 function character(agent) {
-  const pose = poseForAgent(agent);
-  const variant = hash(agent.thread_id) % 3;
+  if (agent.kind === "operator") return `<svg viewBox="0 0 64 76" aria-hidden="true"><circle class="operator-head" cx="32" cy="22" r="13"/><path class="operator-body" d="M9 67v-9a23 23 0 0 1 46 0v9z"/><path class="operator-smile" d="M26 25q6 6 12 0"/></svg>`;
+  const pose = agent.state === "busy" ? "busy" : agent.state === "failed" ? "failed" : agent.pending_approval_count > 0 ? "needs-human" : "idle";
+  const variant = Number(agent.thread_id.split("-").pop()) % 3;
   const eyes = pose === "failed"
     ? '<path d="m17 22 4 4m0-4-4 4m12-4 4 4m0-4-4 4"/>'
     : pose === "idle"
@@ -173,203 +64,253 @@ function character(agent) {
     </g></svg>`;
 }
 
+function description(agent) {
+  if (agent.kind === "operator") return "Your messages to the swarm";
+  if (agent.kind === "on-demand") return agent.task || "No current task summary";
+  if (agent.kind === "spawned") {
+    const parent = agentById.get(agent.spawned_by_thread_id);
+    return `Delegated by ${parent?.name || agent.spawned_by_thread_id || "another agent"}`;
+  }
+  return agent.purpose || "No purpose set";
+}
+function matches(agent) {
+  const status = activeFilter === "all" || (activeFilter === "needs-human"
+    ? agent.pending_approval_count > 0 : agent.state === activeFilter);
+  return status && `${agent.name} ${TYPES[agent.kind]} ${description(agent)}`.toLowerCase().includes(search);
+}
+function time(value) { return new Date(value).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" }); }
 function renderError() {
   $("swarm-error").textContent = [refreshError, navigationError].filter(Boolean).join(" ");
-  $("swarm-error").hidden = !refreshError && !navigationError;
+  $("swarm-error").hidden = !$("swarm-error").textContent;
+}
+export function setSwarmVisible(visible) {
+  const wasVisible = document.body.classList.contains("swarm-open");
+  document.body.classList.toggle("swarm-open", visible);
+  document.querySelector(".topbar").inert = visible;
+  $("sidebar").inert = visible;
+  if (visible) $("swarm-close").focus({ preventScroll: true });
+  else if (wasVisible) $(window.matchMedia("(max-width: 860px)").matches ? "mobile-nav-toggle" : "tab-swarm").focus({ preventScroll: true });
+}
+function selectAgent(id, focus = false) {
+  selectedId = id;
+  selectedEdge = null;
+  render();
+  if (focus) cards.get(id)?.scrollIntoView({ block: "center", inline: "center" });
 }
 async function openAgent(agent) {
   try {
     const opened = await window.KernHost.openWorkspace(agent.kind === "app" ? "apps" : "chat", agent.thread_id);
     if (opened === false) throw new Error("the thread is no longer available");
     navigationError = "";
-  } catch (error) {
-    navigationError = `Could not open ${agent.name}: ${error.message}`;
-  }
+  } catch (error) { navigationError = `Could not open ${agent.name}: ${error.message}`; }
   renderError();
-}
-function selectAgent(id) {
-  selectedId = id;
-  for (const [key, figure] of figures) figure.setAttribute("aria-pressed", String(key === id));
-  renderDetails();
-  const agent = snapshot?.agents.find(item => item.thread_id === id);
-  if (agent) showBubble(agent, agent.task || agent.purpose);
 }
 function renderDetails() {
   const root = $("swarm-detail");
   root.replaceChildren();
-  const agent = snapshot?.agents.find(item => item.thread_id === selectedId);
-  root.classList.toggle("has-selection", Boolean(agent));
-  if (!agent) {
-    root.append(node("p", "muted", "Pick an agent to see its task and open its conversation."));
+  const hasSelection = Boolean(selectedEdge || agentById.has(selectedId));
+  root.classList.toggle("has-selection", hasSelection);
+  if (hasSelection) {
+    const close = node("button", "swarm-detail-close", "×");
+    close.setAttribute("aria-label", "Close agent details");
+    close.addEventListener("click", () => { selectedId = null; selectedEdge = null; render(); });
+    root.append(close);
+  }
+  if (selectedEdge) {
+    const name = id => agentById.get(id)?.name || id;
+    root.append(node("h2", "", "Communication"), node("p", "", `${name(selectedEdge.sender_thread_id)} → ${name(selectedEdge.target_thread_id)}`),
+      node("p", "", `${selectedEdge.count} accepted messages · last 7 UTC days`));
     return;
   }
-  const identity = node("div", "swarm-detail-identity");
-  identity.append(node("span", `swarm-state state-${poseForAgent(agent)}`, LABELS[poseForAgent(agent)]),
-    node("h2", "", agent.name),
-    node("p", "muted", `${agent.kind === "app" ? "App" : agent.kind === "schedule" ? "Schedule" : "Chat"} · ${runtimeLabel(agent.agent_runtime)}${agent.model ? ` · ${agent.model}` : ""}`));
-  const task = node("div", "swarm-detail-task");
-  task.append(node("span", "swarm-caption", "TASK"), node("p", "", agent.task || "No task title yet."));
-  if (agent.purpose) task.append(node("p", "muted", agent.purpose));
+  const agent = agentById.get(selectedId);
+  if (!agent) {
+    root.append(node("h2", "", "Agent details"), node("p", "muted", "Select an agent or connection. Frequent collaborators cluster together; the map shows up to 500 strongest connections."));
+    return;
+  }
+  root.append(node("span", "swarm-type", TYPES[agent.kind]), node("h2", "", agent.name),
+    node("p", "", description(agent)), node("span", `swarm-state state-${agent.state}`, STATES[agent.state] || ""));
+  if (agent.kind !== "operator") root.append(node("p", "muted", `${runtimeLabel(agent.agent_runtime)}${agent.model ? ` · ${agent.model}` : ""}`));
   if (agent.pending_approval_count > 0) {
-    const count = agent.pending_approval_count;
-    task.append(node("p", "muted", `${count} pending Kern approval${count === 1 ? "" : "s"}.`));
+    root.append(node("p", "", `${agent.pending_approval_count} pending Kern approval${agent.pending_approval_count === 1 ? "" : "s"}.`));
     const approvals = node("button", "ghost sm", "View approvals");
     approvals.dataset.action = "show-tab";
     approvals.dataset.tab = "approvals";
-    task.append(approvals);
+    root.append(approvals);
   }
-  if (agent.next_run_at) task.append(node("p", "muted", `Next scheduled turn: ${new Date(agent.next_run_at).toLocaleString()}`));
+  if (agent.next_run_at) root.append(node("p", "muted", `Next trigger: ${new Date(agent.next_run_at).toLocaleString()}`));
+  const edges = interactions.filter(edge => edge.sender_thread_id === agent.thread_id || edge.target_thread_id === agent.thread_id);
+  if (edges.length) {
+    root.append(node("h3", "", "Strongest connections · last 7 UTC days"));
+    for (const edge of edges.sort((a, b) => b.count - a.count)) {
+      const outgoing = edge.sender_thread_id === agent.thread_id;
+      const otherId = outgoing ? edge.target_thread_id : edge.sender_thread_id;
+      const other = agentById.get(otherId);
+      const link = node("button", "swarm-connection", `${outgoing ? "→" : "←"} ${other?.name || otherId} · ${edge.count}`);
+      link.addEventListener("click", () => { selectedEdge = edge; renderEdges(); renderDetails(); });
+      root.append(link);
+    }
+  }
+  if (agent.kind === "operator") {
+    root.append(node("p", "muted", "Counts include accepted operator messages. Automated triggers and agent replies are excluded from operator links."));
+    return;
+  }
   const open = node("button", "primary sm", "Open conversation");
   open.addEventListener("click", () => { void openAgent(agent); });
-  const close = node("button", "swarm-detail-close", "×");
-  close.setAttribute("aria-label", "Close agent details");
-  close.addEventListener("click", () => selectAgent(null));
-  root.append(identity, task, open, close);
+  root.append(open);
 }
-
-function renderAgents() {
-  clearSceneMotion();
-  const visible = snapshot.agents.filter(matches);
-  $("swarm-house").classList.toggle("is-focused", activeFilter !== "all" || Boolean(search));
-  const existingIds = new Set(snapshot.agents.map(agent => agent.thread_id));
-  const visibleIds = new Set(visible.map(agent => agent.thread_id));
-  const positions = new Map([...figures].map(([id, figure]) => [id, figure.getBoundingClientRect()]));
-  for (const [id, figure] of figures) {
-    if (!existingIds.has(id)) { figure.remove(); figures.delete(id); }
-    else figure.hidden = !visibleIds.has(id);
+function renderAttention() {
+  const root = $("swarm-attention");
+  root.replaceChildren();
+  const agents = snapshot.agents.filter(agent => agent.state === "failed" || agent.pending_approval_count > 0);
+  $("swarm-attention-count").textContent = agents.length;
+  if (!agents.length) root.append(node("p", "muted", "No errors or pending approvals."));
+  for (const agent of agents) {
+    const button = node("button", "swarm-attention-item");
+    button.append(node("strong", "", agent.name), node("span", "", [agent.state === "failed" ? "Error" : "", agent.pending_approval_count ? `${agent.pending_approval_count} pending approval${agent.pending_approval_count === 1 ? "" : "s"}` : ""].filter(Boolean).join(" · ")));
+    button.addEventListener("click", () => selectAgent(agent.thread_id, true));
+    root.append(button);
   }
-  for (const agent of visible) {
-    const pose = poseForAgent(agent);
-    let figure = figures.get(agent.thread_id);
-    if (!figure) {
-      figure = node("button", "swarm-figure");
-      figure.type = "button";
-      figure.dataset.threadId = agent.thread_id;
-      figure.addEventListener("click", () => selectAgent(agent.thread_id));
-      figure.addEventListener("focus", () => {
-        const current = snapshot.agents.find(item => item.thread_id === agent.thread_id);
-        if (current) showBubble(current, current.task || current.purpose);
-      });
-      figure.style.setProperty("--delay", `${-(hash(agent.thread_id) % 50) / 10}s`);
-      figures.set(agent.thread_id, figure);
-    }
-    if (figure.dataset.pose !== pose) {
-      figure.innerHTML = character(agent);
-      figure.dataset.pose = pose;
-      const label = node("span", "swarm-agent-label");
-      label.append(node("strong", "swarm-agent-name"), node("span", "swarm-agent-task"), node("span", "swarm-agent-purpose"));
-      figure.append(label);
-    }
-    figure.className = `swarm-figure pose-${pose} kind-${agent.kind}`;
-    figure.querySelector(".swarm-agent-name").textContent = agent.name;
-    figure.querySelector(".swarm-agent-task").textContent = agent.task || (agent.state === "busy" ? "Working · task not available" : "No task title yet");
-    const purpose = figure.querySelector(".swarm-agent-purpose");
-    purpose.textContent = agent.purpose || "";
-    purpose.hidden = !agent.purpose;
-    figure.title = [agent.name, agent.task || LABELS[pose], agent.purpose].filter(Boolean).join(" · ");
-    figure.setAttribute("aria-label", `${agent.name}, ${LABELS[pose]}. ${agent.task || "No task title yet"}. Show details.`);
-    figure.setAttribute("aria-pressed", String(agent.thread_id === selectedId));
-    figure.hidden = false;
-    const destination = $(`swarm-agents-${pose}`);
-    if (figure.parentElement !== destination) destination.append(figure);
-  }
-  for (const agent of visible) {
-    const figure = figures.get(agent.thread_id);
-    const previous = positions.get(agent.thread_id);
-    const current = figure.getBoundingClientRect();
-    if (previous?.width && (previous.x !== current.x || previous.y !== current.y)) {
-      walk(figure, previous.x - current.x, previous.y - current.y, false);
-    }
-  }
-  for (const pose of Object.values(SWARM_POSES)) {
-    const count = snapshot.agents.filter(agent => poseForAgent(agent) === pose).length;
-    const shown = visible.filter(agent => poseForAgent(agent) === pose).length;
-    $(`swarm-zone-${pose}`).hidden = activeFilter !== "all" && activeFilter !== pose;
-    $(`swarm-empty-${pose}`).hidden = shown > 0;
-    $(`swarm-count-${pose}`).textContent = count;
-    const filter = document.querySelector(`[data-swarm-filter="${pose}"]`);
-    filter.querySelector("strong").textContent = count;
-    filter.setAttribute("aria-pressed", String(activeFilter === pose));
-  }
-  $("swarm-total").textContent = snapshot.has_more
-    ? `Showing ${snapshot.agents.length} ${search ? "matches" : "agents"} · ${search ? "refine your search" : "search to find more"}`
-    : `${snapshot.agents.length} ${search ? "matching agents" : "agents at home"}`;
-  renderDetails();
 }
-
-function animatePeerDeliveries() {
-  const deliveries = snapshot.peer_deliveries || [];
-  const unseen = shownMessageSeq === null ? deliveries
-    : deliveries.filter(delivery => delivery.seq > shownMessageSeq);
-  if (deliveries.length) shownMessageSeq = Math.max(shownMessageSeq || 0, deliveries[0].seq);
-  for (const delivery of unseen.reverse()) {
-    if (Date.now() - new Date(delivery.timestamp).valueOf() >= 30000) continue;
-    for (const id of [delivery.sender_thread_id, delivery.target_thread_id]) {
-      const figure = figures.get(id);
-      if (!figure || figure.hidden) continue;
-      figure.classList.remove("is-messaging");
-      // A finite greeting only on a new recorded message, never every poll.
-      void figure.offsetWidth;
-      figure.classList.add("is-messaging");
-    }
-    const source = figures.get(delivery.sender_thread_id);
-    const target = figures.get(delivery.target_thread_id);
-    showMessageIcon(source, target);
-    if (onScreen(source) && onScreen(target)) {
-      const from = source.getBoundingClientRect();
-      const to = target.getBoundingClientRect();
-      walk(source, to.x - from.x + (to.x >= from.x ? -48 : 48), to.y - from.y);
+function renderEdges() {
+  const root = $("swarm-edges");
+  root.replaceChildren();
+  const defs = svg("defs", {});
+  const marker = svg("marker", { id: "swarm-arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 5, markerHeight: 5, orient: "auto-start-reverse" });
+  marker.append(svg("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "#438d87" }));
+  defs.append(marker); root.append(defs);
+  for (const edge of interactions) {
+    const source = layout.positions.get(edge.sender_thread_id);
+    const target = layout.positions.get(edge.target_thread_id);
+    if (!source || !target) continue;
+    const dx = target.x - source.x, dy = target.y - source.y;
+    const distance = Math.hypot(dx, dy) || 1;
+    const ux = dx / distance, uy = dy / distance;
+    const x1 = source.x + 110 + ux * 44, y1 = source.y + 44 + uy * 44;
+    const x2 = target.x + 110 - ux * 44, y2 = target.y + 44 - uy * 44;
+    const cx = (x1 + x2) / 2 - uy * 50, cy = (y1 + y2) / 2 + ux * 50;
+    const isSelected = selectedEdge?.sender_thread_id === edge.sender_thread_id && selectedEdge?.target_thread_id === edge.target_thread_id;
+    const touchesSelection = [edge.sender_thread_id, edge.target_thread_id].includes(selectedId);
+    const muted = selectedEdge ? !isSelected : selectedId && !touchesSelection;
+    const path = svg("path", { d: `M${x1},${y1} Q${cx},${cy} ${x2},${y2}`,
+      fill: "none", stroke: isSelected ? "#153f3c" : "#438d87", "stroke-width": Math.min(9, 1.5 + Math.log2(1 + edge.count)),
+      "marker-end": "url(#swarm-arrow)", tabindex: 0, role: "button", class: "swarm-edge",
+      "aria-label": `${agentById.get(edge.sender_thread_id)?.name} to ${agentById.get(edge.target_thread_id)?.name}: ${edge.count} messages`,
+      opacity: muted ? .12 : Math.min(.85, .3 + Math.log2(1 + edge.count) * .075) });
+    const title = svg("title", {}); title.textContent = path.getAttribute("aria-label"); path.append(title);
+    const select = () => { selectedEdge = edge; selectedId = null; render(); };
+    path.addEventListener("click", select);
+    path.addEventListener("keydown", event => { if (["Enter", " "].includes(event.key)) { event.preventDefault(); select(); } });
+    root.append(path);
+    if (!muted && (interactions.length <= 12 || isSelected || touchesSelection)) {
+      const label = svg("text", { x: (x1 + 2 * cx + x2) / 4, y: (y1 + 2 * cy + y2) / 4,
+        class: "swarm-edge-count", "text-anchor": "middle", "dominant-baseline": "middle", "aria-hidden": true });
+      label.textContent = edge.count.toLocaleString();
+      root.append(label);
     }
   }
+}
+function applyScale() {
+  if (!layout) return;
+  $("swarm-canvas").style.transform = `scale(${scale})`;
+  $("swarm-stage").style.width = `${layout.width * scale}px`;
+  $("swarm-stage").style.height = `${layout.height * scale}px`;
+  $("swarm-zoom-level").textContent = `${Math.round(scale * 100)}%`;
+}
+function fitMap() {
+  if (!layout) return;
+  const viewport = $("swarm-viewport");
+  scale = Math.min(1, (viewport.clientWidth - 24) / layout.width, (viewport.clientHeight - 24) / layout.height);
+  applyScale(); viewport.scrollTo(0, 0);
 }
 function render() {
   if (!snapshot) return;
   if (!bound) {
-    $("swarm-search").addEventListener("input", event => {
-      search = event.target.value.toLowerCase().trim();
-      renderAgents();
-      if (searchTimer) clearTimeout(searchTimer);
-      searchTimer = setTimeout(() => { searchTimer = null; void refreshSwarm().catch(() => {}); }, 300);
-    });
-    $("panel-swarm").addEventListener("scroll", clearSceneMotion, { passive: true });
+    $("swarm-search").addEventListener("input", event => { search = event.target.value.toLowerCase().trim(); render(); });
+    $("swarm-fit").addEventListener("click", fitMap);
+    $("swarm-arrange").addEventListener("click", () => { layout = null; render(); fitMap(); });
+    for (const [id, factor] of [["swarm-zoom-in", 1.25], ["swarm-zoom-out", .8]]) {
+      $(id).addEventListener("click", () => { scale = Math.max(.1, Math.min(1.5, scale * factor)); applyScale(); });
+    }
+    $("swarm-actual").addEventListener("click", () => { scale = 1; applyScale(); });
     bound = true;
   }
-  renderAgents();
-  animatePeerDeliveries();
+  const agents = [...agentById.values()];
+  const key = JSON.stringify([[...agentById.keys()].sort(), interactions.map(edge => `${edge.sender_thread_id}:${edge.target_thread_id}`).sort()]);
+  if (key !== layoutKey || !layout) { layout = layoutAgents(agents, interactions); layoutKey = key; }
+  $("swarm-canvas").style.width = `${layout.width}px`;
+  $("swarm-canvas").style.height = `${layout.height}px`;
+  const ids = new Set(agentById.keys());
+  for (const [id, card] of cards) if (!ids.has(id)) { card.remove(); cards.delete(id); }
+  for (const agent of agents) {
+    let card = cards.get(agent.thread_id);
+    if (!card) {
+      card = node("button", "swarm-card"); card.dataset.threadId = agent.thread_id;
+      const statusLine = node("span", "swarm-status-line");
+      statusLine.append(node("span", "swarm-state"), node("span", "swarm-approval"));
+      card.append(node("span", "swarm-avatar"), node("span", "swarm-type"), node("strong", "swarm-agent-name"), node("span", "swarm-agent-description"), statusLine);
+      card.addEventListener("click", () => selectAgent(agent.thread_id));
+      $("swarm-nodes").append(card); cards.set(agent.thread_id, card);
+    }
+    const position = layout.positions.get(agent.thread_id);
+    card.style.left = `${position.x}px`; card.style.top = `${position.y}px`;
+    const agentDescription = description(agent);
+    const contentKey = JSON.stringify([agent.kind, agent.state, agent.pending_approval_count,
+      agent.name, agentDescription, selectedId === agent.thread_id]);
+    // Search and connection refreshes do not change character content. Avoid
+    // replacing every label and invalidating the whole catalog's layout.
+    if (card.dataset.contentKey !== contentKey) {
+      card.className = `swarm-card kind-${agent.kind} pose-${agent.state}`;
+      const avatar = card.querySelector(".swarm-avatar");
+      const appearance = `${agent.state}:${agent.pending_approval_count > 0}`;
+      if (avatar.dataset.appearance !== appearance) { avatar.innerHTML = character(agent); avatar.dataset.appearance = appearance; }
+      card.setAttribute("aria-pressed", String(selectedId === agent.thread_id));
+      card.querySelector(".swarm-type").textContent = TYPES[agent.kind];
+      card.querySelector(".swarm-agent-name").textContent = agent.name;
+      card.querySelector(".swarm-agent-description").textContent = agentDescription;
+      const status = card.querySelector(".swarm-state"); status.textContent = STATES[agent.state] || ""; status.className = `swarm-state state-${agent.state}`;
+      const approval = card.querySelector(".swarm-approval"); approval.textContent = agent.pending_approval_count ? `${agent.pending_approval_count} approval${agent.pending_approval_count === 1 ? "" : "s"}` : "";
+      card.title = `${TYPES[agent.kind]} · ${agent.name}\n${agentDescription}\n${STATES[agent.state] || ""}`;
+      card.dataset.contentKey = contentKey;
+    }
+    card.classList.toggle("is-dimmed", !matches(agent));
+  }
+  for (const filter of document.querySelectorAll("[data-swarm-filter]")) {
+    const state = filter.dataset.swarmFilter;
+    filter.querySelector("strong").textContent = snapshot.agents.filter(agent => state === "needs-human" ? agent.pending_approval_count > 0 : agent.state === state).length;
+    filter.setAttribute("aria-pressed", String(activeFilter === state));
+  }
+  const visibleEdges = interactions.filter(edge => ids.has(edge.sender_thread_id) && ids.has(edge.target_thread_id));
+  $("swarm-total").textContent = `${snapshot.agents.length} agents + you · ${visibleEdges.length} connections shown · last 7 UTC days`;
+  $("swarm-empty").hidden = snapshot.agents.length > 0;
+  renderEdges(); renderAttention(); renderDetails(); applyScale();
 }
-export function setSwarmFilter(pose) {
-  if (!Object.values(SWARM_POSES).includes(pose)) return;
-  activeFilter = activeFilter === pose ? "all" : pose;
+export function setSwarmFilter(state) {
+  if (!["busy", "failed", "idle", "needs-human"].includes(state)) return;
+  activeFilter = activeFilter === state ? "all" : state;
   render();
 }
 export async function refreshSwarm() {
   if (document.hidden || $("panel-swarm").hidden) return;
   if (loading) { refreshPending = true; return; }
   loading = true;
-  const requestedSearch = search;
   try {
-    const [next, peerFeed] = await Promise.all([
-      api("GET", `/v1/swarm${requestedSearch ? `?q=${encodeURIComponent(requestedSearch)}` : ""}`),
-      api("GET", "/v1/swarm/peer-messages").catch(() => null),
-    ]);
-    next.peer_deliveries = peerFeed?.messages || snapshot?.peer_deliveries || [];
-    if (requestedSearch !== search) { refreshPending = true; return; }
-    const changed = JSON.stringify([snapshot?.agents, snapshot?.peer_deliveries, snapshot?.has_more])
-      !== JSON.stringify([next.agents, next.peer_deliveries, next.has_more]);
-    const previousTasks = new Map(snapshot?.agents.map(agent => [agent.thread_id, agent.task]) || []);
-    const tasksChanged = snapshot ? next.agents.filter(agent => agent.task
-      && previousTasks.get(agent.thread_id) !== agent.task) : [];
+    // Communication is optional: a failed count request must not hide agents.
+    const [next, counts] = await Promise.all([api("GET", "/v1/swarm"), api("GET", "/v1/swarm/interactions").catch(() => null)]);
+    const first = !snapshot;
+    const changed = JSON.stringify([snapshot?.agents, interactions]) !== JSON.stringify([next.agents, counts?.interactions || interactions]);
     snapshot = next;
+    agentById = new Map([operator, ...next.agents].map(agent => [agent.thread_id, agent]));
+    if (counts) interactions = counts.interactions;
+    if (selectedEdge) selectedEdge = interactions.find(edge => edge.sender_thread_id === selectedEdge.sender_thread_id && edge.target_thread_id === selectedEdge.target_thread_id) || null;
     if (changed) render();
-    for (const agent of tasksChanged.slice(0, 2)) showBubble(agent, agent.task);
+    if (first) fitMap();
     $("swarm-updated").textContent = `Updated ${time(snapshot.generated_at)}`;
-    refreshError = "";
+    refreshError = counts ? "" : "Could not refresh communication counts. Showing agents with the last available connections.";
   } catch (error) {
     refreshError = snapshot ? `Could not refresh Swarm. Showing the snapshot from ${time(snapshot.generated_at)}.` : "Could not load Swarm. Try opening this page again.";
     throw error;
   } finally {
-    loading = false;
-    renderError();
+    loading = false; renderError();
     if (refreshPending) { refreshPending = false; queueMicrotask(() => { void refreshSwarm().catch(() => {}); }); }
   }
 }

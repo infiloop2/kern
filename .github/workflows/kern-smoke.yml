@@ -35,10 +35,6 @@ jobs:
           ref: main
           persist-credentials: false
 
-      - name: Authorize repo admin
-        if: ${{ github.event_name != 'push' }}
-        uses: ./.github/actions/authorize-repo-admin
-
       - name: Resolve safe ref
         id: resolve
         shell: bash
@@ -66,6 +62,12 @@ jobs:
           fi
           echo "ref=${ref}" >> "${GITHUB_OUTPUT}"
           echo "Testing ref ${ref}"
+
+      - name: Authorize admin or reviewed PR
+        if: ${{ github.event_name != 'push' }}
+        uses: ./.github/actions/authorize-admin-or-codex-stamp
+        with:
+          expected-sha: ${{ steps.resolve.outputs.ref }}
 
       - name: Reject when smoke is already active
         shell: bash
@@ -148,12 +150,13 @@ jobs:
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           ref: main
-          path: .workflow-authority
           persist-credentials: false
 
       - name: Authorize requester
         if: ${{ github.event_name != 'push' }}
-        uses: ./.workflow-authority/.github/actions/authorize-repo-admin
+        uses: ./.github/actions/authorize-admin-or-codex-stamp
+        with:
+          expected-sha: ${{ needs.authorize.outputs.ref }}
 
       - name: Mark smoke pending
         shell: bash

@@ -1319,28 +1319,33 @@ class Handler(BaseHTTPRequestHandler):
 def swarm_snapshot() -> dict[str, Any]:
     agents = []
     for index in range(100):
-        kind = "app" if index < 30 else "schedule" if index < 55 else "chat"
-        prefix = "thread" if kind == "chat" else kind
+        kind = "app" if index < 30 else "standing" if index < 55 else "spawned" if index < 65 else "on-demand"
+        prefix = "app" if kind == "app" else "schedule" if kind == "standing" else "thread"
         name = ["Release notes", "Billing desk", "Launch copy", "Deploy watcher"][index] if index < 4 else f"{kind.title()} agent {index + 1}"
         agents.append({
             "thread_id": f"{prefix}-{index + 1}", "kind": kind, "name": name,
-            "purpose": "Keep the project moving" if kind != "chat" else "",
+            "purpose": "Keep the project moving" if kind in {"app", "standing"} else "",
             "agent_runtime": "codex", "model": "gpt-5.6-terra",
             "state": "busy" if index < 8 else "failed" if 13 <= index < 16 else "idle",
             "task": ["Prepare the next release", "Review customer invoices", "Draft launch copy", "Check deployment health"][index % 4],
             "pending_approval_count": 1 if 8 <= index < 13 else 0,
-            "next_run_at": ago(-90) if kind == "schedule" else None,
+            "spawned_by_thread_id": "app-1" if kind == "spawned" else None,
+            "next_run_at": ago(-90) if kind == "standing" else None,
         })
     return {
         "generated_at": STATE.now(), "agents": agents,
     }
 
 
-def swarm_peer_messages() -> dict[str, Any]:
-    return {"messages": [{
-            "seq": 81, "sender_thread_id": "app-1", "target_thread_id": "app-2",
-            "timestamp": ago(0.2),
-        }]}
+def swarm_interactions() -> dict[str, Any]:
+    return {"interactions": [
+        {"sender_thread_id": "operator", "target_thread_id": "app-1", "count": 24},
+        {"sender_thread_id": "operator", "target_thread_id": "thread-66", "count": 2},
+        {"sender_thread_id": "app-1", "target_thread_id": "app-2", "count": 18},
+        {"sender_thread_id": "app-2", "target_thread_id": "app-1", "count": 5},
+        {"sender_thread_id": "app-1", "target_thread_id": "thread-56", "count": 3},
+        {"sender_thread_id": "schedule-31", "target_thread_id": "app-2", "count": 11},
+    ]}
 
 
 def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dict[str, Any]:
@@ -1348,8 +1353,8 @@ def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dic
         return {"accounts": []}
     if method == "GET" and path == "/v1/swarm":
         return swarm_snapshot()
-    if method == "GET" and path == "/v1/swarm/peer-messages":
-        return swarm_peer_messages()
+    if method == "GET" and path == "/v1/swarm/interactions":
+        return swarm_interactions()
     if method == "GET" and path == "/v1/analytics":
         from analytics_smokes import fixture
         return fixture()

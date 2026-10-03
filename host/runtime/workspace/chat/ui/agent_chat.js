@@ -439,9 +439,9 @@ function updateComposer() {
   $("rename-thread").hidden = !hasThread;
   $("rename-thread").setAttribute(
     "aria-label",
-    scheduled ? "Rename scheduled agent" : "Rename thread",
+    scheduled ? "Rename standing agent" : "Rename thread",
   );
-  $("rename-thread").title = scheduled ? "Rename scheduled agent" : "Rename thread";
+  $("rename-thread").title = scheduled ? "Rename standing agent" : "Rename thread";
   $("schedule-settings").hidden = !scheduled;
   $("thread-memory").hidden = !hasThread || scriptTranscript;
   // Clearing is a write, so it follows the composer: hidden while the thread
@@ -1183,7 +1183,8 @@ function renderThreadEntry(event, openActivities) {
   if (event.event_type === "thread.context_added") {
     const pageIds = Array.isArray(payload.memory_page_ids) ? payload.memory_page_ids : [];
     const details = typeof payload.memory_recall_details === "string" ? payload.memory_recall_details : "";
-    const tooltip = details || pageIds.join("\n");
+    const history = typeof payload.historical_context === "string" ? payload.historical_context : "";
+    const tooltip = history || details || pageIds.join("\n");
     const message = esc(payload.message || "Context added.");
     const notice = tooltip ? `<div class="memory-notice">
       <button type="button" aria-expanded="false" aria-controls="memory-pages-${entryId}">${message}</button>
@@ -1393,9 +1394,9 @@ function setRenameThreadOpen(open) {
     if (!selectedThreadId) return;
     renameThreadReturnFocus = chatRoot.activeElement || $("rename-thread");
     const scheduled = selectedThreadScheduleId !== null;
-    $("rename-thread-eyebrow").textContent = scheduled ? "Scheduled agent" : "Thread";
+    $("rename-thread-eyebrow").textContent = scheduled ? "Standing agent" : "Thread";
     $("rename-thread-title").textContent = scheduled
-      ? "Rename scheduled agent"
+      ? "Rename standing agent"
       : "Rename thread";
     $("rename-thread-input").value = selectedThreadName || selectedThreadId;
     $("rename-thread-error").hidden = true;
@@ -1415,7 +1416,7 @@ async function renameSelectedThread() {
   const name = $("rename-thread-input").value.trim();
   if (!name) {
     $("rename-thread-error").textContent = selectedThreadScheduleId !== null
-      ? "Enter a scheduled agent name."
+      ? "Enter a standing agent name."
       : "Enter a thread name.";
     $("rename-thread-error").hidden = false;
     $("rename-thread-input").focus();

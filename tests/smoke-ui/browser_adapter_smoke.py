@@ -120,6 +120,9 @@ def run(playwright):
             assert browser.page.evaluate("navigator.language") == "en-GB"
             assert browser.page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone") == "Europe/London"
             assert browser.context is browser.process.browser.contexts[0]
+            # Routing WebSockets replaces the page's native constructor even
+            # when the page never opens a connection. Keep login pages native.
+            assert browser.page.evaluate("Function.prototype.toString.call(WebSocket)") == "function WebSocket() { [native code] }"
             assert browser.page.evaluate("navigator.serviceWorker.register('/worker.js').then(() => true)") is True
             assert browser.page.evaluate("navigator.serviceWorker.getRegistrations().then(items => items.length)") == 0
             browser.context.route("https://x.com/download", lambda route: route.fulfill(
@@ -262,7 +265,9 @@ def run(playwright):
 
 
 def run_proxy_failure(playwright):
-    """A reachable website must receive nothing when Decodo or the relay fails."""
+    """Native WSS uses the relay; HTTPS/WSS never fall back when it fails."""
+    import base64
+    import hashlib
     from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
     import ssl
     import subprocess
@@ -277,6 +282,19 @@ def run_proxy_failure(playwright):
             pass
         def do_GET(self):
             requests.append(self.path)
+            if self.headers.get("Upgrade", "").lower() == "websocket":
+                self.protocol_version = "HTTP/1.1"
+                key = self.headers["Sec-WebSocket-Key"]
+                accept = base64.b64encode(hashlib.sha1((key + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest()).decode()
+                self.send_response(101)
+                self.send_header("Upgrade", "websocket")
+                self.send_header("Connection", "Upgrade")
+                self.send_header("Sec-WebSocket-Accept", accept)
+                self.end_headers()
+                message = b"native websocket fixture"
+                self.wfile.write(bytes([0x81, len(message)]) + message)
+                self.wfile.flush()
+                return
             self.send_response(200)
             self.end_headers()
             self.wfile.write(b"fixture reachable")
@@ -310,6 +328,51 @@ def run_proxy_failure(playwright):
                 accounts = Accounts(store)
                 accounts.dispatch("network_save", {"mode": "decodo", "username": "fixture", "password": "secret",
                                   "location": "new_york"})
+                def websocket_result(page, url):
+                    page.evaluate("""url => {
+                        window.websocketResult = null;
+                        const ws = new WebSocket(url);
+                        ws.onmessage = event => { window.websocketResult = event.data; ws.close(); };
+                        ws.onerror = () => { window.websocketResult = 'failed'; };
+                    }""", url)
+                    page.wait_for_function("window.websocketResult !== null")
+                    return page.evaluate("window.websocketResult")
+
+                # Only the external gateway dial is substituted. Chromium's
+                # CONNECT, production relay and website TLS/upgrade are real.
+                def fixture_gateway(_endpoint, host, _credentials):
+                    if host != "fixture.example":
+                        raise BrowserError("No fixture for Chromium background traffic")
+                    return socket.create_connection(("127.0.0.1", 8010), timeout=10)
+                with native_fixture(playwright), patch("host.runtime.browser.chromium.BROWSER_NETWORK_PORT", 8011), patch(
+                    "host.runtime.browser_network.relay.connect_proxy",
+                    side_effect=fixture_gateway,
+                ) as proxy:
+                    with TunnelServer(accounts.network, port=8011) as tunnel:
+                        worker = threading.Thread(target=tunnel.serve_forever, daemon=True)
+                        worker.start()
+                        browser = None
+                        try:
+                            browser = accounts.launch_browser(None, "about:blank")
+                            # Trust this test's self-signed origin only in the fixture.
+                            control = browser.context.new_cdp_session(browser.page)
+                            control.send("Security.setIgnoreCertificateErrors", {"ignore": True})
+                            assert websocket_result(browser.page, "wss://fixture.example/websocket") == "native websocket fixture"
+                            assert requests == ["/websocket"], requests
+                            proxy.assert_any_call(("gate.decodo.com", 7000), "fixture.example",
+                                                  (accounts.network.settings.proxy_username(), "secret"))
+                            def fixture_calls():
+                                return sum(call.args[1] == "fixture.example" for call in proxy.call_args_list)
+                            count = fixture_calls()
+                            assert websocket_result(browser.page, "wss://fixture.example:8443/blocked") == "failed"
+                            assert fixture_calls() == count, "Non-443 WSS escaped the relay port restriction"
+                            requests.clear()
+                        finally:
+                            if browser:
+                                browser.close()
+                            tunnel.shutdown()
+                            worker.join()
+                print("Native WSS passed through the HTTPS relay; non-443 WSS was rejected.", flush=True)
                 with native_fixture(playwright), patch("host.runtime.browser.chromium.BROWSER_NETWORK_PORT", 8011), patch("host.runtime.browser.browser.permitted_url", return_value=True), patch("host.runtime.browser_network.relay.target", return_value="127.0.0.1"), patch("host.runtime.browser_network.relay.connect_proxy", side_effect=BrowserError("fixture gateway unavailable")) as proxy, patch("socket.create_connection") as fallback:
                     with TunnelServer(accounts.network, port=8011) as tunnel:
                         worker = threading.Thread(target=tunnel.serve_forever, daemon=True)
@@ -317,6 +380,7 @@ def run_proxy_failure(playwright):
                         browser = None
                         try:
                             browser = accounts.launch_browser(None, "about:blank")
+                            assert websocket_result(browser.page, "wss://fixture.example/proxy-failed") == "failed"
                             try:
                                 browser.page.goto(url + "proxy-failed")
                                 raise AssertionError("Navigation unexpectedly bypassed failed Decodo")
@@ -332,6 +396,7 @@ def run_proxy_failure(playwright):
                     # Also fail closed when the local relay itself is unavailable.
                     browser = accounts.launch_browser(None, "about:blank")
                     try:
+                        assert websocket_result(browser.page, "wss://fixture.example/relay-stopped") == "failed"
                         try:
                             browser.page.goto(url + "relay-stopped")
                             raise AssertionError("Navigation unexpectedly bypassed stopped relay")
@@ -344,4 +409,4 @@ def run_proxy_failure(playwright):
             finally:
                 website.shutdown()
                 website_worker.join()
-    print("Browser proxy failure passed: failed Decodo and stopped relay never contacted the reachable origin.")
+    print("Browser proxy failure passed: HTTPS/WSS never contacted the reachable origin after failed Decodo or stopped relay.")

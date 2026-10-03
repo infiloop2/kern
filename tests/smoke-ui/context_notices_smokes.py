@@ -11,8 +11,21 @@ def run(page: Any, url: str, log_in: Any) -> None:
     tooltip = "Recall: 12 ms; 1200 memory-content bytes.\nCurrent query: <img src=x onerror=alert(1)>\nSelected thread-1 r2: self memory\n" + "\n".join(page_ids)
     tooltip += "\n" + "\n".join(f"Candidate {n}: useful-guide-{n} r2 — semantic rank {n} cosine 0.610" for n in range(1, 13))
 
-    def check_memory_panel(notice: Any, dismiss: Any) -> None:
-        trigger = notice.get_by_role("button", name="Self identity and 2 memories injected.", exact=True)
+    historical_context = (
+        "--- RETAINED CONVERSATION ---\n"
+        'User:\n  Keep <img src=x onerror=alert(1)> & "quotes" literal.\n'
+        + "Agent:\nEarlier retained answer.\n" * 350
+        + "\n\n… [middle omitted from preview] …\n\n"
+        + "Agent:\nLater retained answer.\n" * 350
+        + "--- END RETAINED CONVERSATION ---\n\n"
+        "--- CURRENT USER MESSAGE ---\nContinue\n--- END CURRENT USER MESSAGE ---"
+    )
+
+    def check_memory_panel(
+        notice: Any, dismiss: Any, *,
+        label: str = "Self identity and 2 memories injected.", details: str = tooltip,
+    ) -> None:
+        trigger = notice.get_by_role("button", name=label, exact=True)
         panel = notice.locator('[role="tooltip"]')
         page.mouse.move(0, 0)
         expect(panel).to_be_hidden()
@@ -22,7 +35,8 @@ def run(page: Any, url: str, log_in: Any) -> None:
         assert trigger.get_attribute("aria-describedby") is None
         trigger.click()
         expect(panel).to_be_visible()
-        expect(panel).to_have_text(tooltip)
+        expect(panel).to_have_text(details)
+        assert panel.text_content() == details
         expect(trigger).to_have_attribute("aria-expanded", "true")
         expect(trigger).to_have_attribute("aria-describedby", panel.get_attribute("id"))
         panel_bounds = panel.bounding_box()
@@ -61,7 +75,7 @@ def run(page: Any, url: str, log_in: Any) -> None:
     events = [
         {"seq": 1, "event_type": "thread.message", "payload": {"source": "user", "message": "Continue"}},
         {"seq": 2, "event_type": "thread.context_added", "payload": {
-            "message": "Historical context transferred.",
+            "message": "Historical context transferred.", "historical_context": historical_context,
         }},
         {"seq": 3, "event_type": "thread.context_added", "payload": {
             "message": "Self identity and 2 memories injected.",
@@ -74,7 +88,10 @@ def run(page: Any, url: str, log_in: Any) -> None:
             "message": "Self identity and 0 memories injected.", "memory_page_ids": [],
             "memory_recall_details": "Recall: 3 ms; 0 candidates. Current query: hello",
         }},
-        {"seq": 6, "event_type": "thread.message", "payload": {"source": "agent", "message": "Ready"}},
+        {"seq": 6, "event_type": "thread.context_added", "payload": {
+            "message": "Historical context transferred.",
+        }},
+        {"seq": 7, "event_type": "thread.message", "payload": {"source": "agent", "message": "Ready"}},
     ]
     # Repeated notice text must retain separate rows, including after polling
     # and reloading. Context notices are not collapsible activity cards.
@@ -85,7 +102,11 @@ def run(page: Any, url: str, log_in: Any) -> None:
     log_in(page, url)
     page.goto(url + "#chat/thread-1")
     chat = page.locator("#panel-workspace-chat")
-    expect(chat.locator(".thread-stopped", has_text="Historical context transferred.")).to_be_visible()
+    history_notices = chat.locator(".thread-stopped", has_text="Historical context transferred.")
+    expect(history_notices).to_have_count(2)
+    check_memory_panel(history_notices.first, chat.locator("#thread-title"),
+                       label="Historical context transferred.", details=historical_context)
+    expect(history_notices.nth(1).get_by_role("button")).to_have_count(0)
     notices = chat.locator(".thread-stopped", has_text="Self identity and 2 memories injected.")
     expect(notices).to_have_count(2)
     expect(notices.first).to_be_visible()
@@ -103,6 +124,8 @@ def run(page: Any, url: str, log_in: Any) -> None:
     expect(notices).to_have_count(2)
 
     check_memory_panel(notices.first, chat.locator("#thread-title"))
+    check_memory_panel(history_notices.first, chat.locator("#thread-title"),
+                       label="Historical context transferred.", details=historical_context)
 
     # A fresh notice can be the last row while the agent has not replied yet.
     original_events = events[:]
@@ -121,7 +144,7 @@ def run(page: Any, url: str, log_in: Any) -> None:
     events[:] = original_events
 
     # Clearing the transcript hides older context notices with the old history.
-    events.append({"seq": 7, "event_type": "thread.memory_cleared", "payload": {
+    events.append({"seq": 8, "event_type": "thread.memory_cleared", "payload": {
         "message": "Working memory cleared.",
     }})
     page.reload()
@@ -142,7 +165,11 @@ def run(page: Any, url: str, log_in: Any) -> None:
     app_id = app.locator("#app-title").inner_text()
     try:
         app.locator("#history-toggle").click()
-        expect(app.locator(".chat-history-entry.stopped", has_text="Historical context transferred.")).to_be_visible()
+        app_history = app.locator(".chat-history-message", has_text="Historical context transferred.")
+        expect(app_history).to_have_count(2)
+        check_memory_panel(app_history.first, app.locator("#app-title"),
+                           label="Historical context transferred.", details=historical_context)
+        expect(app_history.nth(1).get_by_role("button")).to_have_count(0)
         expect(app.locator(".chat-history-entry.stopped", has_text="Self identity and 2 memories injected.")).to_have_count(2)
         app_notices = app.locator(".chat-history-entry.stopped .chat-history-message", has_text="Self identity and 2 memories injected.")
         check_memory_panel(app_notices.first, app.locator("#app-title"))

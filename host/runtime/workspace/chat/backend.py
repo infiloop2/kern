@@ -502,6 +502,8 @@ def send_chat_message(
             host_request.update(schedule_config)
         if peer_sender_thread_id is not None:
             host_request["peer_sender_thread_id"] = peer_sender_thread_id
+        else:
+            host_request["operator_sent_message"] = True
         response = _send_with_busy_retry(thread_id, host_request)
         status = response.get("status")
         if status != "accepted":

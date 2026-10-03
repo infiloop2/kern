@@ -4,7 +4,8 @@
 Lima provider end to end. It uses a unique agent name, a temporary `LIMA_HOME`,
 an ephemeral operator key, and exact-name teardown. It needs no secret, cloud
 account, or model-provider login. Local runs need no GitHub authorization;
-pull request and manual workflow runs require a repository-admin request.
+manual workflow runs require a repository-admin request. PR comments also
+allow non-admin requesters with a current-head Codex approval stamp.
 
 The smoke verifies:
 
@@ -39,10 +40,13 @@ The smoke verifies:
 - direct VM deletion followed by recover from the two preserved disks.
 
 The GitHub workflow `.github/workflows/test-lima-host.yml` runs this smoke
-automatically on every push to `main`. A repository admin can request it for a
-same-repository pull request by commenting exactly `/lima-smoke` or
-`lima-smoke`; manual `workflow_dispatch` runs also require repository-admin
-permission. Requested runs resolve and test the pull request's exact head SHA
+automatically on every push to `main`. Comment exactly `/lima-smoke` or
+`lima-smoke` on a same-repository PR. Repository admins can run it directly;
+other requesters require an open, ready PR to `main` with a clean Codex approval
+stamp for its current head. `authorize-admin-or-codex-stamp` checks the active
+stamp for the resolved SHA in both jobs on every attempt, including reruns.
+Without a qualifying stamp, it calls `authorize-repo-admin`. Manual
+`workflow_dispatch` remains admin-only. Requested runs test the PR's exact head SHA
 from the trusted default-branch workflow, and publish a `lima-smoke` commit
 status on that SHA. Duplicate runs of one SHA share a concurrency group and
 cancel the older run, while different SHAs may run in parallel. The smoke uses

@@ -270,7 +270,7 @@ class AgentChatBackendTests(unittest.TestCase):
             "POST",
             "/v1/threads/thread-7/messages",
             {
-                "message": "continue",
+                "message": "continue", "operator_sent_message": True,
                 "agent_runtime": "codex",
                 "model": "gpt-6.1-sol",
                 "effort": "high",
@@ -311,7 +311,7 @@ class AgentChatBackendTests(unittest.TestCase):
         admin_call.assert_called_once_with(
             "POST",
             "/v1/threads/schedule-7/messages",
-            {"message": "manual follow-up", **saved},
+            {"message": "manual follow-up", "operator_sent_message": True, **saved},
         )
 
     def test_bash_schedule_transcript_rejects_manual_messages(self) -> None:
@@ -366,7 +366,7 @@ class AgentChatBackendTests(unittest.TestCase):
             "POST",
             "/v1/threads/thread-4/messages",
             {
-                "message": "start",
+                "message": "start", "operator_sent_message": True,
                 "agent_runtime": "codex",
                 "model": "gpt-6.1-sol",
                 "effort": "max",

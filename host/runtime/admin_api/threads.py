@@ -39,6 +39,7 @@ THREAD_HANDOFF_ACTIVITY_DETAIL_LIMIT = 1_000
 THREAD_HANDOFF_ACTIVITY_OUTPUT_LIMIT = 8_000
 THREAD_HANDOFF_ACTIVITY_EVENT_CHARACTER_LIMIT = 8_000
 THREAD_EVENT_MESSAGE_BYTES_LIMIT = 200_000
+HISTORICAL_CONTEXT_PREVIEW_BYTES = 24 * 1024
 WORKING_MEMORY_CLEARED_NOTICE = (
     "Working memory cleared. The agent starts fresh from here. Earlier "
     "messages are hidden and are no longer sent to it."
@@ -120,6 +121,7 @@ def thread_route(
     query: dict[str, list[str]],
     body: Any,
     peer_sender_thread_id: str | None,
+    operator_sent_message: bool,
 ) -> Any:
     parts = path.strip("/").split("/")
     if len(parts) < 3 or not PRODUCT_THREAD_ID_RE.fullmatch(parts[2]):
@@ -130,7 +132,7 @@ def thread_route(
             raise ApiError(HTTPStatus.BAD_REQUEST, "thread detail does not accept query parameters")
         return {"thread": get_thread(thread_id)}
     if len(parts) == 4 and parts[3] == "messages" and method == "POST":
-        return send_thread_message(thread_id, body, peer_sender_thread_id)
+        return send_thread_message(thread_id, body, peer_sender_thread_id, operator_sent_message=operator_sent_message)
     if len(parts) == 4 and parts[3] == "stop" and method == "POST":
         return stop_thread(thread_id)
     if len(parts) == 4 and parts[3] == "clear-memory" and method == "POST":
@@ -216,6 +218,7 @@ def send_thread_message(
     thread_id: str,
     body: Any,
     peer_sender_thread_id: str | None,
+    operator_sent_message: bool,
 ) -> dict[str, Any]:
     """Start or steer one turn through the ordinary thread path."""
     if PRODUCT_THREAD_ID_RE.fullmatch(thread_id) is None:
@@ -236,7 +239,8 @@ def send_thread_message(
             session_config, agent_runtime, model, effort
         )
         if not switching_session and orchestrator.steer_live_turn(
-            thread_id, agent_runtime, message, peer_sender_thread_id=peer_sender_thread_id
+            thread_id, agent_runtime, message, peer_sender_thread_id=peer_sender_thread_id,
+            operator_sent_message=operator_sent_message,
         ):
             turn = None
             provider_session_id = None
@@ -258,6 +262,7 @@ def send_thread_message(
                     session_config, agent_runtime, model, effort
                 )
                 launch_message = message
+                handoff_message = ""
                 session_change_activity = None
                 handoff_events: list[dict[str, Any]] = []
                 missing_provider_context = (
@@ -326,7 +331,8 @@ def send_thread_message(
                 # session it is continuing a thread, which is exactly wrong for
                 # a run that starts fresh.
                 if handoff_events:
-                    launch_message = _session_handoff_message(handoff_events, message)
+                    handoff_message = _session_handoff_message(handoff_events, message)
+                    launch_message = handoff_message
                 if agent_runtime != SCRIPT_RUNTIME:
                     memory_context_message = _memory_context_message(thread_id, recalled_pages)
                     launch_message = f"{memory_context_message}\n\n{launch_message}"
@@ -340,6 +346,7 @@ def send_thread_message(
                     message,
                     pre_message_activity=session_change_activity,
                     peer_sender_thread_id=peer_sender_thread_id,
+                    operator_sent_message=operator_sent_message,
                 )
                 # Persist alongside admission: rejected turns leave no notices.
                 # These are display events, excluded from future history handoffs.
@@ -348,7 +355,10 @@ def send_thread_message(
                         cur,
                         "thread.context_added",
                         thread_id,
-                        {"message": "Historical context transferred."},
+                        {
+                            "message": "Historical context transferred.",
+                            "historical_context": _historical_context_preview(handoff_message),
+                        },
                         run_number=turn.run_number,
                     )
                 if agent_runtime != SCRIPT_RUNTIME:
@@ -899,6 +909,27 @@ def _bounded_handoff_section(
             transcript = transcript[-content_limit:]
         transcript = marker + ("\n\n" + transcript if transcript else "")
     return transcript
+
+def _historical_context_preview(text: str) -> str:
+    """Keep both ends within a 24 KiB JSON budget, without changing the handoff."""
+    limit = HISTORICAL_CONTEXT_PREVIEW_BYTES
+    if len(text) <= limit and len(json.dumps(text).encode()) <= limit:
+        return text
+    marker = "\n\n… [middle omitted from preview] …\n\n"
+
+    def preview(keep: int) -> str:
+        tail = keep // 2
+        return text[:keep - tail] + marker + (text[-tail:] if tail else "")
+
+    low, high = 0, min(len(text), limit)
+    while low < high:
+        middle = (low + high + 1) // 2
+        if len(json.dumps(preview(middle)).encode()) <= limit:
+            low = middle
+        else:
+            high = middle - 1
+    return preview(low)
+
 
 def _session_handoff_message(history: list[dict[str, Any]], message: str) -> str:
     """Build independently bounded conversation and activity handoff sections."""

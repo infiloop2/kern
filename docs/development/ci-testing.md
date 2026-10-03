@@ -271,3 +271,28 @@ Focused commands (also useful for repeated validation):
 python3 tests/smoke-ui/admin_ui_smoke.py --port 8000 --scope oauth-poll
 python3 tests/smoke-ui/admin_ui_smoke.py --port 8000 --scope navigation-order
 ```
+
+## Codex approval stamp
+
+`approve-codex-review.yml` turns a clean verdict from
+`chatgpt-codex-connector[bot]` into an `APPROVE` review by `github-actions[bot]`,
+pinned to the reviewed commit. The `stamp-codex-review` action and its
+`stamp.py` resolve the reviewed commit, validate the Codex verdict, and create
+that approval. It applies to open, non-draft, same-repository PRs targeting
+`main`. GitHub Actions must be allowed to create and approve pull requests in
+the repository Actions settings.
+
+The separate `authorize-admin-or-codex-stamp` action uses its own `authorize.py`
+to check for an active approval stamp on the requested SHA, which must still be
+the current PR head. If no stamp qualifies, it calls the existing
+`authorize-repo-admin` action. Authorization does not parse Codex comments or
+re-evaluate the review verdict. A stamp remains valid until dismissed or the
+head changes. Both smoke jobs load these actions from trusted `main` at the
+workspace root before executing PR code, including on reruns.
+
+The stamp means Codex found no major issues on that revision; CI checks and
+human review remain separate signals. It enables non-admin `/smoke` and
+`/lima-smoke` comments for the stamped head. Stale or dismissed approvals,
+manual labels, other authors' approvals, and copied verdict text do not grant
+smoke authority. Stage commands and manual workflow dispatch remain admin-only.
+The new policy takes effect after it lands on `main`.
