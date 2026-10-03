@@ -1,0 +1,11 @@
+name: stamp-codex-review
+description: Approve the exact PR revision with the latest clean Codex verdict.
+runs:
+  using: composite
+  steps:
+    - name: Stamp clean Codex review
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        POLICY_PATH: ${{ github.action_path }}/stamp.py
+      run: python3 "$POLICY_PATH"

@@ -560,9 +560,12 @@ def _workspace_api_tool() -> dict[str, Any]:
         "name": WORKSPACE_API_TOOL_NAME,
         "description": (
             "Call Kern's bounded agent-facing Workspace API for Web Apps, global memory, "
-            "global schedules, spawned-agent discovery, and current thread identity. "
+            "standing agents and triggers, spawned-agent discovery, and current thread identity. "
             "GET /agent/spawned-agents lists active spawned Chats with name, thread id, parent id, "
-            "runtime/model/effort, and status. App routes use an explicit "
+            "runtime/model/effort, and status. Only the owning agent can modify an App or "
+            "standing-agent definition/triggers; ask its owner via send_agent_message for changes. "
+            "POST /agent/schedules creates a standing agent with its own identity. "
+            "App routes use an explicit "
             "immutable app id; GET /agent/apps lists the available ids, and POST "
             "/agent/apps creates a new app only when the operator explicitly asks. "
             "GET /agent/apps/session-options lists runtime/model/effort choices; "

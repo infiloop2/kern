@@ -173,7 +173,7 @@
       <div class="sidebar-divider" aria-hidden="true"></div>
       <div class="sidebar-section workspace-nav-section" aria-labelledby="scheduled-agents-nav-title">
         <div class="workspace-nav-head">
-          <button id="scheduled-agents-nav-title" class="sidebar-section-title workspace-nav-title-button" data-action="open-workspace-global" data-resource="scheduled-agents">Scheduled agents</button>
+          <button id="scheduled-agents-nav-title" class="sidebar-section-title workspace-nav-title-button" data-action="open-workspace-global" data-resource="scheduled-agents">Standing agents</button>
         </div>
         <div id="scheduled-agents-nav-items" class="workspace-nav-items"></div>
       </div>
@@ -203,31 +203,30 @@
     <main>
       <div id="panel-swarm" class="tab-panel" role="region" aria-label="Swarm view" hidden>
         <section class="swarm-page">
-          <div class="swarm-heading"><div><span class="swarm-caption">YOUR AGENTS, TOGETHER</span><h1>Swarm</h1><p id="swarm-total" class="muted">Everyone has a place here.</p></div><div class="swarm-heading-actions"><span id="swarm-updated" class="muted"></span><button id="swarm-close" class="swarm-close" data-action="close-swarm" aria-label="Close Swarm view" title="Back · Esc">×</button></div></div>
+          <div class="swarm-heading"><div><span class="swarm-caption">YOUR AGENTS, TOGETHER</span><h1>Swarm map</h1><p id="swarm-total" class="muted">Everyone has a place here.</p></div><div class="swarm-heading-actions"><span id="swarm-updated" class="muted"></span><button id="swarm-close" class="swarm-close" data-action="close-swarm" aria-label="Close Swarm view" title="Back · Esc">×</button></div></div>
           <p id="swarm-error" class="inline-error" role="alert" hidden></p>
           <div class="swarm-toolbar">
             <div class="swarm-counts" aria-label="Filter agents by state">
-              <button data-action="swarm-filter" data-swarm-filter="busy" aria-pressed="false"><i></i><strong>0</strong> Busy</button>
+              <button data-action="swarm-filter" data-swarm-filter="busy" aria-pressed="false"><i></i><strong>0</strong> Working</button>
               <button data-action="swarm-filter" data-swarm-filter="needs-human" aria-pressed="false"><i></i><strong>0</strong> Approvals</button>
-              <button data-action="swarm-filter" data-swarm-filter="failed" aria-pressed="false"><i></i><strong>0</strong> Failed</button>
+              <button data-action="swarm-filter" data-swarm-filter="failed" aria-pressed="false"><i></i><strong>0</strong> Errors</button>
               <button data-action="swarm-filter" data-swarm-filter="idle" aria-pressed="false"><i></i><strong>0</strong> Idle</button>
             </div>
-            <input id="swarm-search" type="search" maxlength="100" placeholder="Find an agent or task" aria-label="Find an agent or task">
+            <input id="swarm-search" type="search" maxlength="100" placeholder="Find an agent, purpose or task" aria-label="Find an agent, purpose or task">
           </div>
-          <div id="swarm-house" class="swarm-house" role="group" aria-label="Agent commons">
-            <div class="swarm-room-decor" aria-hidden="true">
-              <div class="swarm-room-wall"></div><div class="swarm-room-window"></div>
-              <div class="swarm-room-art"></div><div class="swarm-room-shelf"></div>
-              <div class="swarm-room-sofa"></div><div class="swarm-room-plant"></div>
+          <div class="swarm-workspace">
+            <div class="swarm-map-panel">
+              <div class="swarm-map-tools"><span>Up to 500 strongest connections. Thicker lines = more messages; arrows = direction.</span><div><button id="swarm-zoom-out" aria-label="Zoom out">−</button><span id="swarm-zoom-level">100%</span><button id="swarm-zoom-in" aria-label="Zoom in">+</button><button id="swarm-arrange" title="Rearrange using the latest message counts">Arrange</button><button id="swarm-fit">Fit all</button><button id="swarm-actual">100%</button></div></div>
+              <div id="swarm-viewport" tabindex="0" role="region" aria-label="Agent communication map, scroll to explore">
+                <p id="swarm-empty" hidden>No active agents yet.</p>
+                <div id="swarm-stage"><div id="swarm-canvas"><svg id="swarm-edges" aria-label="Communication connections"></svg><div id="swarm-nodes"></div></div></div>
+              </div>
             </div>
-            <div class="swarm-house-sign"><span>THE COMMONS</span><span>App <i class="key-app"></i> · Chat <i class="key-chat"></i> · Schedule <i class="key-schedule"></i></span></div>
-            <section id="swarm-zone-busy" class="swarm-zone zone-busy"><h2>At work <span id="swarm-count-busy">0</span></h2><p class="swarm-zone-note">Tasks in motion.</p><div id="swarm-agents-busy" class="swarm-agents"></div><p id="swarm-empty-busy" class="swarm-zone-empty">A quiet moment at the desks.</p></section>
-            <section id="swarm-zone-needs-human" class="swarm-zone zone-needs-human"><h2>By the door <span id="swarm-count-needs-human">0</span></h2><p class="swarm-zone-note">Pending Kern approvals.</p><div id="swarm-agents-needs-human" class="swarm-agents"></div><p id="swarm-empty-needs-human" class="swarm-zone-empty">No agents have pending approvals.</p></section>
-            <section id="swarm-zone-failed" class="swarm-zone zone-failed"><h2>A rough moment <span id="swarm-count-failed">0</span></h2><p class="swarm-zone-note">Stopped with an error.</p><div id="swarm-agents-failed" class="swarm-agents"></div><p id="swarm-empty-failed" class="swarm-zone-empty">No failed agents.</p></section>
-            <section id="swarm-zone-idle" class="swarm-zone zone-idle"><h2>The lounge <span id="swarm-count-idle">0</span></h2><p class="swarm-zone-note">Resting together. Filter Idle to explore.</p><div id="swarm-agents-idle" class="swarm-agents"></div><p id="swarm-empty-idle" class="swarm-zone-empty">Everyone is out of the lounge.</p></section>
+            <aside class="swarm-sidebar">
+              <section class="swarm-attention-section"><h2>Needs attention <span id="swarm-attention-count">0</span></h2><div id="swarm-attention"></div></section>
+              <section id="swarm-detail" aria-label="Selected agent"><p>Select an agent or connection.</p></section>
+            </aside>
           </div>
-          <div id="swarm-bubbles" aria-hidden="true"></div>
-          <section id="swarm-detail" class="swarm-detail" aria-label="Selected agent"><p class="muted">Pick an agent to see its task and open its conversation.</p></section>
         </section>
       </div>
       <div id="panel-analytics" class="tab-panel" hidden>

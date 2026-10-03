@@ -123,8 +123,9 @@ Actions. Add these repository secrets:
 
 A push to `main` runs the smoke automatically. A repository admin can also run
 it manually with `workflow_dispatch` by selecting a branch or tag in the GitHub
-Run workflow UI, or request a pull request smoke by commenting either exact
-command on the pull request:
+Run workflow UI. Any requester can run an open, ready, same-repository PR to
+`main` after it receives a current-head Codex approval stamp; repository admins
+can also request a PR smoke without that stamp. Comment either exact command:
 
 ```text
 /smoke
@@ -132,9 +133,14 @@ smoke
 ```
 
 The workflow first runs an `authorize` job that checks out trusted workflow
-actions from `main`. Manual dispatches and comment-triggered runs verify that
-the triggering actor is a repository admin, and comment-triggered runs reject
-fork PR heads before exposing AWS secrets. Pushes to `main` need no separate
+actions from `main`. Manual dispatches require a repository admin. PR comments
+allow an admin or a clean Codex approval for the exact resolved SHA; fork PR
+heads are always rejected before exposing AWS secrets. Both authorization and
+execution jobs use `authorize-admin-or-codex-stamp` to check the active GitHub
+Actions approval on the exact current PR head before executing checkout code.
+Without that stamp, the action calls `authorize-repo-admin` to check the current
+requester, including on reruns. A newer commit or dismissed stamp removes
+non-admin authority; this gate does not re-parse Codex review comments. Pushes to `main` need no separate
 authorization. Every trigger rejects immediately if another `kern-smoke` run
 is already queued or running, while the smoke job's singleton concurrency group
 closes the race between simultaneous authorization checks. The authorize job

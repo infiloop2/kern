@@ -1,10 +1,15 @@
-# Schedules Workspace reference
+# Standing agents and triggers
 
 Read this file before listing, creating, editing, deleting, or diagnosing
-schedules. Schedules are shared by every thread.
+standing agents and triggers. All agents may discover/read them; only the owning
+standing agent can update or delete its own definition through agent tools.
+Agents can create standing agents. The operator can create, edit, archive and
+restore them.
+Other agents request changes through `send_agent_message`.
 
-Every schedule owns one stable `schedule-N` thread. Each trigger sends its saved
-prompt to that thread, steering an active turn when the runtime supports it.
+Each standing agent owns one stable `schedule-N` thread, independently of its
+zero or more triggers. Each trigger sends its saved prompt to that thread,
+steering an active turn when the runtime supports it.
 
 All times are fixed UTC calendar times. Each due trigger makes one independent
 delivery attempt, including when several triggers coincide. The host advances
@@ -32,9 +37,12 @@ manual messaging nor self-memory controls.
   and effort combinations.
 - `GET /agent/schedules/{id}` fetches one active schedule, including its full
   triggers and current revision. Deleted schedules return 404 to agents.
-- `POST /agent/schedules` creates a schedule with `name`, `triggers`,
-  `agent_runtime`, `model`, and `effort`. Runtime/model/effort are shared by all
-  triggers. `triggers` is an array of 0–5 entries:
+- `POST /agent/schedules` creates a standing agent with `name`, `purpose`,
+  `triggers`, `agent_runtime`, `model`, and `effort`. The new agent owns its
+  definition; its creator requests subsequent changes by messaging its
+  `schedule-N` identity. A standing agent updates its own definition using PUT.
+  Runtime/model/effort are shared by all triggers.
+  `triggers` is an array of 0–5 entries:
   - Daily: `{"type":"daily","times":["08:00","20:00"],"prompt":"Research"}`.
     Use 1–24 distinct `HH:MM` UTC times. The prompt runs at each time every day.
   - Weekly: `{"type":"weekly","days":["mon","wed","fri"],"time":"16:00","prompt":"Review"}`.
@@ -56,10 +64,10 @@ recent-failure routes.
 
 Each trigger prompt must be nonblank and may contain up to 12,000 characters.
 The complete request must also fit the Workspace request size limit. Kern never silently
-substitutes a runtime, model, or effort. Deleting a schedule removes only its
+substitutes a runtime, model, or effort. Archiving a standing agent stops its
 triggers. Its persistent thread remains retained
 but hidden; it does not move into Chat, and restoring the schedule reveals it
-under Scheduled agents again during the 90-day restoration window. After the
+under Standing agents again during the 90-day restoration window. After the
 definition is pruned, any remaining host thread data follows ordinary host
 retention and stays absent from both navigation indexes.
 

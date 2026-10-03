@@ -249,7 +249,11 @@ Every trigger funnels into the same provider-connection refresh:
      `claude -p /usage` probe. The CLI authenticates through the proxy and
      owns refreshing an expired access token; the credential hash is re-read
      afterwards, so a refresh-rotation detected here continues to attestation
-     instead of misclassifying as a broken login.
+     instead of misclassifying as a broken login. A usage timeout preserves
+     the approved connection and its last successful usage timestamp, logs a
+     warning, and retries on the normal recheck. It neither stops running turns
+     nor clears the proxy pin; explicit auth rejection and identity checks
+     still block access.
    - *Claude, new or rotated token*: skip the probe — the profile attestation
      in step 5 is its orchestrator live validation. The proxy independently
      attests the bearer UUID on its first request and does not depend on the
@@ -350,6 +354,11 @@ starts re-enter the refresh. An explicit operator refresh bypasses this memory:
   stays `awaiting_login` with zero background provider traffic. An explicit
   refresh probes once; an operator login or account reset replaces the
   credential and clears the verdict.
+- A **Claude usage timeout** retains `active` admission for the already
+  attested token without claiming a successful usage read. Its memo expires
+  after four minutes; the next five-minute recheck tries again. Repeated
+  timeouts alone never revoke the connection. The proxy still enforces the
+  approved account on every request.
 - Any **other failure** is `error` and expires after four minutes, under the
   five-minute recheck, so infrastructure failures recover on the next
   scheduled poll without a five-second retry loop.

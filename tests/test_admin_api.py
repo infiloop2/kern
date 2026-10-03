@@ -2781,6 +2781,11 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         notice = events["events"][-2]
         self.assertIn("Historical context transferred", notice["payload"]["message"])
+        # Short handoffs are shown in full, exactly as sent to the provider.
+        self.assertEqual(
+            notice["payload"]["historical_context"],
+            launch_message.split("--- END KERN HOST CONTEXT ---\n\n", 1)[1],
+        )
 
     def test_session_handoff_reserves_100k_for_newest_conversation(self) -> None:
         history = [
@@ -2914,6 +2919,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
             ["thread.message", "thread.message", "thread.context_added", "thread.context_added"],
+        )
+        self.assertEqual(
+            events["events"][-2]["payload"]["historical_context"],
+            launch_message.split("--- END KERN HOST CONTEXT ---\n\n", 1)[1],
         )
 
     def test_a_schedule_thread_runs_the_script_runtime_on_the_ordinary_path(self) -> None:
@@ -3967,6 +3976,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                     "effort": "high",
                 },
                 None,
+                operator_sent_message=False,
             )
         self.assertEqual(direct_call.exception.status, HTTPStatus.BAD_REQUEST)
 

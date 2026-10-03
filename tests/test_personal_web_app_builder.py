@@ -502,7 +502,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         ).read_text()
         self.assertIn('data-memory-scope="swarm"', markup)
         self.assertIn('data-memory-scope="individual"', markup)
-        self.assertIn('id="memory-content" maxlength="2000"', markup)
+        self.assertIn('id="memory-content" maxlength="4000"', markup)
         self.assertIn('data-trigger-prompt rows="4" maxlength="12000"', source)
         self.assertIn('params.set("scope", state.memoryScope)', source)
         self.assertIn('state.memoryScope === "individual"', source)
@@ -536,10 +536,9 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("GET /agent/memory/search?q=words&limit=20", instructions)
         self.assertIn("GET /agent/memory/pages/{page_id}", instructions)
         self.assertIn("GET /agent/apps/{app_id}/state/{meta|ui|data|data/shape}", instructions)
-        self.assertIn("Migrated Apps inherit the configuration", web_apps)
         self.assertIn("POST /agent/apps/{app_id}/actions", instructions)
         self.assertIn("There is no run/status or separate failure API", instructions)
-        self.assertIn("Global schedules", instructions)
+        self.assertIn("Standing agents and triggers", instructions)
         self.assertIn("content is up to 2,000 characters", memory)
         self.assertIn(
             "Each trigger prompt must be nonblank and may contain up to 12,000 characters", schedules
@@ -1801,7 +1800,7 @@ class ConversationTests(unittest.TestCase):
             "POST",
             "/v1/threads/app-5/messages",
             {
-                "message": "Build it.",
+                "message": "Build it.", "operator_sent_message": True,
                 **self.SESSION,
             },
         )

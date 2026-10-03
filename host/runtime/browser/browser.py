@@ -50,7 +50,8 @@ class Browser:
             self.context.set_default_timeout(10000)
             self.context.set_default_navigation_timeout(20000)
             self.context.route("**/*", self.route_request)
-            self.context.route_web_socket("**/*", lambda route: route.close())
+            # Keep WebSocket native: Playwright routing replaces its constructor
+            # and breaks X login. Secure sockets use Chromium's HTTPS relay.
             self.context.on("requestfailed", self.record_failed_request)
             self.context.on("response", self.record_response)
             self.page = self.context.pages[0] if self.context.pages else self.context.new_page()

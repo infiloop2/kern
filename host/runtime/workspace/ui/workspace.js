@@ -59,13 +59,13 @@
     state.creating = false;
     $("global-title").textContent = resource === "memory"
       ? "Memory"
-      : "Schedules";
+      : "Standing agents";
     $("global-intro").textContent = resource === "memory"
       ? "Swarm memory shared across agent threads."
-      : "Recurring messages delivered to model agents or time-bounded Bash scripts.";
+      : "Persistent agents with optional triggers, and scheduled Bash jobs.";
     $("global-new").textContent = resource === "memory"
       ? "New page"
-      : "New schedule";
+      : "New standing agent";
     $("memory-search-wrap").hidden = resource !== "memory";
     $("memory-scope-toggle").hidden = resource !== "memory";
     renderMemoryScope();
@@ -129,6 +129,7 @@
     }
     if (state.resource !== "memory") return;
     const individual = state.memoryScope === "individual";
+    validateMemoryContent();
     $("global-intro").textContent = individual
       ? "Private memory owned by one app, chat, or schedule thread."
       : "Swarm memory shared across agent threads.";
@@ -155,7 +156,7 @@
     if (!state.items.length) {
       const empty = document.createElement("p");
       empty.className = "global-list-description";
-      empty.textContent = state.deleted ? "Nothing deleted." : "Nothing here yet.";
+      empty.textContent = state.deleted ? (isScheduleResource() ? "No archived agents." : "Nothing deleted.") : "Nothing here yet.";
       list.append(empty);
     }
     for (const item of state.items) {
@@ -176,13 +177,13 @@
       meta.textContent = state.resource === "memory"
         ? `r${item.revision} · ${relativeTime(item.updated_at)}`
         : state.deleted
-          ? `deleted · ${relativeTime(item.updated_at)}`
+          ? `${isScheduleResource() ? "archived" : "deleted"} · ${relativeTime(item.updated_at)}`
           : `next ${relativeTime(item.next_run_at)}`;
       button.append(title, description, meta);
       list.append(button);
     }
     $("global-load-more").hidden = !state.next;
-    $("global-archive-toggle").textContent = state.deleted ? "Back to active" : "Show deleted";
+    $("global-archive-toggle").textContent = state.deleted ? "Back to active" : isScheduleResource() ? "Show archived" : "Show deleted";
   }
 
   function selectedId() {
@@ -244,6 +245,7 @@
       $("memory-page-id").value = prefilledMemoryId;
       $("memory-description").value = "";
       $("memory-content").value = "";
+      validateMemoryContent();
       resizeTextarea("memory-content");
       $("memory-meta").textContent = state.memoryScope === "individual"
         ? "New individual memory page"
@@ -260,7 +262,7 @@
       $("schedule-form").hidden = false;
       setFormDisabled($("schedule-form"), true);
       resetScheduleForm();
-      $("schedule-meta").textContent = "New schedule";
+      $("schedule-meta").textContent = "New standing agent";
       $("schedule-history").replaceChildren();
       $("schedule-delete").hidden = true;
       void ensureSessionOptions().then(() => {
@@ -284,6 +286,7 @@
     $("memory-page-id").value = page.page_id;
     $("memory-description").value = page.description;
     $("memory-content").value = page.content;
+    validateMemoryContent();
     resizeTextarea("memory-content");
     $("memory-meta").textContent = `Revision ${page.revision} · edited by ${page.updated_by} · ${relativeTime(page.updated_at)}`;
     $("memory-link-graph").hidden = state.memoryScope === "individual";
@@ -334,8 +337,20 @@
     textarea.style.height = `${textarea.scrollHeight + borders}px`;
   }
 
+  function validateMemoryContent() {
+    const content = $("memory-content");
+    const maximum = state.memoryScope === "individual" ? 20000 : 2000;
+    // maxlength bounds UTF-16 storage; validity counts Unicode characters.
+    content.maxLength = maximum * 2;
+    content.setCustomValidity([...content.value].length > maximum
+      ? `Content must be at most ${maximum} characters.`
+      : "");
+  }
+
   async function saveMemory(event) {
     event.preventDefault();
+    validateMemoryContent();
+    if (!$("memory-form").reportValidity()) return;
     const operationSequence = state.sequence;
     const operationRoute = window.location.hash;
     const pageId = $("memory-page-id").value.trim();
@@ -407,7 +422,7 @@
   function resetScheduleForm() {
     $("schedule-name").value = "";
     $("schedule-purpose").value = "";
-    renderTriggers([{type: "daily", times: ["09:00"], prompt: ""}]);
+    renderTriggers([]);
   }
 
   async function renderSchedule(sequence) {
@@ -422,10 +437,10 @@
     renderTriggers(schedule.triggers || []);
     syncSessionSelectors(schedule.agent_runtime, schedule.model, schedule.effort);
     const script = schedule.agent_runtime === SCRIPT_RUNTIME;
-    $("global-title").textContent = script ? "Script schedule" : "Scheduled agent";
+    $("global-title").textContent = script ? "Script schedule" : "Standing agent";
     $("global-intro").textContent = script
       ? "Recurring message executed by the time-bounded Bash runtime."
-      : "Persistent agent receiving automated messages at fixed UTC times.";
+      : "Persistent agent with zero or more automatic messages at fixed UTC times.";
     $("schedule-meta").textContent = `${schedule.next_run_at ? "Next " + schedule.next_run_at.replace("T", " ").replace("Z", " UTC") : "No automatic messages"} · last delivery attempt ${relativeTime(schedule.last_run_at)}`;
     $("schedule-delete").hidden = schedule.deleted;
     setFormDisabled($("schedule-form"), schedule.deleted);
@@ -649,7 +664,7 @@
         } catch (error) {
           if (!scheduleOperationIsCurrent(operationSequence, operationRoute)) return;
           status(
-            `Schedule saved, but Chat could not be opened: ${error.message || "unavailable"}`,
+            `Agent saved, but Chat could not be opened: ${error.message || "unavailable"}`,
             "error",
           );
         }
@@ -658,14 +673,14 @@
       await loadItems(false);
       if (window.location.hash !== operationRoute) return;
       await selectItem(String(response.schedule.id));
-      status("Schedule saved", "success");
+      status("Agent saved", "success");
     } catch (error) {
-      status(error.message || "Could not save schedule", "error");
+      status(error.message || "Could not save agent", "error");
     }
   }
 
   async function deleteSchedule() {
-    if (!state.selected || !confirm(`Delete schedule “${state.selected.name}”?`)) return;
+    if (!state.selected || !confirm(`Archive “${state.selected.name}” and stop its triggers?`)) return;
     const operationSequence = state.sequence;
     const operationRoute = window.location.hash;
     try {
@@ -673,13 +688,13 @@
       if (!scheduleOperationIsCurrent(operationSequence, operationRoute)) return;
       state.selected = null;
       hideForms();
-      status("Schedule moved to Deleted", "success");
+      status("Agent archived", "success");
       try {
         await window.KernHost.refreshNavigation();
       } catch (error) {
         if (!scheduleOperationIsCurrent(operationSequence, operationRoute)) return;
         status(
-          `Schedule moved to Deleted, but navigation could not refresh: ${error.message || "unavailable"}`,
+          `Agent archived, but navigation could not refresh: ${error.message || "unavailable"}`,
           "error",
         );
         return;
@@ -688,7 +703,7 @@
       window.KernHost.navigateWorkspace("scheduled-agents");
       await loadItems(false);
     } catch (error) {
-      status(error.message || "Could not delete schedule", "error");
+      status(error.message || "Could not archive agent", "error");
     }
   }
 
@@ -810,6 +825,7 @@
     searchTimer = setTimeout(() => void loadItems(false, $("memory-search").value), 250);
   });
   const growingEditorIds = ["memory-content"];
+  $("memory-content").addEventListener("input", validateMemoryContent);
   for (const id of growingEditorIds) $(id).addEventListener("input", () => resizeTextarea(id));
   if (typeof ResizeObserver === "function") {
     const observedWidths = new WeakMap();

@@ -31,10 +31,10 @@ discover active spawned Chats across all parents. It returns `agents`, each with
 `effort`, and `status`. Archived Chats and ordinary operator Chats are excluded.
 Discovery grants messaging within the authorized task, not archive ownership.
 
-`send_agent_message` takes exactly `thread_id` and `message`. Discover Apps
-and model Schedules through their existing Workspace lists, including their
-short `purpose`, and spawned Chats through `GET /agent/spawned-agents`. Ordinary Chats
-can also be contacted by a known thread id.
+`send_agent_message` takes exactly `thread_id` and `message`. Discover App agents
+and Standing agents through `GET /agent/apps` and `GET /agent/schedules`, including
+their short `purpose`, and spawned Chats through `GET /agent/spawned-agents`.
+Ordinary Chats can also be contacted by a known thread id.
 Kern derives the sender identity and prepends a header identifying the message
 as agent correspondence, not an operator instruction or approval. Reply only
 when useful, using the same tool and the sender thread id in that header.
@@ -49,3 +49,18 @@ task.
 Your message may contain at most 10,000 characters, excluding Kern's header.
 The complete message has a 50,000 UTF-8 byte limit, leaving room for the header
 and multibyte characters. Reference files or App data for larger results.
+
+## Responsibilities and ownership
+
+On-demand Chats handle operator requests. App agents maintain their own App;
+Standing agents own ongoing work and their optional triggers. Both advertise a
+purpose that the owner or operator can update. Spawned agents can be temporary
+or permanent collaborators; they have a name and parent, but no purpose field.
+Only on-demand Chats receive generated task summaries.
+
+To change another agent’s App or standing-agent definition and triggers,
+discover its owner and request the change through `send_agent_message`. Peer
+delivery acceptance is not completion; reply with the result when useful.
+There is no request tracker or automatic retry.
+Only the owner may write its App or standing-agent definition via agent tools.
+Filesystem access and integration permissions follow the host’s access policies.

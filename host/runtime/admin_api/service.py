@@ -1039,8 +1039,13 @@ def _thread_route_request(request: _RouteRequest) -> Any:
         if (not isinstance(peer_sender_thread_id, str)
                 or PRODUCT_THREAD_ID_RE.fullmatch(peer_sender_thread_id) is None):
             raise ApiError(HTTPStatus.BAD_REQUEST, "invalid peer sender")
+    # Browser sends proxied by Workspace carry trusted provenance. Scheduled and
+    # peer sends do not; message text is never used to infer human activity.
+    operator_sent_message = isinstance(request.principal, OperatorPrincipal)
+    if isinstance(request.principal, WorkspacePrincipal) and isinstance(request.body, dict):
+        operator_sent_message = request.body.get("operator_sent_message") is True
     return thread_route(request.method, request.path, request.query, request.body,
-                        peer_sender_thread_id)
+                        peer_sender_thread_id, operator_sent_message=operator_sent_message)
 
 
 def _swarm_route(request: _RouteRequest) -> dict[str, Any]:
@@ -1246,11 +1251,11 @@ _ROUTES: tuple[_Route, ...] = (
         query_label="swarm snapshot",
     ),
     _Route(
-        "GET", "/v1/swarm/peer-messages",
-        lambda request: state.swarm_peer_messages(),
+        "GET", "/v1/swarm/interactions",
+        lambda request: state.swarm_interactions(),
         operator_only=True,
         query_keys=frozenset(),
-        query_label="swarm peer messages",
+        query_label="swarm interactions",
     ),
     _Route("GET", "/v1/network/policy", lambda request: network_policy.network_policy_response()),
     _Route("PUT", "/v1/network/policy", lambda request: replace_network_policy(request.body)),
@@ -1992,7 +1997,7 @@ def restart_interrupted_agents(thread_ids: list[str]) -> None:
             if runtime_type not in refreshed:
                 orchestrator.refresh_runtime_status(runtime_type)
                 refreshed.add(runtime_type)
-            send_thread_message(thread_id, {"message": RESTART_MESSAGE}, None)
+            send_thread_message(thread_id, {"message": RESTART_MESSAGE}, None, operator_sent_message=False)
         except Exception as exc:
             host_errors.report_warning(
                 "admin_api.restart_interrupted_agent", exc,

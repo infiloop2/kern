@@ -30,6 +30,7 @@ INDIVIDUAL_PAGE_ID_RE = re.compile(r"^(?:app|thread|schedule)-")
 LINK_RE = re.compile(r"\[\[([a-z0-9][a-z0-9-]{0,63})\]\]")
 MAX_DESCRIPTION_CHARS = 100
 MAX_CONTENT_CHARS = 2000
+MAX_SELF_CONTENT_CHARS = 20_000
 MAX_PAGES = 10_000
 # Kept in step with the cap in migration 0042's memory_page_links backfill.
 MAX_PAGE_LINKS = 100
@@ -979,7 +980,7 @@ def save_page(
         {"description", "content", "expected_revision"},
     )
     description = _description(request["description"])
-    content = _content(request["content"])
+    content = _content(request["content"], page_id)
     expected = _expected_revision(request["expected_revision"])
     now = _utc_now()
     with db.transaction() as cur:
@@ -1208,8 +1209,12 @@ def embedding_index_loop() -> None:
             if not pending:
                 _embedding_work.wait(EMBEDDING_IDLE_SECONDS)
                 continue
+            # Large self-memory stays intact in storage and recall; only the
+            # semantic index input uses the embedding service's byte budget.
             texts = [
-                f"{page_id}\n{description}\n{content}"
+                f"{page_id}\n{description}\n{content}".encode("utf-8")[
+                    :embedding_client.MAX_TEXT_BYTES
+                ].decode("utf-8", errors="ignore")
                 for page_id, _revision, description, content in pending
             ]
             vectors = embedding_client.embed_texts(texts, kind="passage")
@@ -1400,11 +1405,12 @@ def _description(value: Any) -> str:
     return value
 
 
-def _content(value: Any) -> str:
-    if not isinstance(value, str) or len(value) > MAX_CONTENT_CHARS:
+def _content(value: Any, page_id: str) -> str:
+    maximum = MAX_SELF_CONTENT_CHARS if is_individual_page_id(page_id) else MAX_CONTENT_CHARS
+    if not isinstance(value, str) or len(value) > maximum:
         raise WorkspaceError(
             HTTPStatus.BAD_REQUEST,
-            f"content must be at most {MAX_CONTENT_CHARS} characters",
+            f"content must be at most {maximum} characters",
         )
     return value
 

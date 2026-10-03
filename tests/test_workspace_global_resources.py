@@ -14,7 +14,7 @@ from unittest.mock import patch
 
 import pg_harness
 
-from host.runtime.core import db, state
+from host.runtime.core import db, pgclient, state
 from host.runtime.workspace import agent_api, getting_started, memory, schedules
 from host.runtime.workspace.chat import backend as chat
 from host.runtime.workspace.host_api import WorkspaceError
@@ -68,6 +68,53 @@ class MemoryRecallQueryTests(unittest.TestCase):
                 with self.assertRaises(WorkspaceError) as error:
                     search({"q": ["a" * 201]})
                 self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+
+
+class MemoryContentTests(unittest.TestCase):
+    def test_content_limits_follow_the_memory_namespace(self) -> None:
+        for page_id, maximum in (
+            ("thread-7", 20_000),
+            ("app-7", 20_000),
+            ("schedule-7", 20_000),
+            ("shared-guide", 2_000),
+        ):
+            with self.subTest(page_id=page_id):
+                content = "😀" * maximum
+                self.assertEqual(memory._content(content, page_id), content)
+                with self.assertRaises(WorkspaceError) as oversized:
+                    memory._content(content + "😀", page_id)
+                self.assertEqual(oversized.exception.status, HTTPStatus.BAD_REQUEST)
+                self.assertIn(str(maximum), str(oversized.exception))
+
+    def test_large_self_memory_does_not_block_embedding_other_pages(self) -> None:
+        pending = [
+            ("thread-7", 1, "Self memory", "界" * 20_000),
+            ("shared-guide", 2, "Shared memory", "Keep this page indexed too."),
+        ]
+        vectors = [[0.0] * memory.embedding_client.MODEL_DIMENSIONS] * len(pending)
+
+        def embed(texts: list[str], *, kind: str) -> list[list[float]]:
+            self.assertEqual(kind, "passage")
+            for text in texts:
+                self.assertLessEqual(len(text.encode("utf-8")), memory.embedding_client.MAX_TEXT_BYTES)
+            self.assertTrue(texts[0].startswith("thread-7\nSelf memory\n"))
+            self.assertTrue(texts[0].endswith("界"))
+            self.assertEqual(texts[1], "shared-guide\nShared memory\nKeep this page indexed too.")
+            return vectors
+
+        with (
+            patch.object(memory, "_unembedded_memory_pages", side_effect=[pending, KeyboardInterrupt]),
+            patch.object(memory.embedding_client, "embed_texts", side_effect=embed),
+            patch.object(memory, "_store_memory_page_embeddings") as store,
+            patch.object(memory.time, "sleep"),
+        ):
+            with self.assertRaises(KeyboardInterrupt):
+                memory.embedding_index_loop()
+        store.assert_called_once_with(
+            memory.embedding_client.MODEL_NAME,
+            [("thread-7", 1, vectors[0]), ("shared-guide", 2, vectors[1])],
+        )
+        self.assertEqual(len(pending[0][3]), 20_000)
 
 
 class WorkspaceGlobalDatabaseTests(unittest.TestCase):
@@ -1196,6 +1243,52 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 "large", {"before": [str(2**63)], "limit": ["1"]}
             )
         self.assertEqual(oversized_cursor.exception.status, HTTPStatus.BAD_REQUEST)
+
+    def test_large_self_memory_round_trips_and_restores_for_each_identity(self) -> None:
+        content = "😀" * 20_000
+        for page_id in ("thread-7", "app-7", "schedule-7"):
+            with self.subTest(page_id=page_id):
+                created = agent_api.dispatch_call(
+                    "PUT", "/agent/self/memory",
+                    {"description": "Self memory at the limit", "content": content, "expected_revision": 0},
+                    peer_thread_id=page_id,
+                )["body"]["page"]
+                self.assertEqual(created["content"], content)
+                self.assertEqual(
+                    agent_api.dispatch_call("GET", "/agent/self/memory", None, peer_thread_id=page_id)["body"]["page"]["content"],
+                    content,
+                )
+                with self.assertRaises(WorkspaceError) as oversized:
+                    agent_api.dispatch_call(
+                        "PUT", "/agent/self/memory",
+                        {"description": "Too large", "content": content + "界", "expected_revision": 1},
+                        peer_thread_id=page_id,
+                    )
+                self.assertEqual(oversized.exception.status, HTTPStatus.BAD_REQUEST)
+                updated = memory.route_browser(
+                    "PUT", f"/memory/pages/{page_id}",
+                    {"description": "Shorter notes", "content": "Short notes", "expected_revision": 1}, {},
+                )["page"]
+                restored = memory.restore_revision(page_id, 1, {"expected_revision": updated["revision"]})
+                self.assertEqual(restored["content"], content)
+                self.assertEqual(restored["revision"], 3)
+
+    def test_database_keeps_separate_self_and_shared_content_limits(self) -> None:
+        for page_id, maximum in (("thread-7", 20_000), ("shared-guide", 2_000)):
+            memory.save_page(
+                page_id,
+                {"description": "At the content limit", "content": "界" * maximum, "expected_revision": 0},
+                actor="agent",
+            )
+            for table in ("memory_pages", "memory_page_revisions"):
+                with self.subTest(page_id=page_id, table=table):
+                    with self.assertRaises(pgclient.Error) as oversized:
+                        with db.transaction() as cur:
+                            cur.execute(
+                                f"UPDATE {table} SET content = %s WHERE page_id = %s",
+                                ("界" * (maximum + 1), page_id),
+                            )
+                    self.assertEqual(oversized.exception.sqlstate, "23514")
 
     def test_individual_memory_is_hidden_from_swarm_agent_routes(self) -> None:
         memory.save_page(

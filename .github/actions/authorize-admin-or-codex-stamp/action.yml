@@ -1,0 +1,23 @@
+name: authorize-admin-or-codex-stamp
+description: Accept a Codex stamp on the requested PR head, otherwise require repository admin access.
+inputs:
+  expected-sha:
+    description: Exact resolved smoke SHA.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Check current-head Codex stamp
+      id: stamp
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        EXPECTED_SHA: ${{ inputs.expected-sha }}
+        POLICY_PATH: ${{ github.action_path }}/authorize.py
+      run: python3 "$POLICY_PATH"
+
+    # Callers check out trusted main at the workspace root before using this
+    # action, so the local admin action also comes from trusted main.
+    - name: Require repo admin when no current Codex stamp
+      if: ${{ steps.stamp.outputs.authorized != 'true' }}
+      uses: ./.github/actions/authorize-repo-admin

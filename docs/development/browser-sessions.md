@@ -198,7 +198,8 @@ The popup streams images from hosted Chromium. Clicks and desktop typing go to
 the selected remote field. A compact phone text bar supplies native keyboard
 input. Login challenges remain operator-controlled. There is no editable
 address bar; verification providers may be opened by X in the same remote view.
-Downloads, file uploads, service workers, and WebSockets are unsupported.
+Downloads, file uploads, and service workers are unsupported. Secure WebSockets
+use Chromium's native implementation through the same HTTPS relay as page traffic.
 Close also dismisses a popup whose Open failed or whose control expired, without
 cancelling another window's browser. Save is enabled only while the popup has
 control; Close during startup waits for Open and releases any acquired control.
@@ -398,7 +399,19 @@ saved authentication state. No random fingerprint,
 canvas/GPU/font spoofing, forged Windows/macOS UA, or CAPTCHA solver is added.
 Chromium remains automated and detectable; a custom hosted browser's claims
 cannot be reproduced by promising that a handful of flags makes a human.
-Service workers, WebSockets and nonproxied WebRTC UDP remain restricted.
+Service workers and nonproxied WebRTC UDP remain restricted. WebSocket routing
+is not installed: Playwright replaces the page's native WebSocket constructor
+when routing is enabled, and operator comparisons isolated that interception as
+the trigger for X's login rejection. This does not establish whether X detects
+the replacement or requires a connection it blocked. Live hosted X acceptance
+still needs verification after deployment.
+
+Secure WebSockets (`wss:` on port 443) use the existing CONNECT relay and selected
+Direct/Decodo route. The relay accepts only CONNECT to port 443; it does not
+support plaintext WebSocket upgrades. Forced proxying includes loopback, and
+the Browser UID firewall still denies private, loopback and metadata egress
+outside its private relay/control exceptions. WebSocket payloads remain opaque
+inside website TLS, just like HTTPS payloads; the relay does not inspect them.
 
 Settings are operator-only and serialized with Browser actions. Finish the
 login popup before saving/testing. Changing settings closes existing tunnels;

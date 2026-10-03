@@ -7,7 +7,6 @@ import { $, esc, setHtml } from "./helpers.js";
 export const STARTER_PROMPTS = {
   chat: "Give me a quick tour of this Kern host and suggest three useful things we can do together.",
   app: "Create a personal dashboard app that tracks my weekly priorities, with status, due date, and a simple progress summary.",
-  schedule: "Create a daily 09:00 UTC schedule that harvests durable facts from my past day threads into Memory and reorganizes existing pages so they stay accurate and concise.",
 };
 
 let workspaceStatus = null;
@@ -72,11 +71,10 @@ export function renderGettingStarted() {
     {
       key: "schedule",
       number: 4,
-      title: "Ask your agent to create a schedule",
-      description: "Automate recurring work with an interval or daily schedule.",
-      example: STARTER_PROMPTS.schedule,
+      title: "Create a standing agent",
+      description: "Give an agent an ongoing responsibility. Add triggers now or ask it to set its own later.",
       complete: workspaceStatus.schedule_created === true,
-      actions: promptAction("schedule", "Ask agent"),
+      actions: `<button class="ghost sm" data-action="open-workspace-global" data-resource="scheduled-agents">Create an agent</button>`,
     },
   ];
   const completed = steps.filter(step => step.complete).length;

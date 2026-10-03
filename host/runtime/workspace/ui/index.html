@@ -39,7 +39,7 @@
         <div class="form-grid">
           <label><span>Page ID</span><input id="memory-page-id" maxlength="64" pattern="[a-z0-9][a-z0-9-]*" required><small id="memory-page-id-help"></small></label>
           <label class="wide"><span>When to use this page</span><input id="memory-description" maxlength="100" required></label>
-          <label class="wide"><span>Content</span><textarea id="memory-content" maxlength="2000" rows="12"></textarea></label>
+          <label class="wide"><span>Content</span><textarea id="memory-content" maxlength="4000" rows="12"></textarea></label>
         </div>
         <div class="resource-meta" id="memory-meta"></div>
         <div id="memory-link-graph" class="link-grid">
@@ -73,10 +73,10 @@
         </section>
         <div class="resource-meta" id="schedule-meta"></div>
         <div class="form-actions">
-          <button id="schedule-delete" class="danger ghost" type="button">Delete</button>
+          <button id="schedule-delete" class="danger ghost" type="button">Archive</button>
           <span class="spacer"></span>
           <button id="schedule-cancel" class="ghost" type="button">Cancel</button>
-          <button id="schedule-save" class="soft-primary" type="submit">Save schedule</button>
+          <button id="schedule-save" class="soft-primary" type="submit">Save agent</button>
         </div>
         <div class="schedule-columns">
           <section class="resource-history"><h2>Definition history</h2><div id="schedule-history"></div></section>

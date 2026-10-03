@@ -397,7 +397,7 @@ class AdminUiStaticTests(unittest.TestCase):
             "async function saveSchedule(event)", 1
         )[1].split("\n  async function", 1)[0]
         self.assertIn(
-            "Schedule saved, but Chat could not be opened", save_schedule
+            "Agent saved, but Chat could not be opened", save_schedule
         )
         self.assertLess(
             save_schedule.index("state.selected = response.schedule;"),
@@ -414,11 +414,11 @@ class AdminUiStaticTests(unittest.TestCase):
             "async function deleteSchedule()", 1
         )[1].split("\n  function", 1)[0]
         self.assertIn(
-            "Schedule moved to Deleted, but navigation could not refresh",
+            "Agent archived, but navigation could not refresh",
             delete_schedule,
         )
         self.assertLess(
-            delete_schedule.index('status("Schedule moved to Deleted", "success");'),
+            delete_schedule.index('status("Agent archived", "success");'),
             delete_schedule.index("await window.KernHost.refreshNavigation();"),
         )
         self.assertEqual(
@@ -1038,8 +1038,8 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('data-guide="bedrock"', checklist)
         self.assertIn('data-action="getting-started-prompt"', checklist)
         self.assertIn("Ask your agent to create an app", checklist)
-        self.assertIn("Ask your agent to create a schedule", checklist)
-        self.assertIn("Create a daily 09:00 UTC schedule", checklist)
+        self.assertIn("Create a standing agent", checklist)
+        self.assertIn("ask it to set its own later", checklist)
         self.assertNotIn("Create a weekday", checklist)
         self.assertIn("refreshGettingStarted()", app)
         self.assertIn("window.KernChat.newThread(prompt)", app)
@@ -1281,6 +1281,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 },
                 None,
                 None,
+                operator_sent_message=False,
             )
 
         page.assert_called_once_with("thread-1", 2, 5, before=None)
@@ -1305,6 +1306,7 @@ class AdminUiStaticTests(unittest.TestCase):
                     {"before": ["42"], "limit": ["5"]},
                     None,
                     None,
+                    operator_sent_message=False,
                 ),
                 {"events": []},
             )
@@ -1317,6 +1319,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 {"since": ["2"], "before": ["42"]},
                 None,
                 None,
+                operator_sent_message=False,
             )
         self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
 
@@ -1340,6 +1343,7 @@ class AdminUiStaticTests(unittest.TestCase):
                     },
                     None,
                     None,
+                    operator_sent_message=False,
                 ),
                 {"events": []},
             )
@@ -1363,6 +1367,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 {"event_type": ["turn.started"]},
                 None,
                 None,
+                operator_sent_message=False,
             )
         self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
 
@@ -1393,6 +1398,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 {"limit": ["1"], "message_bytes": [str(message_bytes)]},
                 None,
                 None,
+                operator_sent_message=False,
             )
 
         activity = response["events"][0]["payload"]["activity"]
@@ -1433,6 +1439,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 {"limit": ["6"], "message_bytes": [str(message_bytes)]},
                 None,
                 None,
+                operator_sent_message=False,
             )
 
         self.assertEqual(len(response["events"]), 6)
@@ -1462,6 +1469,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 {"limit": ["8"], "message_bytes": [str(message_bytes)]},
                 None,
                 None,
+                operator_sent_message=False,
             )
 
         self.assertEqual(len(response["events"]), 8)
@@ -1492,6 +1500,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 {"limit": ["8"], "message_bytes": [str(message_bytes)]},
                 None,
                 None,
+                operator_sent_message=False,
             )
 
         self.assertTrue(all(
@@ -2826,6 +2835,7 @@ class AdminUiStaticTests(unittest.TestCase):
                     self.assertEqual(response, {"status": "accepted"})
                     thread_route.assert_called_once_with(
                         "POST", path, {}, body, None,
+                        operator_sent_message=isinstance(principal, admin_api.OperatorPrincipal),
                     )
 
     def test_every_thread_route_rejects_an_unprefixed_id(self) -> None:
@@ -2839,7 +2849,7 @@ class AdminUiStaticTests(unittest.TestCase):
             with self.subTest(method=method, path=path), self.assertRaises(
                 admin_api.ApiError
             ) as rejected:
-                admin_api.thread_route(method, path, {}, None, None)
+                admin_api.thread_route(method, path, {}, None, None, operator_sent_message=False)
             self.assertEqual(rejected.exception.status, HTTPStatus.NOT_FOUND)
 
     def test_http_service_cannot_mint_auth_cookies_or_sessions(self) -> None:

@@ -297,8 +297,8 @@ def route_agent(
 ) -> dict[str, Any]:
     """Route one explicit agent request.
 
-    App access is host-wide for agents: the immutable app id in the route is
-    the target. Archived apps remain readable but reject every mutation.
+    App reads are host-wide. The agent API authenticates ownership before
+    routing mutations; the immutable app id is the target. Archived apps remain readable but reject every mutation.
     Revert remains absent because restoring operator-visible state is a human
     control.
     """
@@ -852,7 +852,7 @@ def create_message(body: Any, *, app_id: str) -> dict[str, Any]:
         "content",
         MAX_CHAT_MESSAGE_BYTES,
     )
-    host_request: dict[str, Any] = {"message": content}
+    host_request: dict[str, Any] = {"message": content, "operator_sent_message": True}
     config_fields = ("agent_runtime", "model", "effort")
     supplied = [field for field in config_fields if field in request]
     if supplied:

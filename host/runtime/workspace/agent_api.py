@@ -2,8 +2,8 @@
 
 The MCP shim sends one bounded JSON call over this Unix socket. Caller identity
 proves only that the request came from ``kern-agent``. The current thread is
-derived from its root-created cgroup for ``/agent/identity`` responses and
-first-class self-memory selection; it does not authorize or select a Web App.
+derived from its root-created cgroup for identity, self-memory, and ownership
+of App and standing-agent mutations. Operator routes remain separate.
 """
 
 from __future__ import annotations
@@ -63,6 +63,32 @@ def agent_peer_uids() -> frozenset[int]:
     return peer_uids(AGENT_PEER_USER)
 
 
+def _require_resource_owner(method: str, path: str, caller: str | None) -> None:
+    """Enforce ownership only on the agent surface; operator routes stay separate."""
+    if method == "GET":
+        return
+    schedule = re.fullmatch(r"/agent/schedules/([1-9][0-9]*)", path)
+    if schedule and caller != f"schedule-{schedule.group(1)}":
+        raise WorkspaceError(
+            HTTPStatus.FORBIDDEN,
+            f"Only the owner, schedule-{schedule.group(1)}, can change this standing agent and its triggers. "
+            f'Use send_agent_message with thread_id="schedule-{schedule.group(1)}" to ask the owner to make the change.',
+        )
+    app = re.fullmatch(r"/agent/apps/(app-[1-9][0-9]*)(/.*)", path)
+    if app:
+        resource = app.group(2)
+        if method == "POST" and (resource == "/state/data/read" or re.fullmatch(
+            r"/collections/[^/]+/query", resource
+        )):
+            return
+        if caller != app.group(1):
+            raise WorkspaceError(
+                HTTPStatus.FORBIDDEN,
+                f"Only the owner, {app.group(1)}, can modify this App. "
+                f'Use send_agent_message with thread_id="{app.group(1)}" to ask the owner to make the change.',
+            )
+
+
 def dispatch_call(
     method: Any,
     path: Any,
@@ -88,6 +114,7 @@ def dispatch_call(
 
     parsed = urlparse(path)
     query = parse_qs(parsed.query, keep_blank_values=True)
+    _require_resource_owner(method, parsed.path, peer_thread_id)
     response: dict[str, Any]
     if parsed.path == "/agent/identity":
         if method != "GET" or body is not None or query:

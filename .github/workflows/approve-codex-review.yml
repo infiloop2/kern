@@ -1,0 +1,32 @@
+name: approve-codex-review
+
+on:
+  issue_comment:
+    types: [created, edited]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: write
+
+concurrency:
+  group: codex-approval-${{ github.event.issue.number }}
+  cancel-in-progress: false
+
+jobs:
+  approve:
+    name: Stamp clean Codex review
+    if: >-
+      github.repository == 'infiversehq/kern' &&
+      github.event.issue.pull_request &&
+      github.event.comment.user.login == 'chatgpt-codex-connector[bot]' &&
+      startsWith(github.event.comment.body, 'Codex Review: Didn''t find any major issues.')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout trusted review policy
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Approve reviewed revision
+        uses: ./.github/actions/stamp-codex-review

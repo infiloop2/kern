@@ -7,11 +7,11 @@ share `kern-workspace.service`.
 
 ## Operator UI
 
-The admin sidebar has release-owned **Chat**, **Apps**, **Scheduled agents**,
+The admin sidebar has release-owned **Chat**, **Apps**, **Standing agents**,
 and **Memory** sections. Chat rows represent conversations; App rows represent
-generated Web App workspaces; scheduled-agent rows open their persistent
-transcripts in the conversation renderer. The Schedules management view creates
-and edits model and script schedules. Archive applies to Chat and Apps;
+generated Web App workspaces; standing-agent rows open their persistent
+transcripts in the conversation renderer. The Standing agents management view creates
+and edits persistent model agents with optional triggers, and script jobs. Archive applies to Chat and Apps;
 deleting a schedule hides its transcript until the schedule is restored.
 
 Apps and scheduled agents have a stable sidebar order independent of activity.
@@ -37,6 +37,11 @@ Memory is host-global, not attached to an App. It is a paginated set of small,
 revisioned pages with descriptions, lexical search, soft-delete, history, and
 operator restore. Swarm pages also form a `[[page-id]]` link graph; individual
 pages do not participate in that graph. Schedules are also host-global.
+Individual self-memory pages allow 20,000 content characters; swarm pages
+allow 2,000. Descriptions remain limited to 100 characters. The API, editor,
+and database enforce these limits, including retained revisions. Semantic
+indexing uses a UTF-8-safe prefix within the embedding service's 16 KiB input
+budget; storage, reads, lexical search, and self-memory recall keep the full text.
 Each definition stores shared agent runtime, model and effort settings, plus a
 list of UTC calendar triggers, and owns one stable `schedule-N` host thread. Every firing submits
 the automated-trigger prefix plus the due trigger prompt through the ordinary
@@ -47,7 +52,7 @@ separate run record, success status, or recent-failure API. Failures before the
 host accepts a message are logged operationally; accepted work uses the normal
 thread event path. Deleting a schedule stops future claims while retaining its
 conversation without moving it into Chat; the hidden transcript returns under
-Scheduled agents when restored. An already-claimed firing may still arrive
+Standing agents when restored. An already-claimed firing may still arrive
 once. Restoring it schedules the next occurrence from restoration time.
 
 Daily triggers contain 1–24 fixed UTC times and a prompt. Weekly triggers contain
@@ -67,7 +72,7 @@ while whether the file exists is decided by the launcher at run time, because
 the Workspace service cannot read the agent's private home. The time-bounded
 Bash provider executes it with a fixed fifteen-minute budget; combined output
 is an ordinary agent message and a non-zero exit, timeout, or launch failure is
-an ordinary thread error. Its Scheduled agents row opens the persistent Chat
+an ordinary thread error. Its Standing agents row opens the persistent Chat
 as a read-only transcript, without composer or self-memory controls. Schedules
 are the only surface that offers this runtime, and the host enforces that rather than relying on it: new script
 sessions are admitted only on stable numeric `schedule-N` identities, so a
@@ -119,8 +124,8 @@ The MCP shim always lists `workspace_api`, `search_conversation_history`,
 server authenticates the `kern-agent` uid with `SO_PEERCRED` before allocating
 a bounded handler, accepts a bounded `POST /call` envelope, and routes only
 validated `/agent/...` requests. `GET /agent/identity` derives the current host
-thread from the peer process's root-created cgroup; it is informational and
-does not select or authorize an App.
+thread from the peer process's root-created cgroup. That identity also enforces
+App and standing-agent ownership for agent-facing mutations.
 
 The two typed history tools search user/assistant messages across retained
 Chat threads and read bounded chronological pages with optional normalized
@@ -128,7 +133,7 @@ activity. Natural-language search fuses the full-text index with vectors from
 the local socket-activated encoder; timestamp-only search does not invoke it.
 An agent selects an existing Web App explicitly through routes under
 `/agent/apps/{app_id}/...`. Any agent thread may read any existing app and
-write any active app. Archived apps remain readable but reject every agent
+write only its own active app. Other agents request changes through messaging. Archived apps remain readable but reject every agent
 mutation. Agents can create a Chat with `spawn_agent` and send a peer-labeled message
 to a known eligible thread with `send_agent_message`. `GET /agent/spawned-agents`
 discovers active spawned Chats by name; only their authenticated
@@ -137,8 +142,8 @@ parent can use `archive_spawned_agent` to archive them. See
 Agents can also list, search, fetch, create, edit, and delete swarm memory
 pages. Individual `app-*`, `thread-*`, and `schedule-*` pages are absent from
 those routes; App and Chat threads reach only their own page through
-self-memory, as do persistent model schedule threads. Agents perform ordinary
-CRUD on global schedules. Revision history and restore stay operator-only.
+self-memory, as do persistent model schedule threads. Agents may discover/read standing agents and update/delete only their own
+definition and triggers. Creation belongs to the operator. Revision history and restore stay operator-only.
 The host-wide conversation-history tools remain read-only.
 
 ## Service and database boundary

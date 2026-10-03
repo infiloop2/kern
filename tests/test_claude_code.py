@@ -765,12 +765,12 @@ time.sleep(120)
             ]),
             patch.object(claude_code.host_errors, "emit_record") as emit,
         ):
-            with self.assertRaises(claude_code.ClaudeCodeError):
+            with self.assertRaises(claude_code.ClaudeTimeout):
                 claude_code.read_claude_usage()
         self.assertEqual(run.call_args.kwargs["timeout"], 60)
         emit.assert_called_once()
         record = emit.call_args.args[0]
-        self.assertEqual(record["severity"], "error")
+        self.assertEqual(record["severity"], "warning")
         self.assertEqual(record["component"], "claude_code.usage_probe")
         self.assertEqual(record["summary"], "Claude usage check timed out")
         self.assertEqual(record["context"],
@@ -787,9 +787,9 @@ time.sleep(120)
         with (
             patch.object(claude_code.subprocess, "run", side_effect=subprocess.TimeoutExpired(["claude"], 60)),
             patch.object(claude_code.host_metrics, "resource_snapshot", return_value={}),
-            patch.object(claude_code.host_errors, "report_unexpected") as error,
+            patch.object(claude_code.host_errors, "report_warning") as error,
         ):
-            with self.assertRaises(claude_code.ClaudeCodeError):
+            with self.assertRaises(claude_code.ClaudeTimeout):
                 claude_code.read_claude_usage()
         self.assertEqual(set(error.call_args.kwargs["context"]), {"timeout_seconds", "elapsed_seconds"})
 

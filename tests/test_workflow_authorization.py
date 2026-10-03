@@ -76,7 +76,7 @@ print(os.environ['FAKE_STATUS'], end='')
                 checkout = prefix.split('      - name: Checkout trusted authorization actions', 1)[1]
                 self.assertNotIn('if:', checkout)
                 gate, later = remaining.split('\n      - name:', 1)
-                self.assertIn('authorize-repo-admin', gate)
+                self.assertIn('authorize-admin-or-codex-stamp' if name != 'kern-stage' else 'authorize-repo-admin', gate)
                 self.assertNotIn('continue-on-error', gate)
                 self.assertTrue(later)
                 if name in ('kern-smoke', 'test-lima-host'):

@@ -71,4 +71,6 @@ def _enqueue(job: Callable[[], None]) -> None:
 def enqueue_task(
     thread_id: str, run_number: int, task_context: str,
 ) -> None:
-    _enqueue(lambda: generate_task(thread_id, run_number, task_context))
+    if thread_id.startswith("thread-"):
+        _enqueue(lambda: generate_task(thread_id, run_number, task_context)
+                 if state.is_on_demand_agent(thread_id) else None)

@@ -930,6 +930,11 @@ def _conversation_event(event: dict[str, Any]) -> dict[str, Any]:
             bounded_details = _clip_json_encoded_text(details, 14000)
             context["memory_recall_details"] = bounded_details
             context["truncated"] = context["truncated"] or details != bounded_details
+        history = payload.get("historical_context")
+        if isinstance(history, str):
+            bounded_history = _clip_json_encoded_text(history, 24 * 1024)
+            context["historical_context"] = bounded_history
+            context["truncated"] = context["truncated"] or history != bounded_history
         return context
     activity = payload.get("activity")
     activity = activity if isinstance(activity, dict) else {}

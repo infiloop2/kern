@@ -212,7 +212,7 @@ SEND_AGENT_MESSAGE_TOOL: JSONObject = {
     "name": "send_agent_message",
     "description": (
         "Send a message to another existing Kern App, model Schedule, or Chat thread. "
-        "Discover Apps, Schedules, and active spawned Chats with workspace_api. "
+        "Discover App agents, Standing agents, and active spawned Chats with workspace_api. "
         "GET /agent/spawned-agents lists spawned Chats with names, thread ids, and parent ids. "
         "Incoming messages identify their source thread for replies using this same tool. "
         "Kern supplies your sender identity and starts an idle recipient or steers a running "

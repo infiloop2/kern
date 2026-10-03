@@ -651,10 +651,10 @@ def read_claude_usage(command: list[str] | None = None) -> dict[str, Any]:
         for key, value in resources_before.items():
             if key.endswith("_cpu_usage_usec"):
                 context[f"{key}_before"] = value
-        host_errors.report_unexpected(
+        host_errors.report_warning(
             "claude_code.usage_probe", TimeoutError("Claude usage check timed out"), context=context,
         )
-        raise ClaudeCodeError(str(exc)) from exc
+        raise ClaudeTimeout("Claude usage check timed out") from exc
     except OSError as exc:
         raise ClaudeCodeError(str(exc)) from exc
     if proc.returncode != 0:
