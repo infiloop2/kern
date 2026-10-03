@@ -118,6 +118,7 @@ class ActionSpec:
     returns_asset: bool = False             # the whole result is one streamed file
     input_protections: dict[str, InputProtection] = field(default_factory=dict)
     cost_description: str = ""
+    limit_runs_per_day: int | None = None
 
 @dataclass(frozen=True)
 class ConfigRequirement:
@@ -213,6 +214,16 @@ class ToolManifest:
   the shape of what it gets back before it makes the call.
 - **`ActionSpec.approval`** states the control structurally: `direct` executes
   immediately; `operator` queues the exact payload and waits for an approval.
+- **`ActionSpec.limit_runs_per_day`** optionally caps execution attempts with a
+  positive integer. Omission means unlimited. The host shares the cap across
+  all threads and connected accounts for that tool/action, using UTC calendar
+  days and a durable atomic counter. Direct calls consume a run immediately
+  before execution; approval requests do not consume runs, but approved
+  execution does. Failed or interrupted executions still count. Exhausted
+  actions fail before invoking tool code, including before queuing a new
+  approval. Pending approvals recheck the cap when executed and fail with a
+  terminal result if it is exhausted. Counters survive restarts and upgrades;
+  the next UTC day resets them. Discovery exposes the limit when declared.
 - **`ActionSpec.returns_asset`** marks the action whose entire result is a
   `StreamingAsset` rather than JSON. With `approval`, it makes each action's
   result kind a declaration rather than something a caller infers from prose.

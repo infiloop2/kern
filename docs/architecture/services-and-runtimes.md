@@ -14,7 +14,8 @@
 | `kern-embedding.socket`, `kern-embedding.service` | `kern-embedding` | Socket-activated local text embeddings; no network or database access, with a five-minute idle exit. |
 | `kern-transcription.socket`, `kern-transcription.service` | `kern-transcription` | Resident local speech recognition on an admin-only socket; starts at boot, no network or database access. |
 | `kern_agent.slice` | — | Top-level cgroup slice holding every agent runtime scope (underscore, not dash: dashes in slice names encode nesting, and the weight must compare against `system.slice` directly). `CPUWeight=50` guarantees the host services CPU time under contention while leaving idle cores to the agent; aggregate `MemoryHigh=75%`/`MemoryMax=80%`/`MemorySwapMax=5G` protect the host, while lower per-scope limits contain one busy thread before it stalls its peers; `TasksMax=4096` stops a slice-wide fork bomb from exhausting kernel PIDs. |
-| `kern_workspace.slice` | — | Cgroup slice for the fixed Workspace service. `CPUWeight=50` keeps host control services responsive under contention. |
+| `kern_workspace.slice` | — | Cgroup slice for Workspace, browser, and inference workloads. `CPUWeight=50`, `IOWeight=50`, and `MemoryLow=4%`; the memory protection is assigned to the Workspace service. |
+| `kern-io-control.service` | root | Boot-time oneshot enabling the kernel I/O-cost controller on the root, admin, and agent disks so I/O weights are enforced with the default NVMe scheduler. |
 
 ## Process Inventory
 
@@ -72,10 +73,10 @@ Agent runtimes are spawned through fixed sudo helpers that demote them to
 `kern-agent`, each inside a transient systemd scope under
 `kern_agent.slice`. Without the scope they would inherit the admin API's
 service cgroup and compete with the host services for resources. The slice's
-`CPUWeight=50` versus `system.slice`'s default 100 keeps the admin API, proxy,
-and Postgres responsive while an agent build or test run saturates the cores,
-and costs the agent nothing when the host services are idle (weights, unlike
-quotas, are work-conserving). Every transient scope has `MemoryHigh=35%`,
+`CPUWeight=50` versus `system.slice`'s default 100 favors the admin API, proxy,
+and Postgres while an agent build or test run saturates the cores. Workspace
+also competes with weight 50. Weights let agents use otherwise idle capacity;
+they do not guarantee request latency. Every transient scope has `MemoryHigh=35%`,
 `MemoryMax=50%`, `MemorySwapMax=3G`, and `TasksMax=1024`; a runaway turn is
 therefore reclaimed or killed before it consumes the whole shared slice and
 stalls another Claude or Codex startup. The parent slice's `MemoryHigh=75%`
@@ -94,6 +95,36 @@ scope is `BindsTo=kern-admin-api.service`: leaving the admin API's
 cgroup must not decouple lifecycles, so when the admin service stops,
 restarts, or crashes, systemd stops the scopes too and no orphaned runtime
 keeps running after its turn was recovered as failed.
+
+The admin API and Postgres each have `MemoryLow=8%`, and the optional tunnel
+has `MemoryLow=4%`, backed by `MemoryLow=20%` on their parent `system.slice`.
+Workspace has a separate 4% budget on both its slice and service. These are
+best-effort protections for memory actually in use, not preallocated RAM or
+hard `MemoryMin` reservations. Unused budgets remain available to agents.
+They reduce reclaim of the UI's working set without forcing an OOM merely
+to retain protected pages. Swap remains 6 GiB, with the existing agent caps.
+
+Disk I/O weights are 100 for `system.slice`, 50 for Workspace's slice, and 25
+for agents. Within their respective slices, admin, Postgres, tunnel and the
+Workspace service have weight 200. The boot-time `kern-io-control` oneshot
+enables `io.cost.qos` and `io.cost.model` in automatic mode on the disks backing
+`/`, `/mnt/kern-admin`, and `/mnt/kern-agent`; the root disk includes swap.
+It resolves partitions to their parent disk and discovers device numbers on
+each boot. No disk scheduler is replaced and no fixed IOPS/bandwidth ceiling
+is imposed. Weights prioritize contention on each disk; they do not reserve
+EC2-wide EBS bandwidth or guarantee latency during severe memory pressure.
+The managed AWS and Lima guests require cgroup v2 with
+`CONFIG_BLK_CGROUP_IOCOST`; unsupported kernels or stacked block devices fail
+setup explicitly. This is a one-time boot step, not a monitoring daemon.
+On later boots a failed I/O setup service remains visible in systemd but does
+not block the database or admin API from starting: performance protection
+must not itself prevent recovery access. Bootstrap explicitly applies the
+resource properties to already-running cgroups as well as saving unit files,
+so fresh deploys and retained-root reconfiguration need no extra reboot.
+Deployment verification checks effective cgroup memory protection, weights,
+and enabled controllers. Fresh-host smoke repeats those checks, including
+after the AWS reboot journey.
+
 Codex runs as stdio app-server child processes; status
 checks and login flows use short-lived servers, and each turn runs on a
 fresh app-server that resumes its provider thread by id. The host supplies the

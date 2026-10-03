@@ -2825,7 +2825,7 @@ function syncAgentSettings(task) {
   const settingsKey = selectedAgentSettings
     ? `${selectedAgentSettings.agent_runtime}\0${selectedAgentSettings.model}\0${selectedAgentSettings.effort}`
     : "default";
-  const key = `${sessionKey}\0${settingsKey}`;
+  const key = `${sessionKey}\0${settingsKey}\0${snapshot.status}`;
   if (key === establishedSessionKey) return;
   establishedSession = next;
   establishedSessionKey = key;

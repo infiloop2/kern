@@ -512,6 +512,7 @@ MANIFEST = ToolManifest(
             data_policy=(
                 "Queues operator approval before anything is sent. After approval, the exact sender, recipients, "
                 "subject, chosen format, and rendered body go to Zoho and are delivered to the named recipients."
+                " Limited to 50 send attempts per UTC day across all connected Zoho accounts on this host."
             ),
             input_schema=_schema(
                 {
@@ -533,6 +534,7 @@ MANIFEST = ToolManifest(
                 ["to", "subject", "blocks"],
             ),
             approval="operator",
+            limit_runs_per_day=50,
         ),
     ), {
         "search_messages": {

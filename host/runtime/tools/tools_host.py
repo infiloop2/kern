@@ -629,6 +629,19 @@ def _normalize_tool_input(value: Any) -> dict[str, Any]:
     return value
 
 
+def _check_run_limit(tool_id: str, spec: ActionSpec, *, consume: bool) -> None:
+    limit = spec.limit_runs_per_day
+    if limit is None:
+        return
+    allowed = (state.consume_tool_action_run(tool_id, spec.id, limit) if consume
+               else not state.tool_action_run_limit_reached(tool_id, spec.id, limit))
+    if not allowed:
+        raise ToolCallError(
+            f"Daily run limit reached for {tool_id}.{spec.id} ({limit} executions per UTC day). "
+            "Try again after 00:00 UTC."
+        )
+
+
 def execute_action(
     tool_id: str,
     action: str,
@@ -658,6 +671,7 @@ def execute_action(
     except ValueError as exc:
         raise ToolCallError(str(exc)) from exc
     audit_arguments = cast(JSONObject, json.loads(serialized_input))
+    _check_run_limit(tool_id, spec, consume=spec.approval == "direct")
     try:
         result = tool.execute(
             action,
@@ -750,6 +764,10 @@ def _execute_approved(
             )
         api = host_api_for(tool, connection, origin_thread_id=record.get("origin_thread_id"), asset_store=asset_store, action_id=action, approval_id=approval_id)
         with api.assets._approved_execution(public_hostname):
+            spec = tool.manifest.action(action)
+            if spec is None:
+                raise ToolCallError(f"Tool {tool_id} has no action {action}.")
+            _check_run_limit(tool_id, spec, consume=True)
             result: Any = tool.execute_approved(_approval_record(record), api)
     except (
         ConnectionAccountChangedError,

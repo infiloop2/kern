@@ -2622,7 +2622,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 )
             self.assertEqual(error.exception.code, 400)
 
-    def test_follow_up_accepts_omitted_or_matching_configuration_and_locks_live_changes(
+    def test_follow_up_preserves_live_configuration_even_when_supplied_settings_differ(
         self,
     ) -> None:
         body = {
@@ -2635,7 +2635,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         seed_thread_session("thread-fixed-options")
         with patch.object(
             orchestrator, "launch_turn", side_effect=attach_recording_steer_server
-        ):
+        ) as launch:
             self.request("POST", path, body)
 
             _, repeated = self.request("POST", path, {**body, "message": "matching repeat"})
@@ -2650,13 +2650,17 @@ class AdminApiIntegrationTests(unittest.TestCase):
             for fields in (
                 {"model": "gpt-6.1-sol", "effort": "high"},
                 {"model": "gpt-6-astra", "effort": "max"},
+                {"agent_runtime": "claude_code", "model": "claude-opus-5-5", "effort": "high"},
             ):
-                with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
-                    self.request("POST", path, {**body, "message": "conflict", **fields})
-                self.assertEqual(error.exception.code, 409)
-                self.assertIn(
-                    "can change only while the thread is idle", error.exception.read().decode()
-                )
+                with self.subTest(fields=fields):
+                    status, steered = self.request("POST", path, {**body, "message": "continue", **fields})
+                    self.assertEqual(status, 200)
+                    self.assertEqual(
+                        {key: steered["thread"][key] for key in ("agent_runtime", "model", "effort")},
+                        {key: body[key] for key in ("agent_runtime", "model", "effort")},
+                    )
+            self.assertEqual(launch.call_count, 1)
+            self.assertEqual(launch.call_args.args[0].server.messages, ["matching repeat", "continue", "continue", "continue"])
             with self.assertRaises(urllib.error.HTTPError) as partial_error:
                 self.request(
                     "POST", path, {"message": "partial conflict", "model": "gpt-6-astra"}
@@ -2671,6 +2675,69 @@ class AdminApiIntegrationTests(unittest.TestCase):
             (thread["agent_runtime"], thread["model"], thread["effort"]),
             (body["agent_runtime"], body["model"], body["effort"]),
         )
+
+    def test_saved_settings_apply_on_next_turn_through_existing_endpoints(self) -> None:
+        from host.runtime.workspace import agent_messages, schedules
+        from host.runtime.workspace.web_apps import backend as apps
+        old = {"agent_runtime": "claude_code", "model": "claude-opus-5-5", "effort": "high"}
+        new = {"agent_runtime": "codex", "model": "gpt-6.1-sol", "effort": "high"}
+        save_policy({"network_integrations": {"openai": {"enabled": True}, "claude": {"enabled": True}}}, "2026-06-08T00:00:00Z")
+        set_runtime_statuses(codex="active", claude_code="active")
+        with patch.object(apps, "active_agent_runtimes", return_value=["claude_code"]):
+            app_id = apps.create_web_app()["app_id"]
+        apps.set_app_agent_settings(app_id, old)
+        scheduled = schedules.create_schedule({"name": "Settings test", "triggers": [], **old}, actor="user")
+
+        def deliver(method, path, body):
+            self.assertEqual(method, "POST")
+            return admin_threads.send_thread_message(path.split("/")[3], body, None, False)
+
+        with patch.object(agent_messages, "call_admin_api", side_effect=deliver):
+            for thread_id in (app_id, scheduled["thread_id"]):
+                with self.subTest(thread_id=thread_id), patch.object(orchestrator, "launch_turn", side_effect=attach_recording_steer_server) as launch:
+                    agent_messages.deliver_message(thread_id, {"message": "First turn"})
+                    turn = launch.call_args.args[0]
+                    before = state.thread_session_config(thread_id)
+                    if thread_id.startswith("app-"):
+                        apps.route_agent("PUT", f"/agent/apps/{thread_id}/agent-settings", new)
+                    elif thread_id.startswith("schedule-"):
+                        schedules.route_agent("PUT", f"/agent/schedules/{scheduled['id']}", {
+                            "expected_revision": scheduled["revision"],
+                            "name": scheduled["name"], "triggers": scheduled["triggers"], **new,
+                        }, {})
+                    after = state.thread_session_config(thread_id)
+                    for key in ("agent_runtime", "model", "effort", "run_number", "provider_session_id"):
+                        self.assertEqual(after[key], before[key])
+                    agent_messages.deliver_message(thread_id, {"message": "Follow up"})
+                    self.assertEqual(launch.call_count, 1)
+                    self.assertEqual(turn.server.messages, ["Follow up"])
+                    orchestrator._finish_turn(turn, provider_session_id="old-session")
+                    orchestrator._close_turn(turn, None)
+                    agent_messages.deliver_message(thread_id, {"message": "Next turn"})
+                    self.assertEqual(launch.call_count, 2)
+                    config = state.thread_session_config(thread_id)
+                    self.assertEqual({key: config[key] for key in new}, new)
+                    self.assertIsNone(launch.call_args.args[2])
+                    self.assertIn("First turn", launch.call_args.args[1])
+                    self.assertIn("Follow up", launch.call_args.args[1])
+                    next_turn = launch.call_args.args[0]
+                    orchestrator._finish_turn(next_turn)
+                    orchestrator._close_turn(next_turn, None)
+
+                    if thread_id.startswith("app-"):
+                        # Explicit message settings must remain saved for later
+                        # messages that omit the tuple, too.
+                        with patch.object(apps, "call_admin_api", side_effect=deliver):
+                            apps.create_message({"content": "Switch back", **old}, app_id=thread_id)
+                            explicit_turn = launch.call_args.args[0]
+                            orchestrator._finish_turn(explicit_turn)
+                            orchestrator._close_turn(explicit_turn, None)
+                            apps.create_message({"content": "Keep these settings"}, app_id=thread_id)
+                        config = state.thread_session_config(thread_id)
+                        self.assertEqual({key: config[key] for key in old}, old)
+                        final_turn = launch.call_args.args[0]
+                        orchestrator._finish_turn(final_turn)
+                        orchestrator._close_turn(final_turn, None)
 
     def test_idle_configuration_change_rotates_provider_and_hands_off_history(self) -> None:
         save_policy(

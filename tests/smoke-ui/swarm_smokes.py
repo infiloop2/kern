@@ -40,6 +40,24 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(page.locator('.swarm-card')).to_have_count(101)
     page.unroute('**/v1/swarm/interactions')
     refresh()
+    # Recovered metrics rank on Arrange, not during a routine refresh.
+    page.locator('#swarm-arrange').click()
+    positions = page.locator('.swarm-card').evaluate_all(
+        'nodes => Object.fromEntries(nodes.map(e => [e.dataset.threadId, [parseFloat(e.style.left), parseFloat(e.style.top)]]))')
+    assert all(point[1] > positions['operator'][1] for key, point in positions.items() if key != 'operator')
+    assert positions['app-1'][1] < positions['app-2'][1] < positions['app-30'][1]
+    original_counts = page.request.get(url + 'v1/swarm/interactions', headers={'X-Kern-Csrf': '1'}).json()
+    changed_counts = {**original_counts, 'metrics': {**original_counts['metrics'],
+        'app-30': {'operator_messages': 10000, 'agent_peers': 100, 'total_tokens': 10000000, 'tokens_partial': False}}}
+    page.route('**/v1/swarm/interactions', lambda route: route.fulfill(json=changed_counts))
+    refresh()
+    assert positions == page.locator('.swarm-card').evaluate_all(
+        'nodes => Object.fromEntries(nodes.map(e => [e.dataset.threadId, [parseFloat(e.style.left), parseFloat(e.style.top)]]))')
+    page.locator('#swarm-arrange').click()
+    assert page.locator('[data-thread-id="app-30"]').evaluate('e => parseFloat(e.style.top)') < page.locator('[data-thread-id="app-1"]').evaluate('e => parseFloat(e.style.top)')
+    page.unroute('**/v1/swarm/interactions')
+    refresh()
+    page.locator('#swarm-arrange').click()
     # A capped dense graph still retains every node and exposes all returned links.
     agents = page.request.get(url + 'v1/swarm', headers={'X-Kern-Csrf': '1'}).json()['agents']
     ids = [agent['thread_id'] for agent in agents]
@@ -72,10 +90,22 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(first).not_to_contain_text('Prepare the next release')
     first.click()
     expect(page.locator('#swarm-detail')).to_contain_text('Keep the project moving')
+    expect(page.locator('#swarm-detail')).to_contain_text('Direct operator messages: 24')
+    expect(page.locator('#swarm-detail')).to_contain_text('Other agents interacted with: 2')
+    expect(page.locator('#swarm-detail')).to_contain_text('Tokens processed: 123,456')
     expect(page.locator('#swarm-detail')).to_contain_text('→ Billing desk · 18')
     expect(first).to_have_css('background-color', 'rgba(0, 0, 0, 0)')
     expect(first.locator('.swarm-avatar svg')).to_have_count(1)
     expect(first.locator('.critter-laptop')).to_have_count(1)
+    # Missing token telemetry is not displayed as a measured zero.
+    page.get_by_role('button', name='Close agent details', exact=True).click()
+    page.locator('[data-thread-id="thread-66"]').click()
+    expect(page.locator('#swarm-detail')).to_contain_text('Tokens processed: Unavailable')
+    page.get_by_role('button', name='Close agent details', exact=True).click()
+    page.locator('[data-thread-id="app-2"]').click()
+    expect(page.locator('#swarm-detail')).to_contain_text('Tokens processed: 500,000 (partial)')
+    page.get_by_role('button', name='Close agent details', exact=True).click()
+    first.click()
     # Directional counts can be inspected from the accessible detail list.
     page.locator('.swarm-connection').filter(has_text='→ Billing desk').click()
     expect(page.locator('#swarm-detail')).to_contain_text('18 accepted messages')

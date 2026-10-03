@@ -1110,18 +1110,13 @@ class BrowserRoutingTests(unittest.TestCase):
                 ("name", {"name": "x" * 101}, HTTPStatus.BAD_REQUEST),
                 ("agent-settings", {"agent_runtime": "codex"}, HTTPStatus.BAD_REQUEST),
                 ("agent-settings", {**settings, "model": "unknown"}, HTTPStatus.BAD_REQUEST),
-                ("agent-settings", settings, HTTPStatus.CONFLICT),
             ):
                 with self.subTest(resource=resource, body=body), self.assertRaises(
                     backend.WorkspaceError
                 ) as error:
                     backend.route_agent("PUT", f"/agent/apps/app-9/{resource}", body)
                 self.assertEqual(error.exception.status, status)
-            transaction.assert_called_once()
-            cursor = transaction.return_value.__enter__.return_value
-            self.assertTrue(all(
-                call.args[0].startswith("SELECT ") for call in cursor.execute.call_args_list
-            ))
+            transaction.assert_not_called()
 
     def test_agent_can_create_an_app_only_through_the_collection_route(self) -> None:
         created = {"app_id": "app-10", "revision": 0}
@@ -1657,6 +1652,9 @@ class BrowserRoutingTests(unittest.TestCase):
 
 
 class ConversationTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(backend, "saved_app_agent_settings", return_value=self.SESSION))
+
     SESSION = {
         "agent_runtime": "codex",
         "model": "gpt-6-astra",
@@ -1789,6 +1787,7 @@ class ConversationTests(unittest.TestCase):
         }
         with (
             patch.object(backend, "_require_web_app"),
+            patch.object(backend, "set_app_agent_settings") as save,
             patch.object(backend, "call_admin_api", return_value=send_response) as host,
         ):
             response = backend.create_message(
@@ -1796,6 +1795,7 @@ class ConversationTests(unittest.TestCase):
                 app_id="app-5",
             )
         self.assertEqual(response, {"status": "accepted", "app_id": "app-5"})
+        save.assert_called_once_with("app-5", self.SESSION)
         host.assert_called_once_with(
             "POST",
             "/v1/threads/app-5/messages",
@@ -2061,7 +2061,7 @@ class AgenticWebAppMockTests(unittest.TestCase):
             ["thread.message", "thread.message", "thread.message"],
         )
 
-    def test_mock_switches_an_idle_session_and_rejects_a_running_switch(self) -> None:
+    def test_mock_switches_an_idle_session_and_steers_the_running_session(self) -> None:
         self._create_app()
         self._send("app-1", "Build the first app.")
         replacement = {
@@ -2069,21 +2069,20 @@ class AgenticWebAppMockTests(unittest.TestCase):
             "model": "claude-sonnet-5-5",
             "effort": "high",
         }
-        with self.assertRaises(backend.WorkspaceError) as running:
-            builder_mock._route_workspace_api(
-                "POST",
-                "apps/app-1/messages",
-                {"content": "Switch too early.", **replacement},
-            )
-        self.assertEqual(running.exception.status, HTTPStatus.CONFLICT)
-        self.assertIn("only while the thread is idle", running.exception.message)
+        original = dict(builder_mock.WORKSPACES["app-1"]["session"])
+        builder_mock._route_workspace_api("PUT", "apps/app-1/agent-settings", replacement)
+        steered = builder_mock._route_workspace_api(
+            "POST", "apps/app-1/messages", {"content": "Continue current work."},
+        )
+        self.assertEqual(steered["status"], "accepted")
+        self.assertEqual(builder_mock.WORKSPACES["app-1"]["session"], original)
 
         builder_mock.TURN_DEADLINES["app-1"] = 0
         builder_mock._route_workspace_api("GET", "apps/app-1/state", None)
         switched = builder_mock._route_workspace_api(
             "POST",
             "apps/app-1/messages",
-            {"content": "Continue with Claude.", **replacement},
+            {"content": "Continue with Claude."},
         )
         self.assertEqual(switched, {"status": "accepted", "app_id": "app-1"})
         self.assertEqual(
@@ -2506,11 +2505,12 @@ class AgenticWebAppDbTests(unittest.TestCase):
         with patch.object(
             backend,
             "browser_conversation",
-            return_value={"session": None, "status": "idle"},
-        ):
+            return_value={"session": None, "status": "running"},
+        ) as live:
             saved = backend.route_agent(
                 "PUT", "/agent/apps/app-1/agent-settings", settings
             )["app"]
+        live.assert_not_called()
         self.assertEqual(saved["agent_settings"], settings)
         renamed = backend.route_agent(
             "PUT", "/agent/apps/app-1/name", {"name": "Marketing HQ"}

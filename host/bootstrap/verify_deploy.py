@@ -36,6 +36,7 @@ import sys
 import time
 from typing import Any, Callable
 
+from host.bootstrap import io_control
 from host.constants import (
     ADMIN_API_PORT,
     EMBEDDING_SOCKET_PATH,
@@ -61,6 +62,7 @@ EXTERNAL_PROBE_HOST = "1.1.1.1"
 PROBE_TIMEOUT_SECONDS = 3
 
 CORE_UNITS = (
+    "kern-io-control.service",
     "kern-postgres.service",
     "kern-network-proxy.service",
     "kern-tools.service",
@@ -519,6 +521,67 @@ def retry_until_clean(
         sleep(2)
 
 
+def check_resource_protection(
+    cloudflare_enabled: bool,
+    cgroup_root: Path = Path("/sys/fs/cgroup"),
+    memory_bytes: int | None = None,
+) -> list[str]:
+    """Check effective kernel controls, not just systemd unit-file settings."""
+    page_size = os.sysconf("SC_PAGE_SIZE")
+    if memory_bytes is None:
+        memory_bytes = os.sysconf("SC_PHYS_PAGES") * page_size
+    # Keep expectations independent of the bootstrap unit writer. Both levels
+    # need protection; MemoryLow on an unprotected leaf alone is ineffective.
+    memory_percent = {
+        "system.slice": 20,
+        "system.slice/kern-admin-api.service": 8,
+        "system.slice/kern-postgres.service": 8,
+        "kern_workspace.slice": 4,
+        "kern_workspace.slice/kern-workspace.service": 4,
+    }
+    weights = {
+        "system.slice": 100,
+        "kern_agent.slice": 25,
+        "kern_workspace.slice": 50,
+        "system.slice/kern-admin-api.service": 200,
+        "system.slice/kern-postgres.service": 200,
+        "kern_workspace.slice/kern-workspace.service": 200,
+    }
+    if cloudflare_enabled:
+        memory_percent["system.slice/kern-cloudflared.service"] = 4
+        weights["system.slice/kern-cloudflared.service"] = 200
+    failures: list[str] = []
+    for group, percent in memory_percent.items():
+        try:
+            actual = int((cgroup_root / group / "memory.low").read_text())
+            expected = memory_bytes * percent // 100
+            if abs(actual - expected) > page_size:
+                failures.append(f"resources: {group} memory.low={actual}, expected {percent}% of RAM")
+        except (OSError, ValueError) as exc:
+            failures.append(f"resources: cannot read {group} memory.low: {exc}")
+    for group, weight in weights.items():
+        try:
+            lines = (cgroup_root / group / "io.weight").read_text().splitlines()
+            if lines != [f"default {weight}"]:
+                failures.append(f"resources: {group} io.weight={lines!r}, expected default {weight}")
+        except OSError as exc:
+            failures.append(f"resources: cannot read {group} io.weight: {exc}")
+    try:
+        qos = (cgroup_root / "io.cost.qos").read_text().splitlines()
+        model = (cgroup_root / "io.cost.model").read_text().splitlines()
+        for device in io_control.backing_devices():
+            for name, lines, required in (
+                ("io.cost.qos", qos, {"enable=1", "ctrl=auto"}),
+                ("io.cost.model", model, {"ctrl=auto"}),
+            ):
+                fields = next((line.split()[1:] for line in lines if line.startswith(device + " ")), [])
+                if not required.issubset(fields):
+                    failures.append(f"resources: {name} not enabled in automatic mode for {device}")
+    except (OSError, RuntimeError) as exc:
+        failures.append(f"resources: cannot verify disk I/O controller: {exc}")
+    return failures
+
+
 def run_all_checks(cloudflare_enabled: bool, run: Runner = _run) -> list[str]:
     path_facts: list[PathFact] = list(PATH_FACTS) + pgdata_path_facts()
     if cloudflare_enabled:
@@ -535,6 +598,7 @@ def run_all_checks(cloudflare_enabled: bool, run: Runner = _run) -> list[str]:
         + check_browser_ready(run)
     )
     failures += check_firewall_ruleset(run)
+    failures += check_resource_protection(cloudflare_enabled)
     failures += retry_until_clean(lambda: check_reachability(enforced_probes(), run))
     failures += check_database_access(run)
     failures += check_immutable_agent_files(run)
@@ -558,7 +622,7 @@ def main(argv: list[str] | None = None) -> int:
         for failure in failures:
             print(f"  - {failure}", file=sys.stderr)
         return 1
-    print("deploy verification passed: accounts, paths, sockets, listeners, services, firewall, database")
+    print("deploy verification passed: accounts, paths, sockets, listeners, services, resources, firewall, database")
     return 0
 
 

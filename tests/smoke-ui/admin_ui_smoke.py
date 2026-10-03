@@ -108,7 +108,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scope",
-        choices=("all", "core", "workspaces", "overload", "oauth-poll", "navigation-order"),
+        choices=("all", "core", "workspaces", "overload", "oauth-poll", "navigation-order", "swarm"),
         default="all",
         help="Smoke only the host UI core, only workspaces, or both.",
     )
@@ -180,7 +180,7 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                         oauth_context.new_page(), url, log_in, open_home_integration, runtime, provider,
                     )
                     oauth_context.close()
-            if scope in {"all", "core"}:
+            if scope in {"all", "core", "swarm"}:
                 import swarm_smokes
                 for mobile in (False, True):
                     swarm_context = browser.new_context(
@@ -189,6 +189,7 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                     )
                     swarm_smokes.run(swarm_context.new_page(), url, log_in, mobile=mobile)
                     swarm_context.close()
+            if scope in {"all", "core"}:
                 import file_preview_smokes
                 files_context = browser.new_context(service_workers="block")
                 file_preview_smokes.run(files_context.new_page(), url, log_in)

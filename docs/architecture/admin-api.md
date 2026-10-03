@@ -213,7 +213,11 @@ and show up in the same agent slice.
   recently used per runtime). A message for an idle thread starts a turn
   immediately; a message for a thread with a live turn is synchronously
   delivered into that turn as a steer and recorded after provider
-  acknowledgement. Turns on one thread are serialized by the live-turn fence;
+  acknowledgement. Follow-ups always use the live turn's configuration even
+  when supplied settings differ; those message settings are not deferred or
+  saved by Admin. Supplied settings apply only when admitting a new turn.
+  App and Standing-agent callers supply their saved definition settings.
+  Turns on one thread are serialized by the live-turn fence;
   turns on different threads run in parallel, up to fifty per runtime (each
   runtime owns an independent pool, and a message that would exceed the cap
   is rejected with `429` rather than queued).

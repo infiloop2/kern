@@ -235,13 +235,16 @@ def send_thread_message(
     with _thread_send_lock(thread_id):
         session_config = state.thread_session_config(thread_id)
         agent_runtime, model, effort = _resolve_session_config(body, session_config, thread_id)
-        switching_session = _session_configuration_changed(
-            session_config, agent_runtime, model, effort
-        )
-        if not switching_session and orchestrator.steer_live_turn(
-            thread_id, agent_runtime, message, peer_sender_thread_id=peer_sender_thread_id,
+        # Follow-ups belong to the live turn; supplied settings apply on admission.
+        steering_runtime = session_config["agent_runtime"] if session_config else agent_runtime
+        if orchestrator.steer_live_turn(
+            thread_id, steering_runtime, message, peer_sender_thread_id=peer_sender_thread_id,
             operator_sent_message=operator_sent_message,
         ):
+            assert session_config is not None
+            agent_runtime, model, effort = (
+                session_config["agent_runtime"], session_config["model"], session_config["effort"]
+            )
             turn = None
             provider_session_id = None
         else:

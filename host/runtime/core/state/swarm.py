@@ -97,7 +97,7 @@ def _interaction_window() -> tuple[str, str]:
 
 
 def swarm_interactions() -> dict[str, Any]:
-    """The 500 strongest directed pairs over seven UTC dates, never message bodies."""
+    """Weekly ranking metrics and up to 500 display links, never message bodies."""
     since, through = _interaction_window()
     with db.transaction() as cur:
         cur.execute(
@@ -111,7 +111,48 @@ def swarm_interactions() -> dict[str, Any]:
             {"sender_thread_id": sender, "target_thread_id": target, "count": int(count)}
             for sender, target, count in cur.fetchall()
         ]
-    return {"interactions": interactions, "since": since, "through": through}
+        # Aggregate before the display cap: weak links still count toward breadth
+        # and operator attention. Reciprocal links count as one distinct peer.
+        cur.execute("""
+            WITH weekly AS (
+                SELECT sender_thread_id AS sender, target_thread_id AS target,
+                       SUM(interactions) AS messages
+                FROM swarm_interaction_days WHERE day >= %s AND day <= %s
+                GROUP BY sender_thread_id, target_thread_id
+            ), endpoints AS (
+                SELECT target AS thread_id, sender AS peer,
+                       CASE WHEN sender = 'operator' THEN messages ELSE 0 END AS operator_messages
+                FROM weekly WHERE sender <> target
+                UNION ALL
+                SELECT sender, target, 0 FROM weekly WHERE sender <> target
+            ), communication AS (
+                SELECT thread_id, SUM(operator_messages) AS operator_messages,
+                       COUNT(DISTINCT peer) FILTER (WHERE peer <> 'operator') AS agent_peers
+                FROM endpoints WHERE thread_id <> 'operator' GROUP BY thread_id
+            ), tokens AS (
+                SELECT thread_id,
+                       SUM(CASE WHEN input_tokens IS NOT NULL OR cached_input_tokens IS NOT NULL
+                                      OR cache_write_tokens IS NOT NULL OR output_tokens IS NOT NULL
+                           THEN COALESCE(input_tokens, 0) + COALESCE(cached_input_tokens, 0)
+                              + COALESCE(cache_write_tokens, 0) + COALESCE(output_tokens, 0)
+                           END) AS total_tokens,
+                       BOOL_OR(input_tokens IS NULL OR cached_input_tokens IS NULL
+                               OR cache_write_tokens IS NULL OR output_tokens IS NULL) AS tokens_partial
+                FROM turn_usage WHERE measured_at >= %s AND measured_at < %s
+                GROUP BY thread_id
+            )
+            SELECT COALESCE(c.thread_id, t.thread_id), COALESCE(c.operator_messages, 0),
+                   COALESCE(c.agent_peers, 0), t.total_tokens, t.tokens_partial
+            FROM communication c FULL OUTER JOIN tokens t USING (thread_id)
+        """, (since, through, since + 'T00:00:00Z',
+              (datetime.fromisoformat(through) + timedelta(days=1)).strftime('%Y-%m-%dT00:00:00Z')))
+        metrics = {
+            thread_id: {"operator_messages": int(messages), "agent_peers": int(peers),
+                        "total_tokens": int(tokens) if tokens is not None else None,
+                        "tokens_partial": partial if partial is not None else True}
+            for thread_id, messages, peers, tokens, partial in cur.fetchall()
+        }
+    return {"interactions": interactions, "metrics": metrics, "since": since, "through": through}
 
 
 def record_swarm_interaction(cur: Any, sender_thread_id: str, target_thread_id: str) -> None:

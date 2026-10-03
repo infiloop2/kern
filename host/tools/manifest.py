@@ -140,6 +140,8 @@ class ActionSpec:
     returns_asset: bool = False
     input_protections: dict[str, InputProtection] = field(default_factory=dict)
     cost_description: str = ""
+    # Host-wide execution attempts per UTC calendar day; None means unlimited.
+    limit_runs_per_day: int | None = None
 
 
 def protect_inputs(actions: tuple[ActionSpec, ...], declarations: dict[str, dict[str, InputProtection]]) -> tuple[ActionSpec, ...]:
@@ -299,6 +301,10 @@ class ToolManifest:
             raise ValueError("ToolManifest.reports_cost must be a boolean.")
         seen_actions: set[str] = set()
         for spec in self.actions:
+            if spec.limit_runs_per_day is not None and (
+                type(spec.limit_runs_per_day) is not int or spec.limit_runs_per_day <= 0
+            ):
+                raise ValueError("ActionSpec.limit_runs_per_day must be a positive integer or None.")
             if not ACTION_ID_RE.fullmatch(spec.id):
                 raise ValueError(
                     "ActionSpec.id must be 1-128 characters containing only ASCII letters, "

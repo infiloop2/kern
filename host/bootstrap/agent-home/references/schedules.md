@@ -54,6 +54,8 @@ manual messaging nor self-memory controls.
   create fields plus `expected_revision`. Fetch it first and preserve fields
   that are not changing. All triggers share one revision; there are no
   per-trigger update/delete/pause routes. Runtime changes keep the same thread.
+  Settings save immediately without interrupting a running turn. That turn and
+  its follow-ups keep the current runtime; the next turn uses the saved settings.
 - `DELETE /agent/schedules/{id}?expected_revision=N` stops future occurrences;
   DELETE takes no body. A firing already claimed by the scheduler may still be
   delivered once.

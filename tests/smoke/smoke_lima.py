@@ -738,7 +738,8 @@ class LimaSmoke(AwsSmoke):
         self._close_tunnel()
         self._open_tunnel()
 
-    def _ssh_code(self, remote_command: str) -> str:
+    def _ssh_code(self, remote_command: str, *, check: bool = False) -> str:
+        # Lima already checks every remote command, including check=True calls.
         return self._ssh(remote_command).strip()
 
     def _api(

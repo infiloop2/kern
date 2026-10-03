@@ -181,6 +181,7 @@ def _tool_entry(tool: Any, enabled_ids: set[str], configured_keys: set[str]) -> 
                 "output_schema": spec.output_schema,
                 "returns_asset": spec.returns_asset,
                 "cost_description": spec.cost_description,
+                **({"limit_runs_per_day": spec.limit_runs_per_day} if spec.limit_runs_per_day is not None else {}),
             }
             for spec in manifest.actions
         ],

@@ -205,6 +205,8 @@ def _list_bundled_tools(tool_input: Any) -> dict[str, Any]:
                 # Only the exceptional case is stated; absent means "direct".
                 if spec.approval == "operator":
                     action["approval"] = "operator"
+                if spec.limit_runs_per_day is not None:
+                    action["limit_runs_per_day"] = spec.limit_runs_per_day
                 actions.append(action)
             entry["agent_notes"] = manifest.agent_notes
             entry["actions"] = actions
@@ -279,6 +281,7 @@ def _describe_tool(tool_input: Any) -> dict[str, Any]:
                     "cost_description": spec.cost_description,
                     "input_protections": {name: asdict(protection) for name, protection in spec.input_protections.items()},
                     **({"output_schema": spec.output_schema} if spec.output_schema else {}),
+                    **({"limit_runs_per_day": spec.limit_runs_per_day} if spec.limit_runs_per_day is not None else {}),
                 }
                 for spec in manifest.actions
                 if requested is None or spec.id in requested

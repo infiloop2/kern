@@ -449,7 +449,7 @@ class AgentMessageDatabaseTests(unittest.TestCase):
                     cur.execute(query, (target,))
                     self.assertIsNotNone(cur.fetchone())
 
-    def test_archive_and_settings_lock_destination_before_checking_idle(self):
+    def test_archive_locks_destination_before_checking_idle(self):
         from host.runtime.workspace.chat import backend as chat
         from host.runtime.workspace.web_apps import backend as apps
         with patch.object(apps, "active_agent_runtimes", return_value=["codex"]):
@@ -460,8 +460,6 @@ class AgentMessageDatabaseTests(unittest.TestCase):
             (chat, "thread-34", lambda: chat.set_chat_thread_archived("thread-34", archived=True),
              "SELECT archived FROM chat_threads WHERE thread_id = %s FOR SHARE NOWAIT"),
             (apps, app["app_id"], lambda: apps.set_web_app_archived(app["app_id"], True),
-             "SELECT archived FROM web_apps WHERE app_id = %s FOR SHARE NOWAIT"),
-            (apps, app["app_id"], lambda: apps.set_app_agent_settings(app["app_id"], SESSION),
              "SELECT archived FROM web_apps WHERE app_id = %s FOR SHARE NOWAIT"),
         ]:
             def status_check(*args):

@@ -265,6 +265,46 @@ class SwarmPersistenceTests(unittest.TestCase):
                 cur.execute('SELECT COUNT(*) FROM swarm_interaction_days')
                 self.assertEqual(cur.fetchone(), (601,))
 
+    def test_ranking_metrics_use_all_links_and_known_token_buckets_in_window(self) -> None:
+        with patch.object(swarm, '_interaction_window', return_value=('2026-09-26', '2026-10-02')):
+            with state.mutation() as cur:
+                # The operator link is too weak to survive the 500-link display cap.
+                cur.execute("INSERT INTO swarm_interaction_days SELECT '2026-10-02',"
+                            " 'thread-' || n, 'app-1', 100 FROM generate_series(1,600) AS n")
+                cur.execute("INSERT INTO swarm_interaction_days VALUES"
+                            " ('2026-09-26','operator','app-1',3),"
+                            " ('2026-10-02','operator','app-1',4),"
+                            " ('2026-10-02','app-1','thread-1',1),"
+                            " ('2026-10-02','app-1','app-1',9),"
+                            " ('2026-09-25','operator','app-1',900),"
+                            " ('2026-10-03','operator','app-1',900)")
+                for thread_id, run, measured, buckets in [
+                    ('app-1', 1, '2026-09-26T00:00:00Z', (100, 200, 300, 400)),
+                    ('app-1', 2, '2026-10-02T23:59:59Z', (10, None, 0, 20)),
+                    ('app-1', 3, '2026-09-25T23:59:59Z', (9000, 0, 0, 0)),
+                    ('app-1', 4, '2026-10-03T00:00:00Z', (9000, 0, 0, 0)),
+                    ('app-2', 1, '2026-10-02T12:00:00Z', (0, 0, 0, 0)),
+                    ('app-3', 1, '2026-10-02T12:00:00Z', (None, None, None, None)),
+                ]:
+                    cur.execute("INSERT INTO turn_usage (thread_id, run_number, agent_runtime, model,"
+                                " started_at, measured_at, input_tokens, cached_input_tokens, cache_write_tokens, output_tokens)"
+                                " VALUES (%s,%s,'codex','test',%s,%s,%s,%s,%s,%s)",
+                                (thread_id, run, measured, measured, *buckets))
+            result = state.swarm_interactions()
+            self.assertEqual(len(result['interactions']), 500)
+            self.assertFalse(any(edge['sender_thread_id'] == 'operator' for edge in result['interactions']))
+            self.assertEqual(result['metrics']['app-1'], {
+                'operator_messages': 7, 'agent_peers': 600, 'total_tokens': 1030, 'tokens_partial': True,
+            })
+            self.assertEqual(result['metrics']['app-2'], {
+                'operator_messages': 0, 'agent_peers': 0, 'total_tokens': 0, 'tokens_partial': False,
+            })
+            self.assertIsNone(result['metrics']['app-3']['total_tokens'])
+            self.assertTrue(result['metrics']['app-3']['tokens_partial'])
+            self.assertEqual(result['metrics']['thread-1']['agent_peers'], 1)
+            self.assertIsNone(result['metrics']['thread-1']['total_tokens'])
+            self.assertNotIn('operator', result['metrics'])
+
     def test_only_on_demand_has_a_task_and_spawned_parent_is_visible(self) -> None:
         self.assertTrue(state.is_on_demand_agent('thread-1'))
         state.save_swarm_task('thread-1', self.run, 'Old task')

@@ -13,7 +13,7 @@ class SwarmLayoutTests(unittest.TestCase):
         source = (Path(__file__).parents[1] / 'host/runtime/admin_api/admin_ui/swarm_layout.js').read_bytes()
         module = 'data:text/javascript;base64,' + base64.b64encode(source).decode()
         script = f"""
-            import {{layoutAgents}} from {json.dumps(module)};
+            import {{layoutAgents, rankAgents}} from {json.dumps(module)};
             const agents = Array.from({{length: 100}}, (_, i) => ({{thread_id: `thread-${{i+1}}`}}));
             const edges = [{{sender_thread_id: 'thread-1', target_thread_id: 'thread-30', count: 8}}];
             const layout = layoutAgents(agents, edges);
@@ -39,18 +39,44 @@ class SwarmLayoutTests(unittest.TestCase):
             }}
             const again = layoutAgents([...agents].reverse(), edges);
             if (JSON.stringify([...again.positions]) !== JSON.stringify([...layout.positions])) throw Error('unstable ordering');
-            const distance = (map, a, b) => Math.hypot(map.get(a).x - map.get(b).x, map.get(a).y - map.get(b).y);
-            const small = ['operator', 'a', 'b', 'c'].map(thread_id => ({{thread_id}}));
-            const weighted = layoutAgents(small, [
-                {{sender_thread_id:'operator', target_thread_id:'a', count:100}},
-                {{sender_thread_id:'operator', target_thread_id:'b', count:1}},
-            ]).positions;
-            if (distance(weighted, 'operator', 'a') >= distance(weighted, 'operator', 'b') * .85) throw Error('strength does not affect distance');
-            if (new Set(positions.map(p => p.x)).size < 80) throw Error('grid layout');
+            // Operator attention dominates even an extremely busy autonomous helper.
+            const sample = ['operator', 'lead', 'helper', 'quiet', 'peer'].map(thread_id => ({{thread_id}}));
+            const metrics = {{
+                lead: {{operator_messages: 20, agent_peers: 1, total_tokens: 100}},
+                helper: {{operator_messages: 0, agent_peers: 100, total_tokens: 1e12}},
+                peer: {{operator_messages: 0, agent_peers: 2, total_tokens: null}},
+            }};
+            const scores = rankAgents(sample, metrics);
+            if (!(scores.get('lead') > scores.get('helper') && scores.get('helper') > scores.get('peer') && scores.get('peer') > scores.get('quiet'))) throw Error('wrong importance order');
+            if (scores.get('quiet') !== 0 || scores.has('operator')) throw Error('missing telemetry / operator score');
+            const ranked = layoutAgents(sample, [], metrics);
+            for (const [a, score] of scores) {{
+                if (ranked.positions.get('operator').y + 216 > ranked.positions.get(a).y) throw Error('operator not above agents');
+                for (const [b, other] of scores) {{
+                    if (score > other && ranked.positions.get(a).y >= ranked.positions.get(b).y) throw Error('hierarchy inverted');
+                }}
+            }}
+            if (Math.abs(ranked.positions.get('operator').x + 110 - ranked.width / 2) > 1e-6) throw Error('operator not centred');
+            const archived = rankAgents(sample, {{...metrics, archived: {{operator_messages: 1e9, agent_peers: 1e9, total_tokens: 1e20}}}});
+            if (JSON.stringify([...scores]) !== JSON.stringify([...archived])) throw Error('archived metrics affect ranking');
+            const reverse = layoutAgents([...sample].reverse(), [], metrics);
+            if (JSON.stringify([...ranked.positions]) !== JSON.stringify([...reverse.positions])) throw Error('unstable rank ties');
+            // A strong collaborator pulls horizontal placement closer, without
+            // changing the ranking or dropping disconnected nodes.
+            const peers = Array.from({{length: 9}}, (_, i) => ({{thread_id: `a${{i}}`}}));
+            const plain = layoutAgents(peers, []);
+            for (const target of ['a6', 'a7', 'a8']) {{
+                const connected = layoutAgents(peers, [{{sender_thread_id:'a0', target_thread_id:target, count:100}}]);
+                const gap = map => Math.abs(map.positions.get('a0').x - map.positions.get(target).x);
+                if (gap(connected) >= gap(plain)) throw Error('collaborators did not move closer');
+            }}
             if (layoutAgents([], []).positions.size) throw Error('empty map');
             const catalog = Array.from({{length: 10000}}, (_, i) => ({{thread_id: `thread-${{i+1}}`}}));
+            const dense = Array.from({{length: 500}}, (_, i) => ({{sender_thread_id: `thread-${{i+1}}`, target_thread_id: `thread-${{i+20}}`, count: i+1}}));
+            const activity = Object.fromEntries(catalog.map((agent, i) => [agent.thread_id,
+                {{operator_messages: i % 41, agent_peers: i % 17, total_tokens: i * 1234}}]));
             const started = performance.now();
-            if (layoutAgents(catalog, edges).positions.size !== 10000) throw Error('large catalog lost agents');
+            if (layoutAgents(catalog, dense, activity).positions.size !== 10000) throw Error('large catalog lost agents');
             if (performance.now() - started > 5000) throw Error('large catalog blocks UI');
         """
         subprocess.run(['node', '--input-type=module', '-e', script], check=True)

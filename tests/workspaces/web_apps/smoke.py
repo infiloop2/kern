@@ -460,11 +460,6 @@ def _create_app() -> dict[str, Any]:
 
 
 def _set_agent_settings(workspace: dict[str, Any], body: Any) -> dict[str, Any]:
-    if workspace["turn"] is not None:
-        raise builder_backend.WorkspaceError(
-            HTTPStatus.CONFLICT,
-            "agent settings can only be changed while the app agent is idle",
-        )
     request = builder_backend._required_object(body, "agent settings request")
     fields = {"agent_runtime", "model", "effort"}
     builder_backend._require_keys(request, fields, required=fields)
@@ -745,16 +740,12 @@ def _create_message(
             raise builder_backend.WorkspaceError(HTTPStatus.BAD_REQUEST, error)
         assert isinstance(model, str) and isinstance(effort, str)
         requested = {"agent_runtime": runtime, "model": model, "effort": effort}
+        workspace["agent_settings"] = copy.deepcopy(requested)
     elif workspace["agent_settings"] is not None:
         requested = copy.deepcopy(workspace["agent_settings"])
     session = workspace["session"]
     if session is not None:
-        if requested is not None and requested != session:
-            if workspace["turn"] is not None:
-                raise builder_backend.WorkspaceError(
-                    HTTPStatus.CONFLICT,
-                    "thread runtime, model, and effort can change only while the thread is idle",
-                )
+        if requested is not None and requested != session and workspace["turn"] is None:
             previous = session
             workspace["session"] = requested
             _append_turn_event(
@@ -1427,8 +1418,21 @@ def desktop_smoke(page: Any) -> None:
     })
     expect(frame.locator("#attachments")).to_contain_text("weekly-focus.txt")
     frame.locator("#message").fill("Build a small weekly focus dashboard.")
-    frame.get_by_role("button", name="Send", exact=True).click()
+    with page.expect_response(lambda response: response.request.method == "POST" and response.url.endswith(f"/apps/{first_app}/messages")) as started:
+        frame.get_by_role("button", name="Send", exact=True).click()
+    assert started.value.status == 200
     expect(frame.locator("#runtime")).to_be_disabled()
+    # An owner can save the next configuration while the UI stays locked on
+    # the live one. The idle transition must refresh the displayed selection.
+    page.evaluate(
+        """appId => window.KernHost.api(
+          "PUT", `/v1/workspace/web-apps/apps/${encodeURIComponent(appId)}/agent-settings`,
+          {agent_runtime: "codex", model: "gpt-6-astra", effort: "high"},
+        ).then(() => window.KernWebApps.refresh())""",
+        first_app,
+    )
+    expect(frame.locator("#model")).to_be_disabled()
+    expect(frame.locator("#model")).to_have_value("gpt-6.1-sol")
     expect(frame.locator("#chat-history-list")).to_contain_text(
         "Build a small weekly focus dashboard."
     )
@@ -1476,6 +1480,7 @@ def desktop_smoke(page: Any) -> None:
             f"generated app should have one sanitized stylesheet, got {generated_sheet_count}"
         )
     expect(frame.locator("#runtime")).to_be_enabled()
+    expect(frame.locator("#model")).to_have_value("gpt-6-astra")
     # A provider the operator has not activated is omitted from the selector.
     hermes = frame.locator("#runtime option[value='hermes']")
     expect(hermes).to_have_count(0)

@@ -1345,7 +1345,13 @@ def swarm_interactions() -> dict[str, Any]:
         {"sender_thread_id": "app-2", "target_thread_id": "app-1", "count": 5},
         {"sender_thread_id": "app-1", "target_thread_id": "thread-56", "count": 3},
         {"sender_thread_id": "schedule-31", "target_thread_id": "app-2", "count": 11},
-    ]}
+    ], "metrics": {
+        "app-1": {"operator_messages": 24, "agent_peers": 2, "total_tokens": 123456, "tokens_partial": False},
+        "app-2": {"operator_messages": 0, "agent_peers": 2, "total_tokens": 500000, "tokens_partial": True},
+        "thread-66": {"operator_messages": 2, "agent_peers": 0, "total_tokens": None, "tokens_partial": True},
+        "thread-56": {"operator_messages": 0, "agent_peers": 1, "total_tokens": None, "tokens_partial": True},
+        "schedule-31": {"operator_messages": 0, "agent_peers": 1, "total_tokens": 0, "tokens_partial": False},
+    }}
 
 
 def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dict[str, Any]:
@@ -2187,10 +2193,7 @@ def send_thread_message(thread_id: str, body: Any) -> dict[str, Any]:
             ):
                 raise ApiError(HTTPStatus.BAD_REQUEST, "invalid session configuration")
             if thread.get("_running") and requested != stored:
-                raise ApiError(
-                    HTTPStatus.CONFLICT,
-                    "thread runtime, model, and effort can change only while the thread is idle",
-                )
+                agent_runtime, model, effort = stored
             switching_session = requested != stored
         else:
             if not supplied:

@@ -5,7 +5,42 @@ from urllib.parse import parse_qs, urlparse
 from playwright.sync_api import expect
 
 
-def approval_smoke(browser, url):
+def assert_review_layout(page, width):
+    """Catch a styled queue falling back to the global headings and flow."""
+    page.set_viewport_size({"width": width, "height": 1000})
+    expect(page.locator(".approval-card").first).to_be_visible()
+    layout = page.evaluate("""() => {
+        const rect = selector => document.querySelector(selector).getBoundingClientRect().toJSON();
+        const card = document.querySelector('.approval-card');
+        const title = card.querySelector('h2');
+        const tab = document.querySelector('#approval-tabs button');
+        return {
+            card: card.getBoundingClientRect().toJSON(),
+            title: title.getBoundingClientRect().toJSON(),
+            titleCase: getComputedStyle(title).textTransform,
+            refresh: rect('[data-action="approval-refresh"]'),
+            heading: rect('.approvals-heading h1'),
+            tabs: rect('#approval-tabs'),
+            toolbar: rect('#approval-toolbar'),
+            countGap: parseFloat(getComputedStyle(tab.querySelector('span')).marginLeft),
+            decisions: rect('.approval-decisions'),
+            buttons: [...document.querySelectorAll('.approvals-page button')].map(el => el.getBoundingClientRect().height),
+        };
+    }""")
+    assert layout["titleCase"] == "none", "request summaries must keep their natural case"
+    assert layout["title"]["x"] > layout["card"]["x"] + 10, "requests need card padding"
+    assert layout["refresh"]["x"] >= layout["heading"]["right"], "Refresh belongs beside the heading"
+    assert layout["countGap"] >= 6, "tab labels and counts must stay separated"
+    if width > 600:
+        assert layout["toolbar"]["x"] >= layout["tabs"]["right"], "bulk actions belong beside the tabs"
+    else:
+        assert layout["toolbar"]["y"] >= layout["tabs"]["bottom"], "mobile bulk actions need their own row"
+        assert min(layout["buttons"]) >= 44, "mobile controls need full touch targets"
+    assert layout["decisions"]["right"] < layout["card"]["right"], "decisions must stay inside the card"
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
+
+
+def approval_smoke(browser, url, screenshot_dir=None):
     context = browser.new_context(viewport={"width": 1440, "height": 1000})
     page = context.new_page()
     errors = []
@@ -20,6 +55,11 @@ def approval_smoke(browser, url):
              "ref_updates": [{"ref": "refs/heads/change"}], "changed_paths": [".github/workflows/test.yml"]}
             for index in range(13)]
     rows[2].update({
+        "summary": (
+            "Reply to https://x.com/i/status/2105531308642590814 as @infiloop2: "
+            "Tracking brand visibility across AI answers is useful feedback. "
+            "Let's connect. I'm building https://kernai.cloud"
+        ),
         "risk_scores": {
             "commits_money_or_obligation": 0.92,
             "sensitive_data": 0.51,
@@ -86,6 +126,13 @@ def approval_smoke(browser, url):
     expect(scores).to_contain_text("92%")
     expect(scores).to_contain_text("51%")
     expect(scores).to_contain_text("20%")
+    for width in (1440, 768, 390, 320):
+        assert_review_layout(page, width)
+        tracks = scores.locator("progress").evaluate_all("elements => elements.map(el => el.getBoundingClientRect().x)")
+        assert max(tracks) - min(tracks) < 1, "risk tracks must align across rows"
+        if screenshot_dir:
+            page.screenshot(path=str(screenshot_dir / f"pending-{width}.png"), full_page=True, animations="disabled")
+    page.set_viewport_size({"width": 1440, "height": 1000})
     page.locator('[data-action="approval-page"][data-page="2"]').click()
     expect(page.locator(".approval-card")).to_have_count(3)
     page.locator('[data-action="approval-page"][data-page="1"]').click()
@@ -93,6 +140,8 @@ def approval_smoke(browser, url):
     page.locator('[data-approval-key="tool:2"] summary').click()
     expect(page.locator('[data-approval-key="tool:2"]')).to_contain_text("gmail-2")
     expect(page.locator('[data-approval-key="tool:2"] pre')).to_contain_text("Exact reviewed message")
+    if screenshot_dir:
+        page.screenshot(path=str(screenshot_dir / "pending-exact-request.png"), full_page=True, animations="disabled")
     # Arriving work changes the count but cannot replace the reviewed page.
     rows.insert(0, {**rows[2], "id": "late", "summary": "Arrived after review"})
     page.evaluate("import('/admin_ui/approvals.js').then(m => m.pollApprovals())")
@@ -173,6 +222,9 @@ def approval_smoke(browser, url):
         page.set_viewport_size({"width": width, "height": 900})
         page.wait_for_timeout(300)
         assert not page.evaluate("document.documentElement.scrollWidth > innerWidth"), width
+        expect(page.locator(".approval-card h2").first).to_have_css("text-transform", "none")
+        if screenshot_dir:
+            page.screenshot(path=str(screenshot_dir / f"history-{width}.png"), full_page=True, animations="disabled")
 
     # The write can finish while its response is lost. Reconcile from the
     # stored approval without submitting the publishing action again.
@@ -234,5 +286,14 @@ def approval_smoke(browser, url):
         if recorded_status == "rejected":
             expect(page.locator("#approval-feedback")).to_contain_text("Already denied in another session")
         assert len(held) == before + 1
+    rows.clear()
+    page.locator('[data-action="approval-refresh"]').click()
+    expect(page.locator(".approval-empty h2")).to_have_text("All caught up")
+    for width in (1440, 390, 320):
+        page.set_viewport_size({"width": width, "height": 900})
+        assert page.evaluate("document.documentElement.scrollWidth <= innerWidth"), width
+        expect(page.locator(".approval-empty h2")).to_have_css("text-transform", "none")
+        if screenshot_dir:
+            page.screenshot(path=str(screenshot_dir / f"empty-{width}.png"), full_page=True, animations="disabled")
     assert not errors, errors
     context.close()
