@@ -636,6 +636,7 @@ class AwsSmoke:
         """
         checks = (
             self.check_health,
+            self.check_resource_protection,
             self.check_host_config_schema,
             self.check_agent_home_guidance,
             self.check_ui_page,
@@ -956,6 +957,25 @@ class AwsSmoke:
             + ", ".join(f"{runtime} runtime {status}" for runtime, status in runtime_states.items())
             + ", swap and all storage mounts reported"
         )
+
+    def check_resource_protection(self) -> None:
+        self._step("effective memory protection and disk I/O weights")
+        # With all providers disabled, no runtime scope creates this slice
+        # after a reboot. Activate the empty slice as a real launcher would;
+        # do not rewrite any policy or re-enable the I/O controller here.
+        try:
+            self._ssh_code("""sudo systemctl start kern_agent.slice && sudo env PYTHONPATH=/opt/kern-host python3 - <<'PY'
+from pathlib import Path
+from host.bootstrap.verify_deploy import check_resource_protection
+failures = check_resource_protection(Path('/etc/kern/cloudflared.token').is_file())
+if failures:
+    raise SystemExit('\\n'.join(failures))
+PY""", check=True)
+        except subprocess.CalledProcessError as exc:
+            # Lima captures SSH output; CalledProcessError's default string
+            # omits the actual kernel-control finding we need to diagnose.
+            raise AssertionError(f"resource protection check failed: {exc.stderr or exc.stdout or exc}") from exc
+        self._ok("effective memory protection and disk I/O weights are enabled")
 
     def check_host_config_schema(self) -> None:
         self._step("deployed host config schema")
@@ -4462,6 +4482,7 @@ class AwsSmoke:
             if token not in (done.get("output_message") or "").upper():
                 raise AssertionError(f"{runtime} thread context lost across reboot: {done.get('output_message')!r}")
         self._ok("host rebooted clean; history, all three provider credentials, and retained runtime thread contexts survived")
+        self.check_resource_protection()
 
     # --- helpers -----------------------------------------------------------
 
@@ -4982,7 +5003,7 @@ LEFT JOIN proxy_provider_pins USING (provider)
             if result != expected:
                 raise AssertionError(f"isolated admin TCP cleanup check failed: {result}")
 
-    def _ssh_code(self, remote_command: str) -> str:
+    def _ssh_code(self, remote_command: str, *, check: bool = False) -> str:
         result = subprocess.run(
             [
                 "ssh", "-S", str(self.control_socket),
@@ -4991,6 +5012,8 @@ LEFT JOIN proxy_provider_pins USING (provider)
             ],
             capture_output=True, text=True,
         )
+        if check:
+            result.check_returncode()
         return result.stdout.strip()
 
     def _aws(self, *args: str) -> dict:

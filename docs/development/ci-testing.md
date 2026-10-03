@@ -270,6 +270,7 @@ Focused commands (also useful for repeated validation):
 ```bash
 python3 tests/smoke-ui/admin_ui_smoke.py --port 8000 --scope oauth-poll
 python3 tests/smoke-ui/admin_ui_smoke.py --port 8000 --scope navigation-order
+python3 tests/smoke-ui/admin_ui_smoke.py --port 8000 --scope swarm
 ```
 
 ## Codex approval stamp

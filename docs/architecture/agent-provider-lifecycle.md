@@ -168,6 +168,14 @@ before the visible user message. This is deliberately a lossy provider
 handoff: older retained events may be omitted and the old provider's hidden
 context and cache reads cannot carry across.
 
+App and Standing-agent settings can be saved through their existing backend
+routes while a turn runs. The current turn and follow-up messages keep the live
+provider configuration; the next turn reads the saved definition. Operator UI
+controls remain idle-only with the existing stop-first warning. This adds no
+settings-edit capability to On-demand or Spawned agents. The message handler
+uses the same rule for every thread: follow-ups use the live configuration;
+supplied settings apply only when admitting a new turn, without queuing changes.
+
 ## Automatic Codex session rotation
 
 After a successful turn, Kern measures the current Codex session's JSONL

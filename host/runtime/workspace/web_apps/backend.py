@@ -674,11 +674,6 @@ def set_app_agent_settings(app_id: str, body: Any) -> dict[str, Any]:
         cur.execute("SELECT 1 FROM web_apps WHERE app_id = %s FOR UPDATE", (app_id,))
         if cur.fetchone() is None:
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
-        if browser_conversation(app_id)["status"] == "running":
-            raise WorkspaceError(
-                HTTPStatus.CONFLICT,
-                "agent settings can only be changed while the app agent is idle",
-            )
         cur.execute(
             "UPDATE web_apps SET agent_runtime = %s, agent_model = %s,"
             " agent_effort = %s, updated_at = %s WHERE app_id = %s"
@@ -865,12 +860,28 @@ def create_message(body: Any, *, app_id: str) -> dict[str, Any]:
         if error is not None:
             raise WorkspaceError(HTTPStatus.BAD_REQUEST, error)
         assert isinstance(model, str) and isinstance(effort, str)
-        host_request.update({"agent_runtime": runtime, "model": model, "effort": effort})
+        settings = {"agent_runtime": runtime, "model": model, "effort": effort}
+        set_app_agent_settings(app_id, settings)
+        host_request.update(settings)
+    else:
+        host_request.update(saved_app_agent_settings(app_id))
     response = _send_with_busy_retry(app_id, host_request)
     status = response.get("status")
     if status != "accepted":
         raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid send status")
     return {"status": status, "app_id": app_id}
+
+
+def saved_app_agent_settings(app_id: str) -> dict[str, str]:
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT agent_runtime, agent_model, agent_effort FROM web_apps WHERE app_id = %s",
+            (app_id,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
+    return _agent_settings_from_values(*row)
 
 
 def _send_with_busy_retry(app_id: str, host_request: dict[str, Any]) -> dict[str, Any]:

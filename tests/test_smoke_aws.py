@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -24,6 +25,46 @@ class McpSmokeCatalogTests(unittest.TestCase):
         from host.runtime.agent_shim import mcp_shim
         from tests.smoke.smoke_aws import STATIC_SHIM_TOOLS
         self.assertEqual(set(STATIC_SHIM_TOOLS), {tool["name"] for tool in mcp_shim._list_tools()})
+
+
+class ResourceProtectionSmokeTests(unittest.TestCase):
+    def test_remote_check_script_is_valid_and_failure_is_not_swallowed(self):
+        smoke = AwsSmoke()
+        with patch.object(smoke, "_ssh_code", return_value="") as ssh, patch.object(smoke, "_ok"):
+            smoke.check_resource_protection()
+        self.assertTrue(ssh.call_args.args[0].startswith("sudo systemctl start kern_agent.slice && "))
+        script = ssh.call_args.args[0].split("<<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        compile(script, "<resource-protection-smoke>", "exec")
+        with patch.object(smoke, "_ssh_code", side_effect=RuntimeError("controller disabled")):
+            with self.assertRaisesRegex(RuntimeError, "controller disabled"):
+                smoke.check_resource_protection()
+
+    def test_successful_resource_check_counts_exactly_one_step(self):
+        smoke = AwsSmoke()
+        with patch.object(smoke, "_ssh_code", return_value=""):
+            smoke.check_resource_protection()
+        self.assertEqual((smoke.passed, smoke.total), (1, 1))
+
+    def test_aws_nonzero_ssh_status_cannot_pass_resource_check(self):
+        smoke = AwsSmoke()
+        smoke.result = {"public_dns": "smoke.example.com"}
+        result = subprocess.CompletedProcess(
+            ["ssh"], 1, stdout="", stderr="resources: io.cost.qos disabled for 8:0"
+        )
+        with patch("tests.smoke.smoke_aws.subprocess.run", return_value=result):
+            with self.assertRaisesRegex(AssertionError, "io.cost.qos disabled for 8:0"):
+                smoke.check_resource_protection()
+        self.assertEqual((smoke.passed, smoke.total), (0, 1))
+
+    def test_lima_ssh_failure_retains_the_kernel_finding(self):
+        failure = subprocess.CalledProcessError(1, ["ssh"], stderr="resources: io.cost.qos disabled for 8:0")
+        from tests.smoke.smoke_lima import LimaSmoke
+        with tempfile.TemporaryDirectory() as tmp:
+            smoke = LimaSmoke(Path(tmp) / "smoke")
+            with patch.object(smoke, "_ssh", side_effect=failure):
+                with self.assertRaisesRegex(AssertionError, "io.cost.qos disabled for 8:0"):
+                    smoke.check_resource_protection()
+            self.assertEqual((smoke.passed, smoke.total), (0, 1))
 
 
 class DictationLiveSmokeTests(unittest.TestCase):

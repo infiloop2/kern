@@ -37,6 +37,38 @@ class PendingToolApprovalLimitReached(Exception):
     """Raised when inserting another pending tool approval would exceed the cap."""
 
 
+def tool_action_run_limit_reached(tool_id: str, action_id: str, limit: int) -> bool:
+    """Non-consuming check before queuing an approval; execution rechecks atomically."""
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT runs >= %s FROM tool_action_runs WHERE tool_id = %s AND action_id = %s "
+            "AND day = (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date",
+            (limit, tool_id, action_id),
+        )
+        row = cur.fetchone()
+        return bool(row and row[0])
+
+
+def consume_tool_action_run(tool_id: str, action_id: str, limit: int) -> bool:
+    """Reserve an attempt before tool code runs, serializing concurrent callers.
+
+    The commit precedes execution: failures and interrupted/unknown outcomes
+    spend a run. One row per action survives restarts without growing daily.
+    """
+    with mutation() as cur:
+        cur.execute(
+            "INSERT INTO tool_action_runs (tool_id, action_id, day, runs) "
+            "VALUES (%s, %s, (CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date, 1) "
+            "ON CONFLICT (tool_id, action_id) DO UPDATE SET day = EXCLUDED.day, "
+            "runs = CASE WHEN tool_action_runs.day = EXCLUDED.day "
+            "THEN tool_action_runs.runs + 1 ELSE 1 END "
+            "WHERE tool_action_runs.day <> EXCLUDED.day OR tool_action_runs.runs < %s "
+            "RETURNING runs",
+            (tool_id, action_id, limit),
+        )
+        return cur.fetchone() is not None
+
+
 def enabled_tool_ids() -> set[str]:
     with db.transaction() as cur:
         cur.execute("SELECT tool_id FROM enabled_tools")

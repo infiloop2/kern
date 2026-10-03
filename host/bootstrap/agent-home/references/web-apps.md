@@ -34,10 +34,11 @@ it. The creator does not gain write access to the new App.
   Read these choices before configuring an App; do not guess model names.
 - `PUT /agent/apps/{app_id}/agent-settings` with
   `{"agent_runtime":"codex","model":"gpt-6.1-sol","effort":"high"}` saves the
-  complete configuration for the App's next agent message. All three fields
+  complete configuration for the App's next turn. All three fields
   are required and validated against the session options. This does not start
-  an agent turn. A running App agent returns 409; wait until it is idle before
-  changing settings, including when changing the current App's own settings.
+  an agent turn. The owner can save settings while running; its current turn
+  and follow-up messages keep the current configuration until that turn ends.
+  Operator UI controls remain locked while running and show the stop-first warning.
 
 Both PUT routes return `{"app":...}` with the App summary, including `name`
 and `agent_settings`. They reject archived Apps (409) and agent-locked Apps

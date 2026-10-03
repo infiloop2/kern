@@ -729,7 +729,7 @@ chmod 600 "$PGDATA_DIR/postgresql.conf" "$PGDATA_DIR/pg_hba.conf"
 cat > /etc/systemd/system/kern-postgres.service <<UNIT
 [Unit]
 Description=Kern Admin State PostgreSQL
-After=local-fs.target
+After=local-fs.target kern-io-control.service
 # Admin state is unreachable without it, and it is local-only, so a crash
 # loop must keep retrying rather than hit the default start-limit.
 StartLimitIntervalSec=0
@@ -1560,6 +1560,59 @@ rm -f /tmp/kern_ssh_rule /tmp/kern_cloudflare_rules
 systemctl enable --now nftables
 }
 
+configure_resource_protection() {
+# Protect only the control services' resident working sets. MemoryLow is
+# best-effort reclaim protection, not a reservation or a hard MemoryMin that
+# could force an OOM when the rest of the host needs memory. Parent budgets
+# are essential: a leaf's protection is capped by its ancestors.
+mkdir -p /etc/systemd/system/system.slice.d
+cat > /etc/systemd/system/system.slice.d/kern-resources.conf <<'UNIT'
+[Slice]
+MemoryLow=20%
+IOWeight=100
+UNIT
+local unit low
+for unit in kern-admin-api kern-postgres kern-cloudflared; do
+  case "$unit" in
+    kern-admin-api|kern-postgres) low=8% ;;
+    kern-cloudflared) low=4% ;;
+  esac
+  mkdir -p "/etc/systemd/system/$unit.service.d"
+  cat > "/etc/systemd/system/$unit.service.d/kern-resources.conf" <<UNIT
+[Service]
+MemoryLow=$low
+IOWeight=200
+UNIT
+done
+
+# The default NVMe scheduler does not implement proportional I/O weights.
+# Enable the kernel I/O-cost controller for root (including swap), admin and
+# agent disks. This oneshot resolves device numbers anew on every boot.
+cat > /etc/systemd/system/kern-io-control.service <<'UNIT'
+[Unit]
+Description=Kern Disk I/O Protection
+RequiresMountsFor=/mnt/kern-admin /mnt/kern-agent
+After=local-fs.target
+# Deliberately order, rather than gate, the control services. If a later boot
+# cannot enable this performance policy, the admin API must remain reachable
+# for diagnosis. Bootstrap still fails verification if protection is absent.
+Before=kern-postgres.service kern-admin-api.service kern-workspace.service kern-cloudflared.service
+
+[Service]
+Type=oneshot
+Environment=PYTHONPATH=/opt/kern-host
+ExecStart=/usr/bin/python3 -m host.bootstrap.io_control
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+systemctl daemon-reload
+systemctl enable kern-io-control.service
+# Reapply on retained-root reconfiguration as well as fresh boot.
+systemctl restart kern-io-control.service
+}
+
 install_service_units() {
 # Systemd services.
 # All agent runtime processes run in transient scopes under this slice (the
@@ -1572,8 +1625,11 @@ install_service_units() {
 # default weight 100), so:
 # - CPUWeight only matters under contention: an otherwise idle host still
 #   gives the agent every core, but when host services need CPU they are
-#   guaranteed about two thirds of it. A hard CPUQuota would waste idle
-#   cores, so none is set.
+#   favored over agent work. A hard CPUQuota would waste idle cores, so none
+#   is set. The Workspace slice also competes at this level.
+# - IOWeight=25 versus system.slice's 100 prioritizes host disk access under
+#   contention, including swap I/O, without limiting otherwise idle disks.
+#   kern-io-control.service enables the controller that enforces the weights.
 # - The slice-wide MemoryHigh is a last-resort aggregate backstop. Each
 #   transient runtime scope has a lower MemoryHigh and MemoryMax, so reclaim
 #   is charged to the busy thread before unrelated runtime startups stall.
@@ -1590,6 +1646,7 @@ Description=Kern Agent Runtimes
 
 [Slice]
 CPUWeight=50
+IOWeight=25
 MemoryHigh=75%
 MemoryMax=80%
 MemorySwapMax=5G
@@ -1604,6 +1661,8 @@ Description=Kern Workspaces Backend
 
 [Slice]
 CPUWeight=50
+IOWeight=50
+MemoryLow=4%
 UNIT
 
 cat > /etc/systemd/system/kern-network-proxy.service <<'UNIT'
@@ -1920,6 +1979,8 @@ User=kern-workspace
 Slice=kern_workspace.slice
 UMask=0077
 RuntimeDirectory=kern-workspace
+MemoryLow=4%
+IOWeight=200
 RuntimeDirectoryMode=0755
 # Browser handlers can hold a Unix socket while opening the admin Unix socket.
 LimitNOFILE=4096
@@ -1957,6 +2018,7 @@ fi
 
 start_services() {
 systemctl daemon-reload
+systemctl start kern_agent.slice kern_workspace.slice
 systemctl enable --now kern-network-proxy.service
 systemctl enable --now kern-host-errors.service
 systemctl enable --now kern-browser.service
@@ -2036,6 +2098,21 @@ fi
 # live firewall probes in both directions (allowed paths connect, denied
 # paths drop) must match the constants the services themselves run with. Any
 # mismatch fails the deploy here, before the staged secrets are dropped.
+apply_live_resource_protection() {
+# daemon-reload updates unit definitions; explicitly realize these settings
+# on already-active cgroups as well, especially system.slice and services
+# surviving a retained-root reconfiguration. Never restart system.slice.
+systemctl set-property --runtime system.slice MemoryLow=20% IOWeight=100
+systemctl set-property --runtime kern_agent.slice IOWeight=25
+systemctl set-property --runtime kern_workspace.slice MemoryLow=4% IOWeight=50
+systemctl set-property --runtime kern-workspace.service MemoryLow=4% IOWeight=200
+systemctl set-property --runtime kern-admin-api.service MemoryLow=8% IOWeight=200
+systemctl set-property --runtime kern-postgres.service MemoryLow=8% IOWeight=200
+if [ "$cloudflare_connection_count" -gt 0 ]; then
+  systemctl set-property --runtime kern-cloudflared.service MemoryLow=4% IOWeight=200
+fi
+}
+
 verify_deployment() {
   echo "== verifying deployed state =="
   local cloudflare_flag=no
@@ -2074,6 +2151,7 @@ main() {
   enforce_version_gate
   install_runtime_code
   install_system_packages
+  configure_resource_protection
   setup_postgres
   migrate_admin_state_and_write_config
   configure_operator_ssh
@@ -2091,6 +2169,7 @@ main() {
   write_firewall
   install_service_units
   start_services
+  apply_live_resource_protection
   verify_deployment
   # Only a verified deployment may discard obsolete cached downloads.
   bootstrap_cache prune $(printf '%s\n%s\n' "$EMBEDDING_MODEL_SHA256" "$TRANSCRIPTION_MODEL_SHA256" | awk '{print $1}')

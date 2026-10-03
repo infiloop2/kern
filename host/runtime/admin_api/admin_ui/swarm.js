@@ -1,12 +1,14 @@
 import { api } from "./api.js";
 import { $, runtimeLabel } from "./helpers.js";
-import { layoutAgents } from "./swarm_layout.js";
+import { layoutAgents, rankAgents } from "./swarm_layout.js";
 
 const TYPES = { "on-demand": "On-demand", app: "App", standing: "Standing", spawned: "Spawned", operator: "Human" };
 const STATES = { busy: "Working", failed: "Error", idle: "Idle" };
 let snapshot = null;
 let agentById = new Map();
 let interactions = [];
+let metrics = null;
+let scores = new Map();
 let selectedId = null;
 let selectedEdge = null;
 let activeFilter = "all";
@@ -124,12 +126,23 @@ function renderDetails() {
   }
   const agent = agentById.get(selectedId);
   if (!agent) {
-    root.append(node("h2", "", "Agent details"), node("p", "muted", "Select an agent or connection. Frequent collaborators cluster together; the map shows up to 500 strongest connections."));
+    root.append(node("h2", "", "Agent details"), node("p", "muted", "Select an agent or connection. You are at the top. Agents with greater weekly involvement sit higher; collaborators group horizontally. Arrange applies the latest ranking. All agents stay visible; dense maps draw only the 500 strongest message links."));
     return;
   }
   root.append(node("span", "swarm-type", TYPES[agent.kind]), node("h2", "", agent.name),
     node("p", "", description(agent)), node("span", `swarm-state state-${agent.state}`, STATES[agent.state] || ""));
   if (agent.kind !== "operator") root.append(node("p", "muted", `${runtimeLabel(agent.agent_runtime)}${agent.model ? ` · ${agent.model}` : ""}`));
+  if (agent.kind !== "operator") {
+    root.append(node("h3", "", "Involvement · last 7 UTC days"));
+    if (metrics) {
+      const values = metrics[agent.thread_id];
+      const count = value => (value || 0).toLocaleString();
+      root.append(node("p", "", `Direct operator messages: ${count(values?.operator_messages)}`),
+        node("p", "", `Other agents interacted with: ${count(values?.agent_peers)}`),
+        node("p", "", `Tokens processed: ${values?.total_tokens == null ? "Unavailable" : count(values.total_tokens) + (values.tokens_partial ? " (partial)" : "")}`),
+        node("p", "muted", `Current involvement score: ${((scores.get(agent.thread_id) || 0) * 100).toFixed(1)}/100. Operator messages 60%, agent connections 25%, tokens 15%; each uses diminishing returns and is scaled across this swarm. Arrange applies this ranking.`));
+    } else root.append(node("p", "muted", "Ranking metrics unavailable. Arrange after they load to apply the hierarchy."));
+  }
   if (agent.pending_approval_count > 0) {
     root.append(node("p", "", `${agent.pending_approval_count} pending Kern approval${agent.pending_approval_count === 1 ? "" : "s"}.`));
     const approvals = node("button", "ghost sm", "View approvals");
@@ -235,8 +248,8 @@ function render() {
     bound = true;
   }
   const agents = [...agentById.values()];
-  const key = JSON.stringify([[...agentById.keys()].sort(), interactions.map(edge => `${edge.sender_thread_id}:${edge.target_thread_id}`).sort()]);
-  if (key !== layoutKey || !layout) { layout = layoutAgents(agents, interactions); layoutKey = key; }
+  const key = JSON.stringify([...agentById.keys()].sort());
+  if (key !== layoutKey || !layout) { layout = layoutAgents(agents, interactions, metrics || {}); layoutKey = key; }
   $("swarm-canvas").style.width = `${layout.width}px`;
   $("swarm-canvas").style.height = `${layout.height}px`;
   const ids = new Set(agentById.keys());
@@ -297,15 +310,16 @@ export async function refreshSwarm() {
     // Communication is optional: a failed count request must not hide agents.
     const [next, counts] = await Promise.all([api("GET", "/v1/swarm"), api("GET", "/v1/swarm/interactions").catch(() => null)]);
     const first = !snapshot;
-    const changed = JSON.stringify([snapshot?.agents, interactions]) !== JSON.stringify([next.agents, counts?.interactions || interactions]);
+    const changed = JSON.stringify([snapshot?.agents, interactions, metrics]) !== JSON.stringify([next.agents, counts?.interactions || interactions, counts ? counts.metrics || null : metrics]);
     snapshot = next;
     agentById = new Map([operator, ...next.agents].map(agent => [agent.thread_id, agent]));
-    if (counts) interactions = counts.interactions;
+    if (counts) { interactions = counts.interactions; metrics = counts.metrics || null; }
+    scores = rankAgents([...agentById.values()], metrics || {});
     if (selectedEdge) selectedEdge = interactions.find(edge => edge.sender_thread_id === selectedEdge.sender_thread_id && edge.target_thread_id === selectedEdge.target_thread_id) || null;
     if (changed) render();
     if (first) fitMap();
     $("swarm-updated").textContent = `Updated ${time(snapshot.generated_at)}`;
-    refreshError = counts ? "" : "Could not refresh communication counts. Showing agents with the last available connections.";
+    refreshError = counts ? "" : "Could not refresh communication counts or ranking metrics. Showing agents with the last available connections and metrics.";
   } catch (error) {
     refreshError = snapshot ? `Could not refresh Swarm. Showing the snapshot from ${time(snapshot.generated_at)}.` : "Could not load Swarm. Try opening this page again.";
     throw error;
