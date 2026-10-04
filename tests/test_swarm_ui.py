@@ -67,18 +67,21 @@ class SwarmLayoutTests(unittest.TestCase):
             if (JSON.stringify([...scores]) !== JSON.stringify([...rankAgents(withHost, hostMetrics)])) throw Error('host affects ranking');
             const hostMap = layoutAgents(withHost, [{{sender_thread_id: 'kern-host', target_thread_id: 'helper', count: 10}}], hostMetrics);
             if (hostMap.positions.size !== withHost.length) throw Error('host or agents missing');
-            if (hostMap.positions.get('operator').y + 216 > hostMap.positions.get('kern-host').y) throw Error('host overlaps operator');
+            if (hostMap.positions.get('operator').y !== hostMap.positions.get('kern-host').y) throw Error('senders not on same row');
+            if (hostMap.positions.get('kern-host').x < hostMap.positions.get('operator').x + 220) throw Error('host not beside operator');
             for (const id of scores.keys()) {{
                 if (hostMap.positions.get('kern-host').y + 216 > hostMap.positions.get(id).y) throw Error('host overlaps agents');
             }}
-            for (const id of ['operator', 'kern-host']) {{
-                if (Math.abs(hostMap.positions.get(id).x + 110 - hostMap.width / 2) > 1e-6) throw Error('sender not centred');
-            }}
+            if (Math.abs(hostMap.positions.get('operator').x + 110 - hostMap.width / 2) > 1e-6) throw Error('operator not centred with host');
             for (const agents of [[{{thread_id:'kern-host'}}], [{{thread_id:'operator'}}, {{thread_id:'kern-host'}}]]) {{
                 const map = layoutAgents(agents, []);
                 if (map.positions.size !== agents.length) throw Error('empty swarm loses senders');
                 for (const point of map.positions.values()) {{
                     if (point.x + 220 > map.width || point.y + 216 > map.height) throw Error('sender outside map');
+                }}
+                if (map.positions.has('operator')) {{
+                    if (map.positions.get('operator').y !== map.positions.get('kern-host').y) throw Error('empty swarm separates senders');
+                    if (Math.abs(map.positions.get('operator').x + 110 - map.width / 2) > 1e-6) throw Error('empty swarm operator not centred');
                 }}
             }}
             // A strong collaborator pulls horizontal placement closer, without

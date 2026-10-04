@@ -1,8 +1,12 @@
 # Swarm map
 
-The operator sits at the top centre. All active Chat, App, Standing and Spawned
+The operator sits at the top centre, with Kern host beside it on the right at
+the same height. All active Chat, App, Standing and Spawned
 agents remain visible, including idle and disconnected agents; Bash schedules
 are excluded. Characters retain their type, task or purpose, and runtime status.
+Each agent type has a small head detail within the shared character style:
+an app window, an on-demand speech bubble, a standing-agent clock, or spawned
+branching nodes. The detail stays the same as the agent's runtime state changes.
 
 ## Automatic involvement hierarchy
 
@@ -43,8 +47,12 @@ the latest available metrics, which may differ from the last arrangement.
 
 At most 500 directed message links are drawn, chosen by weekly count. This
 bounds browser work and clutter; it never omits agents or limits ranking
-metrics. Arrows show direction, thickness shows volume, and selection shows
-exact counts. Horizontal grouping uses these displayed links.
+metrics. Small, fixed-size arrows show direction, thickness shows volume, and
+selection shows exact counts. Horizontal grouping uses these displayed links.
+
+Drag the map background to pan with a mouse or pen. Clicking agents and
+connections still opens their details. Touch swipes, scrollbars and keyboard
+scrolling remain available, along with zoom and Fit all.
 
 The counts/metrics request is optional. A failure keeps the agent map usable
 with the last successful connections and metrics and a visible stale-data

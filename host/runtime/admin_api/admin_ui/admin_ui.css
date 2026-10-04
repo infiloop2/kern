@@ -3223,7 +3223,8 @@ body.swarm-open #app { z-index: 200; }
 .swarm-map-tools > div { display: flex; align-items: center; gap: 6px; }
 .swarm-map-tools button { min-width: 32px; min-height: 32px; padding: 4px 8px; border: 1px solid #d3ded7; border-radius: 7px; font: 12px var(--font-ui); color: #233e3e; background: white; }
 #swarm-zoom-level { min-width: 35px; text-align: center; }
-#swarm-viewport { position: relative; overflow: auto; height: calc(100dvh - 258px); min-height: 400px; overscroll-behavior: contain; background-image: radial-gradient(#b9cec580 1px, transparent 1px); background-size: 20px 20px; }
+#swarm-viewport { position: relative; overflow: auto; height: calc(100dvh - 258px); min-height: 400px; overscroll-behavior: contain; background-image: radial-gradient(#b9cec580 1px, transparent 1px); background-size: 20px 20px; cursor: grab; }
+#swarm-viewport.is-panning { cursor: grabbing; user-select: none; }
 #swarm-stage { position: relative; margin: 0 auto; }
 #swarm-canvas { position: absolute; top: 0; left: 0; transform-origin: top left; }
 #swarm-edges { position: absolute; inset: 0; width: 100%; height: 100%; overflow: visible; }
@@ -3254,6 +3255,8 @@ body.swarm-open #app { z-index: 200; }
 .critter-shadow { fill: #728f8238; }
 .critter-suit, .critter-head { fill: #fffaf2; stroke: #9cb1ac; stroke-width: 1; }
 .critter-head { filter: drop-shadow(1px 2px 1px #667c7638); }
+.critter-type-icon { fill: none; stroke: var(--critter-color); stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+.critter-type-shell { fill: #fffaf2; }
 .critter-ear { fill: var(--critter-color); stroke: #fffaf2; stroke-width: 1; }
 .critter-badge { fill: var(--critter-color); }
 .critter-face { fill: #263b43; }

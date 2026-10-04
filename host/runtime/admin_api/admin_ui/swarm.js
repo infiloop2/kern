@@ -4,6 +4,12 @@ import { layoutAgents, rankAgents } from "./swarm_layout.js";
 
 const TYPES = { "on-demand": "On-demand", app: "App", standing: "Standing", spawned: "Spawned", operator: "Human", host: "Host" };
 const STATES = { busy: "Working", failed: "Error", idle: "Idle" };
+const TYPE_ICONS = {
+  app: '<rect class="critter-type-shell" x="16" y="0" width="18" height="11" rx="2"/><path d="M16 4h18M22 4v7"/><circle cx="19" cy="2" r=".5"/>',
+  "on-demand": '<path class="critter-type-shell" d="M18 0h14a2 2 0 0 1 2 2v6a2 2 0 0 1-2 2h-6l-4 3v-3h-4a2 2 0 0 1-2-2V2a2 2 0 0 1 2-2z"/><path d="M20 4h10M20 7h6"/>',
+  standing: '<circle class="critter-type-shell" cx="25" cy="4" r="6"/><path d="M25 0v4l3 2"/>',
+  spawned: '<path d="M18 2v4h14V2M25 6v4"/><circle class="critter-type-shell" cx="18" cy="1" r="3"/><circle class="critter-type-shell" cx="32" cy="1" r="3"/><circle class="critter-type-shell" cx="25" cy="10" r="3"/>',
+};
 let snapshot = null;
 let agentById = new Map();
 let interactions = [];
@@ -57,6 +63,7 @@ function character(agent) {
       <rect class="critter-suit" x="11" y="30" width="28" height="21" rx="11"/>
       <circle class="critter-badge" cx="25" cy="41" r="2"/>
       <rect class="critter-head" x="8" y="7" width="34" height="30" rx="14"/>
+      <g class="critter-type-icon type-${agent.kind}">${TYPE_ICONS[agent.kind] || ""}</g>
       <circle class="critter-ear" cx="8" cy="23" r="3"/><circle class="critter-ear" cx="42" cy="23" r="3"/>
       <rect class="critter-face" x="12" y="15" width="26" height="18" rx="8"/>
       <g class="critter-eyes">${eyes}</g>
@@ -129,7 +136,7 @@ function renderDetails() {
   }
   const agent = agentById.get(selectedId);
   if (!agent) {
-    root.append(node("h2", "", "Agent details"), node("p", "muted", "Select a node or connection. You are at the top; Kern host shows automated deliveries. Agents with greater weekly involvement sit higher; collaborators group horizontally. Arrange applies the latest ranking. All agents stay visible; dense maps draw only the 500 strongest message links."));
+    root.append(node("h2", "", "Agent details"), node("p", "muted", "Select a node or connection. You and Kern host share the top row; Kern host shows automated deliveries. Agents with greater weekly involvement sit higher; collaborators group horizontally. Arrange applies the latest ranking. All agents stay visible; dense maps draw only the 500 strongest message links."));
     return;
   }
   root.append(node("span", "swarm-type", TYPES[agent.kind]), node("h2", "", agent.name),
@@ -196,7 +203,8 @@ function renderEdges() {
   const root = $("swarm-edges");
   root.replaceChildren();
   const defs = svg("defs", {});
-  const marker = svg("marker", { id: "swarm-arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 5, markerHeight: 5, orient: "auto-start-reverse" });
+  // Arrowheads keep the same size regardless of message volume.
+  const marker = svg("marker", { id: "swarm-arrow", viewBox: "0 0 10 10", refX: 9, refY: 5, markerWidth: 12, markerHeight: 12, markerUnits: "userSpaceOnUse", orient: "auto" });
   marker.append(svg("path", { d: "M 0 0 L 10 5 L 0 10 z", fill: "#438d87" }));
   defs.append(marker); root.append(defs);
   for (const edge of interactions) {
@@ -243,9 +251,35 @@ function fitMap() {
   scale = Math.min(1, (viewport.clientWidth - 24) / layout.width, (viewport.clientHeight - 24) / layout.height);
   applyScale(); viewport.scrollTo(0, 0);
 }
+function bindMapPan() {
+  const viewport = $("swarm-viewport");
+  let drag = null;
+  viewport.addEventListener("pointerdown", event => {
+    // Touch keeps native swipe scrolling; nodes and links keep their clicks.
+    if (event.pointerType === "touch" || !event.isPrimary || event.button !== 0 || event.target.closest("button, [role='button']")) return;
+    drag = { id: event.pointerId, x: event.clientX, y: event.clientY,
+      left: viewport.scrollLeft, top: viewport.scrollTop };
+    viewport.focus({ preventScroll: true });
+    viewport.setPointerCapture(event.pointerId);
+    viewport.classList.add("is-panning");
+    event.preventDefault();
+  });
+  viewport.addEventListener("pointermove", event => {
+    if (!drag || drag.id !== event.pointerId) return;
+    viewport.scrollLeft = drag.left + drag.x - event.clientX;
+    viewport.scrollTop = drag.top + drag.y - event.clientY;
+  });
+  const finish = event => {
+    if (drag?.id !== event.pointerId) return;
+    drag = null;
+    viewport.classList.remove("is-panning");
+  };
+  for (const name of ["pointerup", "pointercancel", "lostpointercapture"]) viewport.addEventListener(name, finish);
+}
 function render() {
   if (!snapshot) return;
   if (!bound) {
+    bindMapPan();
     $("swarm-search").addEventListener("input", event => { search = event.target.value.toLowerCase().trim(); render(); });
     $("swarm-fit").addEventListener("click", fitMap);
     $("swarm-arrange").addEventListener("click", () => { layout = null; render(); fitMap(); });
@@ -282,7 +316,7 @@ function render() {
     if (card.dataset.contentKey !== contentKey) {
       card.className = `swarm-card kind-${agent.kind} pose-${agent.state}`;
       const avatar = card.querySelector(".swarm-avatar");
-      const appearance = `${agent.state}:${agent.pending_approval_count > 0}`;
+      const appearance = `${agent.kind}:${agent.state}:${agent.pending_approval_count > 0}`;
       if (avatar.dataset.appearance !== appearance) { avatar.innerHTML = character(agent); avatar.dataset.appearance = appearance; }
       card.setAttribute("aria-pressed", String(selectedId === agent.thread_id));
       card.querySelector(".swarm-type").textContent = TYPES[agent.kind];

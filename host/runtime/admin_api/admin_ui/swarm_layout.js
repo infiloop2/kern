@@ -16,7 +16,7 @@ export function layoutAgents(agents, interactions, metrics = {}) {
   const ids = [...scores.keys()].sort((a, b) => scores.get(b) - scores.get(a) || compareIds(a, b));
   const hasOperator = agents.some(agent => agent.thread_id === "operator");
   const hasHost = agents.some(agent => agent.thread_id === "kern-host");
-  const fixedRows = Number(hasOperator) + Number(hasHost);
+  const fixedRows = Number(hasOperator || hasHost);
   if (!agents.length) return { positions: new Map(), width: 340, height: 336 };
 
   // Rank determines vertical placement. Compact rows keep even a large idle
@@ -29,7 +29,7 @@ export function layoutAgents(agents, interactions, metrics = {}) {
   }
   const positions = new Map();
   if (hasOperator) positions.set("operator", { x: 0, y: 0 });
-  if (hasHost) positions.set("kern-host", { x: 0, y: hasOperator ? 280 : 0 });
+  if (hasHost) positions.set("kern-host", { x: hasOperator ? 260 : 0, y: 0 });
   const placeRow = (row, rowIndex) => row.forEach((id, column) => {
     positions.set(id, { x: (column - (row.length - 1) / 2) * 260,
       y: (rowIndex + fixedRows) * 280 + (1 - scores.get(id)) * 60 });
@@ -84,11 +84,13 @@ export function layoutAgents(agents, interactions, metrics = {}) {
     });
   }
 
-  // Synthetic sender nodes stay centred above the ranked agent rows.
+  // Keep the operator centred, with the host beside it above the agent rows.
   let minX = 0, maxX = 0, maxY = 0;
   for (const point of positions.values()) {
     minX = Math.min(minX, point.x); maxX = Math.max(maxX, point.x); maxY = Math.max(maxY, point.y);
   }
+  const extent = Math.max(-minX, maxX);
+  minX = -extent; maxX = extent;
   const width = maxX - minX + 340;
   for (const point of positions.values()) { point.x += 60 - minX; point.y += 60; }
   // Return canonical order, independent of API ordering or status changes.
