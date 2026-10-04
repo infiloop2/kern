@@ -46,9 +46,10 @@ class Profile:
             finally:
                 browser.close()
 
-    def launch(self) -> Any:
+    def launch(self, *, site: str | None = None, block_media: bool = False) -> Any:
         if self.browser is None:
-            self.browser = self.factory(self.store.auth(self.account_id) if self.account_id else self.auth, self.provider.login_url)
+            self.browser = self.factory(self.store.auth(self.account_id) if self.account_id else self.auth,
+                                        site or self.provider.login_url, block_media=block_media)
         return self.browser
 
     def status(self) -> dict[str, Any]:
@@ -149,8 +150,8 @@ class Accounts:
                              for key, (provider, data) in self.store.accounts().items()}
             self.loaded = True
 
-    def launch_browser(self, auth: dict[str, Any] | None, site: str) -> Browser:
-        return Browser(auth, site, self.network.dispatch("get", {}))
+    def launch_browser(self, auth: dict[str, Any] | None, site: str, *, block_media: bool = False) -> Browser:
+        return Browser(auth, site, self.network.dispatch("get", {}), block_media=block_media)
 
     def expire(self) -> None:
         for key, profile in list(self.pending.items()):

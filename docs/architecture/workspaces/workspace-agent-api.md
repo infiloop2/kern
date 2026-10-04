@@ -71,20 +71,68 @@ graph. They expire if
 source or vector retention advances. A new search may fall back to lexical
 ranking when the model is unavailable; once paging starts, its cursor keeps the
 ranking mode and frozen candidate set stable without requiring inference again.
-Read returns chronological, byte-bounded user/assistant messages and optional
-normalized activity summaries. `include_context: true` additionally returns
-`thread.context_added` notices as `type: "context"`, with `content`, `truncated`,
-and `memory_page_ids` when recorded. Context notices may include
-`memory_recall_details`, a bounded diagnostic trace also shown when the notice is opened.
-The flag defaults to false and is
-independent of `include_activity`. An absent ids field means the notice did
-not record ids; an empty array records zero recalled pages. Page ids preserve
-recorded order; IDs alone do not capture historical page revisions or text. Fetching
-a page now returns its current contents. Context notices participate in the
-same event limits, byte budgets, and cursors as other requested events; they
-are not added to message search. Read can open the latest page, page before or
-after an event cursor, or center context on a search hit. These routes can read
-any retained host thread, including Chat, app, and schedule threads.
+Search and read preserve the stored distinction between conversation messages
+and Kern notices. Only `type: "message"` has a `role` (`user` or `assistant`).
+Delivered inputs are `type: "notice"` with `notice: {kind, summary}`; they are
+never relabeled as operator messages. Older untyped messages stay as recorded,
+without prefix-based classification.
+
+Both tools accept independent filters:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `roles` | `["user", "assistant"]` | Select ordinary conversation messages. `[]` excludes them. |
+| `notice_kinds` | All four [input kinds](../agent-messages.md#event-contract) | Select notices independently of roles. `[]` excludes them. Search accepts input kinds; read accepts every catalogued kind. |
+
+For operator messages only, pass `roles: ["user"], notice_kinds: []`. For peer
+requests only, pass `roles: [], notice_kinds: ["agent_message"]`. Notice filters
+apply before lexical/vector ranking and before every read pagination mode and
+cursor-bound query. Empty arrays are valid. Filter ordering does not change a
+search cursor's identity. Unknown kinds and duplicate values are rejected.
+The old `exclude_automated_triggers` and `include_context` flags are removed.
+
+Search returns at most 25 matches (default 10), each with `thread_id`,
+`event_id`, `timestamp`, `type`, `excerpt`, and `excerpt_truncated`, plus either
+`role` or `notice`. Excerpts are capped at 2 KiB of JSON-encoded text. Context,
+action, activity, and lifecycle events are not indexed by conversation search.
+Relevance cursors require the signed snapshot format; obsolete rank-only
+cursors must start a new search. The MCP cursor limit matches the API's 8 KiB
+limit, including searches with large frozen semantic candidate lists.
+
+Read returns at most 50 chronological events (default 20) from any retained
+Chat, App, or Standing-agent thread. With no cursor it returns the newest page;
+`before`, `after`, or `around_event_id` select another page and are mutually
+exclusive. Each event has `event_id`, `timestamp`, `type`, and `truncated`:
+
+| Type | Returned fields |
+| --- | --- |
+| `message` | `role`, `content` |
+| `notice` | `notice: {kind, summary}`; incoming input also has its exact delivered `content`, including the routing preamble |
+| `activity` | Bounded `activity` summary, only with `include_activity: true` |
+
+Context and action notices are compact by default. Selecting their kinds does
+not include large diagnostic text. `include_details: true` additionally returns
+recorded `memory_page_ids`, `memory_recall_details` (14 KB), `historical_context`
+(24 KiB beginning/end preview), or `notice.details` (20 KB of action request and
+result). An empty page-id array means zero recalled pages; an absent field means
+it was not recorded. Page ids do not capture historical revisions or page text.
+Message and incoming-input content is always included, bounded to 16 KiB per
+event. The full response stays below 256 KiB, with explicit truncation markers
+and flags. Omitted details are intentional selection, not truncation.
+Lifecycle events such as errors, stops, and clears are outside these tools;
+clearing working memory does not delete retained history.
+
+For example, inspect recent memory writes without tool logs:
+
+```json
+{"thread_id":"thread-42","roles":[],"notice_kinds":["self_memory_saved","shared_memory_saved"],"limit":10}
+```
+
+Then request the recorded details around a returned event:
+
+```json
+{"thread_id":"thread-42","roles":[],"notice_kinds":["shared_memory_saved"],"around_event_id":"event_123","include_details":true,"limit":1}
+```
 
 Workspace is a deliberately narrow transport proxy here: its peer identity,
 connection/call limits, 256 KiB request cap, 24 MiB response cap, fixed route
@@ -207,8 +255,9 @@ prefix rule; the distinction makes the prior individual-memory convention an
 enforced API boundary.
 
 Every schedule owns one stable `schedule-N` thread. A due calendar trigger submits its saved
-prompt through the ordinary thread-message path with an automated-trigger
-prefix. Daily triggers choose up to 24 UTC times; weekly triggers choose weekdays
+prompt through the thread-message delivery path with an automated-trigger
+prefix and explicit `scheduled_trigger` metadata, recorded as `thread.notice`.
+Daily triggers choose up to 24 UTC times; weekly triggers choose weekdays
 and one UTC time. All triggers share one revision and one runtime/model/effort
 configuration. An empty list stops automatic messages. Coincident triggers are
 attempted independently; missed minutes are skipped and failures are logged

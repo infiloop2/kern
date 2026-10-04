@@ -65,6 +65,12 @@ host, including through local resolvers on port 53. Proxied website hostnames
 resolve at Decodo.
 Browser routing also rejects non-HTTPS resources. This disables Chromium's HTTP
 cache, an accepted cost of the URL policy. Agent proxy policy is unchanged.
+Automated text posts and replies start at a blank page, then navigate directly
+to the composer or reply target. Before navigation, their browser blocks image
+and media resources plus all `video.twimg.com` requests (including video fetched
+through XHR/fetch). Scripts on `abs.twimg.com`, stylesheets and X API requests
+still load. Intentional media aborts do not generate request-failure diagnostics.
+Operator login/control and login checks retain normal resource loading.
 Chromium supplies its own user agent and client hints; Kern does not override
 them. Automation-specific launch signals are reduced using Chromium options. Windowed operation and native input
 events improve browser compatibility; they do not make automation undetectable.
@@ -96,9 +102,11 @@ coalesces unsent movement without crossing a key, button, text or scroll event,
 so a slow connection does not accumulate an unbounded hover queue. Desktop
 characters use keyboard events (with Chromium text insertion for characters
 outside Playwright's keyboard map). Paste and the mobile text bar remain bulk
-text insertion. Approved X posts use sequential keyboard input at a fixed 50 ms
-per character, then wait for an enabled submit button. This pacing is not a
-human-presence claim or a substitute for a successful live-site test.
+text insertion. Approved X posts use sequential keyboard input without artificial
+delays, bounded to 60 seconds. Preparation waits for an enabled submit button and
+verifies the complete editor text, including whitespace, against the approved
+text before submission. Keyboard events are not a human-presence claim or a
+substitute for a successful live-site test.
 
 A saved account is the first-class service object:
 
@@ -403,13 +411,15 @@ that ID; changing username/location creates a new one. Peer availability can
 shorten the assignment and IPs can change. Kern keeps country/city filters and
 never widens them or falls back to Direct. Website geolocation may disagree.
 
-When complete Decodo CONNECT headers explicitly report an ended or failed
-session (HTTP 502), the shared relay persists a fresh ID with the same route
-and retries that CONNECT once. This covers connection tests, operator logins
-and tool traffic. Concurrent failures of the old ID share its replacement.
-Existing tunnels remain open, and website requests or submissions are never
-replayed by Kern. Generic gateway, authentication and traffic-limit failures
-are surfaced without rotation. A rejected fresh session is also surfaced.
+When complete Decodo CONNECT headers report any HTTP 5xx rejection (including
+522 timeouts), the shared relay persists a fresh ID with the same route and
+retries that CONNECT once. This covers connection tests, operator logins and
+tool traffic without depending on the gateway's error wording. Concurrent
+failures of the old ID share its replacement. Existing tunnels remain open,
+and website requests or submissions are never replayed by Kern.
+Authentication/quota 4xx responses, incomplete responses and local transport/TLS
+failures are surfaced without rotation. A failed second attempt is also
+surfaced without another renewal or Direct fallback.
 
 The selected preset supplies the browser language and IANA timezone, including
 daylight-saving transitions. These drive native Chromium locale/Accept-Language and date formatting rather

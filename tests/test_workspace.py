@@ -372,8 +372,8 @@ class WorkspaceTests(unittest.TestCase):
             chat.route_browser("GET", "/threads/thread-3/events", None, {"activity": ["true"]})
 
         hidden, shown = requested
-        self.assertIn("event_type=thread.context_added", hidden)
-        self.assertIn("event_type=thread.context_added", shown)
+        self.assertIn("event_type=thread.notice", hidden)
+        self.assertIn("event_type=thread.notice", shown)
         self.assertIn("event_type=thread.memory_cleared", hidden)
         self.assertNotIn("event_type=thread.activity", hidden)
         self.assertIn("event_type=thread.memory_cleared", shown)

@@ -656,6 +656,15 @@ a run admitted just before the transition, and records `thread.error`. Any runti
 rate limit — also returns the thread to idle with `thread.error` and its error
 message.
 
+The agent-facing retained-history endpoints are `POST /v1/conversation-history/search`
+and `POST /v1/conversation-history/read`, proxied through Workspace. They return
+bounded `message`, `notice`, and optional `activity` records, preserving notice
+kinds instead of relabeling them as user messages. Their `roles` and
+`notice_kinds` filters are independent; context/action details require
+`include_details`. See the [history contract](../architecture/workspaces/workspace-agent-api.md)
+for schemas, limits, and examples. These history projections are separate from
+the raw thread event endpoint below.
+
 Thread endpoints:
 
 | Method | Path | Request | Response | Behavior |
@@ -673,8 +682,9 @@ convey authority or prevent operator inspection and recovery.
 Thread summaries include `latest_event_seq`, the newest retained event sequence
 for that thread (or `0` before any activity), so clients can detect changes
 without relying on the whole-second `last_used_at` timestamp. They also include
-`latest_message_seq`, the newest retained `thread.message` sequence (or `0`),
-so unread-message indicators do not advance for agent activity records.
+`latest_message_seq`, the newest retained `thread.message` or delivered
+`thread.notice` (`payload.source: "user"`) sequence, or `0`. Context injections,
+action receipts, and agent activity do not advance unread-message indicators.
 
 Stop has no mailbox or deferred delivery. The HTTP request synchronizes
 directly with steering and provider event writes, commits `thread.stopped`,
@@ -708,6 +718,9 @@ Send message request fields:
 The path's `thread_id` must be a lowercase slug of at most 64 characters
 beginning with `app-`, `thread-`, or `schedule-`; any other value is `404` (no
 such route). The same rule applies to operator and Workspace-service callers.
+Workspace marks operator relays with `operator_sent_message: true`; Kern
+deliveries instead require `kern_notice: {kind, summary}` from the trusted
+Workspace service. Operator requests cannot supply Kern notice metadata.
 The first message requires all three configuration fields. Later messages may
 omit all three or repeat the complete matching triple. A different complete
 triple rotates an idle thread to a new provider session in the same admission
@@ -715,8 +728,10 @@ transaction; a partial triple returns `400`, and a change while running
 returns `409`. The synthetic handoff is sent only to the new provider: the
 visible event stream records a completed `thread.activity` describing the old
 and new session configuration, followed by the operator's new message and a
-compact `thread.context_added` notice. The transcript wrapper itself is not
-stored. The handoff independently preserves up to 100,000
+compact `thread.notice` with `notice.kind: "history_transfer"`. Its
+`historical_context` stores a bounded beginning/end preview of at most 24 KiB,
+with an explicit marker when the middle is omitted. The full provider handoff
+independently preserves up to 100,000
 characters of newest conversation and 150,000 characters of newest bounded
 activity summaries; older retained history may be omitted. Provider-side
 context and cache reads from the previous session are not available. Thread
@@ -757,14 +772,14 @@ Send message response fields:
 
 | Field | Type | Values | Meaning |
 | --- | --- | --- | --- |
-| `status` | enum | `accepted` | The host accepted the message and its durable `thread.message` event committed. Idle and running threads intentionally have the same response. |
+| `status` | enum | `accepted` | The host accepted the message and its durable input event committed. Operator input uses `thread.message`; Kern input uses `thread.notice`. Idle and running threads intentionally have the same response. |
 | `thread` | object |  | The thread, in the same shape as a thread list entry. |
 
 For an idle thread, the host durably admits the message and starts its runtime
 worker; `accepted` does not mean the provider has accepted that initial
 message yet. A later startup/provider failure appears as `thread.error`. For a
 running thread, `accepted` means the live provider transport acknowledged the message and its
-`thread.message` event then committed. Codex acknowledgement is a successful
+durable input event then committed. Codex acknowledgement is a successful
 `turn/steer` JSON-RPC response. The Codex stdout reader routes that response
 directly to the waiting request, so processing unrelated activity
 notifications cannot delay acknowledgement. Claude Code exposes no per-message
@@ -895,12 +910,13 @@ historical reconstruction. Host messages contribute neither operator-message
 counts nor distinct agent peers in involvement metrics.
 
 The Swarm map shows all active agent characters plus synthetic Operator and
-Kern host nodes. These sender nodes sit above the agent rows and have no agent
-runtime, involvement score or conversation link. Weekly involvement determines
-vertical agent placement (60% direct operator messages, 25% distinct agent peers,
-15% known tokens, each scaled with diminishing returns across active identities).
-Combined bidirectional message volume groups collaborators horizontally using
-bounded passes. Arrow width shows directed volume; select
+Kern host nodes. These sender nodes sit at the centre of the map and have no agent
+runtime, involvement score or conversation link. Weekly involvement determines how
+closely each agent orbits the operator and its orb size (60% direct operator messages,
+25% distinct agent peers, 15% known tokens, each scaled with diminishing returns
+across active identities); rings mark involvement tiers. Combined bidirectional
+message volume draws collaborators together using bounded passes. The canvas pans
+without bounds. Arrow width shows directed volume; select
 a node or link to inspect exact counts. This represents communication, not formal
 reporting lines. Status/count refreshes preserve positions; roster changes
 or Arrange recalculate the layout using current weights. Zoom/fit controls and a
@@ -989,7 +1005,7 @@ thread.activity
 thread.error
 thread.stopped
 thread.memory_cleared
-thread.context_added
+thread.notice
 agent_runtime.active
 agent_runtime.login_completed
 agent_runtime.linked_account_reset
@@ -1000,8 +1016,9 @@ agent_runtime.deactivated
 
 | Field | Type | Values | Meaning |
 | --- | --- | --- | --- |
-| `message` | string |  | Message text: every accepted user message and every completed agent message including the final one. |
+| `message` | string |  | Every accepted operator message and every completed agent message including the final one. |
 | `source` | enum | `agent`, `user` | Message source. |
+| `notice.kind` | string | `operator` | Explicit marker on new operator input. Pasting a Kern preamble does not change the message's provenance. Absent on agent replies and older untyped records. |
 
 `thread.memory_cleared` payload fields:
 
@@ -1014,11 +1031,25 @@ A client that requests explicit `event_type` filters must include
 it is never handed to a provider, and a conversation-only view that drops
 `thread.activity` is still expected to fetch it.
 
-`thread.context_added` payload fields:
+`thread.notice` payload fields:
 
 | Field | Type | Description |
 |---|---|---|
-| `message` | string | A compact notice describing context Kern added to the accepted turn's launch prompt. |
+| `notice.kind` | enum | Specific input, context, or action kind from the [notice catalog](../architecture/agent-messages.md#event-contract). No generic kind. |
+| `notice.summary` | string | One display line, at most 100 characters. |
+| `notice.details` | string, when recorded | Action outcome and request details, bounded to 20 KB of JSON-encoded text with an explicit truncation marker. |
+| `source` | `user`, when delivered | Present only on input actually delivered to the provider. Context and action receipts omit it. |
+| `message` | string, when recorded | Exact provider text for delivered input, including its preamble; compact summary for context notices. Action receipts omit it. |
+| `memory_page_ids` | string array, when recorded | Selected page ids on memory injection or suggestion notices. An empty array means no pages were selected. |
+| `memory_recall_details` | string, when recorded | Memory retrieval or suggestion details for the expanded notice. |
+| `historical_context` | string, when recorded | Bounded beginning/end preview of transferred history, at most 24 KiB. |
+
+Clients must include `thread.notice` in explicit event filters even when hiding
+`thread.activity`. Render `notice.summary` as the compact text and open the
+recorded details on click. Delivered notices count as conversation for search,
+unread indicators, and provider handoffs. Context and action receipts are not
+replayed as input. The [notice specification](../architecture/agent-messages.md)
+describes all kinds, producers, and bounds.
 
 Kern records “Historical context transferred” only when retained conversation
 or activity is included for a new provider session, respecting the latest

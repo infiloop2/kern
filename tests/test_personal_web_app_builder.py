@@ -1718,7 +1718,7 @@ class ConversationTests(unittest.TestCase):
             "GET",
             "/v1/threads/app-6/events?since=2&limit=6&message_bytes=122880"
             "&event_type=thread.message&event_type=thread.activity&event_type=thread.error"
-            "&event_type=thread.stopped&event_type=thread.context_added&event_type=thread.memory_cleared",
+            "&event_type=thread.stopped&event_type=thread.notice&event_type=thread.memory_cleared",
         )
 
     def test_conversation_events_open_at_tail_and_page_backward(self) -> None:
@@ -1738,7 +1738,7 @@ class ConversationTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/app-6/events?limit=6&message_bytes=122880"
                 "&event_type=thread.message&event_type=thread.activity&event_type=thread.error"
-                "&event_type=thread.stopped&event_type=thread.context_added&event_type=thread.memory_cleared",
+                "&event_type=thread.stopped&event_type=thread.notice&event_type=thread.memory_cleared",
             ),
         )
         self.assertEqual(
@@ -1747,7 +1747,7 @@ class ConversationTests(unittest.TestCase):
                 "GET",
                 "/v1/threads/app-6/events?before=5&limit=6&message_bytes=122880"
                 "&event_type=thread.message&event_type=thread.activity&event_type=thread.error"
-                "&event_type=thread.stopped&event_type=thread.context_added&event_type=thread.memory_cleared",
+                "&event_type=thread.stopped&event_type=thread.notice&event_type=thread.memory_cleared",
             ),
         )
 
@@ -1767,7 +1767,7 @@ class ConversationTests(unittest.TestCase):
             "GET",
             "/v1/threads/app-6/events?before=5&limit=6&message_bytes=122880"
             "&event_type=thread.message&event_type=thread.error"
-            "&event_type=thread.stopped&event_type=thread.context_added&event_type=thread.memory_cleared",
+            "&event_type=thread.stopped&event_type=thread.notice&event_type=thread.memory_cleared",
         )
 
     def test_conversation_events_reject_mixed_cursors(self) -> None:

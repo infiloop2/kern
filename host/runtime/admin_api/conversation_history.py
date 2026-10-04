@@ -13,6 +13,7 @@ import re
 import secrets
 from typing import Any
 
+from host.agent_messages import INPUT_KINDS, NOTICE_KINDS
 from host.runtime.admin_api.errors import ApiError
 from host.runtime.admin_api.request_params import clip_json_encoded_text as _clip_json_encoded_text
 from host.runtime.core import host_errors, pgclient, state
@@ -36,7 +37,7 @@ CONVERSATION_VARIANT_LIMIT = 8
 CONVERSATION_CURSOR_BYTES = 8192
 CONVERSATION_MESSAGE_BYTES = 16 * 1024
 CONVERSATION_RESPONSE_BYTES = 256 * 1024
-CONVERSATION_EVENT_TYPES = ("thread.message", "thread.activity")
+CONVERSATION_EVENT_TYPES = ("thread.message", "thread.notice", "thread.activity")
 CONVERSATION_SEMANTIC_CANDIDATES = 200
 _CONVERSATION_CURSOR_SIGNING_KEY = secrets.token_bytes(32)
 HISTORY_PROVENANCE = "retained_conversation_history"
@@ -125,6 +126,22 @@ def _conversation_limit(value: Any, maximum: int) -> int:
     return value
 
 
+def _history_filters(body: dict[str, Any], allowed_notice_kinds: frozenset[str]) -> tuple[list[str], tuple[str, ...]]:
+    """Message roles and notice kinds are independent, in both search and read."""
+    selected: dict[str, list[str]] = {}
+    for field, allowed, default in (
+        ("roles", frozenset({"user", "assistant"}), ["user", "assistant"]),
+        ("notice_kinds", allowed_notice_kinds, list(INPUT_KINDS)),
+    ):
+        values = body.get(field, default)
+        if (not isinstance(values, list) or len(values) > len(allowed)
+                or any(not isinstance(value, str) for value in values)
+                or len(set(values)) != len(values) or set(values) - allowed):
+            raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be an array of distinct supported values")
+        selected[field] = values
+    return selected["roles"], tuple(selected["notice_kinds"])
+
+
 def _conversation_event_seq(value: Any, field: str) -> int:
     if not isinstance(value, str) or (match := EVENT_ID_RE.fullmatch(value)) is None:
         raise ApiError(HTTPStatus.BAD_REQUEST, f"{field} must be an event id")
@@ -140,7 +157,7 @@ def _conversation_search_fingerprint(
     to_timestamp: str | None,
     thread_id: str | None,
     roles: list[str],
-    exclude_automated_triggers: bool = False,
+    notice_kinds: tuple[str, ...],
 ) -> str:
     encoded = json.dumps(
         [
@@ -148,8 +165,8 @@ def _conversation_search_fingerprint(
             from_timestamp,
             to_timestamp,
             thread_id,
-            roles,
-            exclude_automated_triggers,
+            sorted(roles),
+            sorted(notice_kinds),
         ],
         ensure_ascii=False,
         separators=(",", ":"),
@@ -169,7 +186,7 @@ def _encode_conversation_search_cursor(
     embedding_generation: int | None = None,
     semantic_seqs: tuple[int, ...] | None = None,
 ) -> str:
-    cursor_mode = mode or ("rank" if relevance else "time")
+    cursor_mode = mode or ("lexical" if relevance else "time")
     if relevance:
         fields = [fingerprint, cursor_mode, value.get("rank"), value.get("seq")]
         snapshot = [
@@ -179,16 +196,15 @@ def _encode_conversation_search_cursor(
             embedding_generation,
             None if semantic_seqs is None else list(semantic_seqs),
         ]
-        if all(item is not None for item in snapshot):
-            fields.extend(snapshot)
-            signature = hmac.new(
-                _CONVERSATION_CURSOR_SIGNING_KEY,
-                json.dumps(fields, separators=(",", ":")).encode(),
-                hashlib.sha256,
-            ).hexdigest()
-            fields.append(signature)
-        elif cursor_mode != "rank":
+        if any(item is None for item in snapshot):
             raise ValueError("relevance cursor requires a complete snapshot")
+        fields.extend(snapshot)
+        signature = hmac.new(
+            _CONVERSATION_CURSOR_SIGNING_KEY,
+            json.dumps(fields, separators=(",", ":")).encode(),
+            hashlib.sha256,
+        ).hexdigest()
+        fields.append(signature)
     else:
         fields = [fingerprint, "time", value.get("timestamp"), value.get("seq")]
     raw = json.dumps(fields, separators=(",", ":")).encode()
@@ -221,9 +237,9 @@ def _decode_conversation_search_cursor(
         decoded = json.loads(
             base64.b64decode(padded, altchars=b"-_", validate=True)
         )
-        if not isinstance(decoded, list) or len(decoded) not in {4, 10}:
+        if not isinstance(decoded, list) or len(decoded) != (10 if relevance else 4):
             raise ValueError
-        if len(decoded) == 10:
+        if relevance:
             signature = decoded.pop()
             if not isinstance(signature, str) or not hmac.compare_digest(
                 signature,
@@ -235,7 +251,7 @@ def _decode_conversation_search_cursor(
             ):
                 raise ValueError
         cursor_fingerprint, mode, position, seq = decoded[:4]
-        valid_modes = {"rank", "hybrid", "fallback", "lexical"} if relevance else {"time"}
+        valid_modes = {"hybrid", "fallback", "lexical"} if relevance else {"time"}
         if (
             cursor_fingerprint != fingerprint
             or mode not in valid_modes
@@ -246,68 +262,48 @@ def _decode_conversation_search_cursor(
         ):
             raise ValueError
         if relevance:
-            if len(decoded) == 4:
-                # Cursors issued before snapshot fields existed were plain
-                # lexical rank cursors. Preserve that compatibility without
-                # pretending they are stable hybrid positions.
-                if mode != "rank":
-                    raise ValueError
-                snapshot: tuple[
-                    int | None,
-                    int | None,
-                    int | None,
-                    int | None,
-                    tuple[int, ...] | None,
-                ] = (
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
+            (
+                min_seq,
+                max_seq,
+                embedding_min_seq,
+                embedding_generation,
+                encoded_semantic_seqs,
+            ) = decoded[4:]
+            if (
+                not isinstance(min_seq, int)
+                or isinstance(min_seq, bool)
+                or min_seq < 0
+                or not isinstance(max_seq, int)
+                or isinstance(max_seq, bool)
+                or max_seq < min_seq
+                or max_seq > POSTGRES_BIGINT_MAX
+                or not isinstance(embedding_min_seq, int)
+                or isinstance(embedding_min_seq, bool)
+                or embedding_min_seq < 0
+                or embedding_min_seq > max_seq
+                or not isinstance(embedding_generation, int)
+                or isinstance(embedding_generation, bool)
+                or embedding_generation < 0
+                or embedding_generation > POSTGRES_BIGINT_MAX
+                or not isinstance(encoded_semantic_seqs, list)
+                or len(encoded_semantic_seqs) > CONVERSATION_SEMANTIC_CANDIDATES
+                or any(
+                    not isinstance(candidate, int)
+                    or isinstance(candidate, bool)
+                    or candidate < 1
+                    or candidate > max_seq
+                    for candidate in encoded_semantic_seqs
                 )
-            else:
-                (
-                    min_seq,
-                    max_seq,
-                    embedding_min_seq,
-                    embedding_generation,
-                    encoded_semantic_seqs,
-                ) = decoded[4:]
-                if (
-                    not isinstance(min_seq, int)
-                    or isinstance(min_seq, bool)
-                    or min_seq < 0
-                    or not isinstance(max_seq, int)
-                    or isinstance(max_seq, bool)
-                    or max_seq < min_seq
-                    or max_seq > POSTGRES_BIGINT_MAX
-                    or not isinstance(embedding_min_seq, int)
-                    or isinstance(embedding_min_seq, bool)
-                    or embedding_min_seq < 0
-                    or embedding_min_seq > max_seq
-                    or not isinstance(embedding_generation, int)
-                    or isinstance(embedding_generation, bool)
-                    or embedding_generation < 0
-                    or embedding_generation > POSTGRES_BIGINT_MAX
-                    or not isinstance(encoded_semantic_seqs, list)
-                    or len(encoded_semantic_seqs) > CONVERSATION_SEMANTIC_CANDIDATES
-                    or any(
-                        not isinstance(candidate, int)
-                        or isinstance(candidate, bool)
-                        or candidate < 1
-                        or candidate > max_seq
-                        for candidate in encoded_semantic_seqs
-                    )
-                    or len(set(encoded_semantic_seqs)) != len(encoded_semantic_seqs)
-                ):
-                    raise ValueError
-                snapshot = (
-                    min_seq,
-                    max_seq,
-                    embedding_min_seq,
-                    embedding_generation,
-                    tuple(encoded_semantic_seqs),
-                )
+                or len(set(encoded_semantic_seqs)) != len(encoded_semantic_seqs)
+            ):
+                raise ValueError
+            snapshot = (
+                min_seq,
+                max_seq,
+                embedding_min_seq,
+                embedding_generation,
+                tuple(encoded_semantic_seqs),
+            )
             if mode in {"hybrid", "fallback"}:
                 if (
                     not isinstance(position, int)
@@ -336,10 +332,6 @@ def _decode_conversation_search_cursor(
                 raise ValueError from exc
             if not math.isfinite(rank) or rank < 0:
                 raise ValueError
-            # ``rank`` is the pre-hybrid cursor mode. It must continue as plain
-            # lexical pagination: that client has not consumed a fused prefix,
-            # so excluding today's semantic candidates would silently skip
-            # results it has never seen.
             return (
                 mode,
                 rank,
@@ -382,6 +374,7 @@ def _require_conversation_search_snapshot(
 
 def _frozen_conversation_semantic_rows(
     semantic_seqs: tuple[int, ...],
+    notice_kinds: tuple[str, ...],
     *,
     from_timestamp: str | None,
     to_timestamp: str | None,
@@ -390,7 +383,6 @@ def _frozen_conversation_semantic_rows(
     min_seq: int,
     max_seq: int,
     embedding_min_seq: int,
-    exclude_automated_triggers: bool = False,
 ) -> list[dict[str, Any]]:
     """Resolve cursor ids only when every id still satisfies its search."""
     rows = state.thread_messages_by_seqs(
@@ -400,7 +392,7 @@ def _frozen_conversation_semantic_rows(
         thread_id=thread_id,
         sources=sources,
         max_seq=max_seq,
-        exclude_automated_triggers=exclude_automated_triggers,
+        notice_kinds=notice_kinds,
     )
     if len(rows) != len(semantic_seqs):
         # Prefer the specific expiry response when retention advanced during
@@ -425,7 +417,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
         "to",
         "thread_id",
         "roles",
-        "exclude_automated_triggers",
+        "notice_kinds",
         "limit",
         "cursor",
     }
@@ -475,21 +467,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
             HTTPStatus.BAD_REQUEST,
             "provide query, from, to, or thread_id",
         )
-    roles = body.get("roles", ["user", "assistant"])
-    if (
-        not isinstance(roles, list)
-        or not roles
-        or not all(isinstance(role, str) for role in roles)
-        or set(roles) - {"user", "assistant"}
-    ):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "roles must contain user and/or assistant")
-    roles = list(dict.fromkeys(roles))
-    exclude_automated_triggers = body.get("exclude_automated_triggers", False)
-    if not isinstance(exclude_automated_triggers, bool):
-        raise ApiError(
-            HTTPStatus.BAD_REQUEST,
-            "exclude_automated_triggers must be a boolean",
-        )
+    roles, notice_kinds = _history_filters(body, frozenset(INPUT_KINDS))
     limit = _conversation_limit(body.get("limit", 10), CONVERSATION_SEARCH_LIMIT)
     fingerprint = _conversation_search_fingerprint(
         queries,
@@ -497,7 +475,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
         to_timestamp,
         thread_id,
         roles,
-        exclude_automated_triggers,
+        notice_kinds,
     )
     decoded_cursor = _decode_conversation_search_cursor(
         body.get("cursor"), fingerprint, bool(queries)
@@ -549,10 +527,9 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
     search_mode = "lexical" if queries else "timestamp"
     continuation_mode: str | None = None
     lexical_tail: dict[str, Any] | None = None
-    lexical_tail_mode = "lexical"
     try:
         sources = tuple("user" if role == "user" else "agent" for role in roles)
-        if queries and cursor_mode not in {"rank", "lexical"}:
+        if queries and cursor_mode != "lexical":
             lexical_rows = state.search_thread_messages(
                 tuple(queries),
                 from_timestamp=from_timestamp,
@@ -562,7 +539,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                 limit=CONVERSATION_SEMANTIC_CANDIDATES + 1,
                 before=None,
                 max_seq=snapshot_max_seq,
-                exclude_automated_triggers=exclude_automated_triggers,
+                notice_kinds=notice_kinds,
             )
             # The extra row distinguishes a result set that ends exactly at the
             # candidate window from one with more matches below it, so a lexical
@@ -581,7 +558,6 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                 rows = _hybrid_conversation_rows(lexical_rows, [])[hybrid_offset:]
                 search_mode = "lexical_fallback"
                 continuation_mode = "fallback"
-                lexical_tail_mode = "rank"
             elif cursor_mode == "hybrid":
                 # The first page froze the ordered HNSW candidate ids. Fetch
                 # their immutable source rows instead of rerunning an
@@ -599,7 +575,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                     min_seq=snapshot_min_seq,
                     max_seq=snapshot_max_seq,
                     embedding_min_seq=snapshot_embedding_min_seq,
-                    exclude_automated_triggers=exclude_automated_triggers,
+                    notice_kinds=notice_kinds,
                 )
                 rows = _hybrid_conversation_rows(
                     lexical_rows,
@@ -623,7 +599,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                         minimum_similarity=embedding_client.MINIMUM_SIMILARITY,
                         max_seq=snapshot_max_seq,
                         max_embedding_generation=snapshot_embedding_generation,
-                        exclude_automated_triggers=exclude_automated_triggers,
+                        notice_kinds=notice_kinds,
                     )
                     snapshot_semantic_seqs = tuple(
                         int(row["seq"]) for row in semantic_rows
@@ -641,9 +617,6 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                     rows = _hybrid_conversation_rows(lexical_rows, [])[hybrid_offset:]
                     search_mode = "lexical_fallback"
                     continuation_mode = "fallback"
-                    # A fallback prefix contains only lexical candidates, so
-                    # its tail must not exclude semantic candidates.
-                    lexical_tail_mode = "rank"
         else:
             # A lexical continuation walks below the fused window, where the
             # semantic candidates already returned on the hybrid pages appear
@@ -665,7 +638,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                     min_seq=snapshot_min_seq,
                     max_seq=snapshot_max_seq,
                     embedding_min_seq=snapshot_embedding_min_seq,
-                    exclude_automated_triggers=exclude_automated_triggers,
+                    notice_kinds=notice_kinds,
                 )
                 exclude_seqs = snapshot_semantic_seqs
             rows = state.search_thread_messages(
@@ -678,11 +651,9 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                 before=before,
                 max_seq=snapshot_max_seq,
                 exclude_seqs=exclude_seqs,
-                exclude_automated_triggers=exclude_automated_triggers,
+                notice_kinds=notice_kinds,
             )
-            continuation_mode = (
-                "rank" if cursor_mode == "rank" else "lexical"
-            ) if queries else None
+            continuation_mode = "lexical" if queries else None
     except pgclient.Error as exc:
         if exc.sqlstate == "57014":
             raise ApiError(
@@ -707,7 +678,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
                 "thread_id": row["thread_id"],
                 "event_id": row["event_id"],
                 "timestamp": row["timestamp"],
-                "role": "user" if row["source"] == "user" else "assistant",
+                **_history_identity(row["event_type"], row["source"], row["notice"]),
                 "excerpt": excerpt,
                 "excerpt_truncated": row["excerpt_truncated"] or excerpt != row["excerpt"],
             }
@@ -750,7 +721,7 @@ def search_conversation_history(body: Any) -> dict[str, Any]:
             fingerprint,
             True,
             lexical_tail,
-            mode=lexical_tail_mode,
+            mode="lexical",
             min_seq=snapshot_min_seq,
             max_seq=snapshot_max_seq,
             embedding_min_seq=snapshot_embedding_min_seq,
@@ -793,7 +764,9 @@ def read_conversation_history(body: Any) -> dict[str, Any]:
         "after",
         "around_event_id",
         "include_activity",
-        "include_context",
+        "roles",
+        "notice_kinds",
+        "include_details",
         "limit",
     }
     unexpected = sorted(set(body) - allowed)
@@ -826,19 +799,19 @@ def read_conversation_history(body: Any) -> dict[str, Any]:
     include_activity = body.get("include_activity", False)
     if not isinstance(include_activity, bool):
         raise ApiError(HTTPStatus.BAD_REQUEST, "include_activity must be a boolean")
-    include_context = body.get("include_context", False)
-    if not isinstance(include_context, bool):
-        raise ApiError(HTTPStatus.BAD_REQUEST, "include_context must be a boolean")
+    include_details = body.get("include_details", False)
+    if not isinstance(include_details, bool):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "include_details must be a boolean")
+    roles, notice_kinds = _history_filters(body, NOTICE_KINDS)
+    message_sources = tuple("user" if role == "user" else "agent" for role in roles)
     limit = _conversation_limit(body.get("limit", 20), CONVERSATION_READ_LIMIT)
-    event_types = CONVERSATION_EVENT_TYPES if include_activity else ("thread.message",)
-    if include_context:
-        event_types += ("thread.context_added",)
+    event_types = CONVERSATION_EVENT_TYPES if include_activity else ("thread.message", "thread.notice")
     if "around" in cursors:
         raw_events = state.page_thread_events_around(
             thread_id,
             cursors["around"],
             limit,
-            event_types=event_types,
+            event_types=event_types, notice_kinds=notice_kinds, message_sources=message_sources,
         )
         if raw_events is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "anchor event not found in thread")
@@ -848,7 +821,7 @@ def read_conversation_history(body: Any) -> dict[str, Any]:
             thread_id,
             cursors["after"],
             limit,
-            event_types=event_types,
+            event_types=event_types, notice_kinds=notice_kinds, message_sources=message_sources,
         )
         mode = "after"
     else:
@@ -857,11 +830,11 @@ def read_conversation_history(body: Any) -> dict[str, Any]:
             None,
             limit,
             before=cursors.get("before"),
-            event_types=event_types,
+            event_types=event_types, notice_kinds=notice_kinds, message_sources=message_sources,
         )
         mode = "before"
 
-    projected = [_conversation_event(event) for event in raw_events]
+    projected = [_conversation_event(event, include_details) for event in raw_events]
     events = _bounded_conversation_events(projected, mode, cursors.get("around"))
     response: dict[str, Any] = {
         "provenance": HISTORY_PROVENANCE,
@@ -879,7 +852,7 @@ def read_conversation_history(body: Any) -> dict[str, Any]:
             thread_id,
             oldest,
             newest,
-            event_types=event_types,
+            event_types=event_types, notice_kinds=notice_kinds, message_sources=message_sources,
         )
         if has_older:
             response["older_cursor"] = f"event_{oldest}"
@@ -888,34 +861,30 @@ def read_conversation_history(body: Any) -> dict[str, Any]:
     return response
 
 
-def _conversation_event(event: dict[str, Any]) -> dict[str, Any]:
+def _history_identity(event_type: str, source: Any, notice: Any) -> dict[str, Any]:
+    """Keep recorded provenance visible in read events and search hits."""
+    if event_type == "thread.notice":
+        return {"type": "notice", "notice": {"kind": notice["kind"], "summary": notice["summary"]}}
+    return {"type": "message", "role": "user" if source == "user" else "assistant"}
+
+
+def _conversation_event(event: dict[str, Any], include_details: bool) -> dict[str, Any]:
     payload = event.get("payload")
     payload = payload if isinstance(payload, dict) else {}
-    if event.get("event_type") == "thread.message":
-        content = payload.get("message")
-        content = content if isinstance(content, str) else ""
-        clipped = _clip_json_encoded_text(content, CONVERSATION_MESSAGE_BYTES)
-        return {
+    if event["event_type"] in {"thread.message", "thread.notice"}:
+        result: dict[str, Any] = {
             "event_id": event["event_id"],
             "timestamp": event["timestamp"],
-            "type": "message",
-            "role": "user" if payload.get("source") == "user" else "assistant",
-            "content": clipped,
-            "truncated": clipped != content,
+            **_history_identity(event["event_type"], payload.get("source"), payload.get("notice")),
+            "truncated": False,
         }
-    if event.get("event_type") == "thread.context_added":
-        content = payload.get("message")
-        content = content if isinstance(content, str) else ""
-        clipped = _clip_json_encoded_text(content, CONVERSATION_MESSAGE_BYTES)
-        context: dict[str, Any] = {
-            "event_id": event["event_id"],
-            "timestamp": event["timestamp"],
-            "type": "context",
-            "content": clipped,
-            "truncated": clipped != content,
-        }
-        # Preserve absent versus empty: old notices and history handoffs do
-        # not record page ids; an empty list records recall returning no pages.
+        if event["event_type"] == "thread.message" or result["notice"]["kind"] in INPUT_KINDS:
+            content = payload.get("message", "")
+            result["content"] = _clip_json_encoded_text(content, CONVERSATION_MESSAGE_BYTES)
+            result["truncated"] = result["content"] != content
+        if not include_details or event["event_type"] == "thread.message":
+            return result
+        # An empty array records zero recalled pages; absence applies to other kinds.
         page_ids = payload.get("memory_page_ids")
         if isinstance(page_ids, list):
             bounded_ids = [
@@ -923,19 +892,18 @@ def _conversation_event(event: dict[str, Any]) -> dict[str, Any]:
                 if isinstance(page_id, str)
                 and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,63}", page_id)
             ]
-            context["memory_page_ids"] = bounded_ids
-            context["truncated"] = context["truncated"] or bounded_ids != page_ids
-        details = payload.get("memory_recall_details")
+            result["memory_page_ids"] = bounded_ids
+            result["truncated"] |= bounded_ids != page_ids
+        for field, budget in (("memory_recall_details", 14000), ("historical_context", 24 * 1024)):
+            value = payload.get(field)
+            if isinstance(value, str):
+                result[field] = _clip_json_encoded_text(value, budget)
+                result["truncated"] |= result[field] != value
+        details = payload["notice"].get("details")
         if isinstance(details, str):
-            bounded_details = _clip_json_encoded_text(details, 14000)
-            context["memory_recall_details"] = bounded_details
-            context["truncated"] = context["truncated"] or details != bounded_details
-        history = payload.get("historical_context")
-        if isinstance(history, str):
-            bounded_history = _clip_json_encoded_text(history, 24 * 1024)
-            context["historical_context"] = bounded_history
-            context["truncated"] = context["truncated"] or history != bounded_history
-        return context
+            result["notice"]["details"] = _clip_json_encoded_text(details, 20_000)
+            result["truncated"] |= result["notice"]["details"] != details
+        return result
     activity = payload.get("activity")
     activity = activity if isinstance(activity, dict) else {}
     summary: dict[str, Any] = {}

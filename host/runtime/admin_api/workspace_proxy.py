@@ -48,9 +48,10 @@ class _UnixHTTPConnection(http.client.HTTPConnection):
         self.sock = sock
 
 
-def send_message(thread_id: str, message: str) -> dict[str, Any]:
+def send_message(thread_id: str, message: str, notice: dict[str, str]) -> dict[str, Any]:
     """Deliver a Kern notice through Workspace's ordinary destination checks."""
-    return _proxy("POST", f"/messages/{thread_id}", {}, {"message": message})
+    body = {"message": message, "kern_notice": notice}
+    return _proxy("POST", f"/messages/{thread_id}", {}, body)
 
 
 def recall_memory(

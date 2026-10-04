@@ -99,7 +99,7 @@ CONVERSATION_EVENT_TYPES = (
     "thread.activity",
     "thread.error",
     "thread.stopped",
-    "thread.context_added",
+    "thread.notice",
     "thread.memory_cleared",
 )
 MAX_PATH_DEPTH = 16

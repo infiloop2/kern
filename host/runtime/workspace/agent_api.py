@@ -26,7 +26,7 @@ from host.runtime.core.unix_socket_service import (
     UnixSocketServer,
     peer_uids,
 )
-from host.runtime.workspace import agent_messages, conversation_history, memory, schedules
+from host.runtime.workspace import agent_notices, agent_messages, conversation_history, memory, schedules
 from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.web_apps import backend as web_apps
 
@@ -90,11 +90,22 @@ def _require_resource_owner(method: str, path: str, caller: str | None) -> None:
 
 
 def dispatch_call(
+    method: Any, path: Any, body: Any, *, peer_thread_id: str | None = None,
+) -> dict[str, Any]:
+    try:
+        result = _dispatch_call(method, path, body, peer_thread_id=peer_thread_id)
+    except Exception as exc:
+        agent_notices.record(peer_thread_id, method, path, body, result=None, error=exc)
+        raise
+    agent_notices.record(peer_thread_id, method, path, body, result=result, error=None)
+    return result
+
+
+def _dispatch_call(
     method: Any,
     path: Any,
     body: Any,
-    *,
-    peer_thread_id: str | None = None,
+    peer_thread_id: str | None,
 ) -> dict[str, Any]:
     if not isinstance(method, str) or method.upper() not in ALLOWED_METHODS:
         raise ValueError(f"method must be one of {', '.join(sorted(ALLOWED_METHODS))}")

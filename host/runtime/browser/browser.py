@@ -34,9 +34,10 @@ def permitted_url(url: str) -> bool:
 
 class Browser:
     """Temporary Chromium with private authentication snapshots; no agent cookie access."""
-    def __init__(self, storage_state: dict[str, Any] | None, site: str, settings: dict[str, Any]) -> None:
+    def __init__(self, storage_state: dict[str, Any] | None, site: str, settings: dict[str, Any], *, block_media: bool = False) -> None:
         from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
         self.site = site
+        self.block_media = block_media
         self.reported_failures: set[tuple[str, str, str]] = set()
         if settings.get("error"):
             raise BrowserError(settings["error"])
@@ -90,14 +91,27 @@ class Browser:
 
     def route_request(self, route: Any) -> None:
         if permitted_url(route.request.url):
-            route.fallback()
+            if self.omit_resource(route.request):
+                route.abort()
+            else:
+                route.fallback()
         else:
             self.record_resource_failure(route.request, "Blocked by Browser URL policy")
             route.abort()
 
+    def omit_resource(self, request: Any) -> bool:
+        # X also fetches video playlists/segments via fetch/XHR. Keep scripts
+        # on abs.twimg.com: they power the composer and are not optional media.
+        return self.block_media and (
+            request.resource_type in {"image", "media"}
+            or urlsplit(request.url).hostname == "video.twimg.com"
+        )
+
     def record_failed_request(self, request: Any) -> None:
         if not permitted_url(request.url):
             return  # The routing policy already reported this intentional abort.
+        if self.omit_resource(request):
+            return  # Intentional bandwidth savings, including video fetch/XHR.
         # Raw failures can contain credentials or URL paths. Keep only Chromium's code.
         match = re.search(r"net::ERR_[A-Z_]+", request.failure or "")
         self.record_resource_failure(request, match.group(0) if match else "Request failed")

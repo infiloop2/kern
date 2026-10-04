@@ -1,6 +1,9 @@
 """All four agent categories on a map, weighted links, and actionable attention."""
 from __future__ import annotations
 
+import math
+import re
+
 
 def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     from playwright.sync_api import expect
@@ -13,6 +16,17 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
         with page.expect_response(lambda response: response.url.endswith('/v1/swarm')
                                   and response.status == 200 and response.json() == payload):
             refresh()
+
+    def settle():
+        # Camera glides and re-layouts are CSS transitions; wait for them to end.
+        page.evaluate('''() => Promise.allSettled(document.querySelector('#swarm-canvas')
+          .getAnimations({subtree: true}).filter(a => a instanceof CSSTransition).map(a => a.finished))''')
+
+    def tap(locator):
+        # Agents may sit beyond the camera; keyboard focus glides them into view.
+        locator.focus()
+        settle()
+        locator.click()
 
     errors = []
     page.on('pageerror', lambda error: errors.append(str(error)))
@@ -30,8 +44,10 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(page.locator('.kind-standing')).to_have_count(25)
     expect(page.locator('.kind-spawned')).to_have_count(10)
     expect(page.locator('.kind-on-demand')).to_have_count(35)
+    # Every agent type is a visually distinct robot, also shown in the legend.
     for kind, count in [('app', 30), ('standing', 25), ('spawned', 10), ('on-demand', 35)]:
-        expect(page.locator(f'.kind-{kind} .critter-type-icon.type-{kind}')).to_have_count(count)
+        expect(page.locator(f'.swarm-card.kind-{kind} .swarm-bot.bot-{kind}')).to_have_count(count)
+        expect(page.locator(f'.swarm-legend .bot-{kind}')).to_have_count(1)
     expect(page.locator('.swarm-edge')).to_have_count(0)
     expect(page.locator('#swarm-error')).to_contain_text('Could not refresh communication counts')
     page.unroute('**/v1/swarm/interactions')
@@ -47,10 +63,19 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     page.locator('#swarm-arrange').click()
     positions = page.locator('.swarm-card').evaluate_all(
         'nodes => Object.fromEntries(nodes.map(e => [e.dataset.threadId, [parseFloat(e.style.left), parseFloat(e.style.top)]]))')
-    assert all(point[1] > positions['operator'][1] for key, point in positions.items() if key not in {'operator', 'kern-host'})
-    assert positions['operator'][1] == positions['kern-host'][1] < positions['app-1'][1]
-    assert positions['kern-host'][0] >= positions['operator'][0] + 220
-    assert positions['app-1'][1] < positions['app-2'][1] < positions['app-30'][1]
+
+    def orbit(points, thread_id):
+        return math.dist(points[thread_id], points['operator'])
+
+    # You sit at the centre; involvement decides how close each agent orbits.
+    assert positions['operator'][1] == positions['kern-host'][1]
+    assert positions['kern-host'][0] >= positions['operator'][0] + 160
+    assert orbit(positions, 'app-1') < orbit(positions, 'app-2') < orbit(positions, 'app-30')
+    sizes = page.locator('.swarm-card').evaluate_all(
+        "nodes => Object.fromEntries(nodes.map(e => [e.dataset.threadId, parseFloat(e.style.getPropertyValue('--orb'))]))")
+    assert sizes['app-1'] > sizes['app-2'] > sizes['app-30']
+    expect(page.locator('.swarm-ring')).to_have_count(3)
+    expect(page.locator('.swarm-ring-label')).to_have_text(['CORE', 'ACTIVE', 'QUIET'])
     original_counts = page.request.get(url + 'v1/swarm/interactions', headers={'X-Kern-Csrf': '1'}).json()
     changed_counts = {**original_counts, 'metrics': {**original_counts['metrics'],
         'app-30': {'operator_messages': 10000, 'agent_peers': 100, 'total_tokens': 10000000, 'tokens_partial': False}}}
@@ -59,7 +84,9 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     assert positions == page.locator('.swarm-card').evaluate_all(
         'nodes => Object.fromEntries(nodes.map(e => [e.dataset.threadId, [parseFloat(e.style.left), parseFloat(e.style.top)]]))')
     page.locator('#swarm-arrange').click()
-    assert page.locator('[data-thread-id="app-30"]').evaluate('e => parseFloat(e.style.top)') < page.locator('[data-thread-id="app-1"]').evaluate('e => parseFloat(e.style.top)')
+    rearranged = page.locator('.swarm-card').evaluate_all(
+        'nodes => Object.fromEntries(nodes.map(e => [e.dataset.threadId, [parseFloat(e.style.left), parseFloat(e.style.top)]]))')
+    assert orbit(rearranged, 'app-30') < orbit(rearranged, 'app-1')
     page.unroute('**/v1/swarm/interactions')
     refresh()
     page.locator('#swarm-arrange').click()
@@ -97,27 +124,100 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     assert panel.evaluate('e => { const r=e.getBoundingClientRect(); return r.x === 0 && r.y === 0 && r.width === innerWidth && r.height === innerHeight; }')
     assert page.locator('#sidebar').evaluate('e => e.inert')
     assert page.locator('#tab-swarm').evaluate('e => e.previousElementSibling.id === "tab-approvals"')
+    viewport = page.locator('#swarm-viewport')
+    canvas = page.locator('#swarm-canvas')
+
+    def camera():
+        return canvas.evaluate('e => { const m = new DOMMatrix(e.style.transform); return [m.e, m.f, m.a]; }')
+
+    def cards_inside():
+        return page.evaluate('''() => {
+          const view = document.querySelector('#swarm-viewport').getBoundingClientRect();
+          return [...document.querySelectorAll('.swarm-avatar')].filter(e => {
+            const r = e.getBoundingClientRect();
+            return r.left >= view.left - 1 && r.top >= view.top - 1 && r.right <= view.right + 1 && r.bottom <= view.bottom + 1;
+          }).length;
+        }''')
+
+    def expect_cards_inside(count):
+        # Camera moves glide briefly; settle, then poll for the final frame.
+        settle()
+        for _ in range(30):
+            if cards_inside() == count:
+                return
+            page.wait_for_timeout(100)
+        assert cards_inside() == count, (cards_inside(), camera())
     # Fit includes all nodes, including idle and disconnected ones.
     page.locator('#swarm-fit').click()
-    assert page.locator('#swarm-stage').evaluate('e => e.clientWidth <= e.parentElement.clientWidth && e.clientHeight <= e.parentElement.clientHeight')
+    expect(page.locator('#swarm-zoom-level')).not_to_have_text('100%')
+    expect_cards_inside(102)
     page.locator('#swarm-actual').click()
-    # Drag background in both axes and release outside the map.
-    viewport = page.locator('#swarm-viewport')
-    viewport.evaluate('e => e.scrollTo(200, 200)')
+    expect(page.locator('#swarm-zoom-level')).to_have_text('100%')
     box = viewport.bounding_box()
-    page.mouse.move(box['x'] + 80, box['y'] + 80)
-    page.mouse.down()
-    expect(viewport).to_have_class('is-panning')
-    page.mouse.move(box['x'] + 20, box['y'] + 20, steps=4)
-    expect(viewport).to_have_js_property('scrollLeft', 260)
-    expect(viewport).to_have_js_property('scrollTop', 260)
-    page.mouse.move(box['x'] - 10, box['y'] + 20)
-    page.mouse.up()
-    expect(viewport).not_to_have_class('is-panning')
-    after_drag = viewport.evaluate('e => [e.scrollLeft, e.scrollTop]')
-    page.mouse.move(box['x'] + 100, box['y'] + 100)
-    assert viewport.evaluate('e => [e.scrollLeft, e.scrollTop]') == after_drag
-    page.locator('.kind-operator').click()
+    if not mobile:
+        # Drag in both axes and release outside the map. The camera is
+        # unbounded: dragging well past the swarm leaves open space in view.
+        start = camera()
+        page.mouse.move(box['x'] + 80, box['y'] + 80)
+        page.mouse.down()
+        page.mouse.move(box['x'] + 20, box['y'] + 20, steps=4)
+        expect(viewport).to_have_class('is-panning')
+        assert camera()[:2] == [start[0] - 60, start[1] - 60], (start, camera())
+        page.mouse.move(box['x'] - 10, box['y'] + 20)
+        page.mouse.up()
+        expect(viewport).not_to_have_class('is-panning')
+        after_drag = camera()
+        page.mouse.move(box['x'] + 100, box['y'] + 100)
+        assert camera() == after_drag
+        for _ in range(3):
+            page.mouse.move(box['x'] + 40, box['y'] + 40)
+            page.mouse.down()
+            page.mouse.move(box['x'] + box['width'] - 40, box['y'] + box['height'] - 40, steps=6)
+            page.mouse.up()
+        expect_cards_inside(0)
+        # Wheel pans, Ctrl + wheel zooms around the pointer, 0 fits everything.
+        before = camera()
+        page.mouse.move(box['x'] + 200, box['y'] + 200)
+        page.mouse.wheel(0, 300)
+        assert camera()[1] == before[1] - 300
+        page.keyboard.down('Control')
+        page.mouse.wheel(0, -200)
+        page.keyboard.up('Control')
+        assert camera()[2] > before[2]
+        viewport.focus()
+        page.keyboard.press('0')
+        expect_cards_inside(102)
+        # A press that becomes a drag on an agent pans instead of selecting it.
+        operator_box = page.locator('.kind-operator .swarm-avatar').bounding_box()
+        page.mouse.move(operator_box['x'] + 10, operator_box['y'] + 10)
+        page.mouse.down()
+        # Pressing an agent keeps it in place (no global button-press transform).
+        assert page.locator('.kind-operator .swarm-avatar').bounding_box() == operator_box
+        page.mouse.move(operator_box['x'] + 90, operator_box['y'] + 60, steps=5)
+        page.mouse.up()
+        expect(page.locator('#swarm-detail')).not_to_have_class('has-selection')
+        # A press released outside the map before it travelled far enough to
+        # pan must not leave a stale pointer that turns the next drag into a pinch.
+        page.mouse.move(box['x'] + 3, box['y'] + 200)
+        page.mouse.down()
+        page.mouse.move(box['x'] - 40, box['y'] + 200)
+        page.mouse.up()
+        start = camera()
+        page.mouse.move(box['x'] + 300, box['y'] + 300)
+        page.mouse.down()
+        page.mouse.move(box['x'] + 340, box['y'] + 330, steps=4)
+        page.mouse.up()
+        assert camera() == [start[0] + 40, start[1] + 30, start[2]]
+        # Pressing open canvas space (not just the grid) focuses the map for keys.
+        page.locator('#swarm-close').focus()
+        ring = page.locator('.swarm-ring').first
+        for name in ('pointerdown', 'pointerup'):
+            ring.dispatch_event(name, {'pointerId': 7, 'isPrimary': True, 'button': 0, 'pointerType': 'mouse', 'bubbles': True})
+        expect(viewport).to_be_focused()
+    else:
+        # One finger drags the map; native page scroll stays outside it.
+        assert viewport.evaluate("e => getComputedStyle(e).touchAction") == 'none'
+    tap(page.locator('.kind-operator'))
     expect(page.locator('#swarm-detail')).to_contain_text('→ Release notes · 24')
     expect(page.locator('#swarm-detail')).to_contain_text('Automated triggers and agent replies are excluded')
     expect(page.locator('#swarm-detail button').filter(has_text='Open conversation')).to_have_count(0)
@@ -125,7 +225,7 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     page.get_by_role('button', name='Close agent details', exact=True).click()
     # Host connections show automated deliveries to different agent categories.
     host = page.locator('.kind-host')
-    host.click()
+    tap(host)
     expect(host.locator('.swarm-agent-name')).to_have_text('Kern host')
     expect(host.locator('.host-server')).to_have_count(1)
     expect(page.locator('#swarm-detail')).to_contain_text('→ Standing agent 31 · 14')
@@ -142,7 +242,7 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(first.locator('.swarm-type')).to_have_text('App')
     expect(first.locator('.swarm-agent-description')).to_have_text('Keep the project moving')
     expect(first).not_to_contain_text('Prepare the next release')
-    first.click()
+    tap(first)
     expect(page.locator('#swarm-detail')).to_contain_text('Keep the project moving')
     expect(page.locator('#swarm-detail')).to_contain_text('Direct operator messages: 24')
     expect(page.locator('#swarm-detail')).to_contain_text('Other agents interacted with: 2')
@@ -151,20 +251,23 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(page.locator('#swarm-detail')).to_contain_text('← Kern host · 3')
     expect(first).to_have_css('background-color', 'rgba(0, 0, 0, 0)')
     expect(first.locator('.swarm-avatar svg')).to_have_count(1)
-    expect(first.locator('.critter-laptop')).to_have_count(1)
+    expect(first.locator('.bot-busy')).to_have_count(1)
+    # Selecting an agent fades agents outside its neighbourhood.
+    expect(page.locator('[data-thread-id="app-2"]')).not_to_have_class(re.compile('is-faded'))
+    expect(page.locator('[data-thread-id="app-30"]')).to_have_class(re.compile('is-faded'))
     # Missing token telemetry is not displayed as a measured zero.
     page.get_by_role('button', name='Close agent details', exact=True).click()
-    page.locator('[data-thread-id="thread-66"]').click()
+    tap(page.locator('[data-thread-id="thread-66"]'))
     expect(page.locator('#swarm-detail')).to_contain_text('Tokens processed: Unavailable')
     page.get_by_role('button', name='Close agent details', exact=True).click()
-    page.locator('[data-thread-id="app-2"]').click()
+    tap(page.locator('[data-thread-id="app-2"]'))
     expect(page.locator('#swarm-detail')).to_contain_text('Tokens processed: 500,000 (partial)')
     page.get_by_role('button', name='Close agent details', exact=True).click()
-    first.click()
+    tap(first)
     # Directional counts can be inspected from the accessible detail list.
     page.locator('.swarm-connection').filter(has_text='→ Billing desk').click()
     expect(page.locator('#swarm-detail')).to_contain_text('18 accepted messages')
-    first.click()
+    tap(first)
     first.focus()
     page.evaluate('window.__swarmCard = document.activeElement')
     refresh()
@@ -179,10 +282,19 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     converted = page.locator('[data-thread-id="thread-66"]')
     apply_snapshot(reparented)
     expect(converted.locator('.swarm-type')).to_have_text('Spawned')
-    expect(converted.locator('.critter-type-icon.type-spawned')).to_have_count(1)
-    expect(converted.locator('.critter-type-icon.type-on-demand')).to_have_count(0)
+    expect(converted.locator('.swarm-bot.bot-spawned')).to_have_count(1)
+    expect(converted.locator('.swarm-bot.bot-on-demand')).to_have_count(0)
     apply_snapshot(original)
-    expect(converted.locator('.critter-type-icon.type-on-demand')).to_have_count(1)
+    expect(converted.locator('.swarm-bot.bot-on-demand')).to_have_count(1)
+    # A selected agent that leaves the roster clears its neighbourhood focus.
+    tap(converted)
+    expect(page.locator('.swarm-card.is-faded').first).to_be_attached()
+    apply_snapshot({**original, 'agents': [agent for agent in original['agents'] if agent['thread_id'] != 'thread-66']})
+    expect(converted).to_have_count(0)
+    expect(page.locator('.swarm-card.is-faded')).to_have_count(0)
+    apply_snapshot(original)
+    expect(converted).to_have_count(1)
+    tap(first)
     # Highlighting preserves every agent on the map.
     page.locator('[data-swarm-filter="needs-human"]').click()
     expect(page.locator('.swarm-card:not(.is-dimmed)')).to_have_count(5)
@@ -207,9 +319,10 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     apply_snapshot(payload)
     expect(first.locator('.swarm-state')).to_have_text('Error')
     expect(first.locator('.swarm-approval')).to_have_text('1 approval')
-    expect(first.locator('.critter-type-icon.type-app')).to_have_count(1)
+    expect(first.locator('.swarm-bot.bot-app')).to_have_count(1)
+    expect(first.locator('.badge-failed')).to_have_count(1)
     assert position == first.evaluate('e => [e.style.left, e.style.top]')
-    first.click()
+    tap(first)
     expect(page.locator('#swarm-detail')).to_contain_text('<img src=x onerror=alert(1)>')
     expect(page.locator('#swarm-detail img')).to_have_count(0)
     expect(page.locator('#swarm-attention-count')).to_have_text('9')
@@ -228,6 +341,12 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
                             'pending_approval_count': 0})
     apply_snapshot(large)
     expect(page.locator('.swarm-card')).to_have_count(1003)
+    # Fit all keeps its promise for catalogs that need less than the usual 8% minimum.
+    page.evaluate("() => { const v = document.querySelector('#swarm-viewport'); v.style.height = '200px'; }")
+    page.locator('#swarm-fit').click()
+    expect_cards_inside(1003)
+    assert camera()[2] < .08
+    page.evaluate("() => { document.querySelector('#swarm-viewport').style.height = ''; }")
     expect(page.locator('.kind-spawned .swarm-agent-description').first).to_have_text('Delegated by Team lead')
     page.evaluate("""() => {
       window.__swarmContentMutations = 0;
@@ -250,7 +369,8 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     page.locator('#swarm-search').fill('')
     page.unroute('**/v1/swarm')
     page.emulate_media(reduced_motion='reduce')
-    assert page.locator('#swarm-canvas').evaluate('e => e.getAnimations({subtree:true}).length') == 0
+    # Halos, pulses and in-flight layout transitions all stop under reduced motion.
+    page.wait_for_function("() => document.querySelector('#swarm-canvas').getAnimations({subtree: true}).length === 0")
     page.keyboard.press('Escape')
     expect(page.locator('#panel-home')).to_be_visible()
     assert not page.locator('#sidebar').evaluate('e => e.inert')

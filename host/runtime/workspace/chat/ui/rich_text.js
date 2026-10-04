@@ -448,7 +448,32 @@
       </details>`;
   }
 
+  // Both transcript surfaces use the same host-authored notice contract.
+  // Text stays literal in details, including peer messages and tool input.
+  function eventNotice(event) {
+    const payload = event.payload || {};
+    const notice = payload.notice;
+    if (notice && notice.kind !== "operator" && typeof notice.summary === "string") {
+      return { summary: notice.summary, details: typeof notice.details === "string"
+        ? notice.details : payload.historical_context || payload.memory_recall_details
+          || (Array.isArray(payload.memory_page_ids) ? payload.memory_page_ids.join("\n") : "")
+          || (payload.source === "user" ? payload.message : "") || "" };
+    }
+    return null;
+  }
+
+  function renderNotice(notice, panelId, open = false) {
+    const summary = escapeHtml(notice.summary);
+    if (!notice.details) return summary;
+    return `<div class="memory-notice${open ? " memory-notice-open" : ""}">
+      <button type="button" aria-expanded="${open}" aria-controls="${escapeHtml(panelId)}"${open ? ` aria-describedby="${escapeHtml(panelId)}"` : ""}>${summary}</button>
+      <div class="memory-pages" id="${escapeHtml(panelId)}" role="tooltip">${escapeHtml(notice.details)}</div>
+    </div>`;
+  }
+
   const api = {
+    eventNotice,
+    renderNotice,
     renderActivity,
     escapeHtml,
     safeNavigationHref,

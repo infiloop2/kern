@@ -1,25 +1,12 @@
-"""Send one ordinary thread message after an operator decides an approval."""
+"""Deliver an approval outcome with its typed transcript notice."""
 
 from typing import Any
 
-from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX
+from host.agent_messages import approval_message, approval_notice
 from host.runtime.admin_api import workspace_proxy
 from host.runtime.core import host_errors
 
 TERMINAL_STATUSES = frozenset({"executed", "failed", "denied"})
-
-
-def outcome_message(record: dict[str, Any]) -> str:
-    outcome = {
-        "executed": "was approved and executed successfully.",
-        "failed": "was approved, but execution failed.",
-        "denied": "was denied.",
-    }[record["status"]]
-    message = AUTOMATED_TRIGGER_PREFIX + f"Approval ID: {record['approval_id']} {outcome}"
-    if record["status"] in {"executed", "failed"} and record["result"]:
-        label = "Error" if record["status"] == "failed" else "Result"
-        message += f"\n\n{label}: {record['result'][:4000]}"
-    return message
 
 
 def notify(record: dict[str, Any]) -> None:
@@ -27,7 +14,7 @@ def notify(record: dict[str, Any]) -> None:
     if not thread_id or record.get("status") not in TERMINAL_STATUSES:
         return
     try:
-        workspace_proxy.send_message(thread_id, outcome_message(record))
+        workspace_proxy.send_message(thread_id, approval_message(record), notice=approval_notice(record))
     except Exception as exc:
         # Notification failure must not obscure the completed approval or
         # invite re-execution. Same one-shot semantics as agent messages.
@@ -44,6 +31,7 @@ def notify_push(push: dict[str, Any]) -> None:
     notify({
         "origin_thread_id": push.get("origin_thread_id"),
         "approval_id": f"push-{push['id']}",
+        "summary": "Git push",
         "status": status,
         "result": push.get("detail") or ("The push failed." if status == "failed" else ""),
     })

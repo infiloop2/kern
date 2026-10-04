@@ -13,7 +13,7 @@ from browser_fakes import MemoryStore
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser_network.config import LOCATIONS, Settings
 from host.runtime.browser_network.relay import Network, TunnelHandler, TunnelServer
-from host.runtime.browser_network.transport import ConnectionFailure, SessionEnded, connect_proxy, proxy_details, target
+from host.runtime.browser_network.transport import ConnectionFailure, RetryableConnectFailure, connect_proxy, proxy_details, target
 from host.runtime.browser.accounts import Accounts
 from host.runtime.browser.service import authorized
 
@@ -134,12 +134,12 @@ class BrowserNetworkTests(unittest.TestCase):
             direct.assert_not_called()
             self.assertFalse(self.network.connections)
 
-    def test_ended_session_renews_once_persists_and_keeps_active_tunnels(self):
+    def test_connect_failure_renews_once_persists_and_keeps_active_tunnels(self):
         self.network.dispatch("save", DECODO)
         original = self.network.settings.value.copy()
         active, upstream = Mock(), Mock()
         self.network.connections.add(active)
-        with patch("host.runtime.browser_network.relay.connect_proxy", side_effect=[SessionEnded("ended"), upstream]) as proxy:
+        with patch("host.runtime.browser_network.relay.connect_proxy", side_effect=[RetryableConnectFailure("gateway failed"), upstream]) as proxy:
             self.assertIs(self.network.dial("x.com:443"), upstream)
         self.assertEqual(proxy.call_count, 2)
         self.assertNotEqual(proxy.call_args_list[0].args[2], proxy.call_args_list[1].args[2])
@@ -152,8 +152,8 @@ class BrowserNetworkTests(unittest.TestCase):
 
     def test_second_session_failure_stops_without_fallback(self):
         self.network.dispatch("save", DECODO)
-        with patch("host.runtime.browser_network.relay.connect_proxy", side_effect=SessionEnded("ended")) as proxy, patch("socket.create_connection") as direct:
-            with self.assertRaises(SessionEnded):
+        with patch("host.runtime.browser_network.relay.connect_proxy", side_effect=RetryableConnectFailure("gateway failed")) as proxy, patch("socket.create_connection") as direct:
+            with self.assertRaises(RetryableConnectFailure):
                 self.network.dial("x.com:443")
             self.assertEqual(proxy.call_count, 2)
             direct.assert_not_called()
@@ -162,13 +162,13 @@ class BrowserNetworkTests(unittest.TestCase):
     def test_failed_renewal_persistence_does_not_dial_unstored_session(self):
         self.network.dispatch("save", DECODO)
         original = self.network.settings.value.copy()
-        with patch.object(self.store, "save_settings", side_effect=OSError("unavailable")), patch("host.runtime.browser_network.relay.connect_proxy", side_effect=SessionEnded("ended")) as proxy:
+        with patch.object(self.store, "save_settings", side_effect=OSError("unavailable")), patch("host.runtime.browser_network.relay.connect_proxy", side_effect=RetryableConnectFailure("gateway failed")) as proxy:
             with self.assertRaises(OSError):
                 self.network.dial("x.com:443")
             proxy.assert_called_once()
         self.assertEqual(self.network.settings.value, original)
 
-    def test_concurrent_ended_sessions_share_renewal(self):
+    def test_concurrent_connect_failures_share_renewal(self):
         from concurrent.futures import ThreadPoolExecutor
         self.network.dispatch("save", DECODO)
         original = self.network.settings.proxy_username()
@@ -176,7 +176,7 @@ class BrowserNetworkTests(unittest.TestCase):
         def connect(endpoint, host, credentials):
             if credentials[0] == original:
                 barrier.wait(timeout=3)
-                raise SessionEnded("ended")
+                raise RetryableConnectFailure("gateway failed")
             return Mock()
         with patch.object(self.store, "save_settings", wraps=self.store.save_settings) as save, patch("host.runtime.browser_network.relay.connect_proxy", side_effect=connect) as proxy, ThreadPoolExecutor(max_workers=2) as pool:
             futures = [pool.submit(self.network.dial, "x.com:443") for _ in range(2)]
@@ -191,32 +191,42 @@ class BrowserNetworkTests(unittest.TestCase):
         self.network.dispatch("save", DECODO)
         def connect(*args):
             self.network.dispatch("save", {**DECODO, "location": "london"})
-            raise SessionEnded("ended")
+            raise RetryableConnectFailure("gateway failed")
         with patch("host.runtime.browser_network.relay.connect_proxy", side_effect=connect) as proxy:
             with self.assertRaisesRegex(BrowserError, "changed during connection"):
                 self.network.dial("x.com:443")
             proxy.assert_called_once()
         self.assertEqual(self.network.settings.value["location"], "london")
 
-    def test_only_explicit_complete_session_rejection_is_retryable(self):
+    def test_only_complete_gateway_server_errors_are_retryable(self):
         cases = [
             (502, "Bad gateway. The session has ended.", True, True),
             (502, "Bad gateway. The session has failed. Please start a new session.", True, True),
-            (502, "Bad gateway. Routing failed.", True, False),
+            (502, "Bad gateway. Routing failed.", True, True),
+            (522, "Timeout. The request took too long to complete and has timed out. Please try sending it again.", True, True),
+            *((status, None, True, True) for status in (500, 503, 504, 522, 599)),
+            *((status, "Access denied.", True, False) for status in (400, 401, 402, 403, 429)),
+            (407, "Access denied. You've reached your current traffic limit.", True, False),
             (407, "The session has ended.", True, False),
             (502, "The session has ended.", False, False),
+            (522, "Timeout.", False, False),
+            (200, "Timeout.", False, False),
         ]
         for status, reason, complete, retryable in cases:
             with self.subTest(status=status, reason=reason, complete=complete):
                 client, peer = socket.socketpair()
                 with peer:
-                    peer.sendall(f"HTTP/1.1 {status} Error\r\nx-error-message: {reason}\r\n".encode() + (b"\r\n" if complete else b""))
+                    response = f"HTTP/1.1 {status} Error\r\n"
+                    if reason is not None:
+                        response += f"x-error-message: {reason}\r\n"
+                    peer.sendall(response.encode() + (b"\r\n" if complete else b""))
                     peer.shutdown(socket.SHUT_WR)
                     with patch("socket.create_connection", return_value=client), patch("host.runtime.browser_network.transport.ssl.create_default_context") as tls:
                         tls.return_value.wrap_socket.return_value = client
                         with self.assertRaises(ConnectionFailure) as caught:
                             connect_proxy(("gate.decodo.com", 7000), "x.com", ("example", "session"))
-                    self.assertEqual(isinstance(caught.exception, SessionEnded), retryable)
+                    self.assertEqual(isinstance(caught.exception, RetryableConnectFailure), retryable)
+                    self.assertIn(f"HTTP {status}", str(caught.exception))
                     self.assertEqual(client.fileno(), -1)
 
     def test_test_uses_local_relay_without_credentials_and_has_total_deadline(self):

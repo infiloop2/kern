@@ -501,13 +501,13 @@ export const HOST_INFERENCE_INTEGRATIONS = {
     ],
     capabilities: [
       { name: "Auto-approval", description: "Reviews pending tool requests against policies you save in Approvals. Clear matches are approved automatically; other requests stay pending with an explanation." },
-      { name: "Swarm task titles", description: "Names each new agent task." },
+      { name: "Swarm task titles", description: "Names each new on-demand agent task and refreshes its title when ongoing work changes." },
     ],
     dataSummary: {
       items: [
         {
           title: "What leaves this host",
-          description: "All data in Kern can leave this host for OpenAI when Host AI features use this connection. Task titles use bounded text containing the current and recent user messages. Auto-approval sends your policy and the exact request, including action, account, summary and payload, through the shared credential redactor.",
+          description: "All data in Kern can leave this host for OpenAI when Host AI features use this connection. Task titles use bounded user and assistant messages, peer messages, scheduled requests and approval-outcome summaries. Auto-approval sends your policy and the exact request, including action, account, summary and payload, through the shared credential redactor.",
           links: [
             { label: "OpenAI API data controls", url: "https://platform.openai.com/docs/guides/your-data" },
           ],
@@ -557,7 +557,7 @@ export const HOST_INFERENCE_INTEGRATIONS = {
     ],
     capabilities: [
       { name: "Approval risk annotations", description: "Scores likely financial commitments, sensitive data, and summary mismatches on new tool approval requests. The operator still makes every decision." },
-      { name: "Memory recall reranking", description: "Ranks candidate memory descriptions on every recall when Jev is enabled. If Jev is disabled or reranking fails, the local ranking is kept." },
+      { name: "Memory recall reranking", description: "Ranks candidate memory descriptions at turn start and during ongoing work when Jev is enabled. If Jev is disabled or reranking fails, the local ranking is kept." },
     ],
     dataSummary: {
       items: [
@@ -568,7 +568,7 @@ export const HOST_INFERENCE_INTEGRATIONS = {
         },
         {
           title: "Memory recall reranking data",
-          description: "When TypeSafe Jev is enabled, Kern sends a task query containing the current and recent user messages (up to 1,000 UTF-8 bytes total), plus up to 20 candidate descriptions with local ids. Page contents are not sent.",
+          description: "When TypeSafe Jev is enabled, Kern sends a task query containing bounded user and assistant messages, peer messages, scheduled requests and approval-outcome summaries (up to 1,500 UTF-8 bytes total), plus up to 20 candidate descriptions with local ids. Page contents are not sent.",
           links: [],
         },
         {

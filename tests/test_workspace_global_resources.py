@@ -57,10 +57,13 @@ def thread_events(thread_id: str) -> list[tuple[Any, ...]]:
 
 class MemoryRecallQueryTests(unittest.TestCase):
     def test_recall_preserves_prose_with_a_utf8_byte_budget(self) -> None:
-        from host.memory_recall import task_query
-        self.assertEqual(task_query("  Can you please check token usage? "), "Can you please check token usage?")
-        self.assertLessEqual(len(task_query("界" * 400).encode()), 1000)
-        self.assertLessEqual(len(task_query("ΐ" * 500).encode()), 1000)
+        from host.memory_recall import conversation_query
+        def query(text):
+            return conversation_query([{
+                "event_type": "thread.message", "payload": {"source": "user", "message": text}}])
+        self.assertEqual(query("  Can you please check token usage? "), "User: Can you please check token usage?")
+        self.assertLessEqual(len(query("界" * 400).encode()), 1000)
+        self.assertLessEqual(len(query("ΐ" * 500).encode()), 1000)
 
     def test_ordinary_search_still_rejects_queries_over_200_bytes(self) -> None:
         for search in (memory.search_pages, memory.search_swarm_pages):
@@ -417,7 +420,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         history = [{"event_type": "thread.message", "payload": {
             "source": "user", "message": "Generate an Aira video with native Grok audio",
         }}]
-        with patch.object(threads.state, "page_thread_events", return_value=history), \
+        with patch.object(threads.state, "recall_context_events", return_value=history), \
              patch.object(memory.embedding_client, "embed_texts", side_effect=memory.embedding_client.EmbeddingError("offline")):
             followup_query = threads._memory_task_query("thread-8", "how did you choose the voice?")
             followup = memory.recall_pages({"thread_id": "thread-8", "message": followup_query})
@@ -1581,6 +1584,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                     f"/v1/threads/{schedule['thread_id']}/messages",
                     {
                         "message": "This is an automated message from Kern.\n\n---\n\nSummarize open work.",
+                        "kern_notice": {"kind": "scheduled_trigger", "summary": f"Scheduled trigger for {schedule['name']}: Summarize open work."},
                         **SESSION,
                     },
                 )
@@ -2090,6 +2094,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                             "This is an automated message from Kern.\n\n---\n\n"
                             "/mnt/kern-agent/agent-home/scripts/backup.sh"
                         ),
+                        "kern_notice": {"kind": "scheduled_trigger", "summary": f"Scheduled trigger for {schedule['name']}: /mnt/kern-agent/agent-home/scripts/backup.sh"},
                         "agent_runtime": "script",
                         "model": "bash",
                         "effort": "fixed",

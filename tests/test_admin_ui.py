@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import test_admin_api as admin_api_tests
 
+from host.agent_messages import INPUT_KINDS, CONTEXT_KINDS
 from host.runtime.admin_api import service as admin_api
 from host.runtime.admin_api import threads as thread_api
 from host.runtime.admin_api import workspace_api as workspace_admin_api
@@ -299,7 +300,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("void Promise.all([refresh(), window.KernHost.refreshNavigation()])", send)
         self.assertIn(
             '["thread.message", "thread.activity", "thread.error", "thread.stopped",\n'
-            '      "thread.memory_cleared", "thread.context_added"].includes(event.event_type)',
+            '      "thread.memory_cleared", "thread.notice"].includes(event.event_type)',
             script,
         )
         # A clear made while scrolled up must bring its own confirmation into
@@ -1286,7 +1287,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 operator_sent_message=False,
             )
 
-        page.assert_called_once_with("thread-1", 2, 5, before=None)
+        page.assert_called_once_with("thread-1", 2, 5, notice_kinds=None, before=None, message_sources=None)
         payload = response["events"][0]["payload"]
         self.assertLessEqual(len(payload["message"].encode()), message_bytes)
         self.assertTrue(payload["message"].endswith("… (truncated)"))
@@ -1313,7 +1314,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 {"events": []},
             )
 
-        page.assert_called_once_with("thread-1", None, 5, before=42)
+        page.assert_called_once_with("thread-1", None, 5, notice_kinds=None, before=42, message_sources=None)
         with self.assertRaises(admin_api.ApiError) as error:
             admin_api.thread_route(
                 "GET",
@@ -1340,7 +1341,7 @@ class AdminUiStaticTests(unittest.TestCase):
                             "thread.message",
                             "thread.error",
                             "thread.stopped",
-                            "thread.context_added",
+                            "thread.notice",
                         ],
                     },
                     None,
@@ -1354,12 +1355,13 @@ class AdminUiStaticTests(unittest.TestCase):
             "thread-1",
             None,
             6,
+            notice_kinds=None, message_sources=None,
             before=None,
             event_types=(
                 "thread.message",
                 "thread.error",
                 "thread.stopped",
-                "thread.context_added",
+                "thread.notice",
             ),
         )
         with self.assertRaises(admin_api.ApiError) as error:
@@ -1514,6 +1516,8 @@ class AdminUiStaticTests(unittest.TestCase):
     def test_conversation_search_projects_bounded_public_matches_and_cursor(self) -> None:
         rows = [
             {
+                "event_type": "thread.message",
+                "notice": None,
                 "seq": 8,
                 "event_id": "event_8",
                 "timestamp": "2026-07-01T00:00:00Z",
@@ -1524,6 +1528,8 @@ class AdminUiStaticTests(unittest.TestCase):
                 "excerpt_truncated": True,
             },
             {
+                "event_type": "thread.message",
+                "notice": None,
                 "seq": 7,
                 "event_id": "event_7",
                 "timestamp": "2026-06-30T00:00:00Z",
@@ -1560,7 +1566,7 @@ class AdminUiStaticTests(unittest.TestCase):
             limit=admin_api.CONVERSATION_SEMANTIC_CANDIDATES + 1,
             before=None,
             max_seq=10**12,
-            exclude_automated_triggers=False,
+            notice_kinds=INPUT_KINDS,
         )
         self.assertEqual(response["matches"][0]["role"], "assistant")
         self.assertTrue(response["matches"][0]["excerpt_truncated"])
@@ -1575,6 +1581,8 @@ class AdminUiStaticTests(unittest.TestCase):
 
     def test_conversation_search_normalizes_filters_and_resumes_its_cursor(self) -> None:
         row = {
+            "event_type": "thread.message",
+            "notice": None,
             "seq": 8,
             "event_id": "event_8",
             "timestamp": "2026-07-01T00:00:00Z",
@@ -1615,7 +1623,7 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertEqual(first_call.kwargs["sources"], ("agent",))
         self.assertEqual(search.call_args_list[1].kwargs["before"], None)
 
-    def test_conversation_search_passes_automated_trigger_filter_before_ranking(self) -> None:
+    def test_conversation_search_filters_notice_kinds_before_ranking(self) -> None:
         with (
             patch.object(
                 admin_api.state, "search_thread_messages", return_value=[]
@@ -1630,53 +1638,20 @@ class AdminUiStaticTests(unittest.TestCase):
                 {
                     "query": "operator correction",
                     "roles": ["user"],
-                    "exclude_automated_triggers": True,
+                    "notice_kinds": [],
                 }
             )
 
-        self.assertTrue(
-            text_search.call_args.kwargs["exclude_automated_triggers"]
-        )
+        self.assertEqual(text_search.call_args.kwargs["notice_kinds"], ())
 
-    def test_legacy_rank_cursor_stays_on_plain_lexical_pagination(self) -> None:
-        row = {
-            "seq": 7,
-            "event_id": "event_7",
-            "timestamp": "2026-07-01T00:00:00Z",
-            "thread_id": "thread-1",
-            "source": "user",
-            "search_rank": 0.4,
-            "excerpt": "deployment detail",
-            "excerpt_truncated": False,
-        }
+    def test_old_untyped_search_cursor_requires_a_new_search(self) -> None:
+        import base64
         fingerprint = admin_api._conversation_search_fingerprint(
-            ["deployment"], None, None, None, ["user", "assistant"]
+            ["deployment"], None, None, None, ["user", "assistant"], INPUT_KINDS,
         )
-        legacy_cursor = admin_api._encode_conversation_search_cursor(
-            fingerprint,
-            True,
-            {"rank": 0.5, "seq": 8},
-        )
-        with (
-            patch.object(
-                admin_api.state,
-                "search_thread_messages",
-                return_value=[row, {**row, "seq": 6}],
-            ) as search,
-            patch.object(admin_api.embedding_client, "embed_texts") as embed,
-        ):
-            response = admin_api.search_conversation_history(
-                {"query": "deployment", "limit": 1, "cursor": legacy_cursor}
-            )
-
-        embed.assert_not_called()
-        self.assertEqual(search.call_args.kwargs["before"], (0.5, 8))
-        self.assertEqual(search.call_args.kwargs["exclude_seqs"], ())
-        decoded = admin_api._decode_conversation_search_cursor(
-            response["next_cursor"], fingerprint, True
-        )
-        self.assertIsNotNone(decoded)
-        self.assertEqual(decoded[0], "rank")
+        cursor = base64.urlsafe_b64encode(json.dumps([fingerprint, "rank", 0.5, 8]).encode()).decode()
+        with self.assertRaises(admin_api.ApiError):
+            admin_api.search_conversation_history({"query": "deployment", "cursor": cursor})
 
     def test_conversation_search_rejects_missing_filter_and_cursor_reuse(self) -> None:
         with self.assertRaises(admin_api.ApiError) as missing:
@@ -1690,7 +1665,7 @@ class AdminUiStaticTests(unittest.TestCase):
         cursor = admin_api._encode_conversation_search_cursor(
             "different",
             True,
-            {"rank": 1.0, "seq": 2},
+            {"rank": 1.0, "seq": 2}, min_seq=1, max_seq=10, embedding_min_seq=1, embedding_generation=1, semantic_seqs=(),
         )
         with self.assertRaises(admin_api.ApiError) as invalid:
             admin_api.search_conversation_history(
@@ -1699,16 +1674,16 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn("different search filters", invalid.exception.message)
 
         fingerprint = admin_api._conversation_search_fingerprint(
-            ["deployment"], None, None, None, ["user", "assistant"]
+            ["deployment"], None, None, None, ["user", "assistant"], INPUT_KINDS
         )
         filtered_fingerprint = admin_api._conversation_search_fingerprint(
-            ["deployment"], None, None, None, ["user", "assistant"], True
+            ["deployment"], None, None, None, ["user", "assistant"], ()
         )
         self.assertNotEqual(fingerprint, filtered_fingerprint)
         filtered_cursor = admin_api._encode_conversation_search_cursor(
             filtered_fingerprint,
             True,
-            {"rank": 1.0, "seq": 2},
+            {"rank": 1.0, "seq": 2}, min_seq=1, max_seq=10, embedding_min_seq=1, embedding_generation=1, semantic_seqs=(),
         )
         with self.assertRaises(admin_api.ApiError) as filtered_reuse:
             admin_api.search_conversation_history(
@@ -1719,7 +1694,7 @@ class AdminUiStaticTests(unittest.TestCase):
         oversized_cursor = admin_api._encode_conversation_search_cursor(
             fingerprint,
             True,
-            {"rank": 1.0, "seq": admin_api.POSTGRES_BIGINT_MAX + 1},
+            {"rank": 1.0, "seq": admin_api.POSTGRES_BIGINT_MAX + 1}, min_seq=1, max_seq=10, embedding_min_seq=1, embedding_generation=1, semantic_seqs=(),
         )
         with self.assertRaises(admin_api.ApiError) as oversized:
             admin_api.search_conversation_history(
@@ -1729,10 +1704,10 @@ class AdminUiStaticTests(unittest.TestCase):
 
     def test_conversation_search_rejects_hostile_cursor_values(self) -> None:
         rank_fingerprint = admin_api._conversation_search_fingerprint(
-            ["deployment"], None, None, None, ["user", "assistant"]
+            ["deployment"], None, None, None, ["user", "assistant"], INPUT_KINDS
         )
         time_fingerprint = admin_api._conversation_search_fingerprint(
-            [], "2026-01-01T00:00:00Z", None, None, ["user", "assistant"]
+            [], "2026-01-01T00:00:00Z", None, None, ["user", "assistant"], INPUT_KINDS
         )
         cases = (
             (
@@ -1740,7 +1715,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 admin_api._encode_conversation_search_cursor(
                     rank_fingerprint,
                     True,
-                    {"rank": 10**320, "seq": 1},
+                    {"rank": 10**320, "seq": 1}, min_seq=1, max_seq=10, embedding_min_seq=1, embedding_generation=1, semantic_seqs=(),
                 ),
             ),
             (
@@ -1790,7 +1765,7 @@ class AdminUiStaticTests(unittest.TestCase):
             {"query": "ok", "thread_id": "../thread-1"},
             {"query": "ok", "thread_id": "legacy-thread"},
             {"query": "ok", "roles": ["user", {"role": "assistant"}]},
-            {"query": "ok", "exclude_automated_triggers": 1},
+            {"query": "ok", "notice_kinds": 1},
             {"query": "ok", "limit": float("nan")},
             {"query": "ok", "limit": 10**5_000},
             {"query": "ok", "unexpected": {"deeply": ["nested"]}},
@@ -1801,7 +1776,7 @@ class AdminUiStaticTests(unittest.TestCase):
             {"thread_id": "legacy-thread"},
             {"thread_id": "thread-1", "before": "event_0"},
             {"thread_id": "thread-1", "include_activity": 1},
-            {"thread_id": "thread-1", "include_context": 1},
+            {"thread_id": "thread-1", "include_details": 1},
             {"thread_id": "thread-1", "limit": float("inf")},
             {"thread_id": "thread-1", "unexpected": []},
         )
@@ -1899,6 +1874,8 @@ class AdminUiStaticTests(unittest.TestCase):
     def test_conversation_search_fuses_local_semantic_and_lexical_candidates(self) -> None:
         lexical = [
             {
+                "event_type": "thread.message",
+                "notice": None,
                 "seq": 8,
                 "event_id": "event_8",
                 "timestamp": "2026-07-01T00:00:00Z",
@@ -1911,6 +1888,8 @@ class AdminUiStaticTests(unittest.TestCase):
         ]
         semantic = [
             {
+                "event_type": "thread.message",
+                "notice": None,
                 "seq": 7,
                 "event_id": "event_7",
                 "timestamp": "2026-06-30T00:00:00Z",
@@ -1953,6 +1932,8 @@ class AdminUiStaticTests(unittest.TestCase):
 
     def test_conversation_search_falls_back_when_local_model_is_unavailable(self) -> None:
         row = {
+            "event_type": "thread.message",
+            "notice": None,
             "seq": 3,
             "event_id": "event_3",
             "timestamp": "2026-07-01T00:00:00Z",
@@ -1989,6 +1970,8 @@ class AdminUiStaticTests(unittest.TestCase):
     def test_hybrid_cursor_reuses_frozen_semantic_candidates(self) -> None:
         lexical = [
             {
+                "event_type": "thread.message",
+                "notice": None,
                 "seq": seq,
                 "event_id": f"event_{seq}",
                 "timestamp": "2026-07-01T00:00:00Z",
@@ -2049,7 +2032,7 @@ class AdminUiStaticTests(unittest.TestCase):
                 "thread_id": None,
                 "sources": ("user", "agent"),
                 "max_seq": 10**12,
-                "exclude_automated_triggers": False,
+                "notice_kinds": INPUT_KINDS,
             },
         )
         self.assertEqual(
@@ -2066,6 +2049,8 @@ class AdminUiStaticTests(unittest.TestCase):
 
     def test_conversation_cursor_expires_when_retention_advances(self) -> None:
         row = {
+            "event_type": "thread.message",
+            "notice": None,
             "seq": 3,
             "event_id": "event_3",
             "timestamp": "2026-07-01T00:00:00Z",
@@ -2110,6 +2095,8 @@ class AdminUiStaticTests(unittest.TestCase):
     def test_hybrid_search_transitions_to_the_lexical_tail(self) -> None:
         lexical = [
             {
+                "event_type": "thread.message",
+                "notice": None,
                 "seq": 400 - index,
                 "event_id": f"event_{400 - index}",
                 "timestamp": "2026-07-01T00:00:00Z",
@@ -2165,6 +2152,8 @@ class AdminUiStaticTests(unittest.TestCase):
         """Inference recovery must not hide an unseen deep lexical match."""
         lexical = [
             {
+                "event_type": "thread.message",
+                "notice": None,
                 "seq": 400 - index,
                 "event_id": f"event_{400 - index}",
                 "timestamp": "2026-07-01T00:00:00Z",
@@ -2203,14 +2192,14 @@ class AdminUiStaticTests(unittest.TestCase):
         ):
             first = admin_api.search_conversation_history(request)
             fingerprint = admin_api._conversation_search_fingerprint(
-                ["exact match"], None, None, None, ["user", "assistant"]
+                ["exact match"], None, None, None, ["user", "assistant"], INPUT_KINDS
             )
             decoded = None
             while first["next_cursor"] is not None:
                 decoded = admin_api._decode_conversation_search_cursor(
                     first["next_cursor"], fingerprint, True
                 )
-                if decoded[0] == "rank":
+                if decoded[0] == "lexical":
                     break
                 first = admin_api.search_conversation_history(
                     {**request, "cursor": first["next_cursor"]}
@@ -2220,14 +2209,14 @@ class AdminUiStaticTests(unittest.TestCase):
             )
 
         self.assertIsNotNone(decoded)
-        self.assertEqual(decoded[0], "rank")
+        self.assertEqual(decoded[0], "lexical")
         self.assertEqual(second["matches"][0]["event_id"], "event_199")
         self.assertEqual(search.call_args_list[-1].kwargs["exclude_seqs"], ())
         self.assertEqual(embed.call_count, 1)
 
     def test_in_progress_hybrid_cursor_does_not_require_inference(self) -> None:
         fingerprint = admin_api._conversation_search_fingerprint(
-            ["deployment"], None, None, None, ["user", "assistant"]
+            ["deployment"], None, None, None, ["user", "assistant"], INPUT_KINDS
         )
         cursor = admin_api._encode_conversation_search_cursor(
             fingerprint,
@@ -2241,6 +2230,8 @@ class AdminUiStaticTests(unittest.TestCase):
             semantic_seqs=(7,),
         )
         semantic = {
+            "event_type": "thread.message",
+            "notice": None,
             "seq": 7,
             "event_id": "event_7",
             "timestamp": "2026-07-01T00:00:00Z",
@@ -2276,7 +2267,7 @@ class AdminUiStaticTests(unittest.TestCase):
             "roles": ["user"],
         }
         fingerprint = admin_api._conversation_search_fingerprint(
-            ["deployment"], None, None, "thread-1", ["user"]
+            ["deployment"], None, None, "thread-1", ["user"], INPUT_KINDS
         )
         cursor = admin_api._encode_conversation_search_cursor(
             fingerprint,
@@ -2309,7 +2300,7 @@ class AdminUiStaticTests(unittest.TestCase):
 
     def test_frozen_semantic_ids_are_authenticated_by_the_cursor(self) -> None:
         fingerprint = admin_api._conversation_search_fingerprint(
-            ["deployment"], None, None, None, ["user", "assistant"]
+            ["deployment"], None, None, None, ["user", "assistant"], INPUT_KINDS
         )
         cursor = admin_api._encode_conversation_search_cursor(
             fingerprint,
@@ -2348,6 +2339,8 @@ class AdminUiStaticTests(unittest.TestCase):
         # page must not advertise a lexical continuation that returns nothing.
         lexical = [
             {
+                "event_type": "thread.message",
+                "notice": None,
                 "seq": 400 - index,
                 "event_id": f"event_{400 - index}",
                 "timestamp": "2026-07-01T00:00:00Z",
@@ -2437,7 +2430,7 @@ class AdminUiStaticTests(unittest.TestCase):
 
     def test_hybrid_lexical_tail_uses_frozen_semantic_exclusion(self) -> None:
         fingerprint = admin_api._conversation_search_fingerprint(
-            ["deployment"], None, None, None, ["user", "assistant"]
+            ["deployment"], None, None, None, ["user", "assistant"], INPUT_KINDS
         )
         cursor = admin_api._encode_conversation_search_cursor(
             fingerprint,
@@ -2462,6 +2455,8 @@ class AdminUiStaticTests(unittest.TestCase):
                 "thread_messages_by_seqs",
                 return_value=[
                     {
+                        "event_type": "thread.message",
+                        "notice": None,
                         "seq": 7,
                         "event_id": "event_7",
                         "timestamp": "2026-07-01T00:00:00Z",
@@ -2490,6 +2485,8 @@ class AdminUiStaticTests(unittest.TestCase):
 
         def row(index: int) -> dict[str, Any]:
             return {
+                "event_type": "thread.message",
+                "notice": None,
                 "seq": 1000 - index,
                 "event_id": f"event_{1000 - index}",
                 "timestamp": "2026-07-01T00:00:00Z",
@@ -2615,7 +2612,8 @@ class AdminUiStaticTests(unittest.TestCase):
             None,
             20,
             before=None,
-            event_types=("thread.message", "thread.activity"),
+            event_types=("thread.message", "thread.notice", "thread.activity"), notice_kinds=INPUT_KINDS,
+            message_sources=("user", "agent"),
         )
         self.assertEqual([event["type"] for event in response["events"]], ["message", "activity"])
         self.assertTrue(response["events"][0]["truncated"])
@@ -2633,19 +2631,21 @@ class AdminUiStaticTests(unittest.TestCase):
             admin_api.CONVERSATION_RESPONSE_BYTES,
         )
 
-    def test_conversation_read_context_preserves_recorded_ids_and_legacy_notices(self) -> None:
+    def test_conversation_read_context_preserves_kinds_and_recorded_ids(self) -> None:
         payloads = [
             {"message": "Memories injected.", "memory_page_ids": ["thread-1", "kern-memory-system"]},
             {"message": "Self identity and 0 memories injected.", "memory_page_ids": []},
             {"message": "Historical context transferred."},
-            {"message": "Legacy memory notice."},
+            {"message": "Additional memories suggested."},
         ]
+        for payload, kind in zip(payloads, ("memory_injection", "memory_injection", "history_transfer", "memory_suggestion")):
+            payload["notice"] = {"kind": kind, "summary": payload["message"]}
         raw = [
             {
                 "seq": index,
                 "event_id": f"event_{index}",
                 "timestamp": "2026-09-16T00:00:00Z",
-                "event_type": "thread.context_added",
+                "event_type": "thread.notice",
                 "payload": payload,
             }
             for index, payload in enumerate(payloads, 2)
@@ -2655,16 +2655,17 @@ class AdminUiStaticTests(unittest.TestCase):
             patch.object(admin_api.state, "thread_event_page_bounds", return_value=(True, True)) as bounds,
         ):
             response = admin_api.read_conversation_history({
-                "thread_id": "thread-1", "include_context": True, "after": "event_1",
+                "thread_id": "thread-1", "notice_kinds": list(INPUT_KINDS + CONTEXT_KINDS), "include_details": True, "after": "event_1",
             })
-        event_types = ("thread.message", "thread.context_added")
-        page.assert_called_once_with("thread-1", 1, 20, event_types=event_types)
-        bounds.assert_called_once_with("thread-1", 2, 5, event_types=event_types)
+        event_types = ("thread.message", "thread.notice")
+        page.assert_called_once_with("thread-1", 1, 20, event_types=event_types, notice_kinds=INPUT_KINDS + CONTEXT_KINDS, message_sources=("user", "agent"))
+        bounds.assert_called_once_with("thread-1", 2, 5, event_types=event_types, notice_kinds=INPUT_KINDS + CONTEXT_KINDS, message_sources=("user", "agent"))
         self.assertEqual(response["instruction_authority"], "none")
         self.assertEqual(response["trust"], "untrusted")
         for event, payload in zip(response["events"], payloads):
-            self.assertEqual(event["type"], "context")
-            self.assertEqual(event["content"], payload["message"])
+            self.assertEqual(event["type"], "notice")
+            self.assertEqual(event["notice"], payload["notice"])
+            self.assertNotIn("role", event)
             self.assertFalse(event["truncated"])
             if "memory_page_ids" in payload:
                 self.assertEqual(event["memory_page_ids"], payload["memory_page_ids"])
@@ -2684,28 +2685,28 @@ class AdminUiStaticTests(unittest.TestCase):
                     ):
                         admin_api.read_conversation_history({
                             "thread_id": "thread-1", "include_activity": include_activity,
-                            "include_context": include_context, **cursor,
+                            "notice_kinds": list(INPUT_KINDS + CONTEXT_KINDS if include_context else INPUT_KINDS), **cursor,
                         })
-                        expected = ("thread.message",)
+                        expected = ("thread.message", "thread.notice")
                         if include_activity:
                             expected += ("thread.activity",)
-                        if include_context:
-                            expected += ("thread.context_added",)
                         called = around if "around_event_id" in cursor else page
                         self.assertEqual(called.call_args.kwargs["event_types"], expected)
+                        self.assertEqual(called.call_args.kwargs["notice_kinds"], INPUT_KINDS + CONTEXT_KINDS if include_context else INPUT_KINDS)
 
     def test_conversation_read_context_is_bounded(self) -> None:
         raw = [{
             "seq": index, "event_id": f"event_{index}",
-            "timestamp": "2026-09-16T00:00:00Z", "event_type": "thread.context_added",
-            "payload": {"message": "\x01" * 100_000, "memory_page_ids": ["a" * 64] * 1000},
+            "timestamp": "2026-09-16T00:00:00Z", "event_type": "thread.notice",
+            "payload": {"notice": {"kind": "memory_injection", "summary": "Memories injected."},
+                        "memory_recall_details": "\x01" * 100_000, "memory_page_ids": ["a" * 64] * 1000},
         } for index in range(1, 51)]
         with (
             patch.object(admin_api.state, "page_thread_events", return_value=raw),
             patch.object(admin_api.state, "thread_event_page_bounds", return_value=(True, False)),
         ):
             response = admin_api.read_conversation_history({
-                "thread_id": "thread-1", "include_context": True, "limit": 50,
+                "thread_id": "thread-1", "notice_kinds": ["history_transfer", "memory_injection", "memory_suggestion"], "include_details": True, "limit": 50,
             })
         self.assertTrue(response["events"])
         self.assertLess(len(response["events"]), 50)

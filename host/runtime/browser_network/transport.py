@@ -16,8 +16,8 @@ class ConnectionFailure(BrowserError):
     """A sanitized connection error safe to return through the local relay."""
 
 
-class SessionEnded(ConnectionFailure):
-    """Decodo explicitly rejected CONNECT because its sticky session ended."""
+class RetryableConnectFailure(ConnectionFailure):
+    """A gateway CONNECT failure that may recover with a fresh sticky session."""
 
 
 def failure(stage: str, exc: Exception, *, host: str = "", status: int | None = None,
@@ -138,13 +138,11 @@ def connect_proxy(endpoint: tuple[str, int], host: str, credentials: tuple[str, 
         }
         error = failure(stage, exc, host=host, status=status_code,
                         detail=facts.get("proxy_error", ""), facts=facts)
-        # Classify only complete gateway CONNECT headers, before diagnostic
-        # redaction/truncation. Never retry generic 502s or tunneled requests.
-        if stage == "proxy_connect" and status_code == 502 and response.endswith(b"\r\n\r\n"):
-            for line in bytes(response).split(b"\r\n")[1:]:
-                name, _, value = line.partition(b":")
-                if name.lower() == b"x-error-message" and any(
-                    reason in value.lower() for reason in (b"the session has ended", b"the session has failed")
-                ):
-                    raise SessionEnded(str(error)) from exc
+        # Any gateway 5xx can reflect an unhealthy sticky exit, even without
+        # an explicit session error. Retry only a complete CONNECT rejection:
+        # no website bytes have been sent. Auth/quota 4xx and transport/TLS
+        # failures do not establish an exit problem and leave the session alone.
+        if (stage == "proxy_connect" and status_code is not None and 500 <= status_code < 600
+                and response.endswith(b"\r\n\r\n")):
+            raise RetryableConnectFailure(str(error)) from exc
         raise error from exc

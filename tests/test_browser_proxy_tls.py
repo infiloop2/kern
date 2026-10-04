@@ -69,9 +69,12 @@ class BrowserProxyTlsTests(unittest.TestCase):
         self.check_https_ip()
 
     def test_https_ip_check_recovers_ended_session_through_shared_relay(self):
-        self.check_https_ip(renew=True)
+        self.check_https_ip(rejection=b"HTTP/1.1 502 Bad Gateway\r\nx-error-message: Bad gateway. The session has ended.\r\n\r\n")
 
-    def check_https_ip(self, *, renew=False):
+    def test_https_ip_check_recovers_timeout_through_shared_relay(self):
+        self.check_https_ip(rejection=b"HTTP/1.1 522 Timeout\r\nx-error-message: Timeout. The request took too long to complete and has timed out. Please try sending it again.\r\n\r\n")
+
+    def check_https_ip(self, *, rejection=None):
         client, proxy_peer = socket.socketpair()
         target_pipe, website_peer = socket.socketpair()
         for stream in (client, proxy_peer, target_pipe, website_peer):
@@ -89,7 +92,7 @@ class BrowserProxyTlsTests(unittest.TestCase):
                     while not data.endswith(b'\r\n\r\n'):
                         data += secure.recv(1)
                     headers.append(data)
-                    secure.sendall(b"HTTP/1.1 502 Bad Gateway\r\nx-error-message: Bad gateway. We couldn't find a suitable exit node and the session has ended. Please adjust your filters or start a new session and try again.\r\n\r\n")
+                    secure.sendall(rejection)
             except Exception as exc:
                 errors.append(exc)
         def proxy():
@@ -123,7 +126,7 @@ class BrowserProxyTlsTests(unittest.TestCase):
                     secure.sendall(b'HTTP/1.0 200 OK\r\nContent-Length: 14\r\n\r\n93.184.215.14\n')
             except Exception as exc:
                 errors.append(exc)
-        workers = [threading.Thread(target=fn) for fn in ([expired_proxy] if renew else []) + [proxy, website]]
+        workers = [threading.Thread(target=fn) for fn in ([expired_proxy] if rejection else []) + [proxy, website]]
         for worker in workers:
             worker.start()
         from browser_fakes import MemoryStore
@@ -136,7 +139,7 @@ class BrowserProxyTlsTests(unittest.TestCase):
                 relay_worker = threading.Thread(target=relay.serve_forever)
                 relay_worker.start()
                 try:
-                    with patch('socket.create_connection', side_effect=([expired_client] if renew else []) + [client]), patch('ssl.create_default_context', return_value=self.trusted), patch('host.runtime.browser_network.relay.BROWSER_NETWORK_PORT', 8009), patch.dict(os.environ, {'CURL_CA_BUNDLE': str(self.cert)}):
+                    with patch('socket.create_connection', side_effect=([expired_client] if rejection else []) + [client]), patch('ssl.create_default_context', return_value=self.trusted), patch('host.runtime.browser_network.relay.BROWSER_NETWORK_PORT', 8009), patch.dict(os.environ, {'CURL_CA_BUNDLE': str(self.cert)}):
                         self.assertEqual(network.test(), {'mode': 'decodo', 'ip': '93.184.215.14'})
                 finally:
                     relay.shutdown()
@@ -148,8 +151,8 @@ class BrowserProxyTlsTests(unittest.TestCase):
                 worker.join(4)
         self.assertTrue(all(not worker.is_alive() for worker in workers))
         self.assertFalse(errors, errors)
-        self.assertEqual(len(headers), 2 if renew else 1)
-        if renew:
+        self.assertEqual(len(headers), 2 if rejection else 1)
+        if rejection:
             self.assertNotEqual(headers[0], headers[1])
             self.assertNotEqual(network.settings.proxy_username(), original)
             self.assertEqual(Network(network.settings.store).settings.proxy_username(), network.settings.proxy_username())

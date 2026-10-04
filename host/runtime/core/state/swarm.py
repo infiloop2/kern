@@ -176,9 +176,27 @@ def reset_swarm_ai(cur: Any, thread_id: str, run_number: int) -> None:
     )
 
 
-def save_swarm_task(thread_id: str, run_number: int, task: str) -> None:
+def swarm_task_context(thread_id: str, run_number: int) -> dict[str, Any] | None:
+    """Current title, including an empty title, only for an on-demand turn."""
+    if not thread_id.startswith('thread-'):
+        return None
     with db.transaction() as cur:
         cur.execute(
-            "UPDATE swarm_agent_ai SET task = %s WHERE thread_id = %s AND run_number = %s",
+            "SELECT ai.task FROM swarm_agent_ai ai JOIN chat_threads chat USING (thread_id)"
+            " WHERE ai.thread_id = %s AND ai.run_number = %s"
+            " AND chat.spawned_by_thread_id IS NULL AND NOT chat.archived",
+            (thread_id, run_number),
+        )
+        row = cur.fetchone()
+    return {'task_title': row[0]} if row else None
+
+
+def save_swarm_task(thread_id: str, run_number: int, task: str, *, only_if_empty: bool = False) -> None:
+    with db.transaction() as cur:
+        cur.execute(
+            "UPDATE swarm_agent_ai SET task = %s WHERE thread_id = %s AND run_number = %s"
+            " AND EXISTS (SELECT 1 FROM chat_threads chat WHERE chat.thread_id = swarm_agent_ai.thread_id"
+            " AND chat.spawned_by_thread_id IS NULL AND NOT chat.archived)"
+            + (" AND task IS NULL" if only_if_empty else ""),
             (task, thread_id, run_number),
         )

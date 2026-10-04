@@ -39,6 +39,7 @@ boundary they need.
 | [Runtime harness dependencies](harness-dependencies.md) | Codex, Claude Code, Grok, and Hermes interfaces, auth files, request shapes, and upgrade review points. |
 | [Chat and Web Apps workspaces](workspaces/workspaces.md) | The fixed Workspace service, UI mounting, schemas, migration, and generated-code sandbox. |
 | [Chat workspace](workspaces/agent-chat.md) | Thread index, event views, composer, and archive behavior. |
+| [Kern messages and notices](agent-messages.md) | Central message catalog, provenance, and visible Kern action outcomes. |
 | [Memory recall](memory-recall.md) | Bounded recent-user context, PostgreSQL English hybrid retrieval, and optional Luna/Jev ranking. |
 | [Web Apps workspace](workspaces/personal-web-app-builder.md) | Isolated agent-generated workspaces and preview capabilities. |
 | [Workspace agent API](workspaces/workspace-agent-api.md) | Peer-authenticated agent calls through the main Workspace service; Apps, memory, schedules, history, identity, and peer messaging. |

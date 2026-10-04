@@ -39,9 +39,9 @@ import subprocess
 import threading
 from typing import Any, Callable, cast
 
+from host.agent_messages import AUTOMATED_TRIGGER_PREFIX
 from host.agent_scripts import (
     AGENT_HOME,
-    AUTOMATED_TRIGGER_PREFIX,
     SCRIPT_TIMEOUT_SECONDS,
     script_path_error,
 )

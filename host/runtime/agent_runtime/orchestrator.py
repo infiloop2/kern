@@ -67,6 +67,8 @@ from typing import Any, Callable
 
 from host.config import AGENT_RUNTIMES
 from host.runtime import swarm_annotations
+from host import agent_messages as message_templates
+from host.runtime.memory_monitor import Page as MemoryPage, monitor as memory_monitor
 from host.runtime.core import host_errors, network_policy, state
 from host.runtime.agent_runtime import (
     agent_activity,
@@ -705,6 +707,7 @@ def admit_turn(
     effort: str,
     message: str,
     operator_sent_message: bool,
+    input_notice: dict[str, str],
     *,
     pre_message_activity: dict[str, Any] | None = None,
     peer_sender_thread_id: str | None = None,
@@ -753,11 +756,11 @@ def admit_turn(
             {"activity": pre_message_activity},
             run_number=run_number,
         )
-    message_seq = state.append_agent_event(
+    state.append_agent_event(
         cur,
-        "thread.message",
+        "thread.message" if operator_sent_message else "thread.notice",
         thread_id,
-        {"message": message, "source": "user"},
+        {"message": message, "source": "user", "notice": input_notice},
         run_number=run_number,
     )
     if runtime_type != "script":
@@ -770,6 +773,7 @@ def admit_turn(
 def steer_live_turn(
     thread_id: str, runtime_type: str, message: str,
     operator_sent_message: bool,
+    input_notice: dict[str, str],
     *, peer_sender_thread_id: str | None = None,
 ) -> bool:
     """Synchronously steer a live turn, returning False when it is idle.
@@ -833,20 +837,61 @@ def steer_live_turn(
             else:
                 with state.mutation() as cur:
                     state.touch_thread_session(cur, thread_id, utc_now())
-                    message_seq = state.append_agent_event(
+                    state.append_agent_event(
                         cur,
-                        "thread.message",
+                        "thread.message" if operator_sent_message else "thread.notice",
                         thread_id,
-                        {"message": message, "source": "user"},
+                        {"message": message, "source": "user", "notice": input_notice},
                         run_number=turn.run_number,
                     )
                     sender = peer_sender_thread_id or ("operator" if operator_sent_message else "kern-host")
                     state.record_swarm_interaction(cur, sender, thread_id)
+                memory_monitor.observe((thread_id, turn.run_number), {
+                    "event_type": "thread.message" if operator_sent_message else "thread.notice",
+                    "payload": {"message": message, "source": "user", "notice": input_notice},
+                }, incoming=True)
     if server_to_interrupt is not None:
         _interrupt_turn(server_to_interrupt)
     if failure is not None:
         raise failure
     return True
+
+
+def _update_task_title(turn: _Turn, title: str, still_current: Callable[[], bool]) -> None:
+    if not turn.delivery_lock.acquire(blocking=False):
+        return
+    try:
+        if turn.phase == ExecutionPhase.RUNNING and still_current():
+            state.save_swarm_task(turn.thread_id, turn.run_number, title)
+    finally:
+        turn.delivery_lock.release()
+
+
+def _deliver_memory_suggestion(
+    turn: _Turn, pages: list[MemoryPage],
+) -> bool:
+    """Reuse live steering without admitting a turn or impersonating an operator."""
+    # Optional suggestions never queue behind an operator delivery or completion.
+    if not turn.delivery_lock.acquire(blocking=False):
+        return False
+    try:
+        if turn.phase != ExecutionPhase.RUNNING or turn.server is None:
+            return False
+        message = message_templates.memory_suggestion(pages)
+        try:
+            turn.server.steer(message)
+        except ProviderTurnFinishing:
+            return False
+        except harness_adapter(turn.runtime_type).transport_errors:
+            return False
+        with state.mutation() as cur:
+            state.append_agent_event(
+                cur, "thread.notice", turn.thread_id,
+                message_templates.suggestion_notice(pages, message), run_number=turn.run_number,
+            )
+        return True
+    finally:
+        turn.delivery_lock.release()
 
 
 def _publish_turn(turn: _Turn) -> None:
@@ -857,6 +902,7 @@ def _publish_turn(turn: _Turn) -> None:
 def _mark_finishing(turn: _Turn, provider_session_id: str | None = None) -> None:
     """Publish FINISHING only after the durable lifecycle commit."""
     turn.phase = ExecutionPhase.FINISHING
+    memory_monitor.finish((turn.thread_id, turn.run_number))
     if provider_session_id:
         turn.provider_session_id = provider_session_id
     if turn.startup_timer is not None:
@@ -906,11 +952,18 @@ def _provider_ready(turn: _Turn) -> bool:
 
 def launch_turn(
     turn: _Turn, prepared_turn_message: str, provider_session_id: str | None,
-    *, task_context: str,
+    *, task_context: str, recalled_pages: list[dict[str, Any]] | None = None,
 ) -> None:
     """Run an admitted turn on its own thread. Called after the admitting
     mutation commits, so its user message and durable running state exist
     before the worker starts."""
+    with turn.delivery_lock:
+        if turn.phase == ExecutionPhase.STARTING and harness_adapter(turn.runtime_type).steerable:
+            memory_monitor.seed(
+                (turn.thread_id, turn.run_number), task_context, recalled_pages or [],
+                partial(_deliver_memory_suggestion, turn),
+                partial(_update_task_title, turn),
+            )
     if turn.runtime_type != "script":
         swarm_annotations.enqueue_task(
             turn.thread_id, turn.run_number, task_context,
@@ -1008,6 +1061,7 @@ def _run_turn(turn: _Turn, input_message: str, provider_session_id: str | None) 
                     payload,
                     run_number=turn.run_number,
                 )
+            memory_monitor.observe((thread_id, turn.run_number), payload.get('activity', payload.get('message', '')))
 
     def finish_provider_turn(provider_session_id: str, output: str) -> int:
         """Atomically choose between a just-delivered steer and completion."""

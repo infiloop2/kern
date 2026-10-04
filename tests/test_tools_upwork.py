@@ -282,63 +282,72 @@ class UpworkTests(unittest.TestCase):
                 self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
                     ["upwork__find_jobs", "upwork__manage_proposals", "upwork__get_preview", "upwork__confirm_preview"])
 
-    def test_screening_answers_camelcase_preview_confirms_exact_approved_answers(self):
-        answers = [{"question": "Relevant work?", "answer": "Production agents"},
-                   {"question": "Frameworks?", "answer": "TypeScript"}]
-        pending = self.submit(answers=answers, portfolio_project_ids=["project-one"])
-        self.client.call.reset_mock()
-        self.client.call.side_effect = [self.job_cost(), self.preview(), self.stored_preview(
-            screeningAnswers=answers, screeningQuestions=[row["question"] for row in answers],
-            portfolioProjectIds=["project-one"]),
-            {"content": [{"type": "text", "text": "Submitted"}]}]
-        result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
-        self.assertIsInstance(result, ApprovalExecuted)
-        calls = self.client.call.call_args_list
-        self.assertEqual(calls[1].args[1]["params"]["answers"], answers)
-        self.assertEqual([call.args[0] for call in calls],
-                         ["upwork__find_jobs", "upwork__manage_proposals", "upwork__get_preview", "upwork__confirm_preview"])
-
-    def test_screening_answers_camelcase_changes_never_confirm(self):
-        answers = [{"question": "Relevant work?", "answer": "Production agents"}]
-        for changed in ([], {}, None, [{"question": "Relevant work?", "answer": "Changed"}],
-                        [{"question": "Changed?", "answer": "Production agents"}]):
-            with self.subTest(changed=changed):
-                pending = self.submit(answers=answers)
+    def test_screening_answers_alias_preview_confirms_exact_approved_answers(self):
+        for alias in ("screeningAnswers", "questions"):
+            with self.subTest(alias=alias):
+                answers = [{"question": "Relevant work?", "answer": "Production agents"},
+                           {"question": "Frameworks?", "answer": "TypeScript"}]
+                pending = self.submit(answers=answers, portfolio_project_ids=["project-one"])
                 self.client.call.reset_mock()
-                self.client.call.side_effect = [self.job_cost(), self.preview(),
-                    self.stored_preview(screeningAnswers=changed)]
+                self.client.call.side_effect = [self.job_cost(), self.preview(), self.stored_preview(
+                    **{alias: answers}, screeningQuestions=[row["question"] for row in answers],
+                    portfolioProjectIds=["project-one"]),
+                    {"content": [{"type": "text", "text": "Submitted"}]}]
                 result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
-                self.assertIsInstance(result, ActionFailed)
-                self.assertIn("changed the approved proposal", result.error)
-                self.assertEqual(self.client.call.call_count, 3)
+                self.assertIsInstance(result, ApprovalExecuted)
+                calls = self.client.call.call_args_list
+                self.assertEqual(calls[1].args[1]["params"]["answers"], answers)
+                self.assertEqual([call.args[0] for call in calls],
+                                 ["upwork__find_jobs", "upwork__manage_proposals", "upwork__get_preview", "upwork__confirm_preview"])
 
-    def test_screening_answers_camelcase_cannot_be_split_or_aliased_twice(self):
-        answers = [{"question": "Relevant work?", "answer": "Production agents"}]
-        for kind in ("missing", "split", "duplicate", "conflicting_mirror", "unapproved"):
-            with self.subTest(kind=kind):
-                pending = self.submit(**({} if kind == "unapproved" else {"answers": answers}))
-                preview = self.stored_preview()
-                data = json.loads(preview["content"][0]["text"])
-                if kind == "split":
-                    data["other"] = {"screeningAnswers": answers}
-                elif kind != "missing":
-                    data["params"]["screeningAnswers"] = answers
-                    if kind == "duplicate":
-                        data["params"]["answers"] = answers
-                    elif kind == "conflicting_mirror":
-                        data["other"] = {"answers": [{"question": "Relevant work?", "answer": "Changed"}]}
-                preview["content"][0]["text"] = json.dumps(data)
-                self.client.call.reset_mock()
-                self.client.call.side_effect = [self.job_cost(), self.preview(), preview]
-                record = self.api.approvals.approve(pending.approval_id)
-                if kind == "unapproved":
-                    result = upwork.BUNDLED_TOOL.execute_approved(record, self.api)
-                    self.assertIsInstance(result, ActionFailed)
-                    self.assertIn("unapproved proposal terms: answers", result.error)
-                else:
-                    with self.assertRaises(ProviderWarning):
-                        upwork.BUNDLED_TOOL.execute_approved(record, self.api)
-                self.assertEqual(self.client.call.call_count, 3)
+    def test_screening_answers_alias_changes_never_confirm(self):
+        for alias in ("screeningAnswers", "questions"):
+            with self.subTest(alias=alias):
+                answers = [{"question": "Relevant work?", "answer": "Production agents"}]
+                for changed in ([], {}, None, ["Relevant work?"],
+                                [{"question": "Relevant work?"}],
+                                [{"question": "Relevant work?", "answer": "Changed"}],
+                                [{"question": "Changed?", "answer": "Production agents"}],
+                                answers + [{"question": "Extra?", "answer": "Unapproved"}]):
+                    with self.subTest(changed=changed):
+                        pending = self.submit(answers=answers)
+                        self.client.call.reset_mock()
+                        self.client.call.side_effect = [self.job_cost(), self.preview(),
+                            self.stored_preview(**{alias: changed})]
+                        result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+                        self.assertIsInstance(result, ActionFailed)
+                        self.assertIn("changed the approved proposal", result.error)
+                        self.assertEqual(self.client.call.call_count, 3)
+
+    def test_screening_answers_alias_cannot_be_split_or_aliased_twice(self):
+        for alias in ("screeningAnswers", "questions"):
+            with self.subTest(alias=alias):
+                answers = [{"question": "Relevant work?", "answer": "Production agents"}]
+                for kind in ("missing", "split", "duplicate", "conflicting_mirror", "unapproved"):
+                    with self.subTest(kind=kind):
+                        pending = self.submit(**({} if kind == "unapproved" else {"answers": answers}))
+                        preview = self.stored_preview()
+                        data = json.loads(preview["content"][0]["text"])
+                        if kind == "split":
+                            data["other"] = {alias: answers}
+                        elif kind != "missing":
+                            data["params"][alias] = answers
+                            if kind == "duplicate":
+                                data["params"]["answers"] = answers
+                            elif kind == "conflicting_mirror":
+                                data["other"] = {"answers": [{"question": "Relevant work?", "answer": "Changed"}]}
+                        preview["content"][0]["text"] = json.dumps(data)
+                        self.client.call.reset_mock()
+                        self.client.call.side_effect = [self.job_cost(), self.preview(), preview]
+                        record = self.api.approvals.approve(pending.approval_id)
+                        if kind == "unapproved":
+                            result = upwork.BUNDLED_TOOL.execute_approved(record, self.api)
+                            self.assertIsInstance(result, ActionFailed)
+                            self.assertIn("unapproved proposal terms: answers", result.error)
+                        else:
+                            with self.assertRaises(ProviderWarning):
+                                upwork.BUNDLED_TOOL.execute_approved(record, self.api)
+                        self.assertEqual(self.client.call.call_count, 3)
 
     def test_stored_preview_changes_and_unapproved_camelcase_terms_never_confirm(self):
         for changes in ({"coverLetter": "Changed"}, {"chargedAmount": 51}, {"jobReference": "124"},
@@ -354,6 +363,31 @@ class UpworkTests(unittest.TestCase):
                 result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
                 self.assertIsInstance(result, ActionFailed)
                 self.assertEqual(self.client.call.call_count, 3)
+
+    def test_october_4_stored_questions_shape_preserves_five_ordered_answers(self):
+        # Reconstruct the params shape from approval 1131's structural
+        # diagnostic, using synthetic values. No private proposal copy or
+        # claim that the truncated diagnostic is a full provider response.
+        answers = [{"question": f"Question {i}?", "answer": f"Answer {i}"} for i in range(5)]
+        for returned in (answers, answers[:-1], list(reversed(answers))):
+            with self.subTest(returned=returned):
+                pending = self.submit(answers=answers, portfolio_project_ids=["project-one"])
+                self.client.call.reset_mock()
+                self.client.call.side_effect = [self.job_cost(), self.preview(), self.stored_preview(
+                    questions=returned, portfolio_project_ids=["project-one"],
+                    selectedContractor={"id": "contractor-one", "oDeskUserID": "user-one"},
+                    sri={"frequency": 0, "percent": 0}, teamOrgId="org-one"),
+                    {"content": [{"type": "text", "text": "Submitted"}]}]
+                result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+                self.assertEqual(self.client.call.call_args_list[1].args[1]["params"]["answers"], answers)
+                if returned == answers:
+                    self.assertIsInstance(result, ApprovalExecuted)
+                    self.assertEqual(self.client.call.call_args_list[-1].args[0], "upwork__confirm_preview")
+                    self.assertEqual(self.client.call.call_count, 4)
+                else:
+                    self.assertIsInstance(result, ActionFailed)
+                    self.assertIn("changed the approved proposal", result.error)
+                    self.assertEqual(self.client.call.call_count, 3)
 
     def test_unapproved_preview_terms_report_names_only_and_never_confirm(self):
         pending = self.submit()

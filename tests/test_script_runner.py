@@ -10,8 +10,8 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from host import agent_scripts
+from host.agent_messages import AUTOMATED_TRIGGER_PREFIX
 from host.agent_scripts import (
-    AUTOMATED_TRIGGER_PREFIX,
     SCRIPT_TIMEOUT_SECONDS,
     script_path_error,
 )

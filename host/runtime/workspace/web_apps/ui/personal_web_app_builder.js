@@ -2298,6 +2298,7 @@ function conversationEntries() {
   const entries = [];
   for (const event of conversationEvents) {
     const payload = event.payload || {};
+    const notice = KernRichText.eventNotice(event);
     if (event.event_type === "thread.memory_cleared") {
       entries.length = 0;
       entries.push({
@@ -2320,15 +2321,13 @@ function conversationEntries() {
         kind: "error",
         message: payload.error_message || "The agent stopped because of an error.",
       });
-    } else if (event.event_type === "thread.context_added") {
+    } else if (notice) {
       entries.push({
         key: `event-${event.seq}`,
         seq: Number(event.seq) || 0,
         kind: "stopped",
-        message: payload.message || "Context added.",
-        memoryPageIds: Array.isArray(payload.memory_page_ids) ? payload.memory_page_ids : [],
-        memoryRecallDetails: typeof payload.memory_recall_details === "string" ? payload.memory_recall_details : "",
-        historicalContext: typeof payload.historical_context === "string" ? payload.historical_context : "",
+        message: notice.summary,
+        notice,
       });
     } else if (event.event_type === "thread.stopped") {
       entries.push({
@@ -2400,24 +2399,12 @@ function renderConversationHistory(forceBottom = false) {
       } else {
         message.textContent = entry.message;
       }
-      if (entry.historicalContext || entry.memoryRecallDetails || entry.memoryPageIds?.length) {
-        message.classList.add("memory-notice");
-        const trigger = document.createElement("button");
-        trigger.type = "button";
-        trigger.textContent = entry.message;
-        const pages = document.createElement("div");
-        pages.className = "memory-pages";
-        pages.id = `app-memory-pages-${entry.seq}`;
-        pages.setAttribute("role", "tooltip");
-        pages.textContent = entry.historicalContext || entry.memoryRecallDetails || entry.memoryPageIds.join("\n");
-        trigger.setAttribute("aria-controls", pages.id);
-        const open = openMemoryKeys.has(entry.key);
-        trigger.setAttribute("aria-expanded", open ? "true" : "false");
-        if (open) {
-          message.classList.add("memory-notice-open");
-          trigger.setAttribute("aria-describedby", pages.id);
-        }
-        message.replaceChildren(trigger, pages);
+      if (entry.notice) {
+        item.classList.add("kern-notice");
+        sender.textContent = "Kern:";
+        message.innerHTML = KernRichText.renderNotice(
+          entry.notice, `app-memory-pages-${entry.seq}`, openMemoryKeys.has(entry.key),
+        );
       }
       item.append(sender, message);
       return item;
