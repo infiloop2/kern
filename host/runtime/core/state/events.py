@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX, LEGACY_AUTOMATED_TRIGGER_PREFIX
 from host.runtime.core import db, pgclient
 from host.runtime.core.state._base import (
     AGENT_EVENT_LIMIT,
+    CONVERSATION_EVENT_SQL,
     CONVERSATION_EMBEDDING_MAX_ATTEMPTS,
     CONVERSATION_EMBEDDING_MESSAGE_LIMIT,
     CONVERSATION_EMBEDDING_PRUNE_EVERY_BATCHES,
@@ -30,7 +30,7 @@ from host.runtime.core.state.threads import _increment_counter
 # The typed event payload fields; every event the runtime emits uses a subset.
 _EVENT_PAYLOAD_COLUMNS = (
     "message", "source", "error_message", "agent_runtime", "activity", "memory_page_ids", "memory_recall_details",
-    "historical_context",
+    "historical_context", "notice",
 )
 _EVENT_FIELDS = (
     "seq, created_at, event_type, thread_id, run_number, "
@@ -115,7 +115,7 @@ def append_agent_event(
     values: list[Any] = []
     for column in _EVENT_PAYLOAD_COLUMNS:
         value = payload.get(column)
-        if column in ("activity", "memory_page_ids") and value is not None:
+        if column in ("activity", "memory_page_ids", "notice") and value is not None:
             values.append(pgclient.Jsonb(_jsonb_safe(value)))
         elif column in ("message", "error_message", "memory_recall_details", "historical_context"):
             values.append(_bounded_event_message(value))
@@ -123,14 +123,15 @@ def append_agent_event(
             values.append(value)
     cur.execute(
         "INSERT INTO agent_events (created_at, event_type, thread_id, run_number,"
-        " message, source, error_message, agent_runtime, activity, memory_page_ids, memory_recall_details, historical_context)"
-        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING seq",
+        " message, source, error_message, agent_runtime, activity, memory_page_ids, memory_recall_details, historical_context, notice)"
+        " VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s) RETURNING seq",
         (utc_now(), event_type, thread_id, run_number, *values),
     )
     seq = int(cur.fetchone()[0])
     if event_type == "thread.memory_cleared":
         cur.execute("DELETE FROM swarm_agent_ai WHERE thread_id = %s", (thread_id,))
-    if event_type == "thread.message" and payload.get("message") is not None:
+    conversation = event_type == "thread.message" or (event_type == "thread.notice" and payload.get("source") == "user")
+    if conversation and payload.get("message") is not None:
         # Enqueue in the same transaction that writes the event, so the indexer
         # never has to rediscover outstanding work by scanning the retention
         # window. Nothing is lost if this transaction rolls back.
@@ -147,9 +148,9 @@ def append_agent_event(
     counter = None
     if event_type == "thread.activity":
         counter = _AGENT_HISTORY_COUNTERS["activities"]
-    elif event_type == "thread.message" and payload.get("source") == "user":
+    elif conversation and payload.get("source") == "user":
         counter = _AGENT_HISTORY_COUNTERS["messages"]
-    elif event_type == "thread.message" and payload.get("source") == "agent":
+    elif conversation and payload.get("source") == "agent":
         counter = _AGENT_HISTORY_COUNTERS["activities"]
     if counter is not None:
         _increment_counter(cur, counter)
@@ -220,10 +221,35 @@ def page_agent_events_before(
     return _page_before("agent_events", _EVENT_FIELDS, _event_dict, before, limit)
 
 
+def _event_filter(
+    event_types: tuple[str, ...] | None,
+    notice_kinds: tuple[str, ...] | None,
+    message_sources: tuple[str, ...] | None,
+) -> tuple[str, tuple[Any, ...]]:
+    clauses = []
+    params: tuple[Any, ...] = ()
+    if event_types is not None:
+        if not event_types:
+            return " AND FALSE", ()
+        clauses.append("event_type IN (" + ", ".join("%s" for _ in event_types) + ")")
+        params += event_types
+    if notice_kinds is not None:
+        kinds = "notice->>'kind' IN (" + ", ".join("%s" for _ in notice_kinds) + ")" if notice_kinds else "FALSE"
+        clauses.append("(event_type <> 'thread.notice' OR " + kinds + ")")
+        params += notice_kinds
+    if message_sources is not None:
+        sources = "source IN (" + ", ".join("%s" for _ in message_sources) + ")" if message_sources else "FALSE"
+        clauses.append("(event_type <> 'thread.message' OR " + sources + ")")
+        params += message_sources
+    return "".join(" AND " + clause for clause in clauses), params
+
+
 def page_thread_events(
     thread_id: str,
     since: int | None,
     limit: int,
+    notice_kinds: tuple[str, ...] | None,
+    message_sources: tuple[str, ...] | None,
     *,
     before: int | None = None,
     event_types: tuple[str, ...] | None = None,
@@ -238,14 +264,7 @@ def page_thread_events(
     Backward and initial pages are selected newest-first in the inner query,
     then restored to chronological order for chat rendering.
     """
-    event_type_clause = ""
-    event_type_params: tuple[Any, ...] = ()
-    if event_types is not None:
-        if not event_types:
-            return []
-        placeholders = ", ".join(["%s"] * len(event_types))
-        event_type_clause = f" AND event_type IN ({placeholders})"
-        event_type_params = event_types
+    event_type_clause, event_type_params = _event_filter(event_types, notice_kinds, message_sources)
     with db.transaction() as cur:
         if since is not None:
             cur.execute(
@@ -273,10 +292,38 @@ def page_thread_events(
         return [_event_dict(row) for row in cur.fetchall()]
 
 
+def recall_context_events(thread_id: str) -> list[dict[str, Any]]:
+    """Small, independent user/support windows; never read activity or notice details."""
+    from host.memory_recall import RECALL_NOTICE_KINDS
+    from host.memory_recall_rules import HISTORY_EVENT_LIMIT
+
+    # Each arm includes the latest clear so neither role crosses it. Only
+    # context-bearing notice kinds count toward the supporting window.
+    fields = "seq, event_type, source, message, notice"
+    kinds = sorted(RECALL_NOTICE_KINDS)
+    placeholders = ", ".join(["%s"] * len(kinds))
+    with db.transaction() as cur:
+        cur.execute(
+            f"SELECT * FROM ((SELECT {fields} FROM agent_events WHERE thread_id = %s AND ("
+            "event_type = 'thread.memory_cleared' OR (event_type = 'thread.message' AND source = 'user' "
+            "AND (notice IS NULL OR notice->>'kind' = 'operator'))) ORDER BY seq DESC LIMIT %s) "
+            f"UNION (SELECT {fields} FROM agent_events WHERE thread_id = %s AND ("
+            "event_type = 'thread.memory_cleared' OR (event_type = 'thread.message' AND source = 'agent') "
+            f"OR (event_type = 'thread.notice' AND source = 'user' AND notice->>'kind' IN ({placeholders}))) "
+            "ORDER BY seq DESC LIMIT %s)) AS recent ORDER BY seq",
+            (thread_id, HISTORY_EVENT_LIMIT, thread_id, *kinds, HISTORY_EVENT_LIMIT),
+        )
+        return [{"seq": seq, "event_type": kind,
+                 "payload": {"source": source, "message": message or "", "notice": notice}}
+                for seq, kind, source, message, notice in cur.fetchall()]
+
+
 def page_thread_events_around(
     thread_id: str,
     anchor: int,
     limit: int,
+    notice_kinds: tuple[str, ...] | None,
+    message_sources: tuple[str, ...] | None,
     *,
     event_types: tuple[str, ...],
 ) -> list[dict[str, Any]] | None:
@@ -288,30 +335,30 @@ def page_thread_events_around(
     """
     if not event_types:
         return []
-    placeholders = ", ".join(["%s"] * len(event_types))
+    event_clause, event_params = _event_filter(event_types, notice_kinds, message_sources)
     older_target = (limit + 1) // 2
     with db.transaction() as cur:
         cur.execute(
             "SELECT 1 FROM agent_events WHERE thread_id = %s AND seq = %s"
-            f" AND event_type IN ({placeholders})",
-            (thread_id, anchor, *event_types),
+            f"{event_clause}",
+            (thread_id, anchor, *event_params),
         )
         if cur.fetchone() is None:
             return None
         cur.execute(
             f"SELECT {_EVENT_FIELDS} FROM agent_events"
             " WHERE thread_id = %s AND seq <= %s"
-            f" AND event_type IN ({placeholders})"
+            f"{event_clause}"
             " ORDER BY seq DESC LIMIT %s",
-            (thread_id, anchor, *event_types, limit),
+            (thread_id, anchor, *event_params, limit),
         )
         older_desc = cur.fetchall()
         cur.execute(
             f"SELECT {_EVENT_FIELDS} FROM agent_events"
             " WHERE thread_id = %s AND seq > %s"
-            f" AND event_type IN ({placeholders})"
+            f"{event_clause}"
             " ORDER BY seq LIMIT %s",
-            (thread_id, anchor, *event_types, limit),
+            (thread_id, anchor, *event_params, limit),
         )
         newer = cur.fetchall()
     selected_older = older_desc[:older_target]
@@ -329,27 +376,29 @@ def thread_event_page_bounds(
     thread_id: str,
     oldest: int,
     newest: int,
+    notice_kinds: tuple[str, ...] | None,
+    message_sources: tuple[str, ...] | None,
     *,
     event_types: tuple[str, ...],
 ) -> tuple[bool, bool]:
     """Whether matching retained events exist outside a returned page."""
     if not event_types:
         return False, False
-    placeholders = ", ".join(["%s"] * len(event_types))
+    event_clause, event_params = _event_filter(event_types, notice_kinds, message_sources)
     with db.transaction() as cur:
         cur.execute(
             "SELECT"
             " EXISTS(SELECT 1 FROM agent_events WHERE thread_id = %s AND seq < %s"
-            f" AND event_type IN ({placeholders})),"
+            f"{event_clause}),"
             " EXISTS(SELECT 1 FROM agent_events WHERE thread_id = %s AND seq > %s"
-            f" AND event_type IN ({placeholders}))",
+            f"{event_clause})",
             (
                 thread_id,
                 oldest,
-                *event_types,
+                *event_params,
                 thread_id,
                 newest,
-                *event_types,
+                *event_params,
             ),
         )
         row = cur.fetchone()
@@ -358,6 +407,7 @@ def thread_event_page_bounds(
 
 def search_thread_messages(
     query_variants: tuple[str, ...],
+    notice_kinds: tuple[str, ...],
     *,
     from_timestamp: str | None,
     to_timestamp: str | None,
@@ -367,7 +417,6 @@ def search_thread_messages(
     before: tuple[float, int] | tuple[str, int] | None,
     max_seq: int | None = None,
     exclude_seqs: tuple[int, ...] = (),
-    exclude_automated_triggers: bool = False,
 ) -> list[dict[str, Any]]:
     """Search retained thread messages with indexed relevance or time paging.
 
@@ -377,14 +426,8 @@ def search_thread_messages(
     ``exclude_seqs`` drops messages a caller has already delivered by another
     ranking, so a bounded walk can span both without repeating a hit.
     """
-    clauses = ["events.event_type = 'thread.message'", "events.message IS NOT NULL"]
+    clauses = [CONVERSATION_EVENT_SQL.replace("event_type", "events.event_type").replace("source", "events.source"), "events.message IS NOT NULL"]
     params: list[Any] = []
-    if exclude_automated_triggers:
-        clauses.append(
-            "NOT (events.source = 'user' AND (events.message LIKE %s OR"
-            " events.message LIKE %s))"
-        )
-        params.extend((AUTOMATED_TRIGGER_PREFIX + "%", LEGACY_AUTOMATED_TRIGGER_PREFIX + "%"))
     if exclude_seqs:
         placeholders = ", ".join("%s" for _ in exclude_seqs)
         clauses.append(f"events.seq NOT IN ({placeholders})")
@@ -401,13 +444,9 @@ def search_thread_messages(
     if to_timestamp is not None:
         clauses.append("events.created_at < %s")
         params.append(to_timestamp)
-    if sources:
-        placeholders = ", ".join(["%s"] * len(sources))
-        clauses.append(f"events.source IN ({placeholders})")
-        params.extend(sources)
-    else:
-        return []
-    where = " AND ".join(clauses)
+    event_clause, event_params = _event_filter(None, notice_kinds, sources)
+    where = " AND ".join(clauses) + event_clause
+    params.extend(event_params)
 
     if query_variants:
         query_expression = " || ".join(
@@ -424,7 +463,7 @@ def search_thread_messages(
         sql = (
             f"WITH search_query AS (SELECT ({query_expression}) AS value),"
             " ranked AS ("
-            " SELECT events.seq, events.created_at, events.thread_id, events.source,"
+            " SELECT events.seq, events.created_at, events.thread_id, events.source, events.event_type, events.notice,"
             " ts_rank_cd(to_tsvector('simple', COALESCE(events.message, '')), search_query.value)::float8"
             " AS search_rank,"
             " events.message,"
@@ -436,7 +475,7 @@ def search_thread_messages(
             f" WHERE {where}"
             " AND to_tsvector('simple', COALESCE(events.message, '')) @@ search_query.value"
             ")"
-            " SELECT seq, created_at, thread_id, source, search_rank, excerpt,"
+            " SELECT seq, created_at, thread_id, source, event_type, notice, search_rank, excerpt,"
             " to_tsvector('simple', message) <> to_tsvector('simple', excerpt)"
             " AS excerpt_truncated"
             f" FROM ranked{cursor_clause}"
@@ -451,7 +490,7 @@ def search_thread_messages(
             cursor_clause = " AND (created_at, seq) < (%s, %s)"
             cursor_params = (timestamp, seq)
         sql = (
-            "SELECT events.seq, events.created_at, events.thread_id, events.source,"
+            "SELECT events.seq, events.created_at, events.thread_id, events.source, events.event_type, events.notice,"
             " NULL::float8 AS search_rank,"
             " LEFT(events.message, 4096) AS excerpt,"
             " events.message <> LEFT(events.message, 4096) AS excerpt_truncated"
@@ -476,6 +515,8 @@ def search_thread_messages(
             "timestamp": str(created_at),
             "thread_id": str(result_thread_id),
             "source": str(source),
+            "event_type": event_type,
+            "notice": notice,
             "search_rank": search_rank,
             "excerpt": str(excerpt),
             "excerpt_truncated": bool(excerpt_truncated),
@@ -485,6 +526,8 @@ def search_thread_messages(
             created_at,
             result_thread_id,
             source,
+            event_type,
+            notice,
             search_rank,
             excerpt,
             excerpt_truncated,
@@ -590,7 +633,7 @@ def store_thread_message_embeddings(
                 "INSERT INTO conversation_message_embeddings"
                 " (event_seq, model, embedding, embedding_generation)"
                 " SELECT seq, %s, %s::vector, %s FROM agent_events"
-                " WHERE seq = %s AND event_type = 'thread.message'"
+                f" WHERE seq = %s AND {CONVERSATION_EVENT_SQL}"
                 " AND message IS NOT NULL"
                 " ON CONFLICT (event_seq) DO UPDATE SET"
                 " model = EXCLUDED.model, embedding = EXCLUDED.embedding,"
@@ -624,7 +667,7 @@ def prune_conversation_embeddings(
     # not reached the quota yet.
     floor_sql = (
         "SELECT seq FROM agent_events"
-        " WHERE event_type = 'thread.message' AND message IS NOT NULL"
+        f" WHERE {CONVERSATION_EVENT_SQL} AND message IS NOT NULL"
         " ORDER BY seq DESC OFFSET %s LIMIT 1"
     )
     cur.execute(
@@ -648,33 +691,25 @@ def prune_conversation_embeddings(
 
 def thread_messages_by_seqs(
     seqs: tuple[int, ...],
+    notice_kinds: tuple[str, ...],
     *,
     from_timestamp: str | None,
     to_timestamp: str | None,
     thread_id: str | None,
     sources: tuple[str, ...],
     max_seq: int,
-    exclude_automated_triggers: bool = False,
 ) -> list[dict[str, Any]]:
     """Fetch filtered source rows in a previously frozen semantic order."""
-    if not seqs or not sources:
+    if not seqs:
         return []
     placeholders = ", ".join("%s" for _ in seqs)
-    source_placeholders = ", ".join("%s" for _ in sources)
     clauses = [
-        "event_type = 'thread.message'",
+        CONVERSATION_EVENT_SQL,
         "message IS NOT NULL",
         f"seq IN ({placeholders})",
         "seq <= %s",
-        f"source IN ({source_placeholders})",
     ]
-    params: list[Any] = [*seqs, max_seq, *sources]
-    if exclude_automated_triggers:
-        clauses.append(
-            "NOT (source = 'user' AND (message LIKE %s OR"
-            " message LIKE %s))"
-        )
-        params.extend((AUTOMATED_TRIGGER_PREFIX + "%", LEGACY_AUTOMATED_TRIGGER_PREFIX + "%"))
+    params: list[Any] = [*seqs, max_seq]
     if thread_id is not None:
         clauses.append("thread_id = %s")
         params.append(thread_id)
@@ -684,11 +719,13 @@ def thread_messages_by_seqs(
     if to_timestamp is not None:
         clauses.append("created_at < %s")
         params.append(to_timestamp)
+    event_clause, event_params = _event_filter(None, notice_kinds, sources)
+    params.extend(event_params)
     with db.transaction() as cur:
         cur.execute(
-            "SELECT seq, created_at, thread_id, source,"
+            "SELECT seq, created_at, thread_id, source, event_type, notice,"
             " LEFT(message, 4096), message <> LEFT(message, 4096)"
-            f" FROM agent_events WHERE {' AND '.join(clauses)}",
+            f" FROM agent_events WHERE {' AND '.join(clauses)}{event_clause}",
             tuple(params),
         )
         rows = cur.fetchall()
@@ -699,11 +736,13 @@ def thread_messages_by_seqs(
             "timestamp": str(created_at),
             "thread_id": str(thread_id),
             "source": str(source),
+            "event_type": event_type,
+            "notice": notice,
             "search_rank": 0.0,
             "excerpt": str(excerpt),
             "excerpt_truncated": bool(excerpt_truncated),
         }
-        for seq, created_at, thread_id, source, excerpt, excerpt_truncated in rows
+        for seq, created_at, thread_id, source, event_type, notice, excerpt, excerpt_truncated in rows
     }
     return [by_seq[seq] for seq in seqs if seq in by_seq]
 
@@ -711,6 +750,7 @@ def thread_messages_by_seqs(
 def search_thread_messages_semantic(
     embedding: list[float],
     model: str,
+    notice_kinds: tuple[str, ...],
     *,
     from_timestamp: str | None,
     to_timestamp: str | None,
@@ -720,17 +760,10 @@ def search_thread_messages_semantic(
     minimum_similarity: float,
     max_seq: int | None = None,
     max_embedding_generation: int | None = None,
-    exclude_automated_triggers: bool = False,
 ) -> list[dict[str, Any]]:
     """Nearest indexed message vectors under the same filters as text search."""
-    clauses = ["embeddings.model = %s"]
+    clauses = ["embeddings.model = %s", CONVERSATION_EVENT_SQL.replace("event_type", "events.event_type").replace("source", "events.source")]
     params: list[Any] = [model]
-    if exclude_automated_triggers:
-        clauses.append(
-            "NOT (events.source = 'user' AND (events.message LIKE %s OR"
-            " events.message LIKE %s))"
-        )
-        params.extend((AUTOMATED_TRIGGER_PREFIX + "%", LEGACY_AUTOMATED_TRIGGER_PREFIX + "%"))
     if max_seq is not None:
         clauses.append("events.seq <= %s")
         params.append(max_seq)
@@ -746,26 +779,23 @@ def search_thread_messages_semantic(
     if to_timestamp is not None:
         clauses.append("events.created_at < %s")
         params.append(to_timestamp)
-    if not sources:
-        return []
-    placeholders = ", ".join(["%s"] * len(sources))
-    clauses.append(f"events.source IN ({placeholders})")
-    params.extend(sources)
+    event_clause, event_params = _event_filter(None, notice_kinds, sources)
+    params.extend(event_params)
     literal = "[" + ",".join(format(value, ".9g") for value in embedding) + "]"
     sql = (
         "WITH query_embedding AS (SELECT %s::vector AS value),"
         " nearest AS MATERIALIZED ("
-        " SELECT events.seq, events.created_at, events.thread_id, events.source,"
+        " SELECT events.seq, events.created_at, events.thread_id, events.source, events.event_type, events.notice,"
         " 1 - (embeddings.embedding <=> query_embedding.value) AS similarity,"
         " LEFT(events.message, 4096) AS excerpt,"
         " events.message <> LEFT(events.message, 4096) AS excerpt_truncated"
         " FROM conversation_message_embeddings AS embeddings"
         " JOIN agent_events AS events ON events.seq = embeddings.event_seq"
         " CROSS JOIN query_embedding"
-        f" WHERE {' AND '.join(clauses)}"
+        f" WHERE {' AND '.join(clauses)}{event_clause}"
         " ORDER BY embeddings.embedding <=> query_embedding.value, events.seq DESC"
         " LIMIT %s"
-        ") SELECT seq, created_at, thread_id, source, similarity, excerpt, excerpt_truncated"
+        ") SELECT seq, created_at, thread_id, source, event_type, notice, similarity, excerpt, excerpt_truncated"
         " FROM nearest WHERE similarity >= %s"
         " ORDER BY similarity DESC, seq DESC"
     )
@@ -781,6 +811,8 @@ def search_thread_messages_semantic(
             "timestamp": str(created_at),
             "thread_id": str(result_thread_id),
             "source": str(source),
+            "event_type": event_type,
+            "notice": notice,
             "search_rank": float(similarity),
             "excerpt": str(excerpt),
             "excerpt_truncated": bool(excerpt_truncated),
@@ -790,6 +822,8 @@ def search_thread_messages_semantic(
             created_at,
             result_thread_id,
             source,
+            event_type,
+            notice,
             similarity,
             excerpt,
             excerpt_truncated,
@@ -821,7 +855,7 @@ def recent_thread_handoff_events(
         f"SELECT {_EVENT_FIELDS} FROM ("
         f" SELECT {_EVENT_FIELDS},"
         " COALESCE(SUM(CASE"
-        "   WHEN event_type = 'thread.message' THEN char_length(message)"
+        f"   WHEN {CONVERSATION_EVENT_SQL} THEN char_length(message)"
         "   ELSE 0"
         " END) OVER ("
         "   ORDER BY seq DESC ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING"
@@ -836,10 +870,10 @@ def recent_thread_handoff_events(
         " FROM agent_events"
         " WHERE thread_id = %s"
         " AND seq > %s"
-        " AND event_type IN ('thread.message', 'thread.activity')"
+        f" AND ({CONVERSATION_EVENT_SQL} OR event_type = 'thread.activity')"
         ") AS history"
         " WHERE (event_type = 'thread.activity' AND newer_activity_characters < %s)"
-        " OR (event_type = 'thread.message' AND newer_message_characters < %s)"
+        f" OR ({CONVERSATION_EVENT_SQL} AND newer_message_characters < %s)"
         " ORDER BY seq",
         (
             max(1, activity_event_character_limit),

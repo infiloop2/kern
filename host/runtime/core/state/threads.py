@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from host.runtime.core import db
-from host.runtime.core.state._base import _AGENT_HISTORY_COUNTERS, _read
+from host.runtime.core.state._base import _AGENT_HISTORY_COUNTERS, _read, CONVERSATION_EVENT_SQL
 
 # -- threads --------------------------------------------------------------------
 
@@ -67,7 +67,7 @@ def page_thread_summaries(
             " ORDER BY seq DESC LIMIT 1),"
             " COALESCE((SELECT seq FROM agent_events"
             " WHERE agent_events.thread_id = thread_sessions.thread_id"
-            " AND (event_type = 'thread.message'"
+            f" AND ({CONVERSATION_EVENT_SQL}"
             " OR (event_type = 'thread.error'"
             " AND thread_sessions.thread_id ~ '^schedule-[1-9][0-9]*$'))"
             " ORDER BY seq DESC LIMIT 1), 0),"
@@ -122,7 +122,7 @@ def latest_thread_event_seqs(thread_id: str) -> tuple[int, int]:
             " COALESCE((SELECT seq FROM agent_events WHERE thread_id = %s"
             " ORDER BY seq DESC LIMIT 1), 0),"
             " COALESCE((SELECT seq FROM agent_events WHERE thread_id = %s"
-            " AND (event_type = 'thread.message'"
+            f" AND ({CONVERSATION_EVENT_SQL}"
             " OR (event_type = 'thread.error' AND %s ~ '^schedule-[1-9][0-9]*$'))"
             " ORDER BY seq DESC LIMIT 1), 0)",
             (thread_id, thread_id, thread_id),

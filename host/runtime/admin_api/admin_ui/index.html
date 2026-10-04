@@ -220,11 +220,14 @@
           </div>
           <div class="swarm-workspace">
             <div class="swarm-map-panel">
-              <div class="swarm-map-tools"><span>Higher = more involvement. Thicker arrows = more messages. Dense maps show the 500 strongest links.</span><div><button id="swarm-zoom-out" aria-label="Zoom out">−</button><span id="swarm-zoom-level">100%</span><button id="swarm-zoom-in" aria-label="Zoom in">+</button><button id="swarm-arrange" title="Rearrange using the latest involvement scores and message links">Arrange</button><button id="swarm-fit">Fit all</button><button id="swarm-actual">100%</button></div></div>
-              <div id="swarm-viewport" tabindex="0" role="region" aria-label="Agent communication map, drag or scroll to explore">
+              <div id="swarm-viewport" tabindex="0" role="region" aria-label="Agent communication map. Drag, scroll or use the arrow keys to explore; plus and minus zoom; 0 fits everything.">
+                <div id="swarm-grid" aria-hidden="true"></div>
                 <p id="swarm-empty" hidden>No active agents yet.</p>
-                <div id="swarm-stage"><div id="swarm-canvas"><svg id="swarm-edges" aria-label="Communication connections"></svg><div id="swarm-nodes"></div></div></div>
+                <div id="swarm-canvas"><svg id="swarm-edges" aria-label="Communication connections"></svg><div id="swarm-nodes"></div></div>
               </div>
+              <div class="swarm-legend"><p>Closer and larger = more involved · thicker links = more messages · pulses = working now</p><ul aria-label="Agent types"><li data-legend-kind="operator"><span class="swarm-legend-icon legend-operator"></span>You</li><li data-legend-kind="host"><span class="swarm-legend-icon legend-host"></span>Kern host</li><li data-legend-kind="app"><span class="swarm-legend-icon legend-app"></span>App</li><li data-legend-kind="standing"><span class="swarm-legend-icon legend-standing"></span>Standing</li><li data-legend-kind="spawned"><span class="swarm-legend-icon legend-spawned"></span>Spawned</li><li data-legend-kind="on-demand"><span class="swarm-legend-icon legend-on-demand"></span>On-demand</li></ul></div>
+              <div class="swarm-map-tools" role="toolbar" aria-label="Map controls"><button id="swarm-zoom-out" aria-label="Zoom out" title="Zoom out · −">−</button><span id="swarm-zoom-level">100%</span><button id="swarm-zoom-in" aria-label="Zoom in" title="Zoom in · +">+</button><i></i><button id="swarm-fit" title="Show every agent · 0">Fit all</button><button id="swarm-actual">100%</button><button id="swarm-arrange" title="Rearrange using the latest involvement scores and message links">Arrange</button></div>
+              <canvas id="swarm-minimap" role="img" aria-label="Minimap of the whole swarm; click or drag to move the view"></canvas>
             </div>
             <aside class="swarm-sidebar">
               <section class="swarm-attention-section"><h2>Needs attention <span id="swarm-attention-count">0</span></h2><div id="swarm-attention"></div></section>

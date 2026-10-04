@@ -49,7 +49,7 @@ THREAD_DISPLAY_EVENT_TYPES = (
     # Hiding activity must not hide the working-memory boundary, so this type
     # is deliberately outside the activity filter below.
     "thread.memory_cleared",
-    "thread.context_added",
+    "thread.notice",
 )
 THREAD_LIST_PAGE = 100
 # Chat history is durable user data, so old or archived threads are not
@@ -501,7 +501,12 @@ def send_chat_message(
                 )
             host_request.update(schedule_config)
         if peer_sender_thread_id is not None:
+            from host.agent_messages import peer_notice
+            from host.runtime.workspace.agent_notices import thread_name
             host_request["peer_sender_thread_id"] = peer_sender_thread_id
+            host_request["kern_notice"] = peer_notice(
+                thread_name(peer_sender_thread_id), message.split("\n\n---\n\n", 1)[-1],
+            )
         else:
             host_request["operator_sent_message"] = True
         response = _send_with_busy_retry(thread_id, host_request)

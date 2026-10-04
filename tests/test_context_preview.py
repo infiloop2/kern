@@ -17,13 +17,13 @@ class HistoricalContextPreviewTests(unittest.TestCase):
         preview = _historical_context_preview("BEGIN\n" + "x" * 150_000 + "\nEND")
         for value in (None, preview, "🦀" * 150_000):
             with self.subTest(has_preview=value is not None):
-                payload = {"message": "Historical context transferred."}
+                payload = {"notice": {"kind": "history_transfer", "summary": "Historical context transferred."}}
                 if value is not None:
                     payload["historical_context"] = value
                 event = _conversation_event({
-                    "event_type": "thread.context_added", "event_id": "event_1",
+                    "event_type": "thread.notice", "event_id": "event_1",
                     "timestamp": "2026-10-02T00:00:00Z", "payload": payload,
-                })
+                }, True)
                 if value is None:
                     self.assertNotIn("historical_context", event)
                 elif value == preview:
@@ -52,7 +52,7 @@ class HistoricalContextPreviewTests(unittest.TestCase):
 
                 cur = MagicMock()
                 cur.fetchone.return_value = (1,)
-                append_agent_event(cur, "thread.context_added", "thread-1", {
+                append_agent_event(cur, "thread.notice", "thread-1", {
                     "message": "Historical context transferred.", "historical_context": preview,
                 })
                 sql, parameters = cur.execute.call_args.args

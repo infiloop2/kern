@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import pg_harness
+from host import agent_messages as message_templates
 from host.runtime.admin_api import approval_outcomes as outcomes, threads, tools_client
 from host.runtime.admin_api.errors import ApiError
 from host.runtime.core import peer_identity, state
@@ -56,7 +57,7 @@ class ApprovalOutcomeTests(unittest.TestCase):
             "failed": "was approved, but execution failed.\n\nError: Sent.",
         }
         for status, text in expected.items():
-            self.assertEqual(outcomes.outcome_message(record(status)),
+            self.assertEqual(message_templates.approval_message(record(status)),
                              "This is an automated message from Kern.\n\n---\n\n"
                              f"Approval ID: approval_1.token {text}")
 
@@ -68,11 +69,11 @@ class ApprovalOutcomeTests(unittest.TestCase):
             item = record(status) | {"result": text}
             with patch.object(state, "tool_approval", return_value=item):
                 result = tools_api.call_action("check_tool_approval", {"approval_id": item["approval_id"]}, origin_thread_id=None)
-            self.assertTrue(outcomes.outcome_message(item).endswith(
+            self.assertTrue(message_templates.approval_message(item).endswith(
                 label + ": " + result["result"]["execution_result"]))
 
     def test_failure_message_fits_transport(self):
-        message = outcomes.outcome_message(record("failed") | {"result": "😀" * 10000})
+        message = message_templates.approval_message(record("failed") | {"result": "😀" * 10000})
         self.assertLess(len(message.encode()), threads.MESSAGE_LIMIT)
 
     def test_peer_identity_comes_only_from_scope(self):
@@ -98,7 +99,7 @@ class ApprovalOutcomeTests(unittest.TestCase):
             with patch.object(state, "load_cloudflare_hostname", return_value=None), patch.object(tools_client, "_tools_operator_request", return_value=result), patch.object(outcomes.workspace_proxy, "send_message", return_value={"status": "accepted"}) as send:
                 actual = tools_client.decide_tool_approval("approval_1.token", "deny" if status == "denied" else "approve", "gmail")
                 self.assertIs(actual, result)
-                send.assert_called_once_with("thread-34", outcomes.outcome_message(record(status)))
+                send.assert_called_once_with("thread-34", message_templates.approval_message(record(status)), notice=message_templates.approval_notice(record(status)))
 
     def test_missing_identity_and_nonterminal_outcomes_do_not_send(self):
         for item in (record() | {"origin_thread_id": None}, record("pending"), record("approved")):
@@ -283,7 +284,7 @@ class GitHubApprovalDatabaseTests(unittest.TestCase):
         seed_thread_session("thread-34")
         with state.mutation() as cur:
             cur.execute("INSERT INTO chat_threads (thread_id) VALUES ('thread-34')")
-        with patch.object(outcomes.workspace_proxy, "_proxy", side_effect=to_workspace), patch.object(agent_messages, "call_admin_api", side_effect=to_admin), patch.object(pending, "_run_helper_json", return_value={"ok": True}), patch.object(orchestrator, "runtime_network_enabled", return_value=True), patch.object(orchestrator, "runtime_status", return_value="active"), patch.object(threads, "_recalled_memory_pages", return_value=([], "")), patch.object(threads, "_memory_context_message", return_value="Identity"), patch.object(orchestrator, "launch_turn", side_effect=attach_recording_steer_server) as launch:
+        with patch.object(outcomes.workspace_proxy, "_proxy", side_effect=to_workspace), patch.object(agent_messages, "call_admin_api", side_effect=to_admin), patch.object(pending, "_run_helper_json", return_value={"ok": True}), patch.object(orchestrator, "runtime_network_enabled", return_value=True), patch.object(orchestrator, "runtime_status", return_value="active"), patch.object(threads, "_recalled_memory_pages", return_value=([], "")), patch.object(message_templates, "memory_context_message", return_value="Identity"), patch.object(orchestrator, "launch_turn", side_effect=attach_recording_steer_server) as launch:
             result = service.resolve_pending_push("abc123", "approve")
             self.assertEqual(result["pending_push"]["origin_thread_id"], "thread-34")
             launch.assert_called_once()

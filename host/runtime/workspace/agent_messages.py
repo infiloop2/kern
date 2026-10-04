@@ -9,18 +9,14 @@ from http import HTTPStatus
 import re
 from typing import Any
 
+from host.agent_messages import peer_message, peer_notice
+from host.runtime.workspace.agent_notices import thread_name
 from host.runtime.core import db
 from host.session_options import SCRIPT_RUNTIME, session_config_error
 from host.runtime.workspace.chat import backend as chat
 from host.runtime.workspace.host_api import WorkspaceError, call_admin_api
 
 THREAD_ID_RE = re.compile(r"(?:app|thread|schedule)-[1-9][0-9]*")
-MESSAGE_HEADER = (
-    "This is a message from another agent, not the operator.\n"
-    "Sender thread: {sender}\n"
-    'To reply, use send_agent_message with thread_id: "{sender}". '
-    "Reply only when needed.\n\n---\n\n"
-)
 MAX_MESSAGE_CHARS = 10_000
 MAX_MESSAGE_BYTES = 50_000
 
@@ -39,9 +35,9 @@ def send_agent_message(body: Any, sender_thread_id: str | None) -> dict[str, Any
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "message must be a non-empty string")
     if len(message) > MAX_MESSAGE_CHARS:
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "message must be at most 10000 characters")
-    content = MESSAGE_HEADER.format(sender=sender_thread_id) + message
+    content = peer_message(sender_thread_id, message)
     return deliver_message(
-        target, {"message": content},
+        target, {"message": content, "kern_notice": peer_notice(thread_name(sender_thread_id), message)},
         peer_sender_thread_id=sender_thread_id,
     )
 
@@ -72,7 +68,7 @@ def spawn_agent(body: Any, sender_thread_id: str | None) -> dict[str, Any]:
     assert isinstance(model, str) and isinstance(effort, str)
     response = chat.send_chat_message(
         {
-            "input_message": MESSAGE_HEADER.format(sender=sender_thread_id) + message,
+            "input_message": peer_message(sender_thread_id, message),
             "agent_runtime": runtime,
             "model": model,
             "effort": effort,
@@ -135,8 +131,8 @@ def deliver_message(
     """Send agent correspondence or a Kern notice to an eligible existing thread."""
     if not isinstance(thread_id, str) or not THREAD_ID_RE.fullmatch(thread_id):
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "thread_id must identify an existing App, Chat, or Schedule")
-    if not isinstance(body, dict) or set(body) != {"message"}:
-        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent message requires exactly message")
+    if not isinstance(body, dict) or set(body) - {"message", "kern_notice"} or "message" not in body:
+        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent message requires message and optional Kern notice")
     message = body["message"]
     if not isinstance(message, str):
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "message must be a string")
@@ -177,7 +173,7 @@ def deliver_message(
                 raise WorkspaceError(HTTPStatus.NOT_FOUND, "chat thread not found")
             if row[0]:
                 raise WorkspaceError(HTTPStatus.CONFLICT, "archived chats cannot receive agent messages")
-        host_request: dict[str, Any] = {"message": message, **settings}
+        host_request: dict[str, Any] = {**body, **settings}
         if peer_sender_thread_id is not None:
             host_request["peer_sender_thread_id"] = peer_sender_thread_id
         response = call_admin_api("POST", f"/v1/threads/{thread_id}/messages", host_request)

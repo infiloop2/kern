@@ -123,7 +123,7 @@ def thread_events(thread_id: str) -> list[dict[str, object]]:
     # These assertions cover execution lifecycle. Prompt-context display notices
     # are asserted separately by the admin API admission tests.
     return [event for event in read_agent_events()
-            if event["thread_id"] == thread_id and event["event_type"] != "thread.context_added"]
+            if event["thread_id"] == thread_id and (event["event_type"] != "thread.notice" or event["payload"].get("source") == "user")]
 
 
 def event_summary(events: list[dict[str, object]]) -> list[tuple[object, object]]:
@@ -376,7 +376,7 @@ class OrchestratorTests(unittest.TestCase):
             )
             return orchestrator.admit_turn(
                 cur, after_commit, thread_id, runtime, model, effort, message,
-                operator_sent_message=False,
+                operator_sent_message=True, input_notice={"kind": "operator"},
             )
 
     def start_turn(
@@ -398,7 +398,7 @@ class OrchestratorTests(unittest.TestCase):
             )
             turn = orchestrator.admit_turn(
                 cur, after_commit, thread_id, runtime, model, effort, message,
-                operator_sent_message=False,
+                operator_sent_message=True, input_notice={"kind": "operator"},
             )
             assert turn is not None
         orchestrator.launch_turn(turn, message, provider_session_id, task_context=message)
@@ -406,13 +406,17 @@ class OrchestratorTests(unittest.TestCase):
 
     def send_message(
         self, thread_id: str, message: str, runtime: str = "codex",
-        *, peer_sender_thread_id: str | None = None,
+        *, peer_sender_thread_id: str | None = None, notice: dict[str, str] | None = None,
     ) -> dict[str, object]:
         body: dict[str, object] = {"message": message}
+        if peer_sender_thread_id is not None:
+            notice = {"kind": "agent_message", "summary": "Message from Reviewer"}
+        if notice is not None:
+            body["kern_notice"] = notice
         if state.thread_session_config(thread_id) is None:
             model, effort = DEFAULT_SESSION[runtime]
             body |= {"agent_runtime": runtime, "model": model, "effort": effort}
-        return service.send_thread_message(thread_id, body, peer_sender_thread_id, operator_sent_message=False)
+        return service.send_thread_message(thread_id, body, peer_sender_thread_id, operator_sent_message=notice is None)
 
     def wait_for(self, condition, message: str = "condition") -> None:
         deadline = time.monotonic() + 10
@@ -478,13 +482,13 @@ class OrchestratorTests(unittest.TestCase):
         self.assertTrue(any(e["event_type"] == "thread.error" for e in thread_events("thread-t1")))
 
     def test_swarm_annotations_follow_admission_launch_and_finish(self) -> None:
-        from host.runtime.workspace.agent_messages import MESSAGE_HEADER
+        from host.agent_messages import MESSAGE_HEADER
         from host.runtime.admin_api import threads as thread_routes
         message = MESSAGE_HEADER.format(sender="thread-2") + "Review the release"
         history = [{"event_type": "thread.message", "payload": {
             "source": "user", "message": "Prepare the release checklist",
         }}]
-        with (patch.object(thread_routes.state, "page_thread_events", return_value=history) as history_read,
+        with (patch.object(thread_routes.state, "recall_context_events", return_value=history) as history_read,
               patch.object(orchestrator.swarm_annotations, "enqueue_task") as task,
               patch.object(thread_routes, "_recalled_memory_pages", return_value=(
                   [{"page_id": "release-notes", "content": "Use the release checklist."}], "Recall complete.",
@@ -494,7 +498,7 @@ class OrchestratorTests(unittest.TestCase):
             self.wait_until_idle("thread-1")
         run = state.thread_session_config("thread-1")["run_number"]
         self.assertEqual(task.call_args.args[:2], ("thread-1", run))
-        self.assertEqual(task.call_args.args[2], "Review the release\n\nPrepare the release checklist")
+        self.assertEqual(task.call_args.args[2], "User: Prepare the release checklist\n\nPeer: Review the release")
         history_read.assert_called_once()
         self.assertEqual(task.call_args.args[2], recall.call_args.args[1])
         with db.transaction() as cur:
@@ -503,23 +507,58 @@ class OrchestratorTests(unittest.TestCase):
         latest = state.swarm_interactions()["interactions"][0]
         self.assertEqual((latest["sender_thread_id"], latest["target_thread_id"]), ("thread-2", "thread-1"))
 
+    def test_memory_monitor_receives_admission_activity_and_operator_steering(self) -> None:
+        from host.runtime.memory_monitor import Monitor
+        from host.runtime.admin_api import threads as thread_routes
+        monitor = Monitor()
+        release, started = threading.Event(), threading.Event()
+        def run(server, message, session, model, effort, on_message, finish_turn=None):
+            on_message('Preparing a PR')
+            on_message({'provider': 'codex', 'activity_id': 'command-1', 'kind': 'command',
+                        'phase': 'completed', 'title': 'git push', 'status': 'exit 0'})
+            started.set()
+            if not release.wait(10):
+                raise AssertionError('test did not release turn')
+            return 'session', 'done'
+        pages = [{'page_id': 'ui', 'revision': 1, 'description': 'UI guidance',
+                  'scope': 'swarm', 'content': 'UI rules'}]
+        with (patch.object(orchestrator, 'memory_monitor', monitor),
+              patch.object(thread_routes, '_recalled_memory_pages', return_value=(pages, 'recall')),
+              patch.object(orchestrator.codex_app_server, 'run_turn', run)):
+            try:
+                self.send_message('thread-1', 'Change arrows')
+                self.assertTrue(started.wait(5))
+                key = ('thread-1', state.thread_session_config('thread-1')['run_number'])
+                self.assertEqual(monitor.turns[key].known['ui'], 1)
+                self.assertEqual(monitor.turns[key].count, 2)
+                orchestrator.steer_live_turn('thread-1', 'codex', 'Investigate only',
+                                             operator_sent_message=True, input_notice={'kind': 'operator'})
+                self.assertEqual(monitor.turns[key].generation, 1)
+                self.assertGreaterEqual(monitor.turns[key].count, 5)
+            finally:
+                release.set()
+                self.wait_until_idle('thread-1')
+            self.assertEqual(monitor.turns, {})
+
     def test_pasted_peer_header_does_not_create_correspondence(self) -> None:
-        from host.runtime.workspace.agent_messages import MESSAGE_HEADER
+        from host.agent_messages import MESSAGE_HEADER
         pasted = MESSAGE_HEADER.format(sender="thread-2") + "Review the release"
         with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
             self.send_message("thread-1", pasted)
             self.wait_until_idle("thread-1")
         self.assertEqual(state.swarm_interactions()["interactions"], [{
-            "sender_thread_id": "kern-host", "target_thread_id": "thread-1", "count": 1,
+            "sender_thread_id": "operator", "target_thread_id": "thread-1", "count": 1,
         }])
 
     def test_host_admission_and_steering_count_accepted_automated_messages(self) -> None:
         with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
-            self.send_message("thread-1", "This is an automated message from Kern.\n\nScheduled trigger")
+            self.send_message("thread-1", "This is an automated message from Kern.\n\nScheduled trigger",
+                              notice={"kind": "scheduled_trigger", "summary": "Scheduled trigger"})
             self.wait_until_idle("thread-1")
         self.register_live_turn("codex", "thread-1", FakeServer())
         self.assertTrue(orchestrator.steer_live_turn(
             "thread-1", "codex", "Approval outcome", operator_sent_message=False,
+            input_notice={"kind": "approval_outcome", "summary": "Approved and completed: action"},
         ))
         self.assertEqual(state.swarm_interactions()["interactions"], [{
             "sender_thread_id": "kern-host", "target_thread_id": "thread-1", "count": 2,
@@ -531,7 +570,7 @@ class OrchestratorTests(unittest.TestCase):
         turn = self.register_live_turn("codex", "thread-1", FakeServer())
         turn.phase = orchestrator.ExecutionPhase.STARTING
         with self.assertRaises(ApiError):
-            orchestrator.steer_live_turn("thread-1", "codex", "Restart notice", operator_sent_message=False)
+            orchestrator.steer_live_turn("thread-1", "codex", "Restart notice", operator_sent_message=False, input_notice={"kind": "restart", "summary": "Restart notice"})
         self.assertEqual(state.swarm_interactions()["interactions"], [])
 
     def test_operator_admission_and_steering_count_accepted_messages(self) -> None:
@@ -541,18 +580,18 @@ class OrchestratorTests(unittest.TestCase):
             }, None, operator_sent_message=True)
             self.wait_until_idle("thread-1")
         self.register_live_turn("codex", "thread-1", FakeServer())
-        self.assertTrue(orchestrator.steer_live_turn("thread-1", "codex", "follow-up", operator_sent_message=True))
+        self.assertTrue(orchestrator.steer_live_turn("thread-1", "codex", "follow-up", operator_sent_message=True, input_notice={"kind": "operator"}))
         self.assertEqual(state.swarm_interactions()["interactions"], [{
             "sender_thread_id": "operator", "target_thread_id": "thread-1", "count": 2,
         }])
 
     def test_trusted_peer_steer_records_correspondence(self) -> None:
-        from host.runtime.workspace.agent_messages import MESSAGE_HEADER
+        from host.agent_messages import MESSAGE_HEADER
         self.register_live_turn("codex", "thread-chat", FakeServer())
         wrapped = MESSAGE_HEADER.format(sender="thread-2") + "Can you check the release?"
         self.assertTrue(orchestrator.steer_live_turn(
             "thread-chat", "codex", wrapped, peer_sender_thread_id="thread-2",
-            operator_sent_message=True,
+            operator_sent_message=False, input_notice={"kind": "agent_message", "summary": "Message from Reviewer"},
         ))
         message = state.swarm_interactions()["interactions"][0]
         self.assertEqual((message["sender_thread_id"], message["target_thread_id"]),
@@ -639,7 +678,7 @@ class OrchestratorTests(unittest.TestCase):
         turn.server = server
 
         with self.assertRaises(ApiError) as starting:
-            orchestrator.steer_live_turn("thread-chat", "codex", "too early", operator_sent_message=False)
+            orchestrator.steer_live_turn("thread-chat", "codex", "too early", operator_sent_message=True, input_notice={"kind": "operator"})
         self.assertEqual(starting.exception.status.value, 409)
         self.assertEqual(
             starting.exception.message,
@@ -648,7 +687,7 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(event_summary(thread_events("thread-chat")), [("thread.message", "initial")])
 
         self.assertTrue(orchestrator._provider_ready(turn))
-        self.assertTrue(orchestrator.steer_live_turn("thread-chat", "codex", "accepted", operator_sent_message=False))
+        self.assertTrue(orchestrator.steer_live_turn("thread-chat", "codex", "accepted", operator_sent_message=True, input_notice={"kind": "operator"}))
         self.assertEqual(server.steered, ["accepted"])
         self.assertEqual(
             event_summary(thread_events("thread-chat")),
@@ -671,7 +710,7 @@ class OrchestratorTests(unittest.TestCase):
         turn = self.register_live_turn("codex", "thread-chat", server)
 
         with self.assertRaises(ApiError) as rejected:
-            orchestrator.steer_live_turn("thread-chat", "codex", "new direction", operator_sent_message=False)
+            orchestrator.steer_live_turn("thread-chat", "codex", "new direction", operator_sent_message=True, input_notice={"kind": "operator"})
 
         self.assertEqual(rejected.exception.status.value, 502)
         self.assertIn("rejected the message", rejected.exception.message)
@@ -698,7 +737,7 @@ class OrchestratorTests(unittest.TestCase):
         turn = self.register_live_turn("codex", "thread-chat", server)
 
         with self.assertRaises(ApiError) as finishing:
-            orchestrator.steer_live_turn("thread-chat", "codex", "too late", operator_sent_message=False)
+            orchestrator.steer_live_turn("thread-chat", "codex", "too late", operator_sent_message=True, input_notice={"kind": "operator"})
 
         self.assertEqual(finishing.exception.status.value, 409)
         self.assertEqual(
@@ -833,7 +872,7 @@ class OrchestratorTests(unittest.TestCase):
         server.started = 1
         self.register_live_turn("hermes", "hermes-busy", server)
         with self.assertRaises(ApiError) as caught:
-            orchestrator.steer_live_turn("hermes-busy", "hermes", "hello", operator_sent_message=False)
+            orchestrator.steer_live_turn("hermes-busy", "hermes", "hello", operator_sent_message=True, input_notice={"kind": "operator"})
         self.assertEqual(caught.exception.status.value, 409)
         self.assertIn("Hermes cannot accept another message", caught.exception.message)
 
@@ -846,7 +885,7 @@ class OrchestratorTests(unittest.TestCase):
         with self.assertRaises(ApiError) as caught:
             orchestrator.steer_live_turn(
                 "schedule-1", "script", "/mnt/kern-agent/agent-home/other.sh",
-                operator_sent_message=False,
+                operator_sent_message=True, input_notice={"kind": "operator"},
             )
         self.assertEqual(caught.exception.status.value, 409)
         self.assertIn("Script cannot accept another message", caught.exception.message)
@@ -926,7 +965,7 @@ class OrchestratorTests(unittest.TestCase):
         turn = self.register_live_turn("codex", "thread-chat", FakeServer())
         for index in range(25):
             self.assertTrue(
-                orchestrator.steer_live_turn("thread-chat", "codex", f"steer {index}", operator_sent_message=False)
+                orchestrator.steer_live_turn("thread-chat", "codex", f"steer {index}", operator_sent_message=True, input_notice={"kind": "operator"})
             )
         self.assertEqual(
             turn.server.steered,
@@ -948,7 +987,7 @@ class OrchestratorTests(unittest.TestCase):
         self.register_live_turn("codex", "thread-chat", FakeServer())
 
         with patch.object(orchestrator, "utc_now", return_value="2026-06-08T00:00:09Z"):
-            self.assertTrue(orchestrator.steer_live_turn("thread-chat", "codex", "new direction", operator_sent_message=False))
+            self.assertTrue(orchestrator.steer_live_turn("thread-chat", "codex", "new direction", operator_sent_message=True, input_notice={"kind": "operator"}))
 
         config = state.thread_session_config("thread-chat")
         self.assertIsNotNone(config)
@@ -1013,7 +1052,7 @@ class OrchestratorTests(unittest.TestCase):
         turn = self.register_live_turn("codex", "thread-chat", FakeServer())
         with patch.object(state, "append_agent_event", side_effect=RuntimeError("write failed")):
             with self.assertRaises(RuntimeError):
-                orchestrator.steer_live_turn("thread-chat", "codex", "possibly delivered", operator_sent_message=False)
+                orchestrator.steer_live_turn("thread-chat", "codex", "possibly delivered", operator_sent_message=True, input_notice={"kind": "operator"})
         self.assertEqual(turn.server.steered, ["possibly delivered"])
         self.assertEqual(thread_events("thread-chat"), [])
         self.assertEqual(
@@ -1339,10 +1378,10 @@ class OrchestratorTests(unittest.TestCase):
                     "effort": "ultracode",
                 },
                 None,
-                operator_sent_message=False,
+                operator_sent_message=True,
             )
             self.wait_until_idle("thread-chat")
-            service.send_thread_message("thread-chat", {"message": "again"}, None, operator_sent_message=False)
+            service.send_thread_message("thread-chat", {"message": "again"}, None, operator_sent_message=True)
             self.wait_until_idle("thread-chat")
 
         self.assertEqual(seen, [None, "claude-session-1"])
@@ -1376,10 +1415,10 @@ class OrchestratorTests(unittest.TestCase):
                     "effort": "xhigh",
                 },
                 None,
-                operator_sent_message=False,
+                operator_sent_message=True,
             )
             self.wait_until_idle("thread-grok")
-            service.send_thread_message("thread-grok", {"message": "again"}, None, operator_sent_message=False)
+            service.send_thread_message("thread-grok", {"message": "again"}, None, operator_sent_message=True)
             self.wait_until_idle("thread-grok")
 
         self.assertEqual(seen, [None, "grok-session-1"])
@@ -1432,12 +1471,12 @@ class OrchestratorTests(unittest.TestCase):
             return "replacement-session", "done"
 
         with patch.object(orchestrator.grok_agent, "run_turn", fake_run_turn):
-            service.send_thread_message("thread-stale-grok", {"message": "first retry"}, None, operator_sent_message=False)
+            service.send_thread_message("thread-stale-grok", {"message": "first retry"}, None, operator_sent_message=True)
             self.wait_until_idle("thread-stale-grok")
             self.assertIsNone(
                 state.thread_session_config("thread-stale-grok")["provider_session_id"]
             )
-            service.send_thread_message("thread-stale-grok", {"message": "second retry"}, None, operator_sent_message=False)
+            service.send_thread_message("thread-stale-grok", {"message": "second retry"}, None, operator_sent_message=True)
             self.wait_until_idle("thread-stale-grok")
 
         self.assertEqual(attempts, ["deleted-session", None])
@@ -1529,7 +1568,7 @@ class OrchestratorTests(unittest.TestCase):
                     self.assertIsNone(state.thread_session_config(thread_id)["provider_session_id"])
                     self.assertFalse(server.closed)
                     with self.assertRaises(ApiError) as conflict:
-                        service.send_thread_message(thread_id, {"message": "too soon"}, None, operator_sent_message=False)
+                        service.send_thread_message(thread_id, {"message": "too soon"}, None, operator_sent_message=True)
                     self.assertEqual(conflict.exception.status.value, 409)
 
                 self.rollout_size.side_effect = [
@@ -1597,7 +1636,7 @@ class OrchestratorTests(unittest.TestCase):
             patch.object(orchestrator.codex_app_server, "CodexAppServer", StartingServer),
             patch.object(orchestrator.codex_app_server, "run_turn", fake_run_turn),
         ):
-            service.send_thread_message(thread_id, {"message": "continue the work"}, None, operator_sent_message=False)
+            service.send_thread_message(thread_id, {"message": "continue the work"}, None, operator_sent_message=True)
             self.wait_until_idle(thread_id)
             self.assertEqual(len(attempts), 1)
             self.assertEqual(attempts[0][1], "deleted-session")
@@ -1606,7 +1645,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(len(errors), 1)
             self.assertIn("send the message again", errors[0]["payload"]["error_message"])
 
-            service.send_thread_message(thread_id, {"message": "retry now"}, None, operator_sent_message=False)
+            service.send_thread_message(thread_id, {"message": "retry now"}, None, operator_sent_message=True)
             self.wait_until_idle(thread_id)
 
         self.assertEqual(len(attempts), 2)
@@ -1668,7 +1707,7 @@ class OrchestratorTests(unittest.TestCase):
                 "thread-stale-claude",
                 {"message": "continue the work"},
                 None,
-                operator_sent_message=False,
+                operator_sent_message=True,
             )
             self.assertEqual(response["status"], "accepted")
             self.wait_until_idle("thread-stale-claude")
@@ -1687,7 +1726,7 @@ class OrchestratorTests(unittest.TestCase):
                 "thread-stale-claude",
                 {"message": "retry now"},
                 None,
-                operator_sent_message=False,
+                operator_sent_message=True,
             )
             self.assertEqual(retry["status"], "accepted")
             self.wait_until_idle("thread-stale-claude")
@@ -1719,7 +1758,7 @@ class OrchestratorTests(unittest.TestCase):
             results["first_finish"] = finish_turn("claude-session-1", "done")
             results["second_finish"] = finish_turn("claude-session-1", "done")
             try:
-                service.send_thread_message("thread-chat", {"message": "too late"}, None, operator_sent_message=False)
+                service.send_thread_message("thread-chat", {"message": "too late"}, None, operator_sent_message=True)
                 results["post_finish"] = "accepted"
             except ApiError as exc:
                 results["post_finish"] = (exc.status.value, exc.message)

@@ -246,6 +246,9 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
         "canApply": "can_apply", "boostConnects": "boost_connects", "teamOrgId": "team_org_id",
         "certificateIds": "certificate_ids", "portfolioProjectIds": "portfolio_project_ids",
         "screeningQuestions": "screening_questions", "screeningAnswers": "answers",
+        # get_preview stores create's answers as question/answer pairs under
+        # params.questions (observed in the 2026-10-04 production diagnostic).
+        "questions": "answers",
     }
     def inspect(value):
         nonlocal complete_payload

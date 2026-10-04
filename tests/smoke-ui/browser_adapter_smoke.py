@@ -34,7 +34,7 @@ REPLY_HTML = f'''<!doctype html><html><body>
 
 
 @contextmanager
-def native_fixture(playwright, fixture=None):
+def native_fixture(playwright, fixture=None, *, pattern="https://x.com/**"):
     real_popen = subprocess.Popen
     processes = []
     def popen(command, **options):
@@ -46,7 +46,7 @@ def native_fixture(playwright, fixture=None):
         process = Chromium(runtime, environment, settings)
         processes.append(process)
         if fixture:
-            process.context.route("https://x.com/**", fixture)
+            process.context.route(pattern, fixture)
         return process
     runtime = SimpleNamespace(chromium=playwright.chromium, stop=lambda: None)
     with (patch("playwright.sync_api.sync_playwright", return_value=SimpleNamespace(start=lambda: runtime)),
@@ -81,7 +81,95 @@ def check_presets():
             browser.close()
 
 
+def check_post_text(page):
+    # Simulate an editor doing work per keystroke. With the former 50 ms
+    # artificial delay, 280 characters exceeded the old 30-second deadline.
+    slow_html = HTML + '''<script>
+        window.postKeys = [];
+        const editor = document.querySelector('[role="dialog"] [contenteditable]');
+        editor.addEventListener('keydown', event => {
+            if (event.key === 'x') window.postKeys.push(event.isTrusted);
+        });
+        editor.addEventListener('input', () => {
+            const deadline = performance.now() + 65;
+            while (performance.now() < deadline) {}
+        });
+    </script>'''
+    route_pattern = "https://x.com/compose/post"
+    def slow_editor(route):
+        route.fulfill(status=200, content_type="text/html", body=slow_html)
+    page.route(route_pattern, slow_editor)
+    try:
+        x_post_tweet.prepare_post(page, "example", "x" * 280)
+        assert page.get_by_role("dialog").get_by_test_id("tweetTextarea_0").inner_text() == "x" * 280
+        assert page.evaluate("window.postKeys") == [True] * 280
+    finally:
+        page.unroute(route_pattern, slow_editor)
+
+    # An enabled button alone is insufficient: provider input handlers can
+    # alter text. Even a whitespace-only change must stop preparation.
+    changed_html = HTML + '''<script>
+        const editor = document.querySelector('[role="dialog"] [contenteditable]');
+        editor.style.whiteSpace = 'pre-wrap';
+        editor.addEventListener('keyup', () => {
+            if (editor.innerText === 'exact text') editor.innerText = 'exact  text';
+        });
+    </script>'''
+    def changed_editor(route):
+        route.fulfill(status=200, content_type="text/html", body=changed_html)
+    page.route(route_pattern, changed_editor)
+    try:
+        try:
+            x_post_tweet.prepare_post(page, "example", "exact text")
+            raise AssertionError("Changed approved text was accepted")
+        except x_post_tweet.PreparationFailed as exc:
+            assert exc.step == "verify_post_text", str(exc)
+    finally:
+        page.unroute(route_pattern, changed_editor)
+    print("Post preparation passed: slow editor, trusted keys and changed-text rejection.", flush=True)
+
+
+def check_post_resources(playwright):
+    resources = '''<img src="https://pbs.twimg.com/photo.jpg">
+<video src="https://video.twimg.com/clip.mp4" preload="auto"></video>
+<script src="https://abs.twimg.com/main.js"></script>
+<script>window.videoFetch = fetch('https://video.twimg.com/playlist.m3u8')
+    .then(() => 'loaded', () => 'blocked');</script>'''
+    reached = []
+    def fixture(route):
+        reached.append(route.request.url)
+        if route.request.resource_type == "document":
+            route.fulfill(content_type="text/html", body=HTML + resources)
+        elif route.request.url == "https://abs.twimg.com/main.js":
+            route.fulfill(content_type="application/javascript", body="window.composerScriptLoaded = true")
+        elif route.request.method == "POST":
+            route.fulfill(content_type="application/json", body=json.dumps({"data": {"create_tweet": {"tweet_results": {"result": {
+                "rest_id": "123", "core": {"user_results": {"result": {"core": {"screen_name": "example"}}}}
+            }}}}}))
+        else:
+            route.fulfill(body="fixture media", headers={"Access-Control-Allow-Origin": "*"})
+    with native_fixture(playwright, fixture, pattern="**/*"):
+        for block_media in (True, False):
+            reached.clear()
+            browser = Browser(None, "https://x.com/compose/post", {}, block_media=block_media)
+            try:
+                page = browser.page
+                assert page.evaluate("window.videoFetch") == ("blocked" if block_media else "loaded")
+                assert page.evaluate("window.composerScriptLoaded") is True
+                if block_media:
+                    x_post_tweet.prepare_post(page, "example", "hello")
+                    assert x_post_tweet.submit_prepared_post(page, "example") == "https://x.com/example/status/123"
+                    assert not any("pbs.twimg.com" in url or "video.twimg.com" in url for url in reached), reached
+                else:
+                    assert "https://pbs.twimg.com/photo.jpg" in reached, reached
+                    assert "https://video.twimg.com/playlist.m3u8" in reached, reached
+            finally:
+                browser.close()
+    print("Browser posting skips media before navigation and preserves composer scripts/submission; operator media still loads.", flush=True)
+
+
 def run(playwright):
+    check_post_resources(playwright)
     calls = []
     user_agents = []
     response_override = None
@@ -173,6 +261,7 @@ def run(playwright):
             assert browser.page.get_by_role("dialog").get_by_test_id("tweetTextarea_0").inner_text() == "😀" * 4096
             browser.page.evaluate("window.onbeforeunload = () => 'Unsaved draft'")
             browser.input({"kind": "home"})
+            check_post_text(browser.page)
             exact_text = "First line\nCafé 😀 +\tend".ljust(280, "x")
             x_post_tweet.prepare_post(browser.page, "example", exact_text)
             assert browser.page.get_by_role("dialog").get_by_test_id("tweetTextarea_0").inner_text() == exact_text

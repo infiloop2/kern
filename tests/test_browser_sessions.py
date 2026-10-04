@@ -34,10 +34,11 @@ class FakeBrowser:
     fail_prepare = False
     fail_submit = False
     submissions = 0
-    def __init__(self, profile, site):
+    def __init__(self, profile, site, *, block_media=False):
         self.page = self
         self.profile = profile
         self.site = site
+        self.block_media = block_media
     def account(self):
         return self.account_value
     def origin(self):
@@ -104,6 +105,50 @@ class BrowserSessionsTests(unittest.TestCase):
         self.engine.dispatch("cancel", {"lease": lease})
         self.assertEqual(self.engine.status()["state"], "needs_attention")
         self.assertEqual(self.engine.dispatch("check", {})["state"], "connected")
+
+    def test_post_launch_skips_home_and_filters_media_but_operator_launch_does_not(self):
+        self.connect()
+        with patch.object(self.engine, "factory", wraps=FakeBrowser) as factory:
+            for extra in ({}, {"in_reply_to_tweet_id": "12345"}):
+                post_tweet(self.engine, {**self.body, **extra})
+                self.assertEqual(factory.call_args.args[1], "about:blank")
+                self.assertEqual(factory.call_args.kwargs, {"block_media": True})
+                self.assertIsNone(self.engine.browser)
+            lease = self.engine.dispatch("open", {})["lease"]
+            self.assertEqual(factory.call_args.args[1], self.engine.provider.login_url)
+            self.assertEqual(factory.call_args.kwargs, {"block_media": False})
+            self.engine.dispatch("cancel", {"lease": lease})
+
+    def test_post_resource_filter_preserves_composer_dependencies(self):
+        browser = Browser.__new__(Browser)
+        browser.reported_failures = set()
+        requests = [
+            ("https://pbs.twimg.com/media/photo.jpg", "image", True),
+            ("https://abs.twimg.com/emoji.svg", "image", True),
+            ("https://example.test/clip.mp4", "media", True),
+            ("https://video.twimg.com/playlist.m3u8", "fetch", True),
+            ("https://video.twimg.com/segment", "xhr", True),
+            ("https://abs.twimg.com/responsive-web/main.js", "script", False),
+            ("https://abs.twimg.com/style.css", "stylesheet", False),
+            ("https://x.com/i/api/graphql/id/CreateTweet", "fetch", False),
+            ("https://x.com/i/status/12345", "document", False),
+            ("https://video.twimg.com.example.test/api", "fetch", False),
+        ]
+        for enabled in (False, True):
+            browser.block_media = enabled
+            for url, resource_type, omitted in requests:
+                with self.subTest(enabled=enabled, url=url):
+                    route = Mock(request=SimpleNamespace(url=url, resource_type=resource_type, failure="net::ERR_FAILED"))
+                    with patch.object(browser, "report_failure") as failure:
+                        browser.route_request(route)
+                        if enabled and omitted:
+                            route.abort.assert_called_once()
+                            route.fallback.assert_not_called()
+                            browser.record_failed_request(route.request)
+                            failure.assert_not_called()
+                        else:
+                            route.abort.assert_not_called()
+                            route.fallback.assert_called_once()
 
     def test_login_check_detects_account_change_and_pauses(self):
         self.connect()
@@ -387,6 +432,7 @@ class BrowserSessionsTests(unittest.TestCase):
 
     def test_snapshot_returns_state_without_creating_auth_files(self):
         browser = Browser.__new__(Browser)
+        browser.block_media = False
         browser.context = SimpleNamespace(storage_state=lambda **kwargs: {"cookies": [], "origins": []})
         self.assertEqual(browser.save_state(), {"cookies": [], "origins": []})
         self.assertEqual(list(self.root.iterdir()), [])
@@ -437,6 +483,7 @@ class BrowserSessionsTests(unittest.TestCase):
 
     def test_browser_failure_logs_are_sanitized_and_bounded(self):
         browser = Browser.__new__(Browser)
+        browser.block_media = False
         browser.reported_failures = set()
         request = SimpleNamespace(
             url="https://abs.twimg.com/private/path?token=secret", resource_type="script",
@@ -467,6 +514,7 @@ class BrowserSessionsTests(unittest.TestCase):
 
     def test_browser_policy_blocks_are_logged_and_still_aborted(self):
         browser = Browser.__new__(Browser)
+        browser.block_media = False
         browser.reported_failures = set()
         route = Mock(request=SimpleNamespace(url="https://127.0.0.1/private", resource_type="document"))
         with patch("host.runtime.browser.browser.host_errors.report_warning") as warning:
@@ -481,6 +529,7 @@ class BrowserSessionsTests(unittest.TestCase):
     def test_browser_warning_is_accepted_by_host_diagnostics_collector(self):
         from host.runtime.host_diagnostics_collector.collector import parse_journal_record
         browser = Browser.__new__(Browser)
+        browser.block_media = False
         browser.reported_failures = set()
         with patch("host.runtime.core.host_errors.emit_record") as emit:
             browser.report_failure("Screenshot capture failed")
@@ -494,6 +543,7 @@ class BrowserSessionsTests(unittest.TestCase):
 
     def test_screenshot_failures_are_logged_once_without_changing_error(self):
         browser = Browser.__new__(Browser)
+        browser.block_media = False
         browser.reported_failures = set()
         browser.page = Mock()
         browser.page.screenshot.side_effect = RuntimeError("private screenshot failure")
@@ -507,6 +557,7 @@ class BrowserSessionsTests(unittest.TestCase):
 
     def test_browser_home_and_reload_use_fixed_page_targets(self):
         browser = Browser.__new__(Browser)
+        browser.block_media = False
         browser.site = "https://x.com/"
         browser.page = Mock()
         browser.input({"kind": "home"})

@@ -1,7 +1,9 @@
 """Budgets and routing envelope normalization for bounded-context memory recall."""
 
 # A UTF-8 byte budget, not a tokenizer count. BGE applies its own token ceiling.
-MAX_QUERY_BYTES = 1000
+USER_CONTEXT_BYTES = 1000
+SUPPORT_CONTEXT_BYTES = 500
+MAX_QUERY_BYTES = USER_CONTEXT_BYTES + SUPPORT_CONTEXT_BYTES
 
 HISTORY_EVENT_LIMIT = 12
 CANDIDATE_LIMIT = 20
@@ -17,5 +19,5 @@ PEER_MESSAGE_PREFIX_PATTERN = (
     r'\AThis is a message from another agent, not the operator\.\n'
     r'Sender thread: ((?:app|thread|schedule)-[1-9][0-9]*)\n'
     r'To reply, use send_agent_message with thread_id: "\1"\. '
-    r'Reply only when needed\.\n\n(?:---\n\n)?'
+    r'Reply only when needed\.\n\n---\n\n'
 )

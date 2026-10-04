@@ -16,7 +16,7 @@ from host.constants import BROWSER_NETWORK_PORT
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser_network.config import Settings
 from host.runtime.browser.storage import Store
-from host.runtime.browser_network.transport import ConnectionFailure, SessionEnded, connect_proxy, failure, target
+from host.runtime.browser_network.transport import ConnectionFailure, RetryableConnectFailure, connect_proxy, failure, target
 from host.runtime.core import host_errors
 
 
@@ -43,7 +43,7 @@ class Network:
         elif credentials is not None:
             try:
                 stream = connect_proxy(("gate.decodo.com", 7000), host, credentials)
-            except SessionEnded:
+            except RetryableConnectFailure:
                 with self.lock:
                     if generation != self.generation:
                         raise BrowserError("Browser connection settings changed during connection. Retry.")

@@ -31,7 +31,7 @@ class SwarmAnnotationsTests(unittest.TestCase):
         self.assertEqual(model.call_args.args[1]['properties']['task']['maxLength'], 70)
         self.assertIn('whole words and a natural ending', model.call_args.args[0])
         self.assertIn('never cut off a word', model.call_args.args[0])
-        save.assert_called_once_with('thread-1', 3, 'Review release')
+        save.assert_called_once_with('thread-1', 3, 'Review release', only_if_empty=True)
 
     def test_invalid_task_never_saves(self) -> None:
         for result in ({'task': ''}, {'task': 'x' * 71}, {'task': True}):
@@ -145,6 +145,21 @@ class SwarmPersistenceTests(unittest.TestCase):
         self.assertIsNone(state.page_thread_summaries(None, 1)[0]['task'])
         self.finish()
         self.assertEqual(self.agent()['pending_approval_count'], 0)
+
+    def test_updated_title_wins_over_late_initial_result(self) -> None:
+        self.assertEqual(state.swarm_task_context('thread-1', self.run), {'task_title': None})
+        state.save_swarm_task('thread-1', self.run, 'Publish release')
+        state.save_swarm_task('thread-1', self.run, 'Edit arrows', only_if_empty=True)
+        self.assertEqual(state.swarm_task_context('thread-1', self.run), {'task_title': 'Publish release'})
+        self.assertIsNone(state.swarm_task_context('thread-1', self.run + 1))
+        self.assertIsNone(state.swarm_task_context('app-1', self.run))
+        with state.mutation() as cur:
+            cur.execute("UPDATE chat_threads SET spawned_by_thread_id = 'app-1' WHERE thread_id = 'thread-1'")
+        self.assertIsNone(state.swarm_task_context('thread-1', self.run))
+        state.save_swarm_task('thread-1', self.run, 'Must not rename spawned task')
+        with db.transaction() as cur:
+            cur.execute("SELECT task FROM swarm_agent_ai WHERE thread_id = 'thread-1'")
+            self.assertEqual(cur.fetchone()[0], 'Publish release')
 
     def test_failed_state_matches_latest_event_badge_and_running_wins(self) -> None:
         self.finish()

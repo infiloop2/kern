@@ -74,7 +74,9 @@ def execute(profile: Profile, body: dict[str, Any]) -> dict[str, Any]:
     try:
         step = "launch_browser"
         try:
-            browser = profile.launch()
+            # Install the resource filter before X loads; prepare_post navigates
+            # straight to the composer/target without first loading the home feed.
+            browser = profile.launch(site="about:blank", block_media=True)
             step = "prepare_composer"
             prepare_post(browser.page, account, text, reply_id)
         except Exception as exc:
@@ -122,10 +124,15 @@ def prepare_post(page: Any, account: str, text: str, reply_id: str = "") -> None
         editor = composer.get_by_test_id("tweetTextarea_0")
         editor.fill("")
         step = "type_post_text"
-        # Use the editor's normal keyboard handlers as well as its input handlers.
-        editor.press_sequentially(text, delay=50, timeout=30000)
+        # Keep normal keyboard/input handlers without spending 14 seconds of
+        # the deadline on artificial delays for a 280-character post.
+        editor.press_sequentially(text, delay=0, timeout=60000)
         step = "wait_for_submit_enabled"
         expect(composer.get_by_test_id("tweetButton")).to_be_enabled(timeout=10000)
+        step = "verify_post_text"
+        # Compare the property exactly, without text assertion whitespace
+        # normalization, after the editor's input handlers have run.
+        expect(editor).to_have_js_property("innerText", text, timeout=10000)
     except Exception as exc:
         raise PreparationFailed(step, exc).with_traceback(exc.__traceback__) from None
 

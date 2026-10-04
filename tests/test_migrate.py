@@ -91,6 +91,24 @@ class MigrateRunnerTests(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.migrations = Path(self.temp_dir.name)
 
+    def test_notice_migration_preserves_history_and_bounded_context(self) -> None:
+        migrate.up(target=85, quiet=True)
+        with db.transaction() as cur:
+            cur.execute("INSERT INTO agent_events (created_at, event_type, thread_id, message, historical_context)"
+                        " VALUES ('now', 'thread.context_added', 'thread-1', 'Historical context transferred.', 'bounded preview') RETURNING seq")
+            context_seq = cur.fetchone()[0]
+            cur.execute("INSERT INTO agent_events (created_at, event_type, thread_id, source, message)"
+                        " VALUES ('now', 'thread.message', 'thread-1', 'user', 'This is an automated message from Kern.') RETURNING seq")
+            input_seq = cur.fetchone()[0]
+        self.assertEqual(migrate.up(target=86, quiet=True), [86])
+        with db.transaction() as cur:
+            cur.execute("SELECT seq, event_type, source, historical_context, notice FROM agent_events ORDER BY seq")
+            rows = cur.fetchall()
+        self.assertEqual(rows[0], (context_seq, 'thread.notice', None, 'bounded preview', {
+            'kind': 'history_transfer', 'summary': 'Historical context transferred.',
+        }))
+        self.assertEqual(rows[1], (input_seq, 'thread.message', 'user', None, None))
+
     def test_browser_state_migration_constraints(self) -> None:
         migrate.up(target=77, quiet=True)
         self.assertEqual(migrate.up(target=78, quiet=True), [78])

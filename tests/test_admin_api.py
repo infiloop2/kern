@@ -26,6 +26,7 @@ import urllib.request
 
 import pg_harness
 
+from host.agent_messages import memory_context_message
 from host.config import parse_network_controls
 from host.network_integrations.github.push_gate import pending as github_pending_push
 from host.runtime.admin_api import workspace_proxy as workspace_api_proxy, workspace_api as workspace_admin_api, service as admin_api, threads as admin_threads, github_credential, tools_client as tools_admin_api
@@ -142,7 +143,7 @@ def attach_recording_steer_server(
     turn: "orchestrator._Turn",
     _message: str,
     _provider_session_id: str | None,
-    *, task_context: str,
+    *, task_context: str, recalled_pages: list[dict[str, object]] | None = None,
 ) -> None:
     turn.server = RecordingSteerServer()
     turn.phase = orchestrator.ExecutionPhase.RUNNING
@@ -693,18 +694,18 @@ class ThreadAdmissionHelpersTests(unittest.TestCase):
             ["thread-7", "page-0", *[f"page-{index}" for index in range(2, limit)]],
         )
         self.assertEqual(recalled[0]["selection"], "self")
-        context = admin_threads._memory_context_message("thread-7", recalled)
+        context = memory_context_message("thread-7", recalled)
         self.assertIn("This selection is not comprehensive", context)
         self.assertNotIn(f'"page_id": "page-{limit}"', context)
         self.assertLess(context.index('"page_id": "thread-7"'), context.index('"page_id": "page-0"'))
 
     def test_identity_is_included_without_any_recalled_memories(self) -> None:
-        context = admin_threads._memory_context_message("app-7", [])
+        context = memory_context_message("app-7", [])
         self.assertIn('"identity": {"thread_id": "app-7"}', context)
         self.assertIn('"memories": []', context)
 
     def test_memory_context_carries_the_immutable_thread_identity(self) -> None:
-        context = admin_threads._memory_context_message(
+        context = memory_context_message(
             "app-7",
             [
                 {
@@ -1418,6 +1419,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "POST",
                 "/v1/threads/thread-1/messages",
                 {
+                    "operator_sent_message": True,
                     "message": "from app",
                     "agent_runtime": "codex",
                     "model": "gpt-6-astra",
@@ -1448,12 +1450,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         events = self.workspace_request("GET", "/v1/threads/thread-1/events")
         self.assertEqual(
             [(event["event_type"], event["thread_id"]) for event in events["events"]],
-            [("thread.message", "thread-1"), ("thread.context_added", "thread-1")],
+            [("thread.message", "thread-1"), ("thread.notice", "thread-1")],
         )
         self.assertEqual(events["events"][0]["payload"]["message"], "from app")
 
     def test_workspace_repeated_message_steers_the_running_turn(self) -> None:
         request = {
+            "operator_sent_message": True,
             "message": "from app",
             "agent_runtime": "codex",
             "model": "gpt-6-astra",
@@ -1479,6 +1482,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "POST",
                 "/v1/threads/thread-durable-steer/messages",
                 {
+                    "operator_sent_message": True,
                     "message": "from app",
                     "agent_runtime": "codex",
                     "model": "gpt-6-astra",
@@ -1486,10 +1490,12 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 },
             )
             first = self.workspace_request(
-                "POST", "/v1/threads/thread-durable-steer/messages", {"message": "nudge"}
+                "POST", "/v1/threads/thread-durable-steer/messages",
+                {"message": "nudge", "operator_sent_message": True},
             )
             repeated = self.workspace_request(
-                "POST", "/v1/threads/thread-durable-steer/messages", {"message": "nudge"}
+                "POST", "/v1/threads/thread-durable-steer/messages",
+                {"message": "nudge", "operator_sent_message": True},
             )
 
         self.assertEqual(first["status"], "accepted")
@@ -1513,7 +1519,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         events = self.workspace_request("GET", "/v1/threads/thread-durable-steer/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["thread.message", "thread.context_added", "thread.message", "thread.message"],
+            ["thread.message", "thread.notice", "thread.message", "thread.message"],
         )
 
     def test_workspace_task_routes_are_forbidden(self) -> None:
@@ -2287,6 +2293,20 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 504)
         self.assertIn("root helper could not be terminated", error.exception.read().decode())
 
+    def test_workspace_notice_is_persisted_and_conversation_pageable(self) -> None:
+        from host.runtime.admin_api.workspace_api import route_workspace_request
+        seed_thread_session("thread-notice")
+        notice = {"kind": "self_memory_saved", "summary": "Self memory saved.", "details": "Saved <literal> content."}
+        route = "/v1/threads/thread-notice/notices"
+        result = route_workspace_request("POST", route, {}, notice)
+        self.assertEqual(result, {"status": "recorded"})
+        _, response = self.request("GET", "/v1/threads/thread-notice/events?event_type=thread.notice")
+        self.assertEqual(len(response["events"]), 1)
+        self.assertEqual(response["events"][0]["payload"]["notice"], notice)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request("POST", route, notice)
+        self.assertEqual(error.exception.code, 403)
+
     def test_message_starts_turn_and_records_thread_events(self) -> None:
         seed_thread_session("thread-t1")
         with patch.object(orchestrator, "launch_turn") as launch:
@@ -2310,9 +2330,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [(event["event_type"], event["thread_id"]) for event in events["events"]],
-            [("thread.message", "thread-t1"), ("thread.context_added", "thread-t1")],
+            [("thread.message", "thread-t1"), ("thread.notice", "thread-t1")],
         )
-        self.assertEqual(events["events"][0]["payload"], {"message": "first turn", "source": "user"})
+        self.assertEqual(events["events"][0]["payload"], {"message": "first turn", "source": "user", "notice": {"kind": "operator"}})
 
         _, listed = self.request("GET", "/v1/threads")
         self.assertEqual(listed["threads"][0]["thread_id"], "thread-t1")
@@ -2326,7 +2346,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             })
         with patch.object(orchestrator, "launch_turn") as launch:
             self.request("POST", "/v1/threads/thread-t1/messages", {"message": "?"})
-        self.mock_memory_recall.assert_called_once_with("thread-t1", "?\n\nFix token usage analytics")
+        self.mock_memory_recall.assert_called_once_with("thread-t1", "User: ?\n\nUser: Fix token usage analytics")
         self.assertIn("--- CURRENT USER MESSAGE ---\n?\n--- END CURRENT USER MESSAGE ---",
                       launch.call_args.args[1])
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
@@ -2360,7 +2380,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             )
 
         self.mock_memory_recall.assert_called_once_with(
-            "thread-t1", "Take mobile screenshots"
+            "thread-t1", "User: Take mobile screenshots"
         )
         launch_message = launch.call_args.args[1]
         self.assertIn("Kern host context", launch_message)
@@ -2376,14 +2396,15 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(len(events["events"]), 2)
         self.assertEqual(
             events["events"][0]["payload"],
-            {"message": "Take mobile screenshots", "source": "user"},
+            {"message": "Take mobile screenshots", "source": "user", "notice": {"kind": "operator"}},
         )
 
         notice = events["events"][1]
-        self.assertEqual(notice["event_type"], "thread.context_added")
+        self.assertEqual(notice["event_type"], "thread.notice")
         self.assertIn("memory_recall_details", notice["payload"])
         self.assertEqual({key: value for key, value in notice["payload"].items() if key != "memory_recall_details"}, {
             "message": "Self identity and 2 memories injected.",
+            "notice": {"kind": "memory_injection", "summary": "Self identity and 2 memories injected."},
             "memory_page_ids": ["thread-t1", "playwright-browser"],
         })
 
@@ -2393,17 +2414,18 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual([event["type"] for event in default_history["events"]], ["message"])
         _, history = self.request(
             "POST", "/v1/conversation-history/read",
-            {"thread_id": "thread-t1", "include_context": True, "limit": 1},
+            {"thread_id": "thread-t1", "notice_kinds": ["history_transfer", "memory_injection", "memory_suggestion"], "include_details": True, "limit": 1},
         )
         context = history["events"][0]
-        self.assertEqual(context["type"], "context")
+        self.assertEqual(context["type"], "notice")
+        self.assertEqual(context["notice"]["kind"], "memory_injection")
         self.assertEqual(context["memory_page_ids"], ["thread-t1", "playwright-browser"])
         self.assertEqual(context["memory_recall_details"], notice["payload"]["memory_recall_details"])
         self.assertEqual(context["event_id"], notice["event_id"])
         self.assertIsNotNone(history["older_cursor"])
         _, previous = self.request(
             "POST", "/v1/conversation-history/read",
-            {"thread_id": "thread-t1", "include_context": True, "before": history["older_cursor"]},
+            {"thread_id": "thread-t1", "notice_kinds": ["history_transfer", "memory_injection", "memory_suggestion"], "include_details": True, "before": history["older_cursor"]},
         )
         self.assertEqual([event["type"] for event in previous["events"]], ["message"])
 
@@ -2425,6 +2447,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(len(events["events"]), 2)
         self.assertEqual({key: value for key, value in events["events"][-1]["payload"].items() if key != "memory_recall_details"}, {
             "message": "Self identity and 1 memory injected.",
+            "notice": {"kind": "memory_injection", "summary": "Self identity and 1 memory injected."},
             "memory_page_ids": ["thread-t1"],
         })
 
@@ -2449,7 +2472,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(warning.call_args.kwargs["kind"], "memory_recall_timeout")
 
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
-        self.assertEqual([e["event_type"] for e in events["events"]], ["thread.message", "thread.context_added"])
+        self.assertEqual([e["event_type"] for e in events["events"]], ["thread.message", "thread.notice"])
         self.assertEqual(events["events"][-1]["payload"]["message"], "Self identity and 0 memories injected.")
         self.assertEqual(events["events"][-1]["payload"]["memory_page_ids"], [])
 
@@ -2474,7 +2497,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["thread.message", "thread.context_added", "thread.message", "thread.message", "thread.message"],
+            ["thread.message", "thread.notice", "thread.message", "thread.message", "thread.message"],
         )
 
     def test_message_rejected_while_thread_finishes_previous_turn(self) -> None:
@@ -2690,12 +2713,12 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         def deliver(method, path, body):
             self.assertEqual(method, "POST")
-            return admin_threads.send_thread_message(path.split("/")[3], body, None, False)
+            return admin_threads.send_thread_message(path.split("/")[3], body, None, body.get("operator_sent_message", False))
 
         with patch.object(agent_messages, "call_admin_api", side_effect=deliver):
             for thread_id in (app_id, scheduled["thread_id"]):
                 with self.subTest(thread_id=thread_id), patch.object(orchestrator, "launch_turn", side_effect=attach_recording_steer_server) as launch:
-                    agent_messages.deliver_message(thread_id, {"message": "First turn"})
+                    agent_messages.deliver_message(thread_id, {"message": "First turn", "kern_notice": {"kind": "agent_message", "summary": "Message from settings tester"}})
                     turn = launch.call_args.args[0]
                     before = state.thread_session_config(thread_id)
                     if thread_id.startswith("app-"):
@@ -2708,12 +2731,12 @@ class AdminApiIntegrationTests(unittest.TestCase):
                     after = state.thread_session_config(thread_id)
                     for key in ("agent_runtime", "model", "effort", "run_number", "provider_session_id"):
                         self.assertEqual(after[key], before[key])
-                    agent_messages.deliver_message(thread_id, {"message": "Follow up"})
+                    agent_messages.deliver_message(thread_id, {"message": "Follow up", "kern_notice": {"kind": "agent_message", "summary": "Message from settings tester"}})
                     self.assertEqual(launch.call_count, 1)
                     self.assertEqual(turn.server.messages, ["Follow up"])
                     orchestrator._finish_turn(turn, provider_session_id="old-session")
                     orchestrator._close_turn(turn, None)
-                    agent_messages.deliver_message(thread_id, {"message": "Next turn"})
+                    agent_messages.deliver_message(thread_id, {"message": "Next turn", "kern_notice": {"kind": "agent_message", "summary": "Message from settings tester"}})
                     self.assertEqual(launch.call_count, 2)
                     config = state.thread_session_config(thread_id)
                     self.assertEqual({key: config[key] for key in new}, new)
@@ -2825,8 +2848,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "thread.activity",
                 "thread.activity",
                 "thread.message",
-                "thread.context_added",
-                "thread.context_added",
+                "thread.notice",
+                "thread.notice",
             ],
         )
         change = events["events"][3]["payload"]["activity"]
@@ -2985,7 +3008,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["thread.message", "thread.message", "thread.context_added", "thread.context_added"],
+            ["thread.message", "thread.message", "thread.notice", "thread.notice"],
         )
         self.assertEqual(
             events["events"][-2]["payload"]["historical_context"],
@@ -3199,6 +3222,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "POST",
                 "/v1/threads/thread-new-fable-5/messages",
                 {
+                    "operator_sent_message": True,
                     "message": "new thread",
                     "agent_runtime": "claude_code",
                     "model": "claude-fable-5",
@@ -3211,7 +3235,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
     def test_message_without_session_options_requires_an_existing_thread(self) -> None:
         with self.assertRaises(admin_api.ApiError) as error:
             self.workspace_request(
-                "POST", "/v1/threads/thread-unknown-options/messages", {"message": "first"}
+                "POST", "/v1/threads/thread-unknown-options/messages",
+                {"message": "first", "operator_sent_message": True},
             )
 
         self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
@@ -3222,7 +3247,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             self.workspace_request(
                 "POST",
                 "/v1/threads/thread-partial-options/messages",
-                {"message": "first", "agent_runtime": "codex", "model": "gpt-6-astra"},
+                {"message": "first", "agent_runtime": "codex", "model": "gpt-6-astra", "operator_sent_message": True},
             )
 
         self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
@@ -3378,7 +3403,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["thread.message", "thread.context_added", "thread.stopped"],
+            ["thread.message", "thread.notice", "thread.stopped"],
         )
 
         # The thread stays fenced until the owning turn thread releases it, so
@@ -3396,7 +3421,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["thread.message", "thread.context_added", "thread.stopped"],
+            ["thread.message", "thread.notice", "thread.stopped"],
         )
         config = state.thread_session_config("thread-t1")
         self.assertIsNotNone(config)
@@ -3497,7 +3522,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         _, events = self.request("GET", "/v1/threads/thread-cleared/events")
         self.assertFalse(any(
-            event["event_type"] == "thread.context_added"
+            event["event_type"] == "thread.notice"
             and event["payload"]["message"] == "Historical context transferred."
             for event in events["events"]
         ))
@@ -3542,7 +3567,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         _, events = self.request("GET", "/v1/threads/thread-switched/events")
         self.assertFalse(any(
-            event["event_type"] == "thread.context_added"
+            event["event_type"] == "thread.notice"
             and event["payload"]["message"] == "Historical context transferred."
             for event in events["events"]
         ))
@@ -4052,6 +4077,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "POST",
                 "/v1/threads/thread-chat-01-a/messages",
                 {
+                    "operator_sent_message": True,
                     "message": "hello",
                     "agent_runtime": "codex",
                     "model": "gpt-6-astra",
@@ -6300,19 +6326,20 @@ class AdminApiIntegrationTests(unittest.TestCase):
         launch.assert_called_once()
         self.assertIn("Kern was restarted. Please resume your work.", launch.call_args.args[1])
         self.mock_memory_recall.assert_called_once_with(
-            "thread-t1", "Kern was restarted. Please resume your work.\n\ninterrupted turn"
+            "thread-t1", "User: interrupted turn"
         )
         _, resumed_events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in resumed_events["events"]],
             [
-                "thread.message", "thread.error", "thread.message",
-                "thread.context_added", "thread.context_added",
+                "thread.message", "thread.error", "thread.notice",
+                "thread.notice", "thread.notice",
             ],
         )
         self.assertEqual(resumed_events["events"][2]["payload"], {
             "message": admin_api.RESTART_MESSAGE,
             "source": "user",
+            "notice": {"kind": "restart", "summary": "Kern restarted. Resume requested."},
         })
 
     def test_restart_does_not_rerun_interrupted_script(self) -> None:

@@ -9,7 +9,10 @@ import re
 import unittest
 from unittest.mock import MagicMock, patch
 
-from host.memory_recall import bound_query, task_query
+from host.agent_messages import memory_context_message
+from host.memory_recall import bound_query, conversation_query, RECALL_NOTICE_KINDS
+from host.memory_recall_rules import MAX_QUERY_BYTES
+from host.runtime import memory_context
 from host.runtime.admin_api import conversation_history, threads
 from host.runtime.host_inference import api, provider_http, providers, typesafe, client
 from host.runtime.workspace import memory
@@ -72,7 +75,7 @@ class MemoryRecallDiagnosticsTests(unittest.TestCase):
             pages, details = threads._recalled_memory_pages('thread-1', 'test')
         recall.assert_called_once_with('thread-1', 'test')
         self.assertIn('Current query: test', details)
-        self.assertNotIn('Current query: test', threads._memory_context_message('thread-1', pages))
+        self.assertNotIn('Current query: test', memory_context_message('thread-1', pages))
 
     def test_empty_recall_and_categories_are_recorded(self):
         empty = memory._recall_response([], ['Relevant search unavailable.'], 0)
@@ -86,12 +89,12 @@ class MemoryRecallDiagnosticsTests(unittest.TestCase):
         self.assertIn('Selected thread-1 r2: self', result['diagnostics'])
         self.assertIn('Selected popular-guide r3: popular', result['diagnostics'])
 
-    def test_history_bounds_diagnostics_and_preserves_old_notices(self):
-        event = {'event_id': 'event_1', 'timestamp': 'now', 'event_type': 'thread.context_added',
-                 'payload': {'message': 'Self identity and 0 memories injected.', 'memory_page_ids': []}}
-        self.assertNotIn('memory_recall_details', conversation_history._conversation_event(event))
+    def test_history_bounds_requested_memory_diagnostics(self):
+        event = {'event_id': 'event_1', 'timestamp': 'now', 'event_type': 'thread.notice',
+                 'payload': {'notice': {'kind': 'memory_injection', 'summary': 'Self identity and 0 memories injected.'}, 'memory_page_ids': []}}
+        self.assertNotIn('memory_recall_details', conversation_history._conversation_event(event, True))
         event['payload']['memory_recall_details'] = '😀\\"' * 10000
-        result = conversation_history._conversation_event(event)
+        result = conversation_history._conversation_event(event, True)
         self.assertTrue(result['truncated'])
         self.assertLessEqual(len(json.dumps(result['memory_recall_details'], ensure_ascii=False).encode()), 14000)
 
@@ -101,75 +104,98 @@ class TaskRecallTests(unittest.TestCase):
         # Retrieval tests keep hybrid order; reranker tests cover Jev outcomes.
         self.enterContext(patch.object(memory, "judge", side_effect=client.HostInferenceError("disabled", reason="provider_disabled")))
 
-    def test_every_request_uses_bounded_user_context_newest_first(self):
+    def test_admission_and_midturn_share_context_with_independent_buckets(self):
         history = [
             {"event_type": "thread.message", "payload": {"source": "user", "message": "Generate an Aira video with Grok audio"}},
-            {"event_type": "thread.message", "payload": {"source": "agent", "message": "Unrelated outreach"}},
+            {"event_type": "thread.message", "payload": {"source": "agent", "message": "Preparing a PR"}},
             {"event_type": "thread.message", "payload": {"source": "user", "message": "Use a quieter voice"}},
         ]
-        with patch.object(threads.state, "page_thread_events", return_value=history) as read:
-            # No phrase classifier: typos, acronyms, topic changes and ordinary
-            # follow-ups all use the same input contract.
-            for message in ("?", "go ahead", "how did you choose the voice?", "whyd that voic?",
-                            "Investigate SnowBid billing", "Review PLS model"):
-                with self.subTest(message=message):
-                    query = threads._memory_task_query("thread-1", message)
-                    self.assertEqual(query.split("\n\n"), [
-                        message, "Use a quieter voice", "Generate an Aira video with Grok audio",
-                    ])
-            read.assert_called_with("thread-1", None, 12,
-                                    event_types=("thread.message", "thread.memory_cleared"))
+        incoming = {"event_type": "thread.message", "payload": {
+            "source": "user", "message": "Review it", "notice": {"kind": "operator"}}}
+        with patch.object(threads.state, "recall_context_events", return_value=history):
+            admitted = threads._memory_task_query("thread-1", "Review it", {"kind": "operator"})
+        with patch.object(threads.state, "recall_context_events", return_value=[*history, incoming]):
+            reevaluated = memory_context.load_query("thread-1")
+        self.assertEqual(admitted, reevaluated)
+        self.assertEqual(admitted.split("\n\n"), [
+            "User: Review it", "User: Use a quieter voice", "User: Generate an Aira video with Grok audio",
+            "Assistant: Preparing a PR"])
 
-    def test_context_stops_at_memory_clear(self):
+    def test_context_stops_at_memory_clear_for_both_roles(self):
         history = [
             {"event_type": "thread.message", "payload": {"source": "user", "message": "Old task"}},
+            {"event_type": "thread.message", "payload": {"source": "agent", "message": "Old plan"}},
             {"event_type": "thread.memory_cleared", "payload": {}},
             {"event_type": "thread.message", "payload": {"source": "user", "message": "New task"}},
         ]
-        with patch.object(threads.state, "page_thread_events", return_value=history):
-            self.assertEqual(threads._memory_task_query("thread-1", "continue"), "continue\n\nNew task")
+        with patch.object(threads.state, "recall_context_events", return_value=history):
+            self.assertEqual(threads._memory_task_query("thread-1", "continue"), "User: continue\n\nUser: New task")
             history.append({"event_type": "thread.memory_cleared", "payload": {}})
-            self.assertEqual(threads._memory_task_query("thread-1", "continue"), "continue")
+            self.assertEqual(threads._memory_task_query("thread-1", "continue"), "User: continue")
 
-    def test_current_message_consumes_budget_before_any_history(self):
-        with patch.object(threads.state, "page_thread_events") as read:
-            self.assertEqual(threads._memory_task_query("thread-1", "a" * 1200), "a" * 1000)
-            read.assert_not_called()
-        history = [{"event_type": "thread.message", "payload": {"source": "user", "message": m}}
-                   for m in ("Old task", "界" * 600)]
-        with patch.object(threads.state, "page_thread_events", return_value=history):
+    def test_user_and_assistant_budgets_are_independent_and_utf8_safe(self):
+        history = [
+            {"event_type": "thread.message", "payload": {"source": "user", "message": "Earlier direction"}},
+            {"event_type": "thread.message", "payload": {"source": "agent", "message": "界" * 600}},
+        ]
+        with patch.object(threads.state, "recall_context_events", return_value=history):
             query = threads._memory_task_query("thread-1", "Current request")
-        self.assertTrue(query.startswith("Current request\n\n界"))
-        self.assertLessEqual(len(query.encode()), 1000)
-        self.assertNotIn("Old task", query)
-        self.assertNotIn("�", query)
+            self.assertTrue(query.startswith("User: Current request\n\nUser: Earlier direction\n\nAssistant: 界"))
+            long = threads._memory_task_query("thread-1", "a" * 1200)
+        self.assertEqual(len(long.split("\n\n")[0].encode()), 1000)
+        self.assertLessEqual(len(long.split("\n\n")[1].encode()), 500)
+        self.assertLessEqual(len(long.encode()), MAX_QUERY_BYTES)
+        self.assertNotIn("�", query + long)
 
     def test_empty_current_message_does_not_recall_old_work(self):
-        with patch.object(threads.state, "page_thread_events") as read:
+        with patch.object(threads.state, "recall_context_events") as read:
             self.assertEqual(threads._memory_task_query("thread-1", "   "), "")
             read.assert_not_called()
 
     def test_message_boundaries_and_negation_survive(self):
-        previous = "Don't deploy billing.\n\nUse staging first."
-        history = [{"event_type": "thread.message", "payload": {"source": "user", "message": previous}}]
-        with patch.object(threads.state, "page_thread_events", return_value=history):
+        history = [{"event_type": "thread.message", "payload": {
+            "source": "user", "message": "Don't deploy billing.\n\nUse staging first."}}]
+        with patch.object(threads.state, "recall_context_events", return_value=history):
             query = threads._memory_task_query("thread-1", "Review PLS\nmodel")
-        self.assertEqual(query, "Review PLS model\n\nDon't deploy billing. Use staging first.")
+        self.assertEqual(query, "User: Review PLS model\n\nUser: Don't deploy billing. Use staging first.")
         self.assertEqual(bound_query(query), query)
 
-    def test_routing_envelopes_removed_from_current_and_prior_messages(self):
-        from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX, LEGACY_AUTOMATED_TRIGGER_PREFIX
-        from host.runtime.workspace.agent_messages import MESSAGE_HEADER
-        for prefix in (AUTOMATED_TRIGGER_PREFIX, LEGACY_AUTOMATED_TRIGGER_PREFIX,
-                       MESSAGE_HEADER.format(sender="schedule-38"),
-                       MESSAGE_HEADER.replace("---\n\n", "").format(sender="schedule-38")):
-            history = [{"event_type": "thread.message", "payload": {"source": "user", "message": prefix + "Review Aira video"}}]
-            with self.subTest(prefix=prefix), patch.object(threads.state, "page_thread_events", return_value=history):
-                self.assertEqual(threads._memory_task_query("thread-1", prefix + "Follow up"),
-                                 "Follow up\n\nReview Aira video")
-        # Quoted headers and ordinary paragraph dividers remain content.
-        self.assertIn("Sender thread", task_query("Explain this header:\n" + prefix))
-        self.assertEqual(task_query("Review Aira\n\n---\n\nvideo feedback"), "Review Aira --- video feedback")
+    def test_notice_allowlist_excludes_tool_data_and_feedback(self):
+        from host import agent_messages
+        events = []
+        for kind in agent_messages.NOTICE_KINDS:
+            events.append({"event_type": "thread.notice", "payload": {
+                "source": "user", "message": f"Body-{kind}",
+                "notice": {"kind": kind, "summary": f"Summary-{kind}", "details": "PRIVATE TOOL JSON"},
+                "memory_recall_details": "RECALLED BODY", "historical_context": "TRANSFERRED HISTORY"}})
+        query = conversation_query(events)
+        self.assertEqual(RECALL_NOTICE_KINDS, {'agent_message', 'scheduled_trigger', 'approval_outcome'})
+        self.assertIn('Peer: Body-agent_message', query)
+        self.assertIn('Scheduled request: Body-scheduled_trigger', query)
+        self.assertIn('Approval outcome: Summary-approval_outcome', query)
+        self.assertNotIn('Body-approval_outcome', query)
+        for forbidden in ('PRIVATE', 'RECALLED', 'TRANSFERRED', 'Body-memory', 'Body-restart', 'Body-automated'):
+            self.assertNotIn(forbidden, query)
+
+    def test_provenance_and_routing_envelopes(self):
+        from host import agent_messages
+        peer = agent_messages.peer_message("schedule-38", "Review Aira video")
+        scheduled = agent_messages.scheduled_message("Prepare the report")
+        events = [{"event_type": "thread.notice", "payload": {
+            "source": "user", "message": text, "notice": {"kind": kind, "summary": "Display only"}}}
+            for text, kind in ((peer, 'agent_message'), (scheduled, 'scheduled_trigger'))]
+        self.assertEqual(conversation_query(events), 'Scheduled request: Prepare the report\n\nPeer: Review Aira video')
+        # Explicit operator provenance beats pasted text; legacy rows stay as recorded.
+        events = [{"event_type": "thread.message", "payload": {
+            "source": "user", "message": peer, "notice": {"kind": "operator"}}}]
+        self.assertTrue(conversation_query(events).startswith('User: This is a message from another agent'))
+        events[0]['payload'].pop('notice')
+        self.assertTrue(conversation_query(events).startswith('User: This is a message from another agent'))
+
+    def test_unavailable_history_preserves_incoming_request(self):
+        with (patch.object(threads.state, 'recall_context_events', side_effect=OSError('unavailable')),
+              patch.object(memory_context.host_errors, 'report_warning')):
+            self.assertEqual(threads._memory_task_query('thread-1', 'Review login'), 'User: Review login')
 
     def test_recall_preserves_hybrid_order_without_a_provider(self):
         pages = [
@@ -220,11 +246,11 @@ class TaskRecallTests(unittest.TestCase):
         self.assertEqual([p["page_id"] for p in searched["pages"]], ["direct-guide", "linked-guide"])
 
     def test_history_failure_still_fetches_self_memory(self):
-        with patch.object(threads.state, "page_thread_events", side_effect=OSError("unavailable")), \
-             patch.object(threads, "_report_degraded_recall") as report, \
+        with patch.object(threads.state, "recall_context_events", side_effect=OSError("unavailable")), \
+             patch.object(memory_context.host_errors, "report_warning") as report, \
              patch.object(threads.workspace_proxy, "recall_memory", return_value={"pages": []}) as recall:
             threads._recalled_memory_pages("thread-1", threads._memory_task_query("thread-1", "?"))
-        recall.assert_called_once_with("thread-1", "?")
+        recall.assert_called_once_with("thread-1", "User: ?")
         report.assert_called_once()
 
     def test_topic_switch_uses_hybrid_order_without_a_provider(self):
@@ -247,7 +273,9 @@ class TaskRecallTests(unittest.TestCase):
 
     def test_recall_context_reaches_embedding_and_lexical_channels(self):
         guide = row("aira-guide")
-        query = "How did you choose the voice?\n\nGenerate an Aira video with Grok audio"
+        query = "User: " + "Generate an Aira video with Grok audio. " * 25 + "\n\nAssistant: " + ("Preparing a PR. " * 20).strip()
+        self.assertGreater(len(query.encode()), 1000)
+        self.assertLessEqual(len(query.encode()), MAX_QUERY_BYTES)
         with ExitStack() as stack:
             for name, value in (("load_page", {"page_id": "thread-1", "revision": 1, "content": "Notes"}),
                                 ("_memory_search_generation", "fixed"),
@@ -429,3 +457,37 @@ class RecallRerankingTests(unittest.TestCase):
             result = memory.recall_pages({"thread_id": "thread-1", "message": "Fix login"})
         self.assertEqual([p["page_id"] for p in result["pages"]], ["thread-1", "guide-5", "guide-4", "guide-3", "guide-2", "guide-1"])
         self.assertIn("Selected guide-5 r6", result["diagnostics"])
+
+
+class RecallContextHistoryTests(unittest.TestCase):
+    def setUp(self):
+        import pg_harness
+        pg_harness.reset_database()
+
+    def test_assistant_and_excluded_notices_cannot_evict_user_history(self):
+        state = threads.state
+        with state.mutation() as cur:
+            state.append_agent_event(cur, 'thread.message', 'thread-1', {
+                'source': 'user', 'message': 'Do not deploy. Fix arrowheads.', 'notice': {'kind': 'operator'}})
+            for n in range(30):
+                state.append_agent_event(cur, 'thread.message', 'thread-1', {
+                    'source': 'agent', 'message': f'Progress {n}'})
+            state.append_agent_event(cur, 'thread.notice', 'thread-1', {
+                'source': 'user', 'message': 'PRIVATE RESULT JSON',
+                'notice': {'kind': 'approval_outcome', 'summary': 'Approved and completed: Open PR'}})
+            for n in range(30):
+                state.append_agent_event(cur, 'thread.notice', 'thread-1', {
+                    'notice': {'kind': 'app_data_changed', 'summary': 'Action receipt', 'details': 'PRIVATE REQUEST'}})
+        events = state.recall_context_events('thread-1')
+        self.assertLessEqual(len(events), 24)
+        query = conversation_query(events)
+        self.assertTrue(query.startswith('User: Do not deploy. Fix arrowheads.'))
+        self.assertIn('Approval outcome: Approved and completed: Open PR', query)
+        self.assertIn('Assistant: Progress 29', query)
+        self.assertNotIn('PRIVATE', query)
+        self.assertNotIn('Action receipt', str(events))
+        with state.mutation() as cur:
+            state.append_agent_event(cur, 'thread.memory_cleared', 'thread-1', {})
+            state.append_agent_event(cur, 'thread.message', 'thread-1', {
+                'source': 'user', 'message': 'New task', 'notice': {'kind': 'operator'}})
+        self.assertEqual(memory_context.load_query('thread-1'), 'User: New task')

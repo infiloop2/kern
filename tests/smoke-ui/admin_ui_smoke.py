@@ -108,7 +108,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scope",
-        choices=("all", "core", "workspaces", "overload", "oauth-poll", "navigation-order", "swarm"),
+        choices=("all", "core", "workspaces", "overload", "oauth-poll", "navigation-order", "swarm", "notices"),
         default="all",
         help="Smoke only the host UI core, only workspaces, or both.",
     )
@@ -321,13 +321,6 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 workspace_smokes.web_app_turn_budget_smoke(budget_page)
                 budget_workspaces.close()
 
-                # Existing workspace journeys use the initial App ids. Run the
-                # independent notice fixture after those journeys have finished.
-                import context_notices_smokes
-                notices_context = browser.new_context(service_workers="block")
-                context_notices_smokes.run(notices_context.new_page(), url, log_in)
-                notices_context.close()
-
                 import app_chat_review_smokes
                 for mobile, short_transcript in ((False, False), (True, False), (False, True)):
                     app_chat_context = browser.new_context(
@@ -350,6 +343,22 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 report_page_errors(voice_page, "dictation recovery")
                 dictation_smokes.run(voice_page, url, log_in)
                 voice_context.close()
+
+            if scope in {"all", "workspaces", "notices"}:
+                import context_notices_smokes
+                for mobile in (False, True):
+                    notices_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    context_notices_smokes.run(notices_context.new_page(), url, log_in)
+                    notices_context.close()
+                    notices_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    context_notices_smokes.run_kern_notices(notices_context.new_page(), url, log_in)
+                    notices_context.close()
 
             if scope in {"all", "workspaces", "navigation-order"}:
                 import navigation_order_smokes
@@ -1394,7 +1403,8 @@ def desktop_smoke(page, url: str) -> None:
         "up to 20 candidate descriptions with local ids"
     )
     expect(page.locator("[data-guide-section='host_typesafe']")).to_contain_text(
-        "current and recent user messages (up to 1,000 UTF-8 bytes total)"
+        "bounded user and assistant messages, peer messages, scheduled requests and "
+        "approval-outcome summaries (up to 1,500 UTF-8 bytes total)"
     )
     page.locator("#panel-network .home-back").click()
 

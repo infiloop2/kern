@@ -18,6 +18,7 @@ from unittest.mock import MagicMock, patch
 
 import pg_harness
 
+from host.agent_messages import INPUT_KINDS, CONTEXT_KINDS
 from host.runtime.core import db, pgclient, secretbox, state
 from host.runtime.core.state import events as state_events
 from host.runtime.core.state import network as state_network
@@ -65,7 +66,7 @@ class EventPayloadTests(unittest.TestCase):
             with self.subTest(page_ids=page_ids):
                 cur = MagicMock()
                 cur.fetchone.return_value = (1,)
-                state.append_agent_event(cur, "thread.context_added", "thread-1", {
+                state.append_agent_event(cur, "thread.notice", "thread-1", {
                     "message": "Memories injected.", "memory_page_ids": page_ids,
                     "memory_recall_details": "Current query: screenshot",
                 })
@@ -73,9 +74,9 @@ class EventPayloadTests(unittest.TestCase):
                 sql, parameters = cur.execute.call_args.args
                 self.assertIn("memory_page_ids", sql)
                 self.assertEqual(sql.count("%s"), len(parameters))
-                self.assertIsInstance(parameters[-3], pgclient.Jsonb)
-                self.assertEqual(parameters[-3].value, page_ids)
-                self.assertEqual(parameters[-2], "Current query: screenshot")
+                self.assertIsInstance(parameters[-4], pgclient.Jsonb)
+                self.assertEqual(parameters[-4].value, page_ids)
+                self.assertEqual(parameters[-3], "Current query: screenshot")
 
 
 class StateStorageTests(unittest.TestCase):
@@ -87,6 +88,117 @@ class StateStorageTests(unittest.TestCase):
         self.env_patch = patch.dict("os.environ", {"KERN_STATE_DIR": self.temp_dir.name})
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
+
+    def test_notice_storage_preserves_conversation_and_context_boundaries(self) -> None:
+        from host import agent_messages as messages
+        from host.runtime.admin_api.conversation_history import read_conversation_history
+        with state.mutation() as cur:
+            seed_thread(cur, "thread-1")
+            peer_text = messages.peer_message("app-2", "Review the release")
+            peer = state.append_agent_event(cur, "thread.notice", "thread-1", {
+                "source": "user", "message": peer_text,
+                "notice": messages.peer_notice("Portfolio", "Review the release"),
+            })
+            scheduled = state.append_agent_event(cur, "thread.notice", "thread-1", {
+                "source": "user", "message": messages.scheduled_message("Check releases"),
+                "notice": messages.scheduled_notice("Release checker", "Check releases"),
+            })
+            operator = state.append_agent_event(cur, "thread.message", "thread-1", {
+                "source": "user", "message": messages.RESTART_MESSAGE,
+                "notice": {"kind": "operator"},
+            })
+            assistant = state.append_agent_event(cur, "thread.message", "thread-1", {
+                "source": "agent", "message": "The release is ready",
+            })
+            context = state.append_agent_event(cur, "thread.notice", "thread-1", messages.memory_notice([], "Recall diagnostics"))
+            action = state.append_agent_event(cur, "thread.notice", "thread-1", {"notice": {
+                "kind": "app_ui_published", "summary": "Published Portfolio UI", "details": "Tool request and result",
+            }})
+        delivered = [peer, scheduled, operator, assistant]
+        self.assertEqual(sorted(seq for seq, _ in state.unembedded_thread_messages(20)), delivered)
+        self.assertEqual(state.latest_thread_event_seqs("thread-1"), (action, assistant))
+        rows = state.page_thread_events("thread-1", None, 20, notice_kinds=None, message_sources=None)
+        self.assertEqual(rows[0]["payload"]["message"], peer_text)
+        self.assertEqual(rows[0]["payload"]["notice"]["summary"], "Message from Portfolio: Review the release")
+        with db.transaction() as cur:
+            handoff = state.recent_thread_handoff_events(cur, "thread-1", message_character_limit=10000,
+                                                       activity_character_limit=10000, activity_event_character_limit=1000)
+        self.assertEqual([event["seq"] for event in handoff], delivered)
+        for include_context in (False, True):
+            expected = delivered + ([context] if include_context else [])
+            history = read_conversation_history({"thread_id": "thread-1", "notice_kinds": list(INPUT_KINDS + CONTEXT_KINDS if include_context else INPUT_KINDS)})
+            self.assertEqual([event["event_id"] for event in history["events"]], [f"event_{seq}" for seq in expected])
+            tail = read_conversation_history({"thread_id": "thread-1", "notice_kinds": list(INPUT_KINDS + CONTEXT_KINDS if include_context else INPUT_KINDS), "limit": 1})
+            self.assertEqual(tail["events"][0]["event_id"], f"event_{expected[-1]}")
+            self.assertIsNone(tail["newer_cursor"])
+            self.assertIsNotNone(tail["older_cursor"])
+            around = read_conversation_history({"thread_id": "thread-1", "around_event_id": f"event_{peer}", "notice_kinds": list(INPUT_KINDS + CONTEXT_KINDS if include_context else INPUT_KINDS)})
+            self.assertEqual([event["event_id"] for event in around["events"]], [f"event_{seq}" for seq in expected])
+        matches = state.search_thread_messages((), from_timestamp=None, to_timestamp=None, thread_id="thread-1",
+                                             sources=("user", "agent"), limit=20, before=None, notice_kinds=("agent_message",))
+        # An operator-pasted preamble stays searchable; the scheduled notice is excluded.
+        self.assertEqual([event["seq"] for event in matches], [assistant, operator, peer])
+        vector = [1.0] + [0.0] * 383
+        state.store_thread_message_embeddings("test-model", [(seq, vector) for seq in delivered])
+        semantic = state.search_thread_messages_semantic(vector, "test-model", from_timestamp=None, to_timestamp=None,
+                                                        thread_id="thread-1", sources=("user", "agent"), limit=20,
+                                                        minimum_similarity=0.9, notice_kinds=("agent_message",))
+        self.assertEqual({event["seq"] for event in semantic}, {assistant, operator, peer})
+
+    def test_typed_history_filters_before_limits_and_preserves_search_metadata(self) -> None:
+        from host.runtime.admin_api.conversation_history import read_conversation_history
+        with state.mutation() as cur:
+            seed_thread(cur, "thread-1")
+            operator = state.append_agent_event(cur, "thread.message", "thread-1", {
+                "source": "user", "message": "release operator direction", "notice": {"kind": "operator"},
+            })
+            peer = state.append_agent_event(cur, "thread.notice", "thread-1", {
+                "source": "user", "message": "release peer request",
+                "notice": {"kind": "agent_message", "summary": "Message from reviewer"},
+            })
+            assistant = state.append_agent_event(cur, "thread.message", "thread-1", {
+                "source": "agent", "message": "release assistant response",
+            })
+            actions = []
+            for index in range(12):
+                actions.append(state.append_agent_event(cur, "thread.notice", "thread-1", {"notice": {
+                    "kind": "shared_memory_saved", "summary": f"Saved release guidance {index}", "details": "Action result",
+                }}))
+                state.append_agent_event(cur, "thread.activity", "thread-1", {"activity": {"kind": "command", "title": "test"}})
+        read = read_conversation_history({"thread_id": "thread-1", "roles": ["user"], "notice_kinds": [], "limit": 1})
+        self.assertEqual([event["event_id"] for event in read["events"]], [f"event_{operator}"])
+        self.assertIsNone(read["older_cursor"])
+        self.assertIsNone(read["newer_cursor"])
+        request = {"thread_id": "thread-1", "roles": [], "notice_kinds": ["shared_memory_saved"], "limit": 1}
+        latest = read_conversation_history(request)
+        self.assertEqual(latest["events"][0]["event_id"], f"event_{actions[-1]}")
+        self.assertEqual(latest["events"][0]["notice"], {"kind": "shared_memory_saved", "summary": "Saved release guidance 11"})
+        before = read_conversation_history({**request, "before": latest["older_cursor"]})
+        self.assertEqual(before["events"][0]["event_id"], f"event_{actions[-2]}")
+        after = read_conversation_history({**request, "after": before["newer_cursor"], "include_details": True})
+        self.assertEqual(after["events"][0]["notice"]["details"], "Action result")
+        around = read_conversation_history({**request, "around_event_id": f"event_{actions[5]}"})
+        self.assertEqual(around["events"][0]["event_id"], f"event_{actions[5]}")
+        self.assertEqual(around["older_cursor"], around["newer_cursor"])
+
+        vector = [1.0] + [0.0] * 383
+        seqs = (operator, peer, assistant)
+        state.store_thread_message_embeddings("test-model", [(seq, vector) for seq in seqs])
+        for sources, kinds, expected in (((), ("agent_message",), {peer}), (("user",), (), {operator}),
+                                         (("agent",), (), {assistant}), ((), (), set())):
+            common = {"from_timestamp": None, "to_timestamp": None, "thread_id": "thread-1", "sources": sources,
+                      "notice_kinds": kinds}
+            rows = [
+                state.search_thread_messages((), limit=1, before=None, **common),
+                state.search_thread_messages(("release",), limit=1, before=None, **common),
+                state.search_thread_messages_semantic(vector, "test-model", limit=1, minimum_similarity=0.9, **common),
+                state.thread_messages_by_seqs(seqs, max_seq=actions[-1], **common),
+            ]
+            for result in rows:
+                self.assertEqual({row["seq"] for row in result}, expected)
+                if expected == {peer}:
+                    self.assertEqual(result[0]["event_type"], "thread.notice")
+                    self.assertEqual(result[0]["notice"], {"kind": "agent_message", "summary": "Message from reviewer"})
 
     def test_mutation_persists_on_normal_exit_and_rolls_back_on_exception(self) -> None:
         with state.mutation() as cur:
@@ -697,7 +809,7 @@ class StateStorageTests(unittest.TestCase):
         older = state.page_agent_events_before(seqs[-1], limit=5)
         self.assertTrue(older)
         self.assertTrue(all(event["seq"] < seqs[-1] for event in older))
-        thread_page = state.page_thread_events("t1", None, 100)
+        thread_page = state.page_thread_events("t1", None, 100, notice_kinds=None, message_sources=None)
         self.assertTrue(all(event["thread_id"] == "t1" for event in thread_page))
         activity = next(event for event in thread_page if event["event_type"] == "thread.activity")
         self.assertEqual(activity["payload"]["activity"]["output"], "done")
@@ -708,19 +820,19 @@ class StateStorageTests(unittest.TestCase):
             state.append_agent_event(cur, "thread.message", "chat", {"message": "b", "source": "agent"})
             state.append_agent_event(cur, "thread.message", "other", {"message": "c", "source": "agent"})
             state.append_agent_event(cur, "thread.message", "chat", {"message": "d", "source": "agent"})
-        all_events = state.page_thread_events("chat", None, 100)
+        all_events = state.page_thread_events("chat", None, 100, notice_kinds=None, message_sources=None)
         # All of the thread's events, chronological, and never the other thread's.
         self.assertEqual([event["payload"]["message"] for event in all_events], ["a", "b", "d"])
         seqs = [event["seq"] for event in all_events]
         self.assertEqual(seqs, sorted(seqs))
         # An uncursored bounded page opens at the newest events.
-        latest = state.page_thread_events("chat", None, 2)
+        latest = state.page_thread_events("chat", None, 2, notice_kinds=None, message_sources=None)
         self.assertEqual([event["payload"]["message"] for event in latest], ["b", "d"])
         # A before cursor walks backward while preserving chronological output.
-        older = state.page_thread_events("chat", None, 2, before=latest[0]["seq"])
+        older = state.page_thread_events("chat", None, 2, notice_kinds=None, before=latest[0]["seq"], message_sources=None)
         self.assertEqual([event["payload"]["message"] for event in older], ["a"])
         # A since cursor returns only newer events.
-        rest = state.page_thread_events("chat", seqs[0], 100)
+        rest = state.page_thread_events("chat", seqs[0], 100, notice_kinds=None, message_sources=None)
         self.assertEqual([event["payload"]["message"] for event in rest], ["b", "d"])
 
     def test_thread_events_can_filter_event_types_before_pagination(self) -> None:
@@ -748,8 +860,8 @@ class StateStorageTests(unittest.TestCase):
         messages = state.page_thread_events(
             "chat",
             None,
-            2,
-            event_types=("thread.message",),
+            2, notice_kinds=None,
+            event_types=("thread.message",), message_sources=None,
         )
         self.assertEqual(
             [event["payload"]["message"] for event in messages],
@@ -795,7 +907,7 @@ class StateStorageTests(unittest.TestCase):
             thread_id=None,
             sources=("user", "agent"),
             limit=10,
-            before=None,
+            before=None, notice_kinds=INPUT_KINDS,
         )
         self.assertEqual(relevant[0]["thread_id"], "thread-99")
         self.assertIn("thread-2", {row["thread_id"] for row in relevant})
@@ -809,7 +921,7 @@ class StateStorageTests(unittest.TestCase):
             thread_id="thread-1",
             sources=("user",),
             limit=10,
-            before=None,
+            before=None, notice_kinds=INPUT_KINDS,
         )
         self.assertEqual(complete[0]["excerpt"], "[[Cloudflare]] [[tunnel]] is healthy")
         self.assertFalse(complete[0]["excerpt_truncated"])
@@ -821,7 +933,7 @@ class StateStorageTests(unittest.TestCase):
             thread_id=None,
             sources=("agent",),
             limit=1,
-            before=None,
+            before=None, notice_kinds=INPUT_KINDS,
         )
         self.assertEqual([row["thread_id"] for row in timed], ["thread-3"])
         older = state.search_thread_messages(
@@ -831,7 +943,7 @@ class StateStorageTests(unittest.TestCase):
             thread_id=None,
             sources=("agent",),
             limit=10,
-            before=(timed[-1]["timestamp"], timed[-1]["seq"]),
+            before=(timed[-1]["timestamp"], timed[-1]["seq"]), notice_kinds=INPUT_KINDS,
         )
         self.assertEqual([row["thread_id"] for row in older], ["thread-2"])
 
@@ -852,7 +964,7 @@ class StateStorageTests(unittest.TestCase):
                     thread_id=None,
                     sources=("user", "agent"),
                     limit=10,
-                    before=None,
+                    before=None, notice_kinds=INPUT_KINDS,
                 ),
                 [],
             )
@@ -861,25 +973,16 @@ class StateStorageTests(unittest.TestCase):
         self.assertNotIn(hostile, search_sql)
         self.assertEqual(parameters[0], hostile)
 
-    def test_conversation_search_excludes_automated_approvals_and_schedule_prompts(self) -> None:
-        automated = "This is an automated trigger.\n\nRemember this correction"
+    def test_conversation_search_filters_recorded_kinds_without_guessing_old_messages(self) -> None:
         current = "This is an automated message from Kern.\n\n---\n\nRemember this correction"
         with state.mutation() as cur:
-            prompt = state.append_agent_event(
-                cur, "thread.message", "schedule-7",
-                {"message": automated, "source": "user"},
-            )
-            divided_prompt = state.append_agent_event(
-                cur, "thread.message", "schedule-7",
-                {"message": "This is an automated trigger.\n\n---\n\nRemember this correction", "source": "user"},
-            )
             automated_prompts = [
                 state.append_agent_event(
-                    cur, "thread.message", thread_id,
-                    {"message": message, "source": "user"},
+                    cur, "thread.notice", thread_id,
+                    {"message": current, "source": "user", "notice": {"kind": kind, "summary": kind}},
                 )
                 for thread_id in ("thread-1", "app-1", "schedule-7")
-                for message in (current, automated)
+                for kind in ("scheduled_trigger", "approval_outcome", "restart")
             ]
             kept = [
                 state.append_agent_event(
@@ -888,15 +991,17 @@ class StateStorageTests(unittest.TestCase):
                 )
                 for thread_id, source, message in (
                     ("schedule-7", "user", "Remember this correction"),
-                    ("schedule-7", "user", "This is an automated trigger. Remember this correction"),
-                    ("schedule-7", "user", "This is an automated trigger.\nRemember this correction"),
-                    ("schedule-7", "agent", automated),
+                    ("schedule-7", "user", "This is an automated trigger.\n\nRemember this correction"),
+                    ("schedule-7", "user", current),
                     ("thread-1", "agent", current),
                     ("app-1", "user", "Quoting: " + current),
-                    ("thread-1", "user", "This is an automated message from Kern. Remember this correction"),
                 )
             ]
-        seqs = (prompt, divided_prompt, *automated_prompts, *kept)
+            kept.append(state.append_agent_event(
+                cur, "thread.notice", "app-1", {"message": "Remember this correction", "source": "user",
+                                                    "notice": {"kind": "agent_message", "summary": "Peer message"}},
+            ))
+        seqs = (*automated_prompts, *kept)
         vector = [1.0] + [0.0] * 383
         state.store_thread_message_embeddings("test-model", [(seq, vector) for seq in seqs])
         for exclude in (False, True):
@@ -904,17 +1009,17 @@ class StateStorageTests(unittest.TestCase):
             lexical = state.search_thread_messages(
                 ("remember correction",), from_timestamp=None, to_timestamp=None,
                 thread_id=None, sources=("user", "agent"), limit=50, before=None,
-                exclude_automated_triggers=exclude,
+                notice_kinds=("agent_message",) if exclude else INPUT_KINDS,
             )
             semantic = state.search_thread_messages_semantic(
                 vector, "test-model", from_timestamp=None, to_timestamp=None,
                 thread_id=None, sources=("user", "agent"), limit=50, minimum_similarity=0.5,
-                exclude_automated_triggers=exclude,
+                notice_kinds=("agent_message",) if exclude else INPUT_KINDS,
             )
             frozen = state.thread_messages_by_seqs(
                 seqs, from_timestamp=None, to_timestamp=None,
                 thread_id=None, sources=("user", "agent"), max_seq=max(seqs),
-                exclude_automated_triggers=exclude,
+                notice_kinds=("agent_message",) if exclude else INPUT_KINDS,
             )
             for mode, rows in (("lexical", lexical), ("semantic", semantic), ("frozen", frozen)):
                 with self.subTest(mode=mode, exclude=exclude):
@@ -950,7 +1055,7 @@ class StateStorageTests(unittest.TestCase):
             to_timestamp=None,
             thread_id=None,
             sources=("user", "agent"),
-            max_seq=second,
+            max_seq=second, notice_kinds=INPUT_KINDS,
         )
         self.assertEqual([row["seq"] for row in frozen], [second, first])
         snapshot = state.conversation_search_snapshot()
@@ -965,7 +1070,7 @@ class StateStorageTests(unittest.TestCase):
             thread_id=None,
             sources=("user", "agent"),
             limit=10,
-            minimum_similarity=0.5,
+            minimum_similarity=0.5, notice_kinds=INPUT_KINDS,
         )
         self.assertEqual([row["seq"] for row in matches], [first, second])
         self.assertEqual(
@@ -980,7 +1085,7 @@ class StateStorageTests(unittest.TestCase):
             sources=("user", "agent"),
             limit=10,
             minimum_similarity=0.5,
-            max_seq=first,
+            max_seq=first, notice_kinds=INPUT_KINDS,
         )
         self.assertEqual([row["seq"] for row in snapshot_matches], [first])
         before_commit_matches = state.search_thread_messages_semantic(
@@ -992,7 +1097,7 @@ class StateStorageTests(unittest.TestCase):
             sources=("user", "agent"),
             limit=10,
             minimum_similarity=0.5,
-            max_embedding_generation=0,
+            max_embedding_generation=0, notice_kinds=INPUT_KINDS,
         )
         self.assertEqual(before_commit_matches, [])
 
@@ -1099,8 +1204,8 @@ class StateStorageTests(unittest.TestCase):
         around = state.page_thread_events_around(
             "thread-1",
             seqs[2],
-            3,
-            event_types=("thread.message",),
+            3, notice_kinds=None,
+            event_types=("thread.message",), message_sources=None,
         )
         self.assertEqual(
             [event["payload"]["message"] for event in around or []],
@@ -1109,8 +1214,8 @@ class StateStorageTests(unittest.TestCase):
         from_start = state.page_thread_events_around(
             "thread-1",
             seqs[0],
-            3,
-            event_types=("thread.message",),
+            3, notice_kinds=None,
+            event_types=("thread.message",), message_sources=None,
         )
         self.assertEqual(
             [event["payload"]["message"] for event in from_start or []],
@@ -1118,7 +1223,7 @@ class StateStorageTests(unittest.TestCase):
         )
         self.assertIsNone(
             state.page_thread_events_around(
-                "thread-1", other, 3, event_types=("thread.message",)
+                "thread-1", other, 3, notice_kinds=None, event_types=("thread.message",), message_sources=None
             )
         )
 

@@ -464,14 +464,14 @@ class McpShimTests(unittest.TestCase):
         self.assertIn("Set limit from 1 to 25", search["description"])
         self.assertIn("paginate with next_cursor", search["description"])
         self.assertIn("untrusted data", search["description"])
-        trigger_filter = search["inputSchema"]["properties"][
-            "exclude_automated_triggers"
-        ]
-        self.assertEqual(trigger_filter["type"], "boolean")
-        self.assertIn("manual user messages", trigger_filter["description"])
+        notice_filter = search["inputSchema"]["properties"]["notice_kinds"]
+        self.assertEqual(notice_filter["type"], "array")
+        self.assertEqual(set(notice_filter["items"]["enum"]), {"scheduled_trigger", "approval_outcome", "restart", "agent_message"})
+        self.assertEqual(search["inputSchema"]["properties"]["cursor"]["maxLength"], 8192)
         read = tools["read_thread_history"]
-        self.assertEqual(read["inputSchema"]["properties"]["include_context"], {"type": "boolean"})
-        self.assertIn("memory_page_ids", read["description"])
+        self.assertEqual(read["inputSchema"]["properties"]["include_details"]["type"], "boolean")
+        self.assertIn("app_ui_published", read["inputSchema"]["properties"]["notice_kinds"]["items"]["enum"])
+        self.assertIn("include_details", read["description"])
         self.assertEqual(read["inputSchema"]["required"], ["thread_id"])
         self.assertEqual(read["inputSchema"]["properties"]["limit"]["maximum"], 50)
         self.assertEqual(
@@ -530,7 +530,7 @@ class McpShimTests(unittest.TestCase):
 
     def test_shim_reads_memory_context_notices(self) -> None:
         socket_path = self.start_server()
-        arguments = {"thread_id": "thread-1", "include_context": True}
+        arguments = {"thread_id": "thread-1", "notice_kinds": ["history_transfer", "memory_injection", "memory_suggestion"], "include_details": True}
         response = {"events": [{
             "type": "context", "event_id": "event_1",
             "content": "Memories injected.", "memory_page_ids": ["kern-memory-system"],

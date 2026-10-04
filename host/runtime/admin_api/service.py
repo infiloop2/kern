@@ -47,7 +47,7 @@ from typing import Any, Callable, cast, NamedTuple
 from urllib.parse import parse_qs, quote, urlparse
 
 from host.config import AGENT_RUNTIMES, ConfigError, parse_network_controls
-from host.agent_scripts import AUTOMATED_TRIGGER_PREFIX
+from host.agent_messages import INPUT_KINDS, RESTART_MESSAGE, restart_notice
 from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES, PROXY_PORT
 from host.runtime.admin_api import browser as browser_admin
 from host.runtime.admin_api import xai_video_storage
@@ -61,6 +61,7 @@ from host.session_options import session_config_error
 # The cycle is safe with plain module imports: each side binds the module
 # object and reads its attributes only at request time, never during import.
 from host.runtime.admin_api import auto_approvals
+from host.runtime.memory_monitor import monitor as memory_monitor
 from host.runtime.admin_api import approvals as approvals_admin_api
 from host.runtime.admin_api import admin_auth, admin_passkeys, workspace_api as workspace_admin_api, workspace_proxy, github_credential, github_repo_audit, tools_client as tools_admin_api, upgrade_check
 from host.runtime.agent_runtime import (
@@ -308,7 +309,7 @@ THREAD_DISPLAY_EVENT_TYPES = frozenset({
     "thread.error",
     "thread.stopped",
     "thread.memory_cleared",
-    "thread.context_added",
+    "thread.notice",
 })
 CONVERSATION_SEARCH_LIMIT = 25
 CONVERSATION_SEARCH_EXCERPT_BYTES = 2 * 1024
@@ -321,7 +322,7 @@ CONVERSATION_VARIANT_LIMIT = 8
 CONVERSATION_CURSOR_BYTES = 8192
 CONVERSATION_MESSAGE_BYTES = 16 * 1024
 CONVERSATION_RESPONSE_BYTES = 256 * 1024
-CONVERSATION_EVENT_TYPES = ("thread.message", "thread.activity")
+CONVERSATION_EVENT_TYPES = ("thread.message", "thread.notice", "thread.activity")
 CONVERSATION_SEMANTIC_CANDIDATES = 200
 # Relevance cursors are short-lived capabilities owned by this admin API
 # process.  Signing snapshot cursors prevents a caller from replacing the
@@ -1030,7 +1031,18 @@ def _workspace_proxy_route(request: _RouteRequest) -> Any:
 
 
 def _thread_route_request(request: _RouteRequest) -> Any:
+    if request.path.endswith("/notices"):
+        if not isinstance(request.principal, WorkspacePrincipal):
+            raise ApiError(HTTPStatus.FORBIDDEN, "Kern notices require the Workspace service")
     peer_sender_thread_id = None
+    if isinstance(request.body, dict) and "kern_notice" in request.body:
+        if not isinstance(request.principal, WorkspacePrincipal):
+            raise ApiError(HTTPStatus.FORBIDDEN, "Kern message metadata requires the Workspace service")
+        notice = request.body["kern_notice"]
+        if (not isinstance(notice, dict) or set(notice) != {"kind", "summary"}
+                or notice["kind"] not in INPUT_KINDS or not isinstance(notice["summary"], str)
+                or not 1 <= len(notice["summary"]) <= 100):
+            raise ApiError(HTTPStatus.BAD_REQUEST, "invalid Kern message notice")
     if request.method == "POST" and request.path.endswith("/messages") \
             and isinstance(request.body, dict) and "peer_sender_thread_id" in request.body:
         if not isinstance(request.principal, WorkspacePrincipal):
@@ -1982,9 +1994,6 @@ def initialize_state() -> list[str]:
     return interrupted
 
 
-RESTART_MESSAGE = AUTOMATED_TRIGGER_PREFIX + "Kern was restarted. Please resume your work."
-
-
 def restart_interrupted_agents(thread_ids: list[str]) -> None:
     """Resume interrupted model turns once, after their errors are committed."""
     refreshed: set[str] = set()
@@ -1997,7 +2006,7 @@ def restart_interrupted_agents(thread_ids: list[str]) -> None:
             if runtime_type not in refreshed:
                 orchestrator.refresh_runtime_status(runtime_type)
                 refreshed.add(runtime_type)
-            send_thread_message(thread_id, {"message": RESTART_MESSAGE}, None, operator_sent_message=False)
+            send_thread_message(thread_id, {"message": RESTART_MESSAGE, "kern_notice": restart_notice()}, None, operator_sent_message=False)
         except Exception as exc:
             host_errors.report_warning(
                 "admin_api.restart_interrupted_agent", exc,
@@ -2031,6 +2040,7 @@ def main() -> int:
         ).start()
     threading.Thread(target=maintenance_loop, daemon=True).start()
     threading.Thread(target=auto_approvals.run, name="auto-approvals", daemon=True).start()
+    threading.Thread(target=memory_monitor.run, name="memory-monitor", daemon=True).start()
     threading.Thread(target=embedding_index_loop, daemon=True).start()
     threading.Thread(target=upgrade_check.poll, daemon=True).start()
     threading.Thread(target=workspace_httpd.serve_forever, daemon=True).start()

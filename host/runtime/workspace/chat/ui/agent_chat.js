@@ -832,7 +832,8 @@ async function showThread(
 
 function markSelectedThreadSeen(thread) {
   const acknowledgedMessageSeq = threadEvents.reduce((latest, event) => (
-    ["thread.message", "thread.memory_cleared", "thread.error"].includes(event.event_type)
+    (["thread.message", "thread.memory_cleared", "thread.error"].includes(event.event_type)
+      || (event.event_type === "thread.notice" && event.payload?.source === "user"))
       ? Math.max(latest, Number(event.seq) || 0)
       : latest
   ), 0);
@@ -1115,7 +1116,7 @@ function renderThreadHistory() {
   // in-flight touch scroll (and its momentum) survives polling.
   const ordered = visibleThreadEvents().filter(event => (
     ["thread.message", "thread.activity", "thread.error", "thread.stopped",
-      "thread.memory_cleared", "thread.context_added"].includes(event.event_type)
+      "thread.memory_cleared", "thread.notice"].includes(event.event_type)
   ));
   if (switched || !ordered.length) {
     renderedEntryHtml.clear();
@@ -1180,18 +1181,10 @@ function renderThreadEntry(event, openActivities) {
       Agent stopped
     </article>`;
   }
-  if (event.event_type === "thread.context_added") {
-    const pageIds = Array.isArray(payload.memory_page_ids) ? payload.memory_page_ids : [];
-    const details = typeof payload.memory_recall_details === "string" ? payload.memory_recall_details : "";
-    const history = typeof payload.historical_context === "string" ? payload.historical_context : "";
-    const tooltip = history || details || pageIds.join("\n");
-    const message = esc(payload.message || "Context added.");
-    const notice = tooltip ? `<div class="memory-notice">
-      <button type="button" aria-expanded="false" aria-controls="memory-pages-${entryId}">${message}</button>
-      <div class="memory-pages" id="memory-pages-${entryId}" role="tooltip">${esc(tooltip)}</div>
-    </div>` : message;
-    return `<article class="thread-entry thread-stopped" data-entry-id="${entryId}">
-      ${notice}
+  const notice = KernRichText.eventNotice(event);
+  if (notice) {
+    return `<article class="thread-entry thread-stopped kern-notice" data-entry-id="${entryId}">
+      ${KernRichText.renderNotice(notice, `memory-pages-${entryId}`)}
     </article>`;
   }
   if (event.event_type === "thread.memory_cleared") {

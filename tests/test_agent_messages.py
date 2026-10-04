@@ -8,6 +8,7 @@ import unittest
 from unittest.mock import MagicMock, patch
 
 import pg_harness
+from host.agent_messages import MESSAGE_HEADER
 from host.runtime.core import db, pgclient
 from host.runtime.workspace import agent_api, agent_messages, schedules
 from host.runtime.workspace.host_api import WorkspaceError
@@ -62,7 +63,7 @@ class AgentMessageTests(unittest.TestCase):
         self.assertIn('Sender thread: thread-1', body["message"])
         self.assertIn('not the operator', body["message"])
         self.assertTrue(body["message"].endswith("Please review the draft."))
-        self.assertEqual(set(body), {"message", "agent_runtime", "model", "effort", "peer_sender_thread_id"})
+        self.assertEqual(set(body), {"message", "agent_runtime", "model", "effort", "peer_sender_thread_id", "kern_notice"})
         self.assertEqual(body["peer_sender_thread_id"], "thread-1")
 
     def test_spawn_agent_creates_a_chat_with_delegation_and_reply_instructions(self):
@@ -87,7 +88,7 @@ class AgentMessageTests(unittest.TestCase):
         )
         self.assertTrue(
             request["input_message"].startswith(
-                agent_messages.MESSAGE_HEADER.format(sender="thread-1")
+                MESSAGE_HEADER.format(sender="thread-1")
             )
         )
         self.assertIn("send_agent_message", request["input_message"])
@@ -271,7 +272,7 @@ class AgentMessageTests(unittest.TestCase):
         ) as post:
             agent_messages.send_agent_message({"thread_id": "thread-1", "message": "Review complete."}, sender_thread_id="app-2")
         self.assertEqual(post.call_args.args[1], "/v1/threads/thread-1/messages")
-        self.assertEqual(set(post.call_args.args[2]), {"message", "peer_sender_thread_id"})
+        self.assertEqual(set(post.call_args.args[2]), {"message", "peer_sender_thread_id", "kern_notice"})
         self.assertEqual(post.call_args.args[2]["peer_sender_thread_id"], "app-2")
         self.assertIn("Sender thread: app-2", post.call_args.args[2]["message"])
 

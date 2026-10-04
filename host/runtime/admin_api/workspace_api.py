@@ -43,6 +43,7 @@ WORKSPACE_ALLOWED_ADMIN_ROUTES = (
     ("GET", "/v1/threads"),
     ("GET", "/v1/threads/:thread_id"),
     ("POST", "/v1/threads/:thread_id/messages"),
+    ("POST", "/v1/threads/:thread_id/notices"),
     ("POST", "/v1/threads/:thread_id/stop"),
     ("POST", "/v1/threads/:thread_id/clear-memory"),
     ("GET", "/v1/threads/:thread_id/events"),

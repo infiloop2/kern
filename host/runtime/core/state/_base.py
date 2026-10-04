@@ -34,6 +34,10 @@ from typing import Any, Callable, Iterator
 from host.runtime.core import db, pgclient, secretbox
 
 
+# Delivered notices retain their provider role; UI/context-only notices have no source.
+CONVERSATION_EVENT_SQL = "(event_type = 'thread.message' OR (event_type = 'thread.notice' AND source = 'user'))"
+
+
 DEFAULT_PROXY_STATE_DIR = Path("/mnt/kern-admin/proxy-state")
 
 
