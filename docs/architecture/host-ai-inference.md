@@ -128,9 +128,14 @@ for new requests or metering; historical review and usage records retain their o
 model and stored cost. Sol 6.1 uses its own published cached-input price. The inference service
 has no approval-specific route or logic. Operator instructions and exact request data are separate
 JSON fields under host-authored instructions that treat request content as
-untrusted evidence. Missing, redacted or unverifiable material facts leave the
-request pending. Oversized requests fail rather than being truncated into a
-potentially misleading approval. The reviewer has no tools or external lookup.
+untrusted evidence. The reviewer is told that redaction can hide public IDs,
+account IDs, URL components and parts of timestamps. It judges whether the
+remaining evidence satisfies the operator's policy; redaction alone does not
+require a negative decision. When the available evidence is insufficient for
+a policy condition, the request stays
+pending with an explanation of that condition. Oversized requests fail rather
+than being truncated into a potentially misleading approval. The reviewer has
+no tools or external lookup.
 
 A positive review goes through the existing admin-to-tools approval path.
 Policy text, OpenAI availability and quiet hours are checked before review.
