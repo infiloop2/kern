@@ -75,8 +75,12 @@ Agent runtimes are spawned through fixed sudo helpers that demote them to
 service cgroup and compete with the host services for resources. The slice's
 `CPUWeight=50` versus `system.slice`'s default 100 favors the admin API, proxy,
 and Postgres while an agent build or test run saturates the cores. Workspace
-also competes with weight 50. Weights let agents use otherwise idle capacity;
-they do not guarantee request latency. Every transient scope has `MemoryHigh=35%`,
+also competes with weight 50. Every agent scope explicitly sets `CPUWeight=100`,
+which enables systemd's CPU controller below the agent slice. Busy turns and
+their entire child-process trees share CPU equally, so spawning many build or
+test workers does not buy a turn extra weight. No per-turn CPU quota is set:
+idle scopes give up their share and a busy turn can use otherwise idle cores.
+Weights do not guarantee request latency. Every transient scope has `MemoryHigh=35%`,
 `MemoryMax=50%`, `MemorySwapMax=3G`, and `TasksMax=1024`; a runaway turn is
 therefore reclaimed or killed before it consumes the whole shared slice and
 stalls another Claude or Codex startup. The parent slice's `MemoryHigh=75%`

@@ -1627,6 +1627,9 @@ install_service_units() {
 #   gives the agent every core, but when host services need CPU they are
 #   favored over agent work. A hard CPUQuota would waste idle cores, so none
 #   is set. The Workspace slice also competes at this level.
+# - Each runtime scope sets CPUWeight=100, enabling CPU control below this
+#   slice. Busy turns share CPU equally regardless of their child-process
+#   counts; idle turns give up their share without a fixed per-turn quota.
 # - IOWeight=25 versus system.slice's 100 prioritizes host disk access under
 #   contention, including swap I/O, without limiting otherwise idle disks.
 #   kern-io-control.service enables the controller that enforces the weights.

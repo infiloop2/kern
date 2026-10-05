@@ -1086,11 +1086,13 @@ def run_turn(
                 continue
             is_agent_message = item.get("type") == "agentMessage"
             # Codex may flush a terminal sub-agent notification after its
-            # explicit final answer. Also allow an empty final in response to
-            # late optional memory; other activity still invalidates the answer.
+            # explicit final answer. Late optional memory can produce reasoning
+            # followed by an empty final; neither requires a new answer. Other
+            # activity still invalidates the answer.
             invalidate_final_response(
                 preserve_explicit_final=(
                     is_trailing_subagent_completion(item)
+                    or (trailing_memory and item.get("type") == "reasoning")
                     or (
                         trailing_memory and is_agent_message
                         and item.get("phase") == "final_answer"
@@ -1127,7 +1129,10 @@ def run_turn(
                     on_message(message_text)
             else:
                 invalidate_final_response(
-                    preserve_explicit_final=is_trailing_subagent_completion(item)
+                    preserve_explicit_final=(
+                        is_trailing_subagent_completion(item)
+                        or (trailing_memory and item.get("type") == "reasoning")
+                    )
                 )
                 item_id = str(item.get("id") or "")
                 streamed_output = (

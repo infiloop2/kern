@@ -329,7 +329,7 @@ class AwsSmokeTeardownTests(unittest.TestCase):
         def fake_ssh(command: str) -> str:
             commands.append(command)
             if "--thread-scope smoke-agent-script" in command:
-                return "kern-smoke-script-ok\nkern-agent"
+                return "kern-smoke-script-ok\nkern-smoke-cpu-fairness-ok\nkern-agent"
             if "echo status=$?" in command:
                 # The demoted side owns the not-found status; root owns the
                 # usage rejections.
@@ -347,6 +347,8 @@ class AwsSmokeTeardownTests(unittest.TestCase):
         self.assertIn("sudo -u kern-agent tee", joined)
         self.assertIn("rm -f /mnt/kern-agent/agent-home/kern-smoke-script.sh", joined)
         self.assertIn("stop kern-agent-thread-smoke-agent-script.scope", joined)
+        probe = commands[0].split("<<'KERNSMOKE'\n", 1)[1].rsplit("\nKERNSMOKE", 1)[0]
+        subprocess.run(["bash", "-n"], input=probe, text=True, check=True, timeout=10)
         self.assertEqual(smoke.passed, 1)
 
     def test_script_launcher_probe_fails_when_a_confined_path_is_accepted(self) -> None:
@@ -356,7 +358,7 @@ class AwsSmokeTeardownTests(unittest.TestCase):
 
         def fake_ssh(command: str) -> str:
             if "--thread-scope smoke-agent-script" in command:
-                return "kern-smoke-script-ok\nkern-agent"
+                return "kern-smoke-script-ok\nkern-smoke-cpu-fairness-ok\nkern-agent"
             return "status=0" if "echo status=$?" in command else ""
 
         with (
@@ -366,6 +368,17 @@ class AwsSmokeTeardownTests(unittest.TestCase):
             smoke.check_installed_agent_script_launcher()
         self.assertIn("/etc/hostname", str(caught.exception))
         self.assertEqual(smoke.passed, 0)
+
+    def test_script_launcher_probe_fails_without_effective_cpu_controls(self) -> None:
+        smoke = AwsSmoke()
+        with (
+            patch.object(smoke, "_ssh_code", return_value="kern-smoke-script-ok\nkern-agent") as ssh,
+            self.assertRaisesRegex(AssertionError, "agent CPU controller"),
+        ):
+            smoke.check_installed_agent_script_launcher()
+        self.assertEqual(smoke.passed, 0)
+        self.assertTrue(any("stop kern-agent-thread-smoke-agent-script.scope" in call.args[0]
+                            for call in ssh.call_args_list))
 
     def test_precredential_bedrock_probe_runs_real_hermes_launcher(self) -> None:
         smoke = AwsSmoke()

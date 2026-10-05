@@ -137,7 +137,11 @@ private in-memory phases `STARTING`, `RUNNING`, `FINISHING`, and `CLOSED`:
    gone records a cleanup error and retains the fence; host restart is the
    recovery because starting a replacement process would be unsafe.
 
-STARTING has a ten-second safety deadline. Provider close waits up to three
+STARTING has a 60-second safety deadline covering process creation, provider
+initialization, session resume, and initial message acceptance. Provider calls
+retain their own timeouts, so a failed call can still end startup
+earlier. This deadline allows slow concurrent startups without changing turn
+admission or runtime concurrency limits. Provider close waits up to three
 seconds for normal exit and the privileged scope check is bounded separately,
 so ordinary FINISHING is a short process-management window rather than a
 database operation. Public APIs deliberately flatten these phases: a thread is

@@ -1425,8 +1425,24 @@ class CodexAppServerTests(unittest.TestCase):
         empty_end = event("item/completed", {"type": "agentMessage", "phase": "final_answer", "text": ""})
         command = event("item/started", {"type": "commandExecution", "id": "cmd", "command": "pytest"})
         operator = event("item/completed", {"type": "userMessage", "content": [{"type": "text", "text": "New task"}]})
+        reasoning_item = {"type": "reasoning", "id": "late-reasoning", "summary": []}
+        reasoning = [event("item/started", reasoning_item), event("item/completed", reasoning_item)]
+        tool = event("item/completed", {"type": "mcpToolCall", "id": "tool"})
+        commentary = event("item/completed", {**final, "phase": "commentary", "text": "More work."})
+        replacement = event("item/completed", {**final, "text": "Updated."})
         cases = [
             ("late memory and empty final", True, "final_answer", [], [empty_start, empty_end], "Saved thesis."),
+            ("late memory reasoning and empty final", True, "final_answer", [], [*reasoning, empty_start, empty_end], "Saved thesis."),
+            ("reasoning completion without start", True, "final_answer", [], [reasoning[-1], empty_end], "Saved thesis."),
+            ("reasoning without follow-up response", True, "final_answer", [], reasoning, "Saved thesis."),
+            ("reasoning and replacement final", True, "final_answer", [], [*reasoning, empty_start, replacement], "Updated."),
+            ("ordinary input and reasoning", False, "final_answer", [], [*reasoning, empty_start, empty_end], None),
+            ("reasoning before suggestion", True, "final_answer", reasoning, [empty_start, empty_end], None),
+            ("command after memory reasoning", True, "final_answer", [], [*reasoning, command, empty_start, empty_end], None),
+            ("tool completion after memory reasoning", True, "final_answer", [], [*reasoning, tool, empty_start, empty_end], None),
+            ("operator after memory reasoning", True, "final_answer", [], [*reasoning, operator, empty_start, empty_end], None),
+            ("commentary after memory reasoning", True, "final_answer", [], [*reasoning, commentary, empty_start, empty_end], None),
+            ("reasoning after empty reply", True, "final_answer", [], [*reasoning, empty_start, empty_end, *reasoning], None),
             ("no follow-up response", True, "final_answer", [], [], "Saved thesis."),
             ("completion without start", True, "final_answer", [], [empty_end], "Saved thesis."),
             ("new final replaces old", True, "final_answer", [], [empty_start, event("item/completed", {**final, "text": "Updated."})], "Updated."),

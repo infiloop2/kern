@@ -147,6 +147,7 @@ class LimaSmoke(AwsSmoke):
         if self._definition_signature() != first_definition:
             raise AssertionError("power operations replaced or rewrote the VM definition")
         self._check_live_host()
+        self.check_installed_agent_script_launcher()
         self._assert_root_sentinel(present=True)
         self._ok("stop/start preserved the instance, disks, operator access, and data")
 
