@@ -57,6 +57,7 @@ exec systemd-run --quiet --collect --scope --slice=kern_agent.slice \
   "${unit_args[@]}" \
   --property=BindsTo=kern-admin-api.service \
   --property=RuntimeMaxSec=930 \
+  --property=CPUWeight=100 \
   --property=MemoryHigh=35% \
   --property=MemoryMax=50% \
   --property=MemorySwapMax=3G \

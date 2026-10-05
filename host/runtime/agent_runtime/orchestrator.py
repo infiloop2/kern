@@ -129,7 +129,9 @@ from host.runtime.core.state import (
 # cannot take capacity from its peers. A message that would exceed the cap is
 # rejected at admission; callers retry.
 TURN_LIMIT_PER_RUNTIME = 50
-EXECUTION_START_TIMEOUT_SECONDS = 10.0
+# Allow process initialization, session resume, and initial turn acceptance
+# to finish during host contention; provider calls keep their own timeouts.
+EXECUTION_START_TIMEOUT_SECONDS = 60.0
 RUNTIME_RECHECK_SECONDS = 300  # re-verify an active agent login this often (it can expire)
 RUNTIME_PENDING_RECHECK_SECONDS = 5  # poll more often while loading / awaiting login
 _MANAGED_PROVIDER_BY_RUNTIME = {

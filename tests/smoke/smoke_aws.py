@@ -3344,6 +3344,18 @@ PY""", check=True)
         missing = "/mnt/kern-agent/agent-home/kern-smoke-absent.sh"
         self._ssh_code(
             f"sudo -u kern-agent tee {shlex.quote(script)} >/dev/null <<'KERNSMOKE'\n"
+            "set -eu\n"
+            "read -r cgroup_record < /proc/self/cgroup\n"
+            "scope=/sys/fs/cgroup${cgroup_record#0::}\n"
+            "[ \"$scope\" = /sys/fs/cgroup/kern_agent.slice/kern-agent-thread-smoke-agent-script.scope ]\n"
+            "[ \"$(cat \"$scope/cpu.weight\")\" = 100 ]\n"
+            "read -r quota period < \"$scope/cpu.max\"\n"
+            "[ \"$quota\" = max ]\n"
+            "[ \"$(cat /sys/fs/cgroup/kern_agent.slice/cpu.weight)\" = 50 ]\n"
+            "read -r quota period < /sys/fs/cgroup/kern_agent.slice/cpu.max\n"
+            "[ \"$quota\" = max ]\n"
+            "[[ \" $(cat /sys/fs/cgroup/kern_agent.slice/cgroup.subtree_control) \" == *\" cpu \"* ]]\n"
+            "echo kern-smoke-cpu-fairness-ok\n"
             "echo kern-smoke-script-ok\n"
             "id -un\n"
             "KERNSMOKE"
@@ -3361,6 +3373,10 @@ PY""", check=True)
             if "kern-agent" not in output:
                 raise AssertionError(
                     f"the script did not run as the agent user; output={output!r}"
+                )
+            if "kern-smoke-cpu-fairness-ok" not in output:
+                raise AssertionError(
+                    f"agent CPU controller, equal weight or unlimited quota check failed; output={output!r}"
                 )
 
             # Root's spelling check and the demoted side's file check, with
@@ -3390,7 +3406,7 @@ PY""", check=True)
             self._ssh_code(f"sudo -u kern-agent rm -f {shlex.quote(script)}")
         self._ok(
             "the real script launch path ran an agent-home script as kern-agent and "
-            "refused paths outside the agent home"
+            "verified CPU weight 100 with no quota, and refused paths outside the agent home"
         )
 
     def _check_unconfigured_tools(self, entries: list[dict]) -> None:

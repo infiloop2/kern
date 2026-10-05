@@ -2139,6 +2139,8 @@ class DeployUnitTests(unittest.TestCase):
                     launcher,
                 )
                 self.assertIn("--property=MemoryHigh=35%", launcher)
+                self.assertIn("--property=CPUWeight=100", launcher)
+                self.assertNotIn("CPUQuota", launcher)
                 self.assertIn("--property=MemoryMax=50%", launcher)
                 self.assertIn("--property=MemorySwapMax=3G", launcher)
                 self.assertIn("--property=TasksMax=1024", launcher)
