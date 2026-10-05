@@ -1414,6 +1414,69 @@ class CodexAppServerTests(unittest.TestCase):
 
         self.assertEqual(messages, ["I'll run the tests."])
 
+    def test_late_host_memory_does_not_erase_a_completed_answer(self) -> None:
+        def event(method, item):
+            return {"method": method, "params": {"item": item}}
+
+        final = {"type": "agentMessage", "phase": "final_answer", "text": "Saved thesis."}
+        suggestion = "Optional memory context"
+        memory = {"type": "userMessage", "content": [{"type": "text", "text": suggestion}]}
+        empty_start = event("item/started", {"type": "agentMessage", "phase": "final_answer"})
+        empty_end = event("item/completed", {"type": "agentMessage", "phase": "final_answer", "text": ""})
+        command = event("item/started", {"type": "commandExecution", "id": "cmd", "command": "pytest"})
+        operator = event("item/completed", {"type": "userMessage", "content": [{"type": "text", "text": "New task"}]})
+        cases = [
+            ("late memory and empty final", True, "final_answer", [], [empty_start, empty_end], "Saved thesis."),
+            ("no follow-up response", True, "final_answer", [], [], "Saved thesis."),
+            ("completion without start", True, "final_answer", [], [empty_end], "Saved thesis."),
+            ("new final replaces old", True, "final_answer", [], [empty_start, event("item/completed", {**final, "text": "Updated."})], "Updated."),
+            ("same text from operator", False, "final_answer", [], [empty_start, empty_end], None),
+            ("commentary is not final", True, "commentary", [], [empty_start, empty_end], None),
+            ("work before suggestion", True, "final_answer", [command], [empty_start, empty_end], None),
+            ("work after suggestion", True, "final_answer", [], [command, empty_start, empty_end], None),
+            ("request after suggestion", True, "final_answer", [], [operator, empty_start, empty_end], None),
+            ("consumed suggestion cannot mask repeated text", True, "final_answer", [], [event("item/completed", memory), empty_start, empty_end], None),
+        ]
+        for name, trusted, phase, before, after, expected in cases:
+            with self.subTest(name=name):
+                notifications = [event("item/completed", {**final, "phase": phase}), *before,
+                                 event("item/started", memory), event("item/completed", memory), *after,
+                                 {"method": "turn/completed", "params": {"turn": {"status": "completed"}}}]
+                # Acknowledge the steer BEFORE emitting the final, but consume
+                # its input AFTER the final: the production ThesisBot race.
+                script = r'''
+import json, sys
+def send(value):
+    print(json.dumps(value), flush=True)
+for line in sys.stdin:
+    msg = json.loads(line)
+    method = msg.get("method")
+    if method == "initialize":
+        send({"id": msg["id"], "result": {}})
+    elif method == "thread/start":
+        send({"id": msg["id"], "result": {"thread": {"id": "thread_1"}}})
+    elif method == "turn/start":
+        send({"id": msg["id"], "result": {"turn": {"id": "turn_1"}}})
+    elif method == "turn/steer":
+        send({"id": msg["id"], "result": {}})
+        for notification in NOTIFICATIONS:
+            send(notification)
+'''.replace("NOTIFICATIONS", repr(notifications))
+                messages = []
+                with CodexAppServer([sys.executable, "-u", "-c", script]) as server:
+                    def ready():
+                        server.steer(suggestion, memory_suggestion=trusted)
+                        return True
+                    server._on_ready = ready
+                    if expected is None:
+                        with self.assertRaisesRegex(CodexAppServerError, "completed without a final response"):
+                            run_turn(server, "research", None, "gpt-6.1-sol", "high", messages.append)
+                    else:
+                        _, output = run_turn(server, "research", None, "gpt-6.1-sol", "high", messages.append)
+                        self.assertEqual(output, expected)
+                self.assertEqual(messages[0], "Saved thesis.")
+                self.assertNotIn("", messages)
+
     def test_run_turn_keeps_explicit_final_before_trailing_activity(self) -> None:
         messages: list[str | dict[str, object]] = []
         with CodexAppServer(
@@ -1869,6 +1932,88 @@ for line in sys.stdin:
             with self.assertRaises(CodexAppServerError) as error:
                 server.steer("redirect")
         self.assertIn("malformed input", str(error.exception))
+
+    def test_failed_memory_steer_does_not_tag_a_later_ordinary_message(self) -> None:
+        item = {"type": "userMessage", "content": [{"type": "text", "text": "context"}]}
+        failures = [
+            ("write", OSError("closed stdin")),
+            ("write", CodexAppServerError("server exited")),
+            ("ack", codex_app_server_module.CodexTimeout("late acknowledgement")),
+            ("ack", {"error": {"message": "steer rejected"}}),
+        ]
+        for stage, failure in failures:
+            with self.subTest(stage=stage, failure=failure):
+                server = CodexAppServer(["unused"])
+                server.set_active_turn("thread_1", "turn_1")
+                with (
+                    patch.object(server, "_write_request_with_id_locked") as write,
+                    patch.object(server, "_wait_for_direct_response", return_value={}) as ack,
+                ):
+                    if stage == "write":
+                        write.side_effect = failure
+                    elif isinstance(failure, Exception):
+                        ack.side_effect = failure
+                    else:
+                        ack.return_value = failure
+                    with self.assertRaises(CodexAppServerError):
+                        server.steer("context", memory_suggestion=True)
+                    write.side_effect = ack.side_effect = None
+                    ack.return_value = {}
+                    server.steer("context")
+                self.assertFalse(server.is_memory_suggestion(item, completed=True))
+                self.assertEqual(server._response_waiters, {})
+
+    def test_identical_ordinary_input_is_never_treated_as_optional_memory(self) -> None:
+        item = {"type": "userMessage", "content": [{"type": "text", "text": "context"}]}
+        for order in ((True, False), (False, True)):
+            with self.subTest(memory_flags=order):
+                server = CodexAppServer(["unused"])
+                server.set_active_turn("thread_1", "turn_1")
+                with (
+                    patch.object(server, "_write_request_with_id_locked"),
+                    patch.object(server, "_wait_for_direct_response", return_value={}) as ack,
+                ):
+                    for memory_suggestion in order:
+                        server.steer("context", memory_suggestion=memory_suggestion)
+                    # Both notifications require an answer, in either delivery
+                    # order. Content alone cannot establish which is optional.
+                    for _ in order:
+                        self.assertFalse(server.is_memory_suggestion(item, completed=False))
+                        self.assertFalse(server.is_memory_suggestion(item, completed=True))
+                    # Failed optional delivery must not remove that decision.
+                    ack.return_value = {"error": {"message": "rejected"}}
+                    with self.assertRaises(CodexAppServerError):
+                        server.steer("context", memory_suggestion=True)
+                    ack.return_value = {}
+                    server.steer("context", memory_suggestion=True)
+                    self.assertFalse(server.is_memory_suggestion(item, completed=True))
+
+    def test_identical_memory_deliveries_are_consumed_independently(self) -> None:
+        item = {"type": "userMessage", "content": [{"type": "text", "text": "context"}]}
+        for failure in (None, "write", "ack", "timeout"):
+            with self.subTest(failed_extra_delivery=failure):
+                server = CodexAppServer(["unused"])
+                server.set_active_turn("thread_1", "turn_1")
+                with (
+                    patch.object(server, "_write_request_with_id_locked") as write,
+                    patch.object(server, "_wait_for_direct_response", return_value={}) as ack,
+                ):
+                    # Content-only page revisions can render the same suggestion.
+                    server.steer("context", memory_suggestion=True)
+                    server.steer("context", memory_suggestion=True)
+                    if failure:
+                        if failure == "write":
+                            write.side_effect = OSError("closed stdin")
+                        elif failure == "ack":
+                            ack.return_value = {"error": {"message": "rejected"}}
+                        else:
+                            ack.side_effect = codex_app_server_module.CodexTimeout("timeout")
+                        with self.assertRaises(CodexAppServerError):
+                            server.steer("context", memory_suggestion=True)
+                for _ in range(2):
+                    self.assertTrue(server.is_memory_suggestion(item, completed=False))
+                    self.assertTrue(server.is_memory_suggestion(item, completed=True))
+                self.assertFalse(server.is_memory_suggestion(item, completed=True))
 
     def test_notification_wait_cannot_delay_synchronous_steer_ack(self) -> None:
         with CodexAppServer([sys.executable, "-u", "-c", FAKE_STEER_REJECT_SERVER]) as server:

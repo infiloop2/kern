@@ -18,7 +18,8 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
             refresh()
 
     def settle():
-        # Camera glides and re-layouts are CSS transitions; wait for them to end.
+        # A camera write is batched into the next frame before its glide starts.
+        page.evaluate('() => new Promise(requestAnimationFrame)')
         page.evaluate('''() => Promise.allSettled(document.querySelector('#swarm-canvas')
           .getAnimations({subtree: true}).filter(a => a instanceof CSSTransition).map(a => a.finished))''')
 
@@ -64,18 +65,17 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     positions = page.locator('.swarm-card').evaluate_all(
         'nodes => Object.fromEntries(nodes.map(e => [e.dataset.threadId, [parseFloat(e.style.left), parseFloat(e.style.top)]]))')
 
-    def orbit(points, thread_id):
+    def distance(points, thread_id):
         return math.dist(points[thread_id], points['operator'])
 
-    # You sit at the centre; involvement decides how close each agent orbits.
+    # You sit at the centre; involvement pulls active agents inward on average.
     assert positions['operator'][1] == positions['kern-host'][1]
     assert positions['kern-host'][0] >= positions['operator'][0] + 160
-    assert orbit(positions, 'app-1') < orbit(positions, 'app-2') < orbit(positions, 'app-30')
+    assert sum(distance(positions, id) for id in ['app-1', 'app-2', 'thread-66']) / 3 < sum(distance(positions, f'app-{i}') for i in range(10, 31)) / 21
     sizes = page.locator('.swarm-card').evaluate_all(
         "nodes => Object.fromEntries(nodes.map(e => [e.dataset.threadId, parseFloat(e.style.getPropertyValue('--orb'))]))")
     assert sizes['app-1'] > sizes['app-2'] > sizes['app-30']
-    expect(page.locator('.swarm-ring')).to_have_count(3)
-    expect(page.locator('.swarm-ring-label')).to_have_text(['CORE', 'ACTIVE', 'QUIET'])
+    expect(page.locator('.swarm-ring, .swarm-ring-label')).to_have_count(0)
     original_counts = page.request.get(url + 'v1/swarm/interactions', headers={'X-Kern-Csrf': '1'}).json()
     changed_counts = {**original_counts, 'metrics': {**original_counts['metrics'],
         'app-30': {'operator_messages': 10000, 'agent_peers': 100, 'total_tokens': 10000000, 'tokens_partial': False}}}
@@ -86,7 +86,7 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     page.locator('#swarm-arrange').click()
     rearranged = page.locator('.swarm-card').evaluate_all(
         'nodes => Object.fromEntries(nodes.map(e => [e.dataset.threadId, [parseFloat(e.style.left), parseFloat(e.style.top)]]))')
-    assert orbit(rearranged, 'app-30') < orbit(rearranged, 'app-1')
+    assert distance(rearranged, 'app-30') < distance(rearranged, 'app-1')
     page.unroute('**/v1/swarm/interactions')
     refresh()
     page.locator('#swarm-arrange').click()
@@ -128,7 +128,14 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     canvas = page.locator('#swarm-canvas')
 
     def camera():
+        page.evaluate('() => new Promise(requestAnimationFrame)')
         return canvas.evaluate('e => { const m = new DOMMatrix(e.style.transform); return [m.e, m.f, m.a]; }')
+
+    def wait_for_camera(expected):
+        page.wait_for_function("""expected => {
+          const m = new DOMMatrix(document.querySelector('#swarm-canvas').style.transform);
+          return [m.e, m.f, m.a].every((value, i) => Math.abs(value - expected[i]) < .01);
+        }""", arg=expected)
 
     def cards_inside():
         return page.evaluate('''() => {
@@ -162,7 +169,8 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
         page.mouse.down()
         page.mouse.move(box['x'] + 20, box['y'] + 20, steps=4)
         expect(viewport).to_have_class('is-panning')
-        assert camera()[:2] == [start[0] - 60, start[1] - 60], (start, camera())
+        wait_for_camera([start[0] - 60, start[1] - 60, start[2]])
+        assert math.dist(camera()[:2], [start[0] - 60, start[1] - 60]) < .01, (start, camera())
         page.mouse.move(box['x'] - 10, box['y'] + 20)
         page.mouse.up()
         expect(viewport).not_to_have_class('is-panning')
@@ -179,10 +187,12 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
         before = camera()
         page.mouse.move(box['x'] + 200, box['y'] + 200)
         page.mouse.wheel(0, 300)
-        assert camera()[1] == before[1] - 300
+        page.wait_for_function("y => Math.abs(new DOMMatrix(document.querySelector('#swarm-canvas').style.transform).f - y) < .01", arg=before[1] - 300)
+        assert abs(camera()[1] - before[1] + 300) < .01, (before, camera())
         page.keyboard.down('Control')
         page.mouse.wheel(0, -200)
         page.keyboard.up('Control')
+        page.wait_for_function("k => new DOMMatrix(document.querySelector('#swarm-canvas').style.transform).a > k", arg=before[2])
         assert camera()[2] > before[2]
         viewport.focus()
         page.keyboard.press('0')
@@ -207,10 +217,11 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
         page.mouse.down()
         page.mouse.move(box['x'] + 340, box['y'] + 330, steps=4)
         page.mouse.up()
-        assert camera() == [start[0] + 40, start[1] + 30, start[2]]
+        wait_for_camera([start[0] + 40, start[1] + 30, start[2]])
+        assert math.dist(camera(), [start[0] + 40, start[1] + 30, start[2]]) < .01, (start, camera())
         # Pressing open canvas space (not just the grid) focuses the map for keys.
         page.locator('#swarm-close').focus()
-        ring = page.locator('.swarm-ring').first
+        ring = page.locator('#swarm-grid')
         for name in ('pointerdown', 'pointerup'):
             ring.dispatch_event(name, {'pointerId': 7, 'isPrimary': True, 'button': 0, 'pointerType': 'mouse', 'bubbles': True})
         expect(viewport).to_be_focused()
@@ -250,7 +261,8 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(page.locator('#swarm-detail')).to_contain_text('→ Billing desk · 18')
     expect(page.locator('#swarm-detail')).to_contain_text('← Kern host · 3')
     expect(first).to_have_css('background-color', 'rgba(0, 0, 0, 0)')
-    expect(first.locator('.swarm-avatar svg')).to_have_count(1)
+    expect(first.locator('.swarm-avatar > svg')).to_have_count(1)
+    expect(first.locator('.bot-motion-code')).to_have_count(1)
     expect(first.locator('.bot-busy')).to_have_count(1)
     # Selecting an agent fades agents outside its neighbourhood.
     expect(page.locator('[data-thread-id="app-2"]')).not_to_have_class(re.compile('is-faded'))

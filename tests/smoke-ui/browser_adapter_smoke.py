@@ -15,6 +15,7 @@ from host.runtime.browser.browser import Browser
 from host.runtime.browser.chromium import Chromium
 from host.runtime.browser.providers import x
 from host.runtime.browser.actions import x_post_tweet
+from host.runtime.browser.actions.x_diagnostics import preparation_facts
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser_network.config import LOCATIONS, Settings
 
@@ -207,6 +208,30 @@ def check_post_resources(playwright):
     print("Browser posting skips media before navigation and preserves composer scripts/submission; operator media still loads.", flush=True)
 
 
+def check_reply_diagnostics(page):
+    # Representative structural states, not a claim to reproduce the live X
+    # incident. Diagnostics must distinguish these without returning text.
+    article = '''<article data-testid="tweet"><a href="/someone/status/12345">private target text</a>
+<button data-testid="reply">private button text</button></article>'''
+    fixtures = [
+        ("", {"target_count": 0}),
+        (article * 2, {"target_count": 2}),
+        (article.replace('<button ', '<button hidden '), {"reply_visible": False}),
+        (article.replace('<button ', '<button disabled '), {"reply_enabled": False}),
+        (article + '<div style="position:fixed;inset:0;background:white"></div>',
+         {"reply_visible": True, "reply_enabled": True, "reply_center_unobstructed": False}),
+        (article, {"reply_visible": True, "reply_enabled": True, "reply_center_unobstructed": True}),
+        (article + f'<div role="dialog">{EDITOR}</div>', {"dialog_count": 1, "composer_count": 1}),
+    ]
+    for html, expected in fixtures:
+        page.set_content("<!doctype html>" + html)
+        facts = preparation_facts(page, "12345")
+        assert {key: facts[key] for key in expected} == expected, facts
+        assert "snapshot_incomplete" not in facts, facts
+        assert "private" not in json.dumps(facts), facts
+    print("Reply diagnostics distinguish missing/duplicate targets, hidden/disabled/covered controls and open composers.", flush=True)
+
+
 def run(playwright):
     check_post_resources(playwright)
     calls = []
@@ -309,6 +334,11 @@ def run(playwright):
             x_post_tweet.prepare_post(browser.page, "example", "reply from fixture", "12345")
             assert x_post_tweet.submit_prepared_post(browser.page, "example", "12345") == "https://x.com/example/status/123"
             assert calls == ["hello from fixture", "reply from fixture"]
+            diagnostic_page = browser.context.new_page()
+            try:
+                check_reply_diagnostics(diagnostic_page)
+            finally:
+                diagnostic_page.close()
             response_override = {"data": {"create_tweet": {"tweet_results": {"result": {
                 "__typename": "TweetWithVisibilityResults", "tweet": {
                     "rest_id": "456", "core": {"user_results": {"result": {"legacy": {"screen_name": "example"}}}},

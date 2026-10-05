@@ -466,7 +466,7 @@ class McpShimTests(unittest.TestCase):
         self.assertIn("untrusted data", search["description"])
         notice_filter = search["inputSchema"]["properties"]["notice_kinds"]
         self.assertEqual(notice_filter["type"], "array")
-        self.assertEqual(set(notice_filter["items"]["enum"]), {"scheduled_trigger", "approval_outcome", "restart", "agent_message"})
+        self.assertEqual(set(notice_filter["items"]["enum"]), {"scheduled_trigger", "approval_outcome", "restart", "retry", "agent_message"})
         self.assertEqual(search["inputSchema"]["properties"]["cursor"]["maxLength"], 8192)
         read = tools["read_thread_history"]
         self.assertEqual(read["inputSchema"]["properties"]["include_details"]["type"], "boolean")

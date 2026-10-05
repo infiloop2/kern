@@ -526,6 +526,20 @@ class BrowserSessionsTests(unittest.TestCase):
         route.fallback.assert_not_called()
         self.assertEqual(warning.call_args.args[1], "Blocked by Browser URL policy")
 
+    def test_page_errors_record_host_and_standard_type_without_private_content(self):
+        browser = Browser.__new__(Browser)
+        browser.reported_failures = set()
+        page = SimpleNamespace(url="https://x.com/private-path?token=secret")
+        with patch("host.runtime.browser.browser.host_errors.report_warning") as warning:
+            for name in ("TypeError", "private-error-name"):
+                browser.record_page_error(page, SimpleNamespace(name=name, message="private-message", stack="private-stack"))
+            self.assertEqual(warning.call_args_list[0].args[1], "Uncaught page script error (TypeError)")
+            self.assertEqual(warning.call_args.args[1], "Uncaught page script error (Error)")
+            self.assertEqual(warning.call_args.kwargs["context"]["host"], "x.com")
+            self.assertEqual(warning.call_args.kwargs["context"]["resource_type"], "script")
+            self.assertNotIn("private", str(warning.call_args_list))
+            self.assertNotIn("secret", str(warning.call_args_list))
+
     def test_browser_warning_is_accepted_by_host_diagnostics_collector(self):
         from host.runtime.host_diagnostics_collector.collector import parse_journal_record
         browser = Browser.__new__(Browser)

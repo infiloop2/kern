@@ -27,7 +27,7 @@ class NextTurnSettingsTests(unittest.TestCase):
                 patch.object(threads.state, "mutation") as mutation,
                 patch.object(threads, "_public_thread", side_effect=lambda tid, runtime, model, effort: {"agent_runtime": runtime, "model": model, "effort": effort}),
             ):
-                result = threads.send_thread_message(thread_id, {"message": "Keep going", **NEW}, None, True)
+                result = threads.send_thread_message(thread_id, {"message": "Keep going", **NEW}, None, True, retry_attempt=0)
                 self.assertEqual(result["thread"], OLD)
                 self.assertEqual(steer.call_args.args[:3], (thread_id, OLD["agent_runtime"], "Keep going"))
                 mutation.assert_not_called()

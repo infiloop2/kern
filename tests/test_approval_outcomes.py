@@ -272,6 +272,7 @@ class GitHubApprovalDatabaseTests(unittest.TestCase):
         from host.runtime.agent_runtime import orchestrator
         orchestrator._LIVE.clear()
         self.addCleanup(orchestrator._LIVE.clear)
+        self.enterContext(patch.object(orchestrator.turn_retries, "_pending", {}))
         state.enqueue_pending_push("abc123", "org", "repo", [{"ref": "refs/heads/feature", "old": "0" * 40, "new": "1" * 40}],
                                    [".github/workflows/test.yml"], origin_thread_id="thread-34")
         state.save_proxy_github_token("ghs_working")

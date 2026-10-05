@@ -1105,7 +1105,7 @@ function renderWorkspaceRows(containerId, items, action, archived) {
     button.disabled = pending;
     const primary = document.createElement("span");
     primary.className = "workspace-nav-primary";
-    if (item.status === "running" || (kind === "chat" && item.latest_event_type === "thread.error")) {
+    if (item.status === "running" || item.latest_event_type === "thread.error") {
       const dot = document.createElement("span");
       const running = item.status === "running";
       dot.className = running ? "workspace-nav-running" : "workspace-nav-error";

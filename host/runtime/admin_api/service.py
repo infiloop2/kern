@@ -140,6 +140,7 @@ from host.runtime.admin_api.runtime_accounts import (
     start_grok_oauth_login,
 )
 from host.runtime.admin_api.threads import (
+    retry_failed_turn,
     _handoff_event_block,
     _session_handoff_message,
     _thread_list_prefix,
@@ -2006,7 +2007,7 @@ def restart_interrupted_agents(thread_ids: list[str]) -> None:
             if runtime_type not in refreshed:
                 orchestrator.refresh_runtime_status(runtime_type)
                 refreshed.add(runtime_type)
-            send_thread_message(thread_id, {"message": RESTART_MESSAGE, "kern_notice": restart_notice()}, None, operator_sent_message=False)
+            send_thread_message(thread_id, {"message": RESTART_MESSAGE, "kern_notice": restart_notice()}, None, operator_sent_message=False, retry_attempt=0)
         except Exception as exc:
             host_errors.report_warning(
                 "admin_api.restart_interrupted_agent", exc,
@@ -2039,6 +2040,7 @@ def main() -> int:
             target=restart_interrupted_agents, args=(interrupted,), daemon=True
         ).start()
     threading.Thread(target=maintenance_loop, daemon=True).start()
+    threading.Thread(target=orchestrator.turn_retries.run, args=(retry_failed_turn,), name="turn-retries", daemon=True).start()
     threading.Thread(target=auto_approvals.run, name="auto-approvals", daemon=True).start()
     threading.Thread(target=memory_monitor.run, name="memory-monitor", daemon=True).start()
     threading.Thread(target=embedding_index_loop, daemon=True).start()

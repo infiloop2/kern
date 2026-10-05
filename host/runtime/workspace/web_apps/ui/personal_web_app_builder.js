@@ -2183,8 +2183,8 @@ async function sendMessage(forcedMessage = null, targetAppId = null) {
 
 async function stopRunningTurn() {
   const appId = selectedAppId;
-  if (!appId || snapshot.status !== "running") return;
-  if (!confirm("Stop the agent?")) return;
+  if (!appId || (snapshot.status !== "running" && !snapshot.retry)) return;
+  if (!confirm(snapshot.status === "running" ? "Stop the agent?" : "Cancel the automatic retry?")) return;
   showChatStatus("Stopping…");
   try {
     await api(
@@ -2218,7 +2218,13 @@ async function clearWorkingMemory() {
 
 function renderChat() {
   const running = snapshot.status === "running";
-  $("composer-running").hidden = !running;
+  const retry = snapshot.retry;
+  $("composer-running").hidden = !running && !retry;
+  $("composer-running").querySelector(".agent-working > span").textContent = running
+    ? "Agent is working"
+    : retry ? `Retry ${retry.attempt}/5 at ${new Date(retry.at).toLocaleTimeString()}` : "";
+  $("composer-running").querySelector(".working-dots").hidden = !running;
+  $("stop-turn").textContent = running ? "Stop" : "Cancel retry";
   $("clear-memory").hidden = !snapshot.session || selectedAppOutsideActiveIndex;
   $("clear-memory").disabled = running;
   updateActivityToggle();
@@ -3078,6 +3084,7 @@ async function refreshSelectedApp(appId = selectedAppId) {
     // not make an established workspace look configurable again.
     session: conversationResponse.session || listedSession || snapshot.session || null,
     status: conversationResponse.status || "idle",
+    retry: conversationResponse.retry || null,
   };
   selectedAgentUpdatesLocked = Boolean(next.app.agent_updates_locked);
   await refreshConversationEvents(appId, refreshSequence);

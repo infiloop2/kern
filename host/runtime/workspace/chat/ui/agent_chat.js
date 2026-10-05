@@ -461,7 +461,13 @@ function updateComposer() {
   $("new-task-runtime").hidden = scheduled;
   $("new-task-model").hidden = scheduled;
   $("new-task-effort").hidden = scheduled;
-  $("composer-running").hidden = !running;
+  const retry = threads.find(thread => thread.thread_id === selectedThreadId)?.retry;
+  $("composer-running").hidden = !running && !retry;
+  $("composer-running").querySelector(".agent-working > span").textContent = running
+    ? "Agent is working"
+    : retry ? `Retry ${retry.attempt}/5 at ${new Date(retry.at).toLocaleTimeString()}` : "";
+  $("composer-running").querySelector(".working-dots").hidden = !running;
+  $("stop-task").textContent = running ? "Stop" : "Cancel retry";
   $("new-task").placeholder = running
     ? selectedThreadRuntime === "hermes"
       ? "Hermes does not support follow-ups while running"
@@ -1322,8 +1328,9 @@ async function sendMessageUnlocked() {
 }
 
 async function stopRunningTurn() {
-  if (selectedThreadStatus !== "running" || !selectedThreadId) return;
-  if (!confirm("Stop the agent?")) return;
+  const retry = threads.find(thread => thread.thread_id === selectedThreadId)?.retry;
+  if (!selectedThreadId || (selectedThreadStatus !== "running" && !retry)) return;
+  if (!confirm(selectedThreadStatus === "running" ? "Stop the agent?" : "Cancel the automatic retry?")) return;
   attachmentActivity = "Stopping…";
   renderAttachments();
   try {

@@ -22,7 +22,7 @@ DECODO = {"mode": "decodo", "username": "example", "password": "private-password
 
 class BrowserNetworkTests(unittest.TestCase):
     def setUp(self):
-        self.warning = self.enterContext(patch("host.runtime.browser_network.transport.host_errors.report_warning"))
+        self.warning = self.enterContext(patch("host.runtime.browser_network.relay.host_errors.report_warning"))
         self.store = MemoryStore()
         self.network = Network(self.store)
         self.addCleanup(self.network.disconnect)
@@ -149,6 +149,7 @@ class BrowserNetworkTests(unittest.TestCase):
         self.assertEqual(proxy.call_args.args[2], (Settings(self.store).proxy_username(), DECODO["password"]))
         active.close.assert_not_called()
         active.shutdown.assert_not_called()
+        self.warning.assert_not_called()
 
     def test_second_session_failure_stops_without_fallback(self):
         self.network.dispatch("save", DECODO)
@@ -157,16 +158,47 @@ class BrowserNetworkTests(unittest.TestCase):
                 self.network.dial("x.com:443")
             self.assertEqual(proxy.call_count, 2)
             direct.assert_not_called()
+        self.warning.assert_called_once()
+        self.assertEqual(self.warning.call_args.kwargs["context"]["session_recovery"], "failed")
         self.assertFalse(self.network.connections)
 
     def test_failed_renewal_persistence_does_not_dial_unstored_session(self):
         self.network.dispatch("save", DECODO)
         original = self.network.settings.value.copy()
         with patch.object(self.store, "save_settings", side_effect=OSError("unavailable")), patch("host.runtime.browser_network.relay.connect_proxy", side_effect=RetryableConnectFailure("gateway failed")) as proxy:
-            with self.assertRaises(OSError):
+            with self.assertRaisesRegex(ConnectionFailure, "proxy session renewal"):
                 self.network.dial("x.com:443")
             proxy.assert_called_once()
         self.assertEqual(self.network.settings.value, original)
+        self.warning.assert_called_once()
+        self.assertEqual(self.warning.call_args.kwargs["context"]["stage"], "proxy_session_renewal")
+
+    def test_terminal_proxy_failure_reports_only_final_attempt_with_redacted_evidence(self):
+        self.network.dispatch("save", DECODO)
+        for status in (502, 407):
+            with self.subTest(status=status):
+                self.warning.reset_mock()
+                pairs = [socket.socketpair(), socket.socketpair()]
+                for client, peer in pairs:
+                    self.addCleanup(client.close)
+                    self.addCleanup(peer.close)
+                for (_, peer), code in zip(pairs, (502, status)):
+                    peer.sendall((f"HTTP/1.1 {code} Error\r\n"
+                                  "x-error-message: exit unavailable private-password\r\n\r\n").encode())
+                with patch("socket.create_connection", side_effect=[pair[0] for pair in pairs]), patch(
+                    "host.runtime.browser_network.transport.ssl.create_default_context"
+                ) as tls:
+                    tls.return_value.wrap_socket.side_effect = lambda stream, **_: stream
+                    with self.assertRaises(ConnectionFailure):
+                        self.network.dial("x.com:443")
+                self.warning.assert_called_once()
+                context = self.warning.call_args.kwargs["context"]
+                self.assertEqual(context["session_recovery"], "failed")
+                self.assertEqual(context["proxy_status"], status)
+                self.assertEqual(context["host"], "x.com")
+                self.assertIn("exit unavailable [redacted]", context["proxy_error"])
+                self.assertNotIn("private-password", str(self.warning.call_args))
+                self.assertTrue(all(client.fileno() == -1 for client, _ in pairs))
 
     def test_concurrent_connect_failures_share_renewal(self):
         from concurrent.futures import ThreadPoolExecutor
@@ -249,15 +281,24 @@ class BrowserNetworkTests(unittest.TestCase):
                     self.network.test()
                 self.assertNotIn("secret", str(caught.exception))
                 self.assertEqual(self.warning.call_args.kwargs["context"]["curl_exit"], code)
-        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("curl", 35, output=b"secret")):
-            with self.assertRaises(BrowserError):
-                self.network.test()
+        for error in (subprocess.TimeoutExpired("curl", 35, output=b"secret"), OSError("private-password")):
+            self.warning.reset_mock()
+            with patch("subprocess.run", side_effect=error):
+                with self.assertRaises(BrowserError):
+                    self.network.test()
+            self.warning.assert_called_once()
+            self.assertEqual(self.warning.call_args.kwargs["context"]["stage"], "connection_test")
+            self.assertNotIn("secret", str(self.warning.call_args))
+            self.assertNotIn("private-password", str(self.warning.call_args))
         for response in (b"private-password", b"127.0.0.1", b"\xff"):
+            self.warning.reset_mock()
             with patch("subprocess.run", return_value=Mock(returncode=0, stdout=response)):
                 with self.assertRaises(BrowserError):
                     self.network.test()
-        self.assertNotIn("secret", str(self.warning.call_args_list))
-        self.assertNotIn("private-password", str(self.warning.call_args_list))
+            self.warning.assert_called_once()
+            self.assertEqual(self.warning.call_args.kwargs["context"]["stage"], "connection_test_response")
+            self.assertNotIn("secret", str(self.warning.call_args))
+            self.assertNotIn("private-password", str(self.warning.call_args))
 
     def test_real_curl_deadline_returns_while_relay_dns_is_stuck(self):
         entered, resume = threading.Event(), threading.Event()
@@ -371,15 +412,16 @@ class BrowserNetworkTests(unittest.TestCase):
             with self.assertRaises(BrowserError) as error:
                 connect_proxy(("gate.decodo.com", 7000), "93.184.215.14", ("user", "secret"))
         self.assertIn("407", str(error.exception))
-        context = self.warning.call_args.kwargs["context"]
+        context = error.exception.context
+        self.warning.assert_not_called()
         self.assertEqual(context["stage"], "proxy_connect")
         self.assertEqual(context["proxy_status"], 407)
         self.assertIn("[redacted]-provider-message", context["proxy_status_line"])
         self.assertEqual(context["proxy_header_1"], "Secret: private")
         self.assertEqual(context["gateway"], "gate.decodo.com:7000")
         self.assertGreaterEqual(context["elapsed_ms"], 0)
-        self.assertNotIn("private-body", str(self.warning.call_args))
-        self.assertNotIn("secret", str(self.warning.call_args))
+        self.assertNotIn("private-body", str(context))
+        self.assertNotIn("secret", str(context))
         self.assertNotIn("private", str(error.exception))
         self.assertNotIn("secret", str(error.exception))
         self.assertEqual(client.fileno(), -1)

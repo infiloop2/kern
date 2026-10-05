@@ -29,8 +29,12 @@ let layoutKey = "";
 // the map can be dragged past every agent into open space.
 const camera = { x: 0, y: 0, k: 1 };
 let glideTimer = 0;
-let minimapFrame = 0;
+let cameraFrame = 0;
+let movingTimer = 0;
+let minimapDirty = true;
+const minimapDots = document.createElement("canvas");
 let minimapView = null;
+let pulseLayer = null;
 const cards = new Map();
 const svgNS = "http://www.w3.org/2000/svg";
 
@@ -106,6 +110,22 @@ function character(agent) {
   </g></svg>`;
 }
 
+// Put working props on small HTML layers. Their SVG artwork stays the same,
+// but transform/opacity animation no longer repaints the large edge surface.
+function liftWorkingProps(avatar) {
+  for (const group of avatar.querySelectorAll(".bot-busy")) {
+    const motion = node("span", "bot-motion");
+    const kind = ["hands", "rotor", "typing", "code"].find(kind => group.classList.contains(`bot-${kind}`));
+    motion.classList.add(`bot-motion-${kind}`); motion.setAttribute("aria-hidden", "true");
+    const art = svg("svg", { viewBox: "0 0 64 64" });
+    if (kind === "typing") {
+      // The speech bubble stays still; only its dots blink.
+      for (const dot of [...group.querySelectorAll("circle")]) art.append(dot);
+    } else art.append(group);
+    motion.append(art); avatar.append(motion);
+  }
+}
+
 function description(agent) {
   if (agent.kind === "operator") return "Your messages to the swarm";
   if (agent.kind === "host") return "Automated messages to the swarm";
@@ -167,7 +187,7 @@ function renderDetails() {
   }
   const agent = agentById.get(selectedId);
   if (!agent) {
-    root.append(node("h2", "", "Agent details"), node("p", "muted", "Select an agent or connection. You sit at the centre; Kern host beside you sends automated deliveries. Agents with more weekly involvement orbit closer and look larger, rings mark involvement tiers, and collaborators drift together. Arrange applies the latest ranking. Dense maps draw only the 500 strongest links."),
+    root.append(node("h2", "", "Agent details"), node("p", "muted", "Select an agent or connection. You sit at the centre; Kern host beside you sends automated deliveries. Agents that message each other more cluster together; more involved agents sit closer to you and look larger. Arrange applies the latest ranking. Dense maps draw only the 500 strongest links."),
       node("p", "muted", "Drag anywhere to explore. Scroll to pan; pinch, Ctrl + scroll or + and − to zoom; 0 fits everything."));
     return;
   }
@@ -237,6 +257,8 @@ function renderEdges() {
   // Refreshes rebuild every link; keep keyboard focus on the same one.
   const focusedEdge = root.contains(document.activeElement) ? document.activeElement.dataset.edge : null;
   root.replaceChildren();
+  if (!pulseLayer) { pulseLayer = node("div", "swarm-pulses"); $("swarm-canvas").append(pulseLayer); }
+  pulseLayer.replaceChildren();
   const defs = svg("defs", {});
   // Arrowheads keep the same size regardless of message volume.
   for (const [suffix, tone] of [["", "agent"], ["-operator", "operator"], ["-host", "host"], ["-selected", "selected"]]) {
@@ -247,16 +269,8 @@ function renderEdges() {
   const glow = svg("radialGradient", { id: "swarm-glow" });
   glow.append(svg("stop", { offset: "0%", class: "swarm-glow-core" }), svg("stop", { offset: "100%", class: "swarm-glow-edge" }));
   defs.append(glow); root.append(defs);
-  // Orbit rings name the involvement tiers around the operator.
-  const { center, rings } = layout;
-  const outer = rings.at(-1)?.radius || 400;
-  root.append(svg("circle", { cx: center.x, cy: center.y, r: Math.min(outer, 1400), fill: "url(#swarm-glow)", class: "swarm-glow" }));
-  for (const ring of rings) {
-    root.append(svg("circle", { cx: center.x, cy: center.y, r: ring.radius, class: "swarm-ring" }));
-    const label = svg("text", { x: center.x + ring.radius * Math.cos(ring.angle), y: center.y + ring.radius * Math.sin(ring.angle), class: "swarm-ring-label", "text-anchor": "middle", "dominant-baseline": "middle", "aria-hidden": true });
-    label.textContent = ring.label.toUpperCase();
-    root.append(label);
-  }
+  const { center, width, height } = layout;
+  root.append(svg("circle", { cx: center.x, cy: center.y, r: Math.min(Math.max(width, height) / 2, 1400), fill: "url(#swarm-glow)", class: "swarm-glow" }));
   const focus = selectedEdge ? [selectedEdge.sender_thread_id, selectedEdge.target_thread_id] : selectedId ? [selectedId] : [];
   const flows = [], labels = [];
   for (const edge of interactions) {
@@ -288,11 +302,12 @@ function renderEdges() {
     path.addEventListener("keydown", event => { if (["Enter", " "].includes(event.key)) { event.preventDefault(); select(); } });
     root.append(path);
     if (path.dataset.edge === focusedEdge) path.focus({ preventScroll: true });
-    // Moving pulses mark links whose agents are working right now.
+    // A few composited dots mark live links. Avoid SVG dash animations that
+    // invalidate the entire map even when the camera is still.
     const live = [edge.sender_thread_id, edge.target_thread_id].some(id => agentById.get(id)?.state === "busy");
-    if (!muted && (live || isSelected) && flows.length < 80) {
-      // Busier links pulse faster. CSSOM keeps this compatible with the CSP.
-      const flow = svg("path", { d, class: `swarm-edge-flow tone-${tone}`, "stroke-width": Math.max(2, width * .55), "aria-hidden": true });
+    if (!muted && (live || isSelected) && flows.length < 12) {
+      const flow = node("span", `swarm-edge-flow tone-${tone}`);
+      flow.setAttribute("aria-hidden", "true"); flow.style.offsetPath = `path("${d}")`;
       flow.style.animationDuration = `${Math.max(.9, 3 - Math.log2(1 + edge.count) * .35).toFixed(2)}s`;
       flows.push(flow);
     }
@@ -303,7 +318,7 @@ function renderEdges() {
       labels.push(label);
     }
   }
-  root.append(...flows, ...labels);
+  pulseLayer.append(...flows); root.append(...labels);
   // Selecting an agent or link fades agents outside that neighbourhood.
   const related = new Set(focus);
   if (selectedId) for (const edge of interactions) {
@@ -317,20 +332,29 @@ function viewportSize() {
   const viewport = $("swarm-viewport");
   return [viewport.clientWidth, viewport.clientHeight];
 }
+// Input mutates only the camera. One frame commits all visual work.
+function requestCamera(moving = false) {
+  if (moving) {
+    if (!$("swarm-viewport").classList.contains("is-moving")) $("swarm-viewport").classList.add("is-moving");
+    clearTimeout(movingTimer);
+    movingTimer = setTimeout(() => $("swarm-viewport").classList.remove("is-moving"), $("swarm-canvas").classList.contains("is-gliding") ? 420 : 150);
+  }
+  if (!cameraFrame) cameraFrame = requestAnimationFrame(() => { cameraFrame = 0; applyCamera(); });
+}
 function applyCamera() {
   const { x, y, k } = camera;
   $("swarm-canvas").style.transform = `translate(${x}px, ${y}px) scale(${k})`;
-  // The dot grid moves with the camera; its spacing folds by powers of two
-  // so it reads as endless open space at every zoom level.
+  // Transform a prepainted dot grid instead of repainting its background on
+  // every pan/zoom event. Fold spacing by powers of two for endless space.
   let spacing = 28 * k;
   while (spacing < 16) spacing *= 2;
   while (spacing > 56) spacing /= 2;
-  const grid = $("swarm-grid");
-  grid.style.backgroundSize = `${spacing}px ${spacing}px`;
-  grid.style.backgroundPosition = `${x}px ${y}px`;
-  $("swarm-viewport").classList.toggle("is-far", k < .4);
-  $("swarm-zoom-level").textContent = `${Math.round(k * 100)}%`;
-  scheduleMinimap();
+  $("swarm-grid").style.transform = `translate(${x % spacing}px, ${y % spacing}px) scale(${spacing / 28})`;
+  const viewport = $("swarm-viewport"), far = k < .4;
+  if (viewport.classList.contains("is-far") !== far) viewport.classList.toggle("is-far", far);
+  const label = `${Math.round(k * 100)}%`;
+  if ($("swarm-zoom-level").textContent !== label) $("swarm-zoom-level").textContent = label;
+  drawMinimap();
 }
 // Button and keyboard moves glide; direct manipulation must track 1:1.
 function stopGlide() {
@@ -355,20 +379,20 @@ function zoomAt(screenX, screenY, factor, smooth = false) {
   camera.y = screenY - (screenY - camera.y) * k / camera.k;
   camera.k = k;
   smooth ? glide() : stopGlide();
-  applyCamera();
+  requestCamera(true);
 }
 function zoomCentered(factor) { const [w, h] = viewportSize(); zoomAt(w / 2, h / 2, factor, true); }
 function lookAt(worldX, worldY, k = camera.k, smooth = true) {
   const [w, h] = viewportSize();
   Object.assign(camera, { k, x: w / 2 - worldX * k, y: h / 2 - worldY * k });
   smooth ? glide() : stopGlide();
-  applyCamera();
+  requestCamera(true);
 }
 function fitMap(smooth = false) {
   if (!layout) return;
   lookAt(layout.width / 2, layout.height / 2, Math.min(1, fitScale()), smooth);
 }
-// Large swarms open on the inner orbits at a readable size; the rest extends
+// Large swarms open around the operator at a readable size; the rest extends
 // beyond the edges and stays reachable by dragging, the minimap or Fit all.
 function initialView() {
   if (!layout) return;
@@ -381,7 +405,7 @@ function centerOn(id) {
   if (point) lookAt(point.x, point.y, Math.max(camera.k, .8));
 }
 function scheduleMinimap() {
-  if (!minimapFrame) minimapFrame = requestAnimationFrame(() => { minimapFrame = 0; drawMinimap(); });
+  requestCamera();
 }
 function drawMinimap() {
   const canvas = $("swarm-minimap");
@@ -401,22 +425,25 @@ function drawMinimap() {
   const scale = Math.min((w - 12) / (right - left), (h - 12) / (bottom - top));
   const ox = (w - (right - left) * scale) / 2 - left * scale, oy = (h - (bottom - top) * scale) / 2 - top * scale;
   minimapView = { scale, ox, oy };
-  context.strokeStyle = "rgba(148, 163, 184, .16)";
-  for (const ring of layout.rings) {
-    context.beginPath();
-    context.arc(ox + layout.center.x * scale, oy + layout.center.y * scale, ring.radius * scale, 0, Math.PI * 2);
-    context.stroke();
+  // Cache dots at the map's fitted scale. Empty-space panning changes only
+  // this bitmap's destination rectangle and the viewport outline.
+  const dotScale = Math.min((w - 12) / layout.width, (h - 12) / layout.height);
+  if (minimapDots.width !== canvas.width || minimapDots.height !== canvas.height) {
+    minimapDots.width = canvas.width; minimapDots.height = canvas.height; minimapDirty = true;
   }
-  for (const [id, point] of layout.positions) {
-    const agent = agentById.get(id);
-    const tone = agent?.kind === "operator" ? "operator" : agent?.kind === "host" ? "host" : agent?.state === "failed" ? "failed"
-      : agent?.pending_approval_count > 0 ? "approval" : agent?.state === "busy" ? "busy" : "idle";
-    context.fillStyle = DOT_COLORS[tone];
-    context.globalAlpha = agent && !matches(agent) ? .25 : 1;
-    context.beginPath();
-    context.arc(ox + point.x * scale, oy + point.y * scale, Math.max(1.5, point.r * scale), 0, Math.PI * 2);
-    context.fill();
+  if (minimapDirty) {
+    const dots = minimapDots.getContext("2d");
+    dots.setTransform(ratio, 0, 0, ratio, 0, 0); dots.clearRect(0, 0, w, h);
+    for (const [id, point] of layout.positions) {
+      const agent = agentById.get(id);
+      const tone = agent?.kind === "operator" ? "operator" : agent?.kind === "host" ? "host" : agent?.state === "failed" ? "failed"
+        : agent?.pending_approval_count > 0 ? "approval" : agent?.state === "busy" ? "busy" : "idle";
+      dots.fillStyle = DOT_COLORS[tone]; dots.globalAlpha = agent && !matches(agent) ? .25 : 1;
+      dots.beginPath(); dots.arc(point.x * dotScale, point.y * dotScale, Math.max(1.5, point.r * dotScale), 0, Math.PI * 2); dots.fill();
+    }
+    minimapDirty = false;
   }
+  context.drawImage(minimapDots, ox, oy, w * scale / dotScale, h * scale / dotScale);
   context.globalAlpha = 1;
   context.fillStyle = "rgba(69, 214, 196, .08)";
   context.strokeStyle = "rgba(230, 235, 242, .7)";
@@ -437,6 +464,8 @@ function bindMinimap() {
 }
 function bindMapPan() {
   const viewport = $("swarm-viewport");
+  // Native selection dragging cancels pointer events; this surface pans.
+  viewport.addEventListener("dragstart", event => event.preventDefault());
   const pointers = new Map();
   let drag = null, pinch = null, suppressClick = false;
   const point = event => { const box = viewport.getBoundingClientRect(); return [event.clientX - box.left, event.clientY - box.top]; };
@@ -454,7 +483,7 @@ function bindMapPan() {
     // Drags may start on agents or links too; their click is kept unless the
     // pointer actually travels, so capture waits for real movement.
     drag = { id: event.pointerId, x: event.clientX, y: event.clientY, cameraX: camera.x, cameraY: camera.y, moved: false };
-    // Pressing open map space (grid, canvas, rings) gives the map keyboard focus.
+    // Pressing open map space (grid or canvas) gives the map keyboard focus.
     if (!event.target.closest(".swarm-card, .swarm-edge")) viewport.focus({ preventScroll: true });
   });
   viewport.addEventListener("pointermove", event => {
@@ -475,7 +504,7 @@ function bindMapPan() {
       stopGlide();
     }
     camera.x = drag.cameraX + dx; camera.y = drag.cameraY + dy;
-    applyCamera();
+    requestCamera(true);
   });
   const finish = event => {
     pointers.delete(event.pointerId);
@@ -505,13 +534,13 @@ function bindMapPan() {
     } else {
       camera.x -= (event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX) * unit;
       camera.y -= (event.shiftKey && !event.deltaX ? 0 : event.deltaY) * unit;
-      stopGlide(); applyCamera();
+      stopGlide(); requestCamera(true);
     }
   }, { passive: false });
   viewport.addEventListener("keydown", event => {
     if (event.altKey || event.ctrlKey || event.metaKey) return;
     const pan = { ArrowLeft: [1, 0], ArrowRight: [-1, 0], ArrowUp: [0, 1], ArrowDown: [0, -1] }[event.key];
-    if (pan) { camera.x += pan[0] * 90; camera.y += pan[1] * 90; glide(); applyCamera(); }
+    if (pan) { camera.x += pan[0] * 90; camera.y += pan[1] * 90; glide(); requestCamera(true); }
     else if (["+", "="].includes(event.key)) zoomCentered(1.25);
     else if (["-", "_"].includes(event.key)) zoomCentered(.8);
     else if (event.key === "0") fitMap(true);
@@ -530,7 +559,7 @@ function bindMapPan() {
       if (point) lookAt(point.x, point.y);
     }
   });
-  new ResizeObserver(scheduleMinimap).observe(viewport);
+  new ResizeObserver(() => { minimapDirty = true; scheduleMinimap(); }).observe(viewport);
 }
 function render() {
   if (!snapshot) return;
@@ -551,7 +580,14 @@ function render() {
   }
   const agents = [...agentById.values()];
   const key = JSON.stringify([...agentById.keys()].sort());
-  if (key !== layoutKey || !layout) { layout = layoutAgents(agents, interactions, metrics || {}); layoutKey = key; }
+  if (key !== layoutKey || !layout) {
+    const old = layout;
+    layout = layoutAgents(agents, interactions, metrics || {}, old?.positions); layoutKey = key;
+    // Extents may grow after a roster change; keep the same world origin on
+    // screen instead of moving every existing agent with the new margin.
+    if (old) { camera.x += (old.center.x - layout.center.x) * camera.k; camera.y += (old.center.y - layout.center.y) * camera.k; }
+  }
+  minimapDirty = true;
   $("swarm-canvas").style.width = `${layout.width}px`;
   $("swarm-canvas").style.height = `${layout.height}px`;
   const ids = new Set(agentById.keys());
@@ -583,7 +619,7 @@ function render() {
       card.className = `swarm-card kind-${agent.kind} pose-${agent.state}${agent.pending_approval_count > 0 ? " has-approval" : ""}`;
       const avatar = card.querySelector(".swarm-avatar");
       const appearance = `${agent.kind}:${agent.state}:${agent.pending_approval_count > 0}`;
-      if (avatar.dataset.appearance !== appearance) { avatar.innerHTML = character(agent); avatar.dataset.appearance = appearance; }
+      if (avatar.dataset.appearance !== appearance) { avatar.innerHTML = character(agent); liftWorkingProps(avatar); avatar.dataset.appearance = appearance; }
       card.setAttribute("aria-pressed", String(selectedId === agent.thread_id));
       card.querySelector(".swarm-type").textContent = TYPES[agent.kind];
       card.querySelector(".swarm-agent-name").textContent = agent.name;
@@ -603,7 +639,7 @@ function render() {
   const visibleEdges = interactions.filter(edge => ids.has(edge.sender_thread_id) && ids.has(edge.target_thread_id));
   $("swarm-total").textContent = `${snapshot.agents.length} agents + you + Kern host · ${visibleEdges.length} connections shown · last 7 UTC days`;
   $("swarm-empty").hidden = snapshot.agents.length > 0;
-  renderEdges(); renderAttention(); renderDetails(); applyCamera();
+  renderEdges(); renderAttention(); renderDetails(); requestCamera();
 }
 export function setSwarmFilter(state) {
   if (!["busy", "failed", "idle", "needs-human"].includes(state)) return;

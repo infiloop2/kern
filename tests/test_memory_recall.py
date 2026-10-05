@@ -174,7 +174,7 @@ class TaskRecallTests(unittest.TestCase):
         self.assertIn('Scheduled request: Body-scheduled_trigger', query)
         self.assertIn('Approval outcome: Summary-approval_outcome', query)
         self.assertNotIn('Body-approval_outcome', query)
-        for forbidden in ('PRIVATE', 'RECALLED', 'TRANSFERRED', 'Body-memory', 'Body-restart', 'Body-automated'):
+        for forbidden in ('PRIVATE', 'RECALLED', 'TRANSFERRED', 'Body-memory', 'Body-restart', 'Body-retry', 'Body-automated'):
             self.assertNotIn(forbidden, query)
 
     def test_provenance_and_routing_envelopes(self):

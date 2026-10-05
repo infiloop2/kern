@@ -1,7 +1,44 @@
-"""Exercise real sidebar handles against a durable index fixture."""
+"""Exercise sidebar status indicators and durable navigation ordering."""
 
 import re
 from typing import Any
+
+
+def run_agent_status(page: Any, url: str, log_in: Any) -> None:
+    from playwright.sync_api import expect
+
+    print("App navigation agent status smoke", flush=True)
+    failed = {
+        "app_id": "app-1", "name": "Failed App", "status": "idle",
+        "latest_event_type": "thread.error", "revision": 0,
+    }
+    apps = [failed, {
+        "app_id": "app-2", "name": "New App", "status": "idle", "revision": 0,
+    }]
+    page.context.route(
+        re.compile(r"/v1/workspace/web-apps/apps$"),
+        lambda route: route.fulfill(json={"apps": apps}),
+    )
+    log_in(page, url)
+    page.evaluate("() => window.KernHost.refreshNavigation()")
+    toggle = page.get_by_role("button", name="Open navigation", exact=True)
+    if toggle.is_visible():
+        toggle.click()
+    row = page.locator('#web-apps-nav-items [data-item-id="app-1"]')
+    expect(row.locator('.workspace-nav-error[aria-label="Agent error"]')).to_be_visible()
+    expect(row.locator(".workspace-nav-running")).to_have_count(0)
+    expect(page.locator('#web-apps-nav-items [data-item-id="app-2"] .workspace-nav-error')).to_have_count(0)
+
+    # A retry takes precedence over the previous failure until it completes.
+    failed["status"] = "running"
+    page.evaluate("() => window.KernHost.refreshNavigation()")
+    expect(row.locator('.workspace-nav-running[aria-label="Agent running"]')).to_be_visible()
+    expect(row.locator(".workspace-nav-error")).to_have_count(0)
+
+    failed["status"] = "idle"
+    failed["latest_event_type"] = "thread.completed"
+    page.evaluate("() => window.KernHost.refreshNavigation()")
+    expect(row.locator(".workspace-nav-running, .workspace-nav-error")).to_have_count(0)
 
 
 def run(page: Any, url: str, log_in: Any, *, touch: bool = False) -> None:

@@ -196,7 +196,9 @@ or Chromium error code), Browser URL policy blocks, uncaught page script errors,
 and screenshot capture failures. These are events from the whole browser session,
 including background pages, not a verdict about the displayed page. Each session
 logs at most 20 distinct failures, with duplicates suppressed until Chromium is
-closed. Logs exclude URL paths, page content and raw error messages. A blank page
+closed. Page script errors include the page hostname and an allowlisted standard
+JavaScript error type; unknown names become `Error`. Logs exclude URL paths,
+page content and raw error messages. A blank page
 without one of these failures produces no warning. The popup reports image-load
 and frame-request errors separately from control errors, clears them when an
 image loads, and continues polling after transient capture failures. It does not
@@ -272,6 +274,14 @@ composer opening, clearing/typing the text, and waiting for the submit button.
 Diagnostics preserve the original exception type and safe stack, without raw
 Playwright messages, page text, cookies or credentials. Navigation HTTP failures
 include the status. No preparation failure submits or consumes a posting attempt.
+Preparation warnings also include elapsed preparation time and a best-effort
+structural snapshot: approved reply target ID, hostname, known route category,
+article/target/dialog/editor counts, and (for one matching reply control)
+visibility, enabled state and a center-point obstruction check. These are facts
+observed after failure, not proof of its cause. Snapshot errors retain partial
+facts and never replace the original failure. No page text, screenshots, arbitrary
+attributes, paths or query parameters are captured. Target matching and submission
+behavior are unchanged; ambiguous targets still fail closed.
 
 The service applies a common connected-state and operator-control gate to
 account-scoped tool dispatch. Future actions inherit this gate. Each provider file supplies its login URL and identity verification through the
@@ -424,6 +434,10 @@ and website requests or submissions are never replayed by Kern.
 Authentication/quota 4xx responses, incomplete responses and local transport/TLS
 failures are surfaced without rotation. A failed second attempt is also
 surfaced without another renewal or Direct fallback.
+Successful session recovery emits no warning. The relay reports only the final
+connection failure, retaining its sanitized gateway headers and timing; a failed
+second connection includes `session_recovery: failed`. Failure to save a renewed
+session is reported separately as `proxy_session_renewal` without database error text.
 
 The selected preset supplies the browser language and IANA timezone, including
 daylight-saving transitions. These drive native Chromium locale/Accept-Language and date formatting rather

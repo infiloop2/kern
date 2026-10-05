@@ -69,6 +69,12 @@ whether these optional recommendations still apply. Delivery checks the active r
 under its delivery lock. Title saving additionally checks the incoming generation
 so a redirection cannot be overwritten by an outdated title. Finished
 turns remove their cache and discard late results; the worker never wakes idle agents.
+Codex may accept a suggestion while generating its final answer but consume it
+afterward. The adapter tracks host-sent suggestions and preserves that answer if
+the only follow-up is an empty final response to the optional context. Actual
+incoming requests or subsequent work still invalidate the previous answer.
+If ordinary input duplicates a suggestion's exact text, that text is treated as
+ordinary input for the rest of the turn; the adapter does not guess delivery order.
 Failures consume a batch; new messages can trigger later work. Checks, capacity skips,
 failures and accepted suggestions have cache counters; provider usage stays in Host AI.
 This is optional discovery: it can miss short phases, be skipped under load, or be

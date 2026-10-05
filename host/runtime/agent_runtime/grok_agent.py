@@ -630,7 +630,8 @@ class GrokAcpServer:
                 except queue.Empty:
                     return messages
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, *, memory_suggestion: bool = False) -> None:
+        # The shared memory_suggestion hint needs no special handling here.
         with self._turn_lock:
             if (
                 not self._accepting_steers

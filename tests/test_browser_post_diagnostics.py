@@ -16,6 +16,12 @@ from browser_fakes import MemoryStore
 class BrowserPostDiagnosticsTests(unittest.TestCase):
     def setUp(self):
         self.page = Mock()
+        self.page.is_closed.return_value = False
+        self.page.url = "https://x.com/compose/post?private-live-token"
+        self.page.locator.return_value.count.return_value = 0
+        self.page.locator.return_value.filter.return_value.count.return_value = 0
+        self.page.get_by_role.return_value.count.return_value = 0
+        self.page.get_by_role.return_value.get_by_test_id.return_value.count.return_value = 0
         self.page.goto.return_value = SimpleNamespace(status=200)
         self.browser = Mock(page=self.page)
         self.browser.save_state.return_value = {"cookies": [], "origins": []}
@@ -39,7 +45,10 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
         self.assertEqual(self.profile.data["usage"], {})
         self.submit.assert_not_called()
         record = self.emit.call_args.args[0]
-        self.assertEqual(record["context"], {"stage": "prepare", "step": step, "failure_type": failure_type})
+        self.assertEqual({key: record["context"][key] for key in ("stage", "step", "failure_type")},
+                         {"stage": "prepare", "step": step, "failure_type": failure_type})
+        self.assertGreaterEqual(record["context"]["preparation_elapsed_ms"], 0)
+        self.assertEqual(record["context"]["host"], "x.com")
         self.assertIn(step, record["summary"])
         self.assertNotIn("private-live-token", json.dumps(record))
         self.assertNotIn("private-live-token", str(caught.exception))
@@ -77,6 +86,33 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
                 self.assert_failed_step(step)
         self.expect.return_value.to_be_enabled.side_effect = AssertionError("private-live-token")
         self.assert_failed_step("wait_for_submit_enabled", failure_type="AssertionError")
+
+    def test_reply_failure_records_exact_target_and_structural_state(self):
+        self.page.url = "https://x.com/someone/status/12345?private-live-token"
+        target = self.page.locator.return_value.filter.return_value
+        target.count.return_value = 1
+        target.is_visible.return_value = True
+        reply = target.get_by_test_id.return_value
+        reply.count.return_value = 1
+        reply.is_visible.return_value = True
+        reply.is_enabled.return_value = False
+        reply.evaluate.return_value = False
+        reply.click.side_effect = TimeoutError("private-live-token")
+        self.assert_failed_step("open_reply_composer", {**self.body, "in_reply_to_tweet_id": "12345"})
+        context = self.emit.call_args.args[0]["context"]
+        self.assertEqual(context["reply_target_id"], "12345")
+        self.assertEqual(context["target_count"], 1)
+        self.assertEqual(context["reply_control_count"], 1)
+        self.assertEqual(context["page_route"], "target")
+        self.assertFalse(context["reply_enabled"])
+        self.assertFalse(context["reply_center_unobstructed"])
+        reply.click.assert_called_once()
+
+    def test_snapshot_failure_preserves_original_step_and_partial_facts(self):
+        self.page.locator.return_value.count.side_effect = RuntimeError("private-live-token")
+        self.page.goto.side_effect = TimeoutError("private-live-token")
+        self.assert_failed_step("navigate_to_composer")
+        self.assertTrue(self.emit.call_args.args[0]["context"]["snapshot_incomplete"])
 
     def test_incomplete_or_changed_text_is_never_submitted_or_counted(self):
         self.page.wait_for_function.side_effect = TimeoutError("private-live-token")

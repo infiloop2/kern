@@ -2,7 +2,7 @@
 
 This is the catalog of model-facing preambles and their transcript summaries:
 identity/memory injection, session history transfer, mid-turn memory suggestions,
-scheduled triggers, approval outcomes, restart recovery, and peer messages.
+scheduled triggers, approval outcomes, restart recovery, retries, and peer messages.
 Providers still receive ordinary text. The host records separate notice metadata
 so presentation never has to mistake that text for an operator request.
 """
@@ -19,7 +19,7 @@ MESSAGE_HEADER = (
     "Reply only when needed.\n\n---\n\n"
 )
 RESTART_MESSAGE = AUTOMATED_TRIGGER_PREFIX + "Kern was restarted. Please resume your work."
-INPUT_KINDS = ("scheduled_trigger", "approval_outcome", "restart", "agent_message")
+INPUT_KINDS = ("scheduled_trigger", "approval_outcome", "restart", "retry", "agent_message")
 CONTEXT_KINDS = ("history_transfer", "memory_injection", "memory_suggestion")
 ACTION_KINDS = frozenset({
     "agent_message_sent", "agent_spawned", "agent_archived", "self_memory_saved",
@@ -114,6 +114,19 @@ def history_notice(preview: str) -> dict[str, Any]:
 
 def restart_notice() -> dict[str, str]:
     return {"kind": "restart", "summary": "Kern restarted. Resume requested."}
+
+
+def retry_message(attempt: int, error: str) -> str:
+    return AUTOMATED_TRIGGER_PREFIX + (
+        f"Your previous turn ended with an error: {error[:4000]}\n\n"
+        f"This is automatic retry {attempt}/5. Check what already completed, then continue "
+        "any unfinished work from the existing request. If the work is already complete, "
+        "report that."
+    )
+
+
+def retry_notice(attempt: int) -> dict[str, str]:
+    return {"kind": "retry", "summary": f"Automatic retry {attempt}/5. Resume requested."}
 
 
 def memory_context_message(

@@ -47,18 +47,31 @@ class AgenticWebAppContractTests(unittest.TestCase):
                 "effort": "high",
                 "last_used_at": "2026-08-18T10:02:00Z",
                 "latest_event_seq": 42,
+                "latest_event_type": "thread.error",
                 "latest_message_seq": 40,
                 "task": "Publish release notes",
             },
         )
 
         self.assertEqual(summary["latest_event_seq"], 42)
+        self.assertEqual(summary["latest_event_type"], "thread.error")
         self.assertEqual(summary["latest_message_seq"], 40)
         self.assertEqual(summary["task"], "Publish release notes")
         self.assertEqual(
             summary["agent_settings"],
             {"agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high"},
         )
+
+    def test_app_summary_without_host_history_has_no_latest_event_type(self) -> None:
+        row = ("app-1", "New App", 0, "created", "updated", False, False,
+               "codex", "gpt-6-astra", "high", "")
+        for host_summary in (None, {
+            "status": "idle", "agent_runtime": "codex",
+            "model": "gpt-6-astra", "effort": "high",
+        }):
+            with self.subTest(host_summary=host_summary):
+                summary = backend._web_app_summary(row, host_summary)
+                self.assertIsNone(summary["latest_event_type"])
 
     def test_agent_settings_migration_backfills_and_requires_complete_values(self) -> None:
         migration = (MIGRATIONS_DIR / "0048_web_app_agent_settings.sql").read_text()

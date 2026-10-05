@@ -14,7 +14,7 @@ from host import agent_messages as message_templates
 from host.config import AGENT_RUNTIMES
 from host.runtime.memory_context import load_query
 from host.memory_recall_rules import RELEVANT_PAGE_LIMIT
-from host.runtime.agent_runtime import agent_activity, codex_app_server, orchestrator
+from host.runtime.agent_runtime import agent_activity, codex_app_server, orchestrator, turn_retries
 from host.runtime.admin_api import workspace_proxy
 from host.runtime.admin_api.errors import ApiError
 from host.runtime.admin_api.request_params import clip_json_encoded_text as _clip_json_encoded_text, one as _one
@@ -133,7 +133,7 @@ def thread_route(
             raise ApiError(HTTPStatus.BAD_REQUEST, "thread detail does not accept query parameters")
         return {"thread": get_thread(thread_id)}
     if len(parts) == 4 and parts[3] == "messages" and method == "POST":
-        return send_thread_message(thread_id, body, peer_sender_thread_id, operator_sent_message=operator_sent_message)
+        return send_thread_message(thread_id, body, peer_sender_thread_id, operator_sent_message=operator_sent_message, retry_attempt=0)
     if len(parts) == 4 and parts[3] == "notices" and method == "POST":
         if query or not isinstance(body, dict) or set(body) != {"kind", "summary", "details"}:
             raise ApiError(HTTPStatus.BAD_REQUEST, "notice requires kind, summary, and details")
@@ -232,6 +232,7 @@ def send_thread_message(
     body: Any,
     peer_sender_thread_id: str | None,
     operator_sent_message: bool,
+    retry_attempt: int,
 ) -> dict[str, Any]:
     """Start or steer one turn through the ordinary thread path."""
     if PRODUCT_THREAD_ID_RE.fullmatch(thread_id) is None:
@@ -366,6 +367,7 @@ def send_thread_message(
                     pre_message_activity=session_change_activity,
                     peer_sender_thread_id=peer_sender_thread_id,
                     operator_sent_message=operator_sent_message, input_notice=notice,
+                    retry_attempt=retry_attempt,
                 )
                 # Persist alongside admission: rejected turns leave no notices.
                 # These are display events, excluded from future history handoffs.
@@ -391,6 +393,15 @@ def send_thread_message(
         "status": "accepted",
         "thread": _public_thread(thread_id, agent_runtime, model, effort),
     }
+
+
+def retry_failed_turn(retry: turn_retries.Retry) -> None:
+    if not turn_retries.take(retry):
+        return
+    send_thread_message(retry.thread_id, {
+        "message": message_templates.retry_message(retry.attempt, retry.error),
+        "kern_notice": message_templates.retry_notice(retry.attempt),
+    }, None, operator_sent_message=False, retry_attempt=retry.attempt)
 
 
 def _memory_task_query(thread_id: str, message: str, notice: dict[str, str] | None = None) -> str:
@@ -503,10 +514,16 @@ def get_thread(thread_id: str) -> dict[str, Any]:
     )
 
 def stop_thread(thread_id: str) -> dict[str, str]:
-    if state.thread_session_config(thread_id) is None:
+    config = state.thread_session_config(thread_id)
+    if config is None:
         raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
-    if not orchestrator.stop_thread_turn(thread_id):
+    stopped = orchestrator.stop_thread_turn(thread_id)
+    cancelled = turn_retries.cancel(thread_id)
+    if not stopped and not cancelled:
         raise ApiError(HTTPStatus.CONFLICT, "the thread has no running work")
+    if cancelled and not stopped:
+        with state.mutation() as cur:
+            state.append_agent_event(cur, "thread.stopped", thread_id, {}, run_number=config["run_number"])
     return {"status": "accepted"}
 
 def sweep_archived_codex_sessions() -> int:
@@ -611,6 +628,7 @@ def clear_thread_memory(thread_id: str) -> dict[str, str]:
                     HTTPStatus.CONFLICT,
                     "working memory can be cleared only while the thread is idle",
                 ) from exc
+        turn_retries.cancel(thread_id)
     return {"status": "cleared"}
 
 def list_threads(
@@ -627,6 +645,9 @@ def list_threads(
     page = summaries[:limit]
     live = orchestrator.live_thread_ids()
     for thread in page:
+        retry = turn_retries.pending(thread["thread_id"])
+        if retry is not None:
+            thread["retry"] = retry
         if thread["thread_id"] in live:
             thread["status"] = "running"
     response: dict[str, Any] = {"threads": page}
@@ -659,6 +680,7 @@ def _public_thread(
         "status": status or "idle",
         "latest_event_seq": latest_event_seq,
         "latest_message_seq": latest_message_seq,
+        **({"retry": retry} if (retry := turn_retries.pending(thread_id)) else {}),
     }
 
 def _message(body: Any) -> str:

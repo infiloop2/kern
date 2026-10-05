@@ -511,6 +511,7 @@ def _web_app_summary(
         "updated_at": row[4],
         "last_used_at": last_used_at,
         "latest_event_seq": latest_event_seq,
+        "latest_event_type": host_summary.get("latest_event_type") if host_summary else None,
         "latest_message_seq": latest_message_seq,
         "task": host_summary.get("task") if host_summary else None,
         "session": session,
@@ -785,7 +786,8 @@ def browser_conversation(app_id: str) -> dict[str, Any]:
     status = thread.get("status")
     if status not in {"idle", "running"}:
         raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread")
-    return {"session": _thread_session_config(thread), "status": status}
+    return {"session": _thread_session_config(thread), "status": status,
+            **({"retry": thread["retry"]} if thread.get("retry") else {})}
 
 
 def browser_conversation_events(

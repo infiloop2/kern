@@ -443,7 +443,7 @@ time.sleep(120)
         session._accepting_steers = True
 
         session.steer("respond now")
-        session.steer("and this too")
+        session.steer("and this too", memory_suggestion=True)
 
         # A control interrupt would make Claude abort in-flight tools and
         # report them to the model as user rejections.

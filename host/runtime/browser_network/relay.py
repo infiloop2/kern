@@ -28,6 +28,13 @@ class Network:
         self.generation = 0
 
     def dial(self, authority: str) -> socket.socket:
+        try:
+            return self._dial(authority)
+        except ConnectionFailure as exc:
+            host_errors.report_warning("browser.network", str(exc), context=exc.context)
+            raise
+
+    def _dial(self, authority: str) -> socket.socket:
         with self.lock:
             value = self.settings.value.copy()
             generation = self.generation
@@ -50,10 +57,17 @@ class Network:
                     # Concurrent failures of the same session share one renewal.
                     # Keep established tunnels alive: they may carry a submission.
                     if self.settings.value["session"] == value["session"]:
-                        self.settings.save({**self.settings.value, "session": secrets.token_hex(12)})
+                        try:
+                            self.settings.save({**self.settings.value, "session": secrets.token_hex(12)})
+                        except Exception as exc:
+                            raise failure("proxy_session_renewal", exc, host=host) from exc
                     credentials = (self.settings.proxy_username(), self.settings.value["password"])
                 # Only the rejected CONNECT is retried, at most once per dial.
-                stream = connect_proxy(("gate.decodo.com", 7000), host, credentials)
+                try:
+                    stream = connect_proxy(("gate.decodo.com", 7000), host, credentials)
+                except ConnectionFailure as exc:
+                    exc.context["session_recovery"] = "failed"
+                    raise
         else:
             raise BrowserError("Browser connection settings are invalid.")
         with self.lock:
@@ -97,6 +111,13 @@ class Network:
             raise BrowserError("Unsupported Browser connection operation.")
 
     def test(self) -> dict[str, Any]:
+        try:
+            return self._test()
+        except ConnectionFailure as exc:
+            host_errors.report_warning("browser.network", str(exc), context=exc.context)
+            raise
+
+    def _test(self) -> dict[str, Any]:
         # Exercise the same local relay Chromium uses. curl owns TLS and the
         # whole-request deadline, including a relay stalled in the system resolver.
         # No proxy secret goes in argv, the environment, or diagnostic output.
