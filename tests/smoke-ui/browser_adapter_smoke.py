@@ -1,6 +1,7 @@
 """Exercise the real browser adapter against a local, intercepted X fixture."""
 from __future__ import annotations
 from contextlib import contextmanager
+from html import escape
 import json
 import subprocess
 from pathlib import Path
@@ -17,7 +18,7 @@ from host.runtime.browser.actions import x_post_tweet
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser_network.config import LOCATIONS, Settings
 
-EDITOR = '''<div data-testid="tweetTextarea_0" contenteditable="true"
+EDITOR = '''<div data-testid="tweetTextarea_0" contenteditable="true" style="white-space:pre-wrap"
  oninput="setTimeout(() => this.parentElement.querySelector('button').disabled=false, 150)"></div>
 <button disabled data-testid="tweetButton" onclick="fetch('/i/api/graphql/fixture/CreateTweet', {method:'POST', body:this.parentElement.querySelector('[contenteditable]').textContent})">Post</button>'''
 INLINE = '<div data-testid="tweetTextarea_0" contenteditable="true"></div><button data-testid="tweetButton">Inline post</button>'
@@ -82,6 +83,44 @@ def check_presets():
 
 
 def check_post_text(page):
+    # Native contenteditable blank blocks already reproduce the old innerText
+    # false mismatch, without a live X account or any submission.
+    release_text = ("shipped kern v1.19.22 🎉\n\n"
+                    "kern now suggests saved memories while agents are working, as the conversation changes. "
+                    "earlier decisions can resurface mid-task, and agents choose which suggested pages to read.\n\n"
+                    "https://github.com/infiloop2/kern")
+    samples = [release_text, "\nfirst\n\n\nlast\n", "🎉 👍🏽 👩🏽‍💻 👨‍👩‍👧‍👦 🇺🇳 ❤️ ☀️",
+               "  Café e\u0301\t中文 العربية שלום  \n\nhttps://example.com/a?b=c&d=e"]
+    for text in samples:
+        x_post_tweet.prepare_post(page, "example", text)
+        editor = page.get_by_role("dialog").get_by_test_id("tweetTextarea_0")
+        assert page.evaluate(x_post_tweet.MATCHES_TEXT, [editor.element_handle(), text])
+
+    # Draft-style wrappers, empty-block placeholders, decorated links, and
+    # image emoji must represent exactly the same code points as approved.
+    # These fixtures also exercise verification independently of typing.
+    for text in samples:
+        lines = []
+        for line in text.split('\n'):
+            content = escape(line) or '<br data-text="true">'
+            for emoji in ("🎉", "👍🏽", "👩🏽‍💻", "👨‍👩‍👧‍👦", "🇺🇳", "❤️", "☀️"):
+                content = content.replace(emoji, f'<img alt="{emoji}" draggable="false">')
+            if line.startswith('https://'):
+                content = f'<a href="https://example.com"><span>{content}</span></a>'
+            lines.append('<div data-block="true"><div><span data-offset-key="fixture">'
+                         f'<span data-text="true">{content}</span></span></div></div>')
+        editor.evaluate('(editor, html) => editor.innerHTML = html',
+                        '<div data-contents="true">' + ''.join(lines) + '</div>')
+        assert page.evaluate(x_post_tweet.MATCHES_TEXT, [editor.element_handle(), text])
+        for changed in (text + ' ', text[:-1], text.replace('\n\n', '\n'), text.replace('🎉', '🎊'),
+                        text.replace('🏽', ''), text.replace('\u200d', ''), text.replace('\ufe0f', '')):
+            if changed != text:
+                assert not page.evaluate(x_post_tweet.MATCHES_TEXT, [editor.element_handle(), changed])
+
+    editor.evaluate('(editor) => editor.innerHTML = "<div>a<span><br></span>b<br>c</div>"')
+    assert page.evaluate(x_post_tweet.MATCHES_TEXT, [editor.element_handle(), 'a\nb\nc'])
+    assert not page.evaluate(x_post_tweet.MATCHES_TEXT, [editor.element_handle(), 'ab\nc'])
+
     # Simulate an editor doing work per keystroke. With the former 50 ms
     # artificial delay, 280 characters exceeded the old 30-second deadline.
     slow_html = HTML + '''<script>
@@ -126,7 +165,7 @@ def check_post_text(page):
             assert exc.step == "verify_post_text", str(exc)
     finally:
         page.unroute(route_pattern, changed_editor)
-    print("Post preparation passed: slow editor, trusted keys and changed-text rejection.", flush=True)
+    print("Post preparation passed: Unicode, blank lines, image emoji, slow editor, trusted keys and changed-text rejection.", flush=True)
 
 
 def check_post_resources(playwright):

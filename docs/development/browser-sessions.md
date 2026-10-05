@@ -342,7 +342,11 @@ manual and automatic calls can still fail busy before submission.
 
 The X adapter verifies the live handle, prepares the composer or exact reply
 target, waits for the target and enabled submit button, and scopes editing
-and submission to the composer dialog. A post is confirmed only when X's
+and submission to the composer dialog. Before submission it compares the exact
+logical editor text with the approved copy: block boundaries preserve newlines,
+empty-block BR placeholders do not add content, and image emoji contribute their
+alt text. It does not trim whitespace or normalize Unicode. A mismatch stops
+before counting or submitting the attempt. A post is confirmed only when X's
 CreateTweet response verifies the expected author, post ID and reply target,
 including the `TweetWithVisibilityResults` wrapper. Explicit provider rejections
 return bounded reasons for known error codes, never raw provider messages.

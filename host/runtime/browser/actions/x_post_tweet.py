@@ -7,6 +7,7 @@ from typing import Any, TYPE_CHECKING
 from urllib.parse import urlsplit
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser.providers import x
+from host.runtime.browser.actions.x_composer import MATCHES_TEXT
 from host.runtime.core import host_errors
 
 if TYPE_CHECKING:
@@ -103,7 +104,7 @@ def execute(profile: Profile, body: dict[str, Any]) -> dict[str, Any]:
 
 
 def prepare_post(page: Any, account: str, text: str, reply_id: str = "") -> None:
-    from playwright.sync_api import expect  # type: ignore[import-not-found]
+    from playwright.sync_api import expect, TimeoutError as PlaywrightTimeoutError  # type: ignore[import-not-found]
     step = "navigate_to_target" if reply_id else "navigate_to_composer"
     try:
         response = page.goto(f"https://x.com/i/status/{reply_id}" if reply_id else "https://x.com/compose/post", wait_until="domcontentloaded")
@@ -130,9 +131,12 @@ def prepare_post(page: Any, account: str, text: str, reply_id: str = "") -> None
         step = "wait_for_submit_enabled"
         expect(composer.get_by_test_id("tweetButton")).to_be_enabled(timeout=10000)
         step = "verify_post_text"
-        # Compare the property exactly, without text assertion whitespace
-        # normalization, after the editor's input handlers have run.
-        expect(editor).to_have_js_property("innerText", text, timeout=10000)
+        # Compare logical editor content exactly, including blank lines and
+        # image emoji, after the editor's input handlers have run.
+        try:
+            page.wait_for_function(MATCHES_TEXT, arg=[editor.element_handle(), text], timeout=10000)
+        except PlaywrightTimeoutError:
+            raise BrowserError("The composer text did not exactly match the approved post, including emoji and line breaks.") from None
     except Exception as exc:
         raise PreparationFailed(step, exc).with_traceback(exc.__traceback__) from None
 
