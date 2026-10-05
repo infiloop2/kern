@@ -79,8 +79,9 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
         self.assert_failed_step("wait_for_submit_enabled", failure_type="AssertionError")
 
     def test_incomplete_or_changed_text_is_never_submitted_or_counted(self):
-        self.expect.return_value.to_have_js_property.side_effect = AssertionError("private-live-token")
-        self.assert_failed_step("verify_post_text", failure_type="AssertionError")
+        self.page.wait_for_function.side_effect = TimeoutError("private-live-token")
+        self.assert_failed_step("verify_post_text", failure_type="BrowserError")
+        self.assertIn("did not exactly match the approved post", self.emit.call_args.args[0]["summary"])
 
     def test_navigation_http_status_is_visible_and_stops_preparation(self):
         self.page.goto.return_value = SimpleNamespace(status=403)
@@ -104,6 +105,7 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
         editor.fill.assert_called_once_with("")
         editor.press_sequentially.assert_called_once_with("Exact text", delay=0, timeout=60000)
         self.expect.return_value.to_be_enabled.assert_called_once_with(timeout=10000)
-        self.expect.return_value.to_have_js_property.assert_called_once_with("innerText", "Exact text", timeout=10000)
+        self.page.wait_for_function.assert_called_once_with(
+            posts.MATCHES_TEXT, arg=[editor.element_handle.return_value, "Exact text"], timeout=10000)
         self.submit.assert_not_called()
         self.emit.assert_not_called()
