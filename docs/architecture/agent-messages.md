@@ -3,7 +3,7 @@
 [`host/agent_messages.py`](../../host/agent_messages.py) owns every model-facing
 Kern preamble and the finite notice-kind catalog. It covers identity/memory
 injection, session handoff, memory suggestions, scheduled triggers, approval
-outcomes, restart recovery, and peer messages. Delivery, recall, permissions,
+outcomes, restart recovery, failed-turn retries, and peer messages. Delivery, recall, permissions,
 and history bounds remain with their owning services. The suggestion helpers
 are shared with the follow-up memory-monitor PR; this base does not run a monitor.
 
@@ -19,7 +19,7 @@ The standard event envelope contains `seq`, `event_id`, `timestamp`, `thread_id`
 
 | Category | Kinds | Additional payload fields |
 | --- | --- | --- |
-| Delivered input | `scheduled_trigger`, `approval_outcome`, `restart`, `agent_message` | `source: "user"`, `message`: exact provider input, including its routing preamble |
+| Delivered input | `scheduled_trigger`, `approval_outcome`, `restart`, `retry`, `agent_message` | `source: "user"`, `message`: exact provider input, including its routing preamble |
 | Context | `history_transfer`, `memory_injection`, `memory_suggestion` | `message`: summary; memory notices retain `memory_page_ids` and `memory_recall_details`; transfers retain `historical_context` |
 | Messaging and agents | `agent_message_sent`, `agent_spawned`, `agent_archived` | `notice.details`: outcome and request |
 | Memory writes | `self_memory_saved`, `shared_memory_saved`, `shared_memory_deleted` | `notice.details`: outcome and request |
@@ -48,7 +48,7 @@ request fields, response shapes, and examples.
 ## Producers and presentation
 
 The Workspace service supplies private `kern_notice: {kind, summary}` metadata
-when delivering a trigger or peer message. Approval and restart producers also
+when delivering a trigger or peer message. Approval, restart and retry producers also
 supply their specific metadata. Admin rejects incoming Kern messages without
 it. Operator input receives an explicit `operator` marker on `thread.message`;
 pasting a Kern preamble does not change its classification.

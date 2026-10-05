@@ -120,7 +120,7 @@ def register_live_turn(
         seed_thread_session(thread_id, runtime_type, model=model, effort=effort)
     with state.mutation() as cur:
         run_number = state.start_thread_run(cur, thread_id)
-    turn = orchestrator._Turn(runtime_type, thread_id, model, effort, run_number)
+    turn = orchestrator._Turn(runtime_type, thread_id, model, effort, run_number, retry_attempt=0)
     turn.server = server
     turn.phase = orchestrator.ExecutionPhase.RUNNING
     with orchestrator._LIVE_LOCK:
@@ -132,7 +132,7 @@ class RecordingSteerServer:
     def __init__(self) -> None:
         self.messages: list[str] = []
 
-    def steer(self, message: str) -> None:
+    def steer(self, message: str, *, memory_suggestion: bool = False) -> None:
         self.messages.append(message)
 
     def interrupt(self) -> None:
@@ -760,6 +760,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with orchestrator._LIVE_LOCK:
             orchestrator._LIVE.clear()
         self.addCleanup(orchestrator._LIVE.clear)
+        self.enterContext(patch.object(orchestrator.turn_retries, "_pending", {}))
         self.reconcile_patch = patch(
             "host.runtime.admin_api.service.orchestrator.reconcile_runtime_status_after_policy_change"
         )
@@ -2713,7 +2714,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         def deliver(method, path, body):
             self.assertEqual(method, "POST")
-            return admin_threads.send_thread_message(path.split("/")[3], body, None, body.get("operator_sent_message", False))
+            return admin_threads.send_thread_message(path.split("/")[3], body, None, body.get("operator_sent_message", False), retry_attempt=0)
 
         with patch.object(agent_messages, "call_admin_api", side_effect=deliver):
             for thread_id in (app_id, scheduled["thread_id"]):
@@ -4068,7 +4069,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                     "effort": "high",
                 },
                 None,
-                operator_sent_message=False,
+                operator_sent_message=False, retry_attempt=0,
             )
         self.assertEqual(direct_call.exception.status, HTTPStatus.BAD_REQUEST)
 

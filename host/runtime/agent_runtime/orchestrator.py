@@ -81,6 +81,7 @@ from host.runtime.agent_runtime import (
     grok_agent,
     hermes_agent,
     script_runner,
+    turn_retries,
 )
 from host.runtime.admin_api import github_credential, github_repo_audit
 from host.runtime.admin_api.errors import ApiError
@@ -187,6 +188,7 @@ class _Turn:
     # Durable storage-only scope for this execution. It is attached to thread
     # events so reused provider activity ids cannot collide across processes.
     run_number: int
+    retry_attempt: int
     current_message: str = ""
     phase: ExecutionPhase = ExecutionPhase.STARTING
     # The runtime adapter is published before it starts. Its own lifecycle
@@ -708,6 +710,7 @@ def admit_turn(
     message: str,
     operator_sent_message: bool,
     input_notice: dict[str, str],
+    retry_attempt: int,
     *,
     pre_message_activity: dict[str, Any] | None = None,
     peer_sender_thread_id: str | None = None,
@@ -742,7 +745,7 @@ def admit_turn(
                 f"{label} runtime is already running {TURN_LIMIT_PER_RUNTIME} concurrent threads; retry when one finishes",
             )
         run_number = state.start_thread_run(cur, thread_id)
-        turn = _Turn(runtime_type, thread_id, model, effort, run_number, message)
+        turn = _Turn(runtime_type, thread_id, model, effort, run_number, retry_attempt, message)
         if runtime_type != "script":
             state.start_turn_usage(cur, thread_id, run_number, runtime_type, model)
         # Other admissions cannot interleave because the mutation lock is
@@ -850,6 +853,8 @@ def steer_live_turn(
                     "event_type": "thread.message" if operator_sent_message else "thread.notice",
                     "payload": {"message": message, "source": "user", "notice": input_notice},
                 }, incoming=True)
+                # A newly delivered request starts its own failure chain.
+                turn.retry_attempt = 0
     if server_to_interrupt is not None:
         _interrupt_turn(server_to_interrupt)
     if failure is not None:
@@ -879,7 +884,7 @@ def _deliver_memory_suggestion(
             return False
         message = message_templates.memory_suggestion(pages)
         try:
-            turn.server.steer(message)
+            turn.server.steer(message, memory_suggestion=True)
         except ProviderTurnFinishing:
             return False
         except harness_adapter(turn.runtime_type).transport_errors:
@@ -895,6 +900,7 @@ def _deliver_memory_suggestion(
 
 
 def _publish_turn(turn: _Turn) -> None:
+    turn_retries.cancel(turn.thread_id)
     with _LIVE_LOCK:
         _LIVE[_live_key(turn.runtime_type, turn.thread_id)] = turn
 
@@ -1287,6 +1293,11 @@ def _record_turn_finished(
         )
     state.finish_thread_run(cur, turn.thread_id, turn.run_number)
     after_commit.append(partial(_mark_finishing, turn, accepted_session_id))
+    if error_message is not None and turn.runtime_type != "script":
+        after_commit.append(partial(
+            turn_retries.schedule, turn.thread_id,
+            turn.retry_attempt, error_message,
+        ))
 
 
 def _finish_turn(

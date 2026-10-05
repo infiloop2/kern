@@ -101,7 +101,7 @@ class KernActionNoticeTests(TestCase):
                 threads.thread_route("POST", "/v1/threads/thread-1/notices", {},
                                      {"kind": kind, "summary": summary, "details": "details"}, None, False)
         with self.assertRaises(ApiError) as rejected:
-            threads.send_thread_message("thread-1", {"message": "untyped host input"}, None, False)
+            threads.send_thread_message("thread-1", {"message": "untyped host input"}, None, False, retry_attempt=0)
         self.assertIn("specific notice kind", str(rejected.exception))
 
     def test_notice_route_persists_a_separate_event_without_starting_a_turn(self):

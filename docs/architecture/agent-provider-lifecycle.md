@@ -459,3 +459,30 @@ another refresh holding the runtime's refresh lock.
 - **Refresh** (`POST /v1/agent-runtime/refresh`): re-derives status through
   the pipeline and forces OAuth provider probes. Bedrock has nothing extra to
   force: its status is local and its usage meters update as responses arrive.
+
+## Automatic continuation after a failed model turn
+
+Failed model turns get up to five automated continuations, waiting 5 minutes,
+20 minutes, 1 hour, 4 hours, then 12 hours after each failure. A host worker
+checks in-memory deadlines every 15 seconds and sends an ordinary `retry`
+notice using the thread's recorded runtime, model and effort. The message asks
+the agent to check completed work before continuing. A successful turn ends the
+chain. New admitted messages start a fresh chain; accepted steering resets the running turn's retry count.
+
+Only failed turn completion schedules this work. Operator stops, successful
+turns, cleanup-only errors, and Bash scripts do not. New admitted work, Stop,
+and clearing working memory cancel attempts still waiting. Chat, standing-agent
+and App composers show the next attempt and let the operator cancel it.
+
+Once the worker claims an attempt, it sends through the same host path as
+restart continuation. Normal delivery handles any concurrent messages; there
+is no extra locking or Workspace eligibility policy. A delivery failure is
+logged and ends the chain, just like a failed restart continuation. Only a
+failed model turn schedules the next attempt. There is no error-text classifier
+or model fallback.
+
+Retry deadlines and counters are deliberately process memory only. Restarting
+or redeploying discards pending retries. The existing one-shot continuation for
+turns interrupted by a host restart remains separate and starts a fresh chain
+if that continuation fails. No retry database state, recovery scan or schema
+migration is involved.

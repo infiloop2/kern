@@ -279,3 +279,59 @@ def run_kern_notices(page: Any, url: str, log_in: Any) -> None:
         expect(app.get_by_role("button", name=labels[0], exact=True)).to_have_count(0)
     finally:
         page.evaluate("appId => window.KernHost.api('POST', `/v1/workspace/web-apps/apps/${appId}/archive`, {})", app_id)
+
+
+def run_turn_retries(page: Any, url: str, log_in: Any) -> None:
+    """A waiting retry is visible and cancellable while its thread is idle."""
+    from playwright.sync_api import expect
+
+    pending = {"chat": True, "app": True}
+    retry = {"attempt": 2, "at": "2026-10-06T12:00:00Z"}
+
+    def chat_index(route: Any) -> None:
+        thread = {"thread_id": "thread-1", "name": "Retry test", "status": "idle",
+                  "agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high",
+                  "has_session": True, "schedule_id": None, "archived": False}
+        if pending["chat"]:
+            thread["retry"] = retry
+        route.fulfill(json={"threads": [thread]})
+
+    def app_conversation(route: Any) -> None:
+        body = {"status": "idle", "session": {
+            "agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high"}}
+        if pending["app"]:
+            body["retry"] = retry
+        route.fulfill(json=body)
+
+    def cancel(route: Any, surface: str) -> None:
+        assert route.request.method == "POST"
+        pending[surface] = False
+        route.fulfill(json={"status": "accepted"})
+
+    page.route("**/v1/workspace/chat/threads", chat_index)
+    page.route("**/v1/workspace/chat/threads/thread-1/stop", lambda route: cancel(route, "chat"))
+    page.route("**/v1/workspace/web-apps/apps/*/conversation", app_conversation)
+    page.route("**/v1/workspace/web-apps/apps/*/stop", lambda route: cancel(route, "app"))
+    page.on("dialog", lambda dialog: dialog.accept())
+    log_in(page, url)
+    page.goto(url + "#chat/thread-1")
+    chat = page.locator("#panel-workspace-chat")
+    expect(chat.locator("#composer-running")).to_contain_text("Retry 2/5 at")
+    expect(chat.locator("#composer-running .working-dots")).to_be_hidden()
+    chat.get_by_role("button", name="Cancel retry", exact=True).click()
+    expect(chat.locator("#composer-running")).to_be_hidden()
+    assert not pending["chat"]
+    if page.get_by_role("button", name="Open navigation", exact=True).is_visible():
+        page.get_by_role("button", name="Open navigation", exact=True).click()
+    page.get_by_role("button", name="New app", exact=True).click()
+    app = page.locator("#panel-workspace-web-apps")
+    expect(app.locator("#app-title")).to_have_text(re.compile(r"app-\d+"))
+    app_id = app.locator("#app-title").inner_text()
+    try:
+        app.locator("#history-toggle").click()
+        expect(app.locator("#composer-running")).to_contain_text("Retry 2/5 at")
+        app.get_by_role("button", name="Cancel retry", exact=True).click()
+        expect(app.locator("#composer-running")).to_be_hidden()
+        assert not pending["app"]
+    finally:
+        page.evaluate("appId => window.KernHost.api('POST', `/v1/workspace/web-apps/apps/${appId}/archive`, {})", app_id)

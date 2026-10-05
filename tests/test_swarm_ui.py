@@ -51,7 +51,7 @@ class SwarmLayoutTests(unittest.TestCase):
             const scores = rankAgents(sample, metrics);
             if (!(scores.get('lead') > scores.get('helper') && scores.get('helper') > scores.get('peer') && scores.get('peer') > scores.get('quiet'))) throw Error('wrong importance order');
             if (scores.get('quiet') !== 0 || scores.has('operator')) throw Error('missing telemetry / operator score');
-            // More involved agents orbit strictly closer to the operator and are never smaller.
+            // More involved agents remain larger; their centre pull is statistical.
             const ranked = layoutAgents(sample, [], metrics);
             const operator = ranked.positions.get('operator');
             if (operator.x !== ranked.center.x || operator.y !== ranked.center.y) throw Error('operator not at the centre');
@@ -59,12 +59,15 @@ class SwarmLayoutTests(unittest.TestCase):
             for (const [a, score] of scores) {{
                 if (overlap(footprint(operator), footprint(ranked.positions.get(a)))) throw Error('agent overlaps operator');
                 for (const [b, other] of scores) {{
-                    if (score > other && distance(ranked, a) >= distance(ranked, b)) throw Error('hierarchy inverted');
                     if (score > other && ranked.positions.get(a).r < ranked.positions.get(b).r) throw Error('size inverted');
                 }}
             }}
-            if (ranked.rings.map(ring => ring.label).join() !== 'Core,Active,Occasional,Quiet') throw Error(`wrong tiers ${{ranked.rings.map(ring => ring.label)}}`);
-            if (ranked.rings.some((ring, i) => i && ring.radius <= ranked.rings[i - 1].radius)) throw Error('rings out of order');
+            const attention = Object.fromEntries(agents.map((agent, i) => [agent.thread_id,
+                {{operator_messages: 100-i, agent_peers: 100-i, total_tokens: (100-i)*100}}]));
+            const pulled = layoutAgents([{{thread_id:'operator'}}, ...agents], [], attention);
+            const ordered = [...rankAgents(agents, attention)].sort((a,b) => b[1]-a[1]);
+            const meanDistance = rows => rows.reduce((sum,[id]) => sum+distance(pulled,id),0)/rows.length;
+            if (meanDistance(ordered.slice(0,33)) >= meanDistance(ordered.slice(-33))) throw Error('centre pull inverted');
             const archived = rankAgents(sample, {{...metrics, archived: {{operator_messages: 1e9, agent_peers: 1e9, total_tokens: 1e20}}}});
             if (JSON.stringify([...scores]) !== JSON.stringify([...archived])) throw Error('archived metrics affect ranking');
             const reverse = layoutAgents([...sample].reverse(), [], metrics);
@@ -100,6 +103,30 @@ class SwarmLayoutTests(unittest.TestCase):
                 const gap = map => Math.hypot(map.positions.get('a0').x - map.positions.get(target).x, map.positions.get('a0').y - map.positions.get(target).y);
                 if (gap(connected) >= gap(plain)) throw Error('collaborators did not move closer');
                 if (connected.positions.size !== peers.length) throw Error('collaboration lost agents');
+            }}
+            // Separate strongly connected teams settle into compact clusters.
+            const cliques = Array.from({{length:10}},(_,i)=>({{thread_id:`c${{i}}`}}));
+            const cliqueEdges = [];
+            for (let i=0;i<10;i++) for (let j=i+1;j<10;j++) if (Math.floor(i/5)===Math.floor(j/5))
+                cliqueEdges.push({{sender_thread_id:`c${{i}}`,target_thread_id:`c${{j}}`,count:100}});
+            const clustered = layoutAgents(cliques,cliqueEdges);
+            let intra=0, inter=0, ni=0, ne=0;
+            for (let i=0;i<10;i++) for (let j=i+1;j<10;j++) {{
+                const a=clustered.positions.get(`c${{i}}`), b=clustered.positions.get(`c${{j}}`);
+                const d=Math.hypot(a.x-b.x,a.y-b.y);
+                if (Math.floor(i/5)===Math.floor(j/5)) {{intra+=d;ni++;}} else {{inter+=d;ne++;}}
+            }}
+            if (intra/ni >= inter/ne*.7) throw Error(`weak clustering ${{intra/ni}} vs ${{inter/ne}}`);
+            const canonical = layoutAgents([...cliques].reverse(), [...cliqueEdges].reverse());
+            if (JSON.stringify([...canonical.positions])!==JSON.stringify([...clustered.positions])) throw Error('edge ordering changes layout');
+            // Adding a quiet identity keeps existing positions near their anchors,
+            // relative to the operator (the symmetric map extents can grow).
+            const before = layoutAgents([{{thread_id:'operator'}},...agents],edges,attention);
+            const after = layoutAgents([{{thread_id:'operator'}},...agents,{{thread_id:'new'}}],edges,attention,before.positions);
+            for (const [id,a] of before.positions) {{
+                const b=after.positions.get(id);
+                const motion=Math.hypot(a.x-before.center.x-(b.x-after.center.x),a.y-before.center.y-(b.y-after.center.y));
+                if(motion>40) throw Error(`roster reshuffled ${{id}} ${{motion}}`);
             }}
             if (layoutAgents([], []).positions.size) throw Error('empty map');
             const catalog = Array.from({{length: 10000}}, (_, i) => ({{thread_id: `thread-${{i+1}}`}}));

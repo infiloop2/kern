@@ -99,7 +99,7 @@ class SwarmAnnotationsTests(unittest.TestCase):
         with patch.object(admin_threads, 'send_thread_message', return_value={'status': 'accepted'}) as send:
             admin_api.route('POST', '/v1/threads/thread-1/messages', {}, body,
                             principal=admin_api.WorkspacePrincipal())
-        send.assert_called_once_with('thread-1', body, 'thread-2', operator_sent_message=False)
+        send.assert_called_once_with('thread-1', body, 'thread-2', operator_sent_message=False, retry_attempt=0)
 
 
     def test_operator_provenance_is_explicit_and_automated_sends_are_excluded(self) -> None:

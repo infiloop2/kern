@@ -101,7 +101,7 @@ class FakeServer:
         self.interrupted = True
         self.closed = True
 
-    def steer(self, message: str) -> None:
+    def steer(self, message: str, *, memory_suggestion: bool = False) -> None:
         self.steered.append(message)
         self._delivered_steers += 1
 
@@ -221,7 +221,7 @@ class CodexRotationTests(unittest.TestCase):
         self.turn = orchestrator._Turn(
             "codex", "schedule-1", "gpt-6-astra", "high", 4,
             phase=orchestrator.ExecutionPhase.FINISHING,
-            provider_session_id="old-session",
+            provider_session_id="old-session", retry_attempt=0,
         )
 
     def test_threshold_detaches_before_delete_for_each_codex_account(self) -> None:
@@ -287,6 +287,7 @@ class OrchestratorTests(unittest.TestCase):
         FakeServer.instances = []
         orchestrator._LIVE.clear()
         self.addCleanup(orchestrator._LIVE.clear)
+        self.enterContext(patch.object(orchestrator.turn_retries, "_pending", {}))
         save_policy(
             {
                 "network_integrations": {
@@ -355,7 +356,7 @@ class OrchestratorTests(unittest.TestCase):
                     cur, runtime, thread_id, None, state.utc_now(), model, effort
                 )
             run_number = state.start_thread_run(cur, thread_id)
-        turn = orchestrator._Turn(runtime, thread_id, model, effort, run_number)
+        turn = orchestrator._Turn(runtime, thread_id, model, effort, run_number, retry_attempt=0)
         turn.server = server
         turn.phase = (
             orchestrator.ExecutionPhase.FINISHING
@@ -376,7 +377,7 @@ class OrchestratorTests(unittest.TestCase):
             )
             return orchestrator.admit_turn(
                 cur, after_commit, thread_id, runtime, model, effort, message,
-                operator_sent_message=True, input_notice={"kind": "operator"},
+                operator_sent_message=True, input_notice={"kind": "operator"}, retry_attempt=0,
             )
 
     def start_turn(
@@ -398,7 +399,7 @@ class OrchestratorTests(unittest.TestCase):
             )
             turn = orchestrator.admit_turn(
                 cur, after_commit, thread_id, runtime, model, effort, message,
-                operator_sent_message=True, input_notice={"kind": "operator"},
+                operator_sent_message=True, input_notice={"kind": "operator"}, retry_attempt=0,
             )
             assert turn is not None
         orchestrator.launch_turn(turn, message, provider_session_id, task_context=message)
@@ -416,7 +417,7 @@ class OrchestratorTests(unittest.TestCase):
         if state.thread_session_config(thread_id) is None:
             model, effort = DEFAULT_SESSION[runtime]
             body |= {"agent_runtime": runtime, "model": model, "effort": effort}
-        return service.send_thread_message(thread_id, body, peer_sender_thread_id, operator_sent_message=notice is None)
+        return service.send_thread_message(thread_id, body, peer_sender_thread_id, operator_sent_message=notice is None, retry_attempt=0)
 
     def wait_for(self, condition, message: str = "condition") -> None:
         deadline = time.monotonic() + 10
@@ -450,6 +451,34 @@ class OrchestratorTests(unittest.TestCase):
             return f"codex-{input_message}", "done"
 
         return fake_run_turn
+
+    def test_failed_turn_retries_through_ordinary_admission(self) -> None:
+        with patch.object(orchestrator.turn_retries.time, "time", return_value=1000) as clock, \
+                patch.object(orchestrator, "launch_turn") as launch:
+            self.send_message("thread-1", "Finish the report")
+            first = launch.call_args.args[0]
+            orchestrator._finish_turn(first, error_message="provider capacity")
+            orchestrator._close_turn(first, None)
+            clock.return_value += 300
+            orchestrator.turn_retries.deliver_due(admin_threads.retry_failed_turn)
+            second = launch.call_args.args[0]
+            self.assertEqual(second.retry_attempt, 1)
+            self.assertEqual(second.run_number, first.run_number + 1)
+            self.assertEqual((second.model, second.effort), (first.model, first.effort))
+            notices = [e for e in thread_events("thread-1") if e["event_type"] == "thread.notice"]
+            self.assertEqual(notices[-1]["payload"]["notice"]["kind"], "retry")
+            orchestrator._finish_turn(second, error_message="still at capacity")
+            orchestrator._close_turn(second, None)
+            self.assertEqual(orchestrator.turn_retries.pending("thread-1")["attempt"], 2)
+            self.send_message("thread-1", "Change of plan")
+            third = launch.call_args.args[0]
+            self.assertEqual(third.retry_attempt, 0)
+            self.assertIsNone(orchestrator.turn_retries.pending("thread-1"))
+            orchestrator._finish_turn(third)
+            orchestrator._close_turn(third, None)
+            clock.return_value += 999999
+            orchestrator.turn_retries.deliver_due(admin_threads.retry_failed_turn)
+            self.assertEqual(launch.call_count, 3)
 
     # -- admission -------------------------------------------------------------------
 
@@ -577,7 +606,7 @@ class OrchestratorTests(unittest.TestCase):
         with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
             service.send_thread_message("thread-1", {
                 "message": "hello", "agent_runtime": "codex", "model": DEFAULT_SESSION["codex"][0], "effort": "high",
-            }, None, operator_sent_message=True)
+            }, None, operator_sent_message=True, retry_attempt=0)
             self.wait_until_idle("thread-1")
         self.register_live_turn("codex", "thread-1", FakeServer())
         self.assertTrue(orchestrator.steer_live_turn("thread-1", "codex", "follow-up", operator_sent_message=True, input_notice={"kind": "operator"}))
@@ -700,7 +729,7 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_provider_rejection_after_running_fails_instead_of_retrying_startup(self) -> None:
         class RejectingServer(FakeServer):
-            def steer(self, message: str) -> None:
+            def steer(self, message: str, *, memory_suggestion: bool = False) -> None:
                 del message
                 raise orchestrator.codex_app_server.CodexAppServerError(
                     "provider is not accepting input"
@@ -727,7 +756,7 @@ class OrchestratorTests(unittest.TestCase):
 
     def test_codex_completion_race_is_retryable_without_a_thread_error(self) -> None:
         class FinishingServer(FakeServer):
-            def steer(self, message: str) -> None:
+            def steer(self, message: str, *, memory_suggestion: bool = False) -> None:
                 del message
                 raise orchestrator.codex_app_server.CodexTurnFinishing(
                     "Codex turn is finishing"
@@ -1136,7 +1165,7 @@ class OrchestratorTests(unittest.TestCase):
                 effort,
             )
             run_number = state.start_thread_run(cur, "thread-chat")
-        turn = orchestrator._Turn("codex", "thread-chat", model, effort, run_number)
+        turn = orchestrator._Turn("codex", "thread-chat", model, effort, run_number, retry_attempt=0)
 
         with self.assertRaisesRegex(ValueError, "empty session"):
             orchestrator._provider_session_accepted(turn, "  ")
@@ -1378,10 +1407,10 @@ class OrchestratorTests(unittest.TestCase):
                     "effort": "ultracode",
                 },
                 None,
-                operator_sent_message=True,
+                operator_sent_message=True, retry_attempt=0,
             )
             self.wait_until_idle("thread-chat")
-            service.send_thread_message("thread-chat", {"message": "again"}, None, operator_sent_message=True)
+            service.send_thread_message("thread-chat", {"message": "again"}, None, operator_sent_message=True, retry_attempt=0)
             self.wait_until_idle("thread-chat")
 
         self.assertEqual(seen, [None, "claude-session-1"])
@@ -1415,10 +1444,10 @@ class OrchestratorTests(unittest.TestCase):
                     "effort": "xhigh",
                 },
                 None,
-                operator_sent_message=True,
+                operator_sent_message=True, retry_attempt=0,
             )
             self.wait_until_idle("thread-grok")
-            service.send_thread_message("thread-grok", {"message": "again"}, None, operator_sent_message=True)
+            service.send_thread_message("thread-grok", {"message": "again"}, None, operator_sent_message=True, retry_attempt=0)
             self.wait_until_idle("thread-grok")
 
         self.assertEqual(seen, [None, "grok-session-1"])
@@ -1471,12 +1500,12 @@ class OrchestratorTests(unittest.TestCase):
             return "replacement-session", "done"
 
         with patch.object(orchestrator.grok_agent, "run_turn", fake_run_turn):
-            service.send_thread_message("thread-stale-grok", {"message": "first retry"}, None, operator_sent_message=True)
+            service.send_thread_message("thread-stale-grok", {"message": "first retry"}, None, operator_sent_message=True, retry_attempt=0)
             self.wait_until_idle("thread-stale-grok")
             self.assertIsNone(
                 state.thread_session_config("thread-stale-grok")["provider_session_id"]
             )
-            service.send_thread_message("thread-stale-grok", {"message": "second retry"}, None, operator_sent_message=True)
+            service.send_thread_message("thread-stale-grok", {"message": "second retry"}, None, operator_sent_message=True, retry_attempt=0)
             self.wait_until_idle("thread-stale-grok")
 
         self.assertEqual(attempts, ["deleted-session", None])
@@ -1568,7 +1597,7 @@ class OrchestratorTests(unittest.TestCase):
                     self.assertIsNone(state.thread_session_config(thread_id)["provider_session_id"])
                     self.assertFalse(server.closed)
                     with self.assertRaises(ApiError) as conflict:
-                        service.send_thread_message(thread_id, {"message": "too soon"}, None, operator_sent_message=True)
+                        service.send_thread_message(thread_id, {"message": "too soon"}, None, operator_sent_message=True, retry_attempt=0)
                     self.assertEqual(conflict.exception.status.value, 409)
 
                 self.rollout_size.side_effect = [
@@ -1636,7 +1665,7 @@ class OrchestratorTests(unittest.TestCase):
             patch.object(orchestrator.codex_app_server, "CodexAppServer", StartingServer),
             patch.object(orchestrator.codex_app_server, "run_turn", fake_run_turn),
         ):
-            service.send_thread_message(thread_id, {"message": "continue the work"}, None, operator_sent_message=True)
+            service.send_thread_message(thread_id, {"message": "continue the work"}, None, operator_sent_message=True, retry_attempt=0)
             self.wait_until_idle(thread_id)
             self.assertEqual(len(attempts), 1)
             self.assertEqual(attempts[0][1], "deleted-session")
@@ -1645,7 +1674,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(len(errors), 1)
             self.assertIn("send the message again", errors[0]["payload"]["error_message"])
 
-            service.send_thread_message(thread_id, {"message": "retry now"}, None, operator_sent_message=True)
+            service.send_thread_message(thread_id, {"message": "retry now"}, None, operator_sent_message=True, retry_attempt=0)
             self.wait_until_idle(thread_id)
 
         self.assertEqual(len(attempts), 2)
@@ -1707,7 +1736,7 @@ class OrchestratorTests(unittest.TestCase):
                 "thread-stale-claude",
                 {"message": "continue the work"},
                 None,
-                operator_sent_message=True,
+                operator_sent_message=True, retry_attempt=0,
             )
             self.assertEqual(response["status"], "accepted")
             self.wait_until_idle("thread-stale-claude")
@@ -1726,7 +1755,7 @@ class OrchestratorTests(unittest.TestCase):
                 "thread-stale-claude",
                 {"message": "retry now"},
                 None,
-                operator_sent_message=True,
+                operator_sent_message=True, retry_attempt=0,
             )
             self.assertEqual(retry["status"], "accepted")
             self.wait_until_idle("thread-stale-claude")
@@ -1758,7 +1787,7 @@ class OrchestratorTests(unittest.TestCase):
             results["first_finish"] = finish_turn("claude-session-1", "done")
             results["second_finish"] = finish_turn("claude-session-1", "done")
             try:
-                service.send_thread_message("thread-chat", {"message": "too late"}, None, operator_sent_message=True)
+                service.send_thread_message("thread-chat", {"message": "too late"}, None, operator_sent_message=True, retry_attempt=0)
                 results["post_finish"] = "accepted"
             except ApiError as exc:
                 results["post_finish"] = (exc.status.value, exc.message)

@@ -243,9 +243,19 @@ and show up in the same agent slice.
 - If a runtime becomes non-active after policy disable, login expiry, or a
   health-check error, the orchestrator fails that runtime's running work
   (`thread.error`) and closes all live runtime processes for it.
+- Failed model turns receive bounded automatic continuations through the same
+  internal send path used after host restart; there is no retry endpoint.
+  `GET /v1/threads` and `GET /v1/threads/{id}` include an optional
+  `retry: {"attempt": 1, "at": "2026-10-05T12:05:00Z"}` on a thread while
+  an attempt is pending. `attempt` is 1–5 and `at` is a UTC timestamp. The
+  field is absent when no retry is pending; the thread remains `idle` while
+  waiting. See [automatic continuation](agent-provider-lifecycle.md#automatic-continuation-after-a-failed-model-turn)
+  for backoff and reset behavior.
 - `POST /v1/threads/{id}/stop` ends the thread's running turn by terminating
   its runtime process — the one reliable abort for a stuck turn — and records
-  a `thread.stopped` event. The database is finalized before the non-blocking
+  a `thread.stopped` event. The same route cancels a pending automatic retry,
+  including while idle, and records the stop. It returns `409` when there is
+  neither running work nor a pending retry. The database is finalized before the non-blocking
   interrupt request and response. The thread survives, so a later message
   resumes the conversation, but it stays fenced until the owning execution
   thread proves the old process scope has fully shut down (new messages get

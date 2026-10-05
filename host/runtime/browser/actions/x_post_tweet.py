@@ -3,11 +3,13 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import re
+import time
 from typing import Any, TYPE_CHECKING
 from urllib.parse import urlsplit
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser.providers import x
 from host.runtime.browser.actions.x_composer import MATCHES_TEXT
+from host.runtime.browser.actions.x_diagnostics import preparation_facts, reply_target
 from host.runtime.core import host_errors
 
 if TYPE_CHECKING:
@@ -23,9 +25,10 @@ class PostRejected(BrowserError):
 
 class PreparationFailed(BrowserError):
     """A safe preparation step and cause type, without Playwright page content."""
-    def __init__(self, step: str, cause: Exception) -> None:
+    def __init__(self, step: str, cause: Exception, facts: dict[str, Any] | None = None) -> None:
         self.step = step
         self.failure_type = type(cause).__name__
+        self.facts = facts or {}
         detail = str(cause) if isinstance(cause, BrowserError) else self.failure_type
         super().__init__(f"Preparation failed at {step}: {detail.rstrip('.')}.")
 
@@ -53,8 +56,9 @@ def _report_failure(stage: str, exc: Exception, *, step: str = "") -> None:
     # page content or credentials. Keep their type and stack, never their text.
     summary = str(exc) if isinstance(exc, BrowserError) else type(exc).__name__
     safe = RuntimeError(summary).with_traceback(exc.__traceback__)
-    context = {"stage": stage, "failure_type": type(exc).__name__}
+    context: dict[str, Any] = {"stage": stage, "failure_type": type(exc).__name__}
     if isinstance(exc, PreparationFailed):
+        context.update(exc.facts)
         context.update(step=exc.step, failure_type=exc.failure_type)
     elif step:
         context["step"] = step
@@ -106,6 +110,7 @@ def execute(profile: Profile, body: dict[str, Any]) -> dict[str, Any]:
 def prepare_post(page: Any, account: str, text: str, reply_id: str = "") -> None:
     from playwright.sync_api import expect, TimeoutError as PlaywrightTimeoutError  # type: ignore[import-not-found]
     step = "navigate_to_target" if reply_id else "navigate_to_composer"
+    started = time.monotonic()
     try:
         response = page.goto(f"https://x.com/i/status/{reply_id}" if reply_id else "https://x.com/compose/post", wait_until="domcontentloaded")
         if response is not None and response.status >= 400:
@@ -115,8 +120,7 @@ def prepare_post(page: Any, account: str, text: str, reply_id: str = "") -> None
             raise BrowserError("The signed-in account changed. Reconnect in Browser settings.")
         if reply_id:
             step = "find_reply_target"
-            target = page.locator('article[data-testid="tweet"]').filter(
-                has=page.locator(f'a[href$="/status/{reply_id}"]'))
+            target = reply_target(page, reply_id)
             expect(target).to_have_count(1, timeout=10000)
             step = "open_reply_composer"
             target.get_by_test_id("reply").click()
@@ -138,7 +142,9 @@ def prepare_post(page: Any, account: str, text: str, reply_id: str = "") -> None
         except PlaywrightTimeoutError:
             raise BrowserError("The composer text did not exactly match the approved post, including emoji and line breaks.") from None
     except Exception as exc:
-        raise PreparationFailed(step, exc).with_traceback(exc.__traceback__) from None
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        facts = {"preparation_elapsed_ms": elapsed_ms, **preparation_facts(page, reply_id)}
+        raise PreparationFailed(step, exc, facts).with_traceback(exc.__traceback__) from None
 
 
 def submit_prepared_post(page: Any, account: str, reply_id: str = "") -> str:

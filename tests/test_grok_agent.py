@@ -459,7 +459,7 @@ class GrokTurnTests(unittest.TestCase):
         try:
             worker.start()
             self.assertTrue(ready.wait(timeout=10))
-            server.steer("also test")
+            server.steer("also test", memory_suggestion=True)
             worker.join(timeout=10)
         finally:
             server.close()

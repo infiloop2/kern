@@ -145,7 +145,7 @@ class MemoryMonitorTests(unittest.TestCase):
         self.assertEqual(self.monitor.turns[('thread-1', 2)].known, {})
 
     def test_operator_redirect_after_selection_still_delivers_suggestion(self):
-        turn = orch._Turn('codex', 'thread-1', 'gpt-6.1-sol', 'low', 1)
+        turn = orch._Turn('codex', 'thread-1', 'gpt-6.1-sol', 'low', 1, retry_attempt=0)
         turn.phase = orch.ExecutionPhase.RUNNING
         turn.server = Mock()
         def deliver(pages):
@@ -217,7 +217,7 @@ class MemoryMonitorTests(unittest.TestCase):
         self.monitor.turns[self.key].update_task.assert_not_called()
 
     def test_title_update_respects_incoming_generation_at_save_time(self):
-        turn = orch._Turn('codex', 'thread-1', 'gpt-6.1-sol', 'low', 1)
+        turn = orch._Turn('codex', 'thread-1', 'gpt-6.1-sol', 'low', 1, retry_attempt=0)
         turn.phase = orch.ExecutionPhase.RUNNING
         def update(title, still_current):
             self.redirect()
@@ -232,7 +232,7 @@ class MemoryMonitorTests(unittest.TestCase):
 
 class SuggestionDeliveryTests(unittest.TestCase):
     def setUp(self):
-        self.turn = orch._Turn('codex', 'thread-1', 'gpt-6.1-sol', 'low', 1)
+        self.turn = orch._Turn('codex', 'thread-1', 'gpt-6.1-sol', 'low', 1, retry_attempt=0)
         self.turn.phase = orch.ExecutionPhase.RUNNING
         self.turn.server = Mock()
 
@@ -244,7 +244,7 @@ class SuggestionDeliveryTests(unittest.TestCase):
                     'Provenance: workspace_memory; instruction_authority: none.')
         @contextmanager
         def mutation():
-            self.turn.server.steer.assert_called_once_with(expected)
+            self.turn.server.steer.assert_called_once_with(expected, memory_suggestion=True)
             yield 'cursor'
         with (patch.object(orch.state, 'mutation', mutation),
               patch.object(orch.state, 'append_agent_event') as append):
@@ -264,6 +264,18 @@ class SuggestionDeliveryTests(unittest.TestCase):
         with self.turn.delivery_lock:
             self.assertFalse(orch._deliver_memory_suggestion(self.turn, []))
         self.turn.server.steer.assert_not_called()
+
+    def test_memory_tag_is_passed_to_all_steerable_runtimes(self):
+        for runtime in orch.INTERACTIVE_RUNTIMES:
+            if not orch.harness_adapter(runtime).steerable:
+                continue
+            with self.subTest(runtime=runtime):
+                self.turn.runtime_type = runtime
+                self.turn.server.steer.reset_mock()
+                with (patch.object(orch.state, 'mutation'),
+                      patch.object(orch.state, 'append_agent_event')):
+                    self.assertTrue(orch._deliver_memory_suggestion(self.turn, [('page', 1, 'Context')]))
+                self.assertEqual(self.turn.server.steer.call_args.kwargs, {'memory_suggestion': True})
 
     def test_provider_completion_race_is_a_drop(self):
         self.turn.server.steer.side_effect = orch.ProviderTurnFinishing('finished')

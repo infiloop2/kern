@@ -359,10 +359,24 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                     )
                     context_notices_smokes.run_kern_notices(notices_context.new_page(), url, log_in)
                     notices_context.close()
+                    notices_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    context_notices_smokes.run_turn_retries(notices_context.new_page(), url, log_in)
+                    notices_context.close()
 
             if scope in {"all", "workspaces", "navigation-order"}:
                 import navigation_order_smokes
                 for touch in (False, True):
+                    order_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if touch else {"width": 1280, "height": 900},
+                        has_touch=touch, is_mobile=touch, service_workers="block",
+                    )
+                    navigation_order_smokes.run_agent_status(
+                        order_context.new_page(), url, log_in,
+                    )
+                    order_context.close()
                     order_context = browser.new_context(
                         viewport=IPHONE_VIEWPORT if touch else {"width": 1280, "height": 900},
                         has_touch=touch, is_mobile=touch, service_workers="block",

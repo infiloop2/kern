@@ -35,7 +35,7 @@ class BrowserProxyTlsTests(unittest.TestCase):
         cls.temp.cleanup()
 
     def setUp(self):
-        self.warning = self.enterContext(patch("host.runtime.browser_network.transport.host_errors.report_warning"))
+        self.warning = self.enterContext(patch("host.runtime.browser_network.relay.host_errors.report_warning"))
 
     def test_proxy_certificate_rejected_before_credentials_sent(self):
         for hostname, context in [('gate.decodo.com', ssl.create_default_context()),
@@ -53,7 +53,7 @@ class BrowserProxyTlsTests(unittest.TestCase):
                 worker.start()
                 try:
                     with patch('socket.create_connection', return_value=client), patch('ssl.create_default_context', return_value=context):
-                        with self.assertRaises(BrowserError):
+                        with self.assertRaises(BrowserError) as caught:
                             connect_proxy((hostname, 7000), '93.184.215.14', ('user', 'secret'))
                 finally:
                     client.close()
@@ -61,7 +61,7 @@ class BrowserProxyTlsTests(unittest.TestCase):
                     peer.close()
                 self.assertFalse(worker.is_alive())
                 self.assertEqual(application_data, [])
-                context = self.warning.call_args.kwargs["context"]
+                context = caught.exception.context
                 self.assertEqual(context["stage"], "proxy_tls")
                 self.assertEqual(context["error_type"], "SSLCertVerificationError")
 
@@ -151,6 +151,7 @@ class BrowserProxyTlsTests(unittest.TestCase):
                 worker.join(4)
         self.assertTrue(all(not worker.is_alive() for worker in workers))
         self.assertFalse(errors, errors)
+        self.warning.assert_not_called()
         self.assertEqual(len(headers), 2 if rejection else 1)
         if rejection:
             self.assertNotEqual(headers[0], headers[1])

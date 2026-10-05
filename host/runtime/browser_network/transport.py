@@ -9,11 +9,14 @@ from urllib.parse import urlsplit
 from typing import Any
 
 from host.runtime.browser.client import BrowserError
-from host.runtime.core import host_errors
 
 
 class ConnectionFailure(BrowserError):
     """A sanitized connection error safe to return through the local relay."""
+
+    def __init__(self, message: str, context: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.context = context or {}
 
 
 class RetryableConnectFailure(ConnectionFailure):
@@ -34,8 +37,8 @@ def failure(stage: str, exc: Exception, *, host: str = "", status: int | None = 
     suffix = f" (HTTP {status})" if status is not None else ""
     message = f"Browser connection failed during {stage.replace('_', ' ')}{suffix}."
     message += f" Decodo: {detail}" if detail else " Check Host diagnostics."
-    host_errors.report_warning("browser.network", message, context=context)
-    return ConnectionFailure(message)
+    # The relay reports only terminal failures, after session recovery.
+    return ConnectionFailure(message, context)
 
 
 def redact(value: str, credentials: tuple[str, str]) -> str:
@@ -144,5 +147,5 @@ def connect_proxy(endpoint: tuple[str, int], host: str, credentials: tuple[str, 
         # failures do not establish an exit problem and leave the session alone.
         if (stage == "proxy_connect" and status_code is not None and 500 <= status_code < 600
                 and response.endswith(b"\r\n\r\n")):
-            raise RetryableConnectFailure(str(error)) from exc
+            raise RetryableConnectFailure(str(error), error.context) from exc
         raise error from exc

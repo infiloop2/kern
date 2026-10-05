@@ -436,7 +436,7 @@ class ClaudeCodeSession:
         proc.stdin.flush()
         return message_id
 
-    def steer(self, text: str) -> None:
+    def steer(self, text: str, *, memory_suggestion: bool = False) -> None:
         """Flush one more user message to the active query without waiting.
 
         Claude Code queues the message and injects it at its next safe point:
@@ -448,6 +448,7 @@ class ClaudeCodeSession:
         is the separate interrupt()/close() path.
 
         Once the message flushes to Claude's stdin, the caller records it.
+        The shared memory_suggestion hint needs no special handling here.
         """
         with self._stdin_lock:
             if not self._accepting_steers:

@@ -392,6 +392,7 @@ def _chat_thread_summary(
         "latest_message_seq": max(0, int(summary.get("latest_message_seq") or 0)),
         "task": summary.get("task"),
         "status": status,
+        **({"retry": summary["retry"]} if summary.get("retry") else {}),
         "schedule_id": metadata["schedule_id"],
         "next_run_at": metadata["next_run_at"],
         "has_session": has_session,

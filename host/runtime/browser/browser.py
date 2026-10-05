@@ -120,13 +120,22 @@ class Browser:
         if response.status >= 400:
             self.record_resource_failure(response.request, f"HTTP {response.status}")
 
+    def record_page_error(self, page: Any, error: Any) -> None:
+        # Error names can be page-controlled too. Keep only standard JS types;
+        # messages/stacks may contain account content, URL paths or credentials.
+        name = getattr(error, "name", "")
+        kind = name if name in {"Error", "TypeError", "ReferenceError", "SyntaxError",
+                               "RangeError", "URIError", "EvalError", "AggregateError"} else "Error"
+        self.report_failure(f"Uncaught page script error ({kind})",
+                            host=urlsplit(page.url).hostname or "", resource_type="script")
+
     def adopt_page(self, page: Any) -> None:
         if len(self.context.pages) > 8:
             page.close()
             return
         self.page = page
         page.set_viewport_size({"width": WIDTH, "height": HEIGHT})
-        page.on("pageerror", lambda _error: self.report_failure("Uncaught page script error"))
+        page.on("pageerror", lambda error: self.record_page_error(page, error))
         page.on("dialog", lambda dialog: dialog.accept() if dialog.type == "beforeunload" else dialog.dismiss())
         def closed() -> None:
             remaining = [item for item in self.context.pages if not item.is_closed()]

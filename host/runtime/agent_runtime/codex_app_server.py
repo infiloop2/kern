@@ -179,6 +179,8 @@ class CodexAppServer:
         self._turn_completion_pending = threading.Event()
         self._active_thread_id: str | None = None
         self._active_turn_id: str | None = None
+        # Zero marks ordinary input; positive values count pending memory deliveries.
+        self._steered_memory: dict[str, int] = {}
 
     def __enter__(self) -> "CodexAppServer":
         self.start()
@@ -358,7 +360,7 @@ class CodexAppServer:
                 self._active_thread_id = None
                 self._active_turn_id = None
 
-    def steer(self, message: str) -> None:
+    def steer(self, message: str, *, memory_suggestion: bool = False) -> None:
         """Synchronously hand one message to the active Codex turn.
 
         A successful return is Codex's JSON-RPC acknowledgement. The caller
@@ -375,6 +377,12 @@ class CodexAppServer:
                 self._next_id += 1
                 with self._response_waiters_lock:
                     self._response_waiters[request_id] = waiter
+                # Register before writing: notifications can precede the ack.
+                # Identical ordinary input makes this text non-optional for the
+                # rest of the turn, regardless of provider consumption order.
+                pending = self._steered_memory.get(message)
+                memory_suggestion = memory_suggestion and pending != 0
+                self._steered_memory[message] = (pending or 0) + 1 if memory_suggestion else 0
                 try:
                     self._write_request_with_id_locked(
                         request_id,
@@ -385,23 +393,31 @@ class CodexAppServer:
                             "input": [{"type": "text", "text": message}],
                         },
                     )
-                except OSError as exc:
+                except Exception as exc:
                     with self._response_waiters_lock:
                         self._response_waiters.pop(request_id, None)
-                    raise CodexAppServerError(f"Codex rejected the message: {exc}") from exc
-                except Exception:
-                    with self._response_waiters_lock:
-                        self._response_waiters.pop(request_id, None)
+                    if memory_suggestion:
+                        self._consume_memory_suggestion_locked(message)
+                    if isinstance(exc, OSError):
+                        raise CodexAppServerError(f"Codex rejected the message: {exc}") from exc
                     raise
             try:
                 response = self._wait_for_direct_response(
                     waiter,
                     timeout=CODEX_STEER_TIMEOUT_SECONDS,
                 )
+            except Exception:
+                if memory_suggestion:
+                    with self._stdin_lock:
+                        self._consume_memory_suggestion_locked(message)
+                raise
             finally:
                 with self._response_waiters_lock:
                     self._response_waiters.pop(request_id, None)
             if "error" in response:
+                if memory_suggestion:
+                    with self._stdin_lock:
+                        self._consume_memory_suggestion_locked(message)
                 if self._turn_completion_pending.is_set():
                     raise CodexTurnFinishing("Codex turn is finishing")
                 error = response.get("error")
@@ -411,6 +427,25 @@ class CodexAppServer:
                     else "Codex app-server request failed"
                 )
                 raise CodexAppServerError(detail)
+
+    def is_memory_suggestion(self, item: dict[str, Any], *, completed: bool) -> bool:
+        """Recognize only context actually steered by the host in this turn."""
+        match item:
+            case {"type": "userMessage", "content": [{"type": "text", "text": str() as text}]}:
+                with self._stdin_lock:
+                    if completed:
+                        return self._consume_memory_suggestion_locked(text)
+                    return self._steered_memory.get(text, 0) > 0
+        return False
+
+    def _consume_memory_suggestion_locked(self, text: str) -> bool:
+        """Remove one consumed or failed delivery; caller owns _stdin_lock."""
+        pending = self._steered_memory.get(text, 0)
+        if pending > 1:
+            self._steered_memory[text] = pending - 1
+        elif pending == 1:
+            del self._steered_memory[text]
+        return pending > 0
 
     def _write_request_locked(self, method: str, params: dict[str, Any]) -> int:
         """Allocate and write one request while the caller owns `_stdin_lock`."""
@@ -932,15 +967,18 @@ def run_turn(
     last_message = ""
     last_message_phase: str | None = None
     current_agent_phase: str | None = None
+    trailing_memory = False
 
     def invalidate_final_response(*, preserve_explicit_final: bool = False) -> None:
         nonlocal current_agent_phase, current_parts, last_message, last_message_phase
+        nonlocal trailing_memory
         current_agent_phase = None
         current_parts = []
         if preserve_explicit_final and last_message_phase == "final_answer":
             return
         last_message = ""
         last_message_phase = None
+        trailing_memory = False
 
     def is_trailing_subagent_completion(item: dict[str, Any]) -> bool:
         return (
@@ -993,6 +1031,16 @@ def run_turn(
         params = message.get("params", {})
         if not isinstance(params, dict):
             continue
+        if method in {"item/started", "item/completed"}:
+            item = params.get("item")
+            if isinstance(item, dict) and server.is_memory_suggestion(
+                item, completed=method == "item/completed"
+            ):
+                # A suggestion accepted during generation can be consumed only
+                # after the final answer. Optional context needs no new answer.
+                if last_message_phase == "final_answer":
+                    trailing_memory = True
+                    continue
         if method == "thread/tokenUsage/updated":
             if params.get("threadId") == thread_id and params.get("turnId") == turn_id:
                 usage = params.get("tokenUsage")
@@ -1038,10 +1086,16 @@ def run_turn(
                 continue
             is_agent_message = item.get("type") == "agentMessage"
             # Codex may flush a terminal sub-agent notification after its
-            # explicit final answer. That item reports already-finished work;
-            # every other later activity still invalidates the response.
+            # explicit final answer. Also allow an empty final in response to
+            # late optional memory; other activity still invalidates the answer.
             invalidate_final_response(
-                preserve_explicit_final=is_trailing_subagent_completion(item)
+                preserve_explicit_final=(
+                    is_trailing_subagent_completion(item)
+                    or (
+                        trailing_memory and is_agent_message
+                        and item.get("phase") == "final_answer"
+                    )
+                )
             )
             if is_agent_message:
                 phase = item.get("phase")
@@ -1063,8 +1117,10 @@ def run_turn(
                 phase = item.get("phase")
                 if not isinstance(phase, str):
                     phase = current_agent_phase
-                last_message = "" if phase == "commentary" else message_text
-                last_message_phase = phase if last_message else None
+                if not (trailing_memory and phase == "final_answer" and not message_text):
+                    last_message = "" if phase == "commentary" else message_text
+                    last_message_phase = phase if last_message else None
+                trailing_memory = False
                 current_agent_phase = None
                 current_parts = []
                 if message_text:
