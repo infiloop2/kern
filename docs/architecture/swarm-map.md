@@ -67,7 +67,7 @@ Collaborator grouping uses these displayed links.
 
 The map is an unbounded canvas. Drag anywhere, including on an agent, to pan
 past every agent into open space. A press counts as a click unless it moves
-more than 4 px. Scroll or a trackpad pans; Ctrl/⌘ + scroll, trackpad pinch and
+more than 4 px. Scroll, two-finger trackpad scroll, trackpad pinch and
 two-finger touch pinch zoom around the pointer. One finger drags on touch. With
 the map focused, arrow keys pan, `+`/`−` zoom and `0` fits everything. The dot
 grid moves with the camera. A minimap shows every agent and the current view,

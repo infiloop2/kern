@@ -86,7 +86,7 @@ STAGE_VIDEO_TOOL = {
     "name": "stage_video",
     "description": (
         "Stream an agent-workspace MP4 or MOV into the private Kern tools service "
-        "for Runway, falAI or OpenRouter generation/enhancement, or approval-gated Instagram or X video publishing. Returns a short-lived, "
+        "for Runway, falAI or OpenRouter generation/enhancement, or approved Zoho Mail attachments, Instagram or X video publishing. Returns a short-lived, "
         "tool-scoped video_asset_id; pass it directly to the consuming tool and never "
         "store it as durable app state."
     ),
@@ -100,7 +100,7 @@ STAGE_VIDEO_TOOL = {
             },
             "for_tool": {
                 "type": "string",
-                "enum": ["runway", "instagram", "fal_ai", "openrouter", "twitter"],
+                "enum": ["runway", "instagram", "fal_ai", "openrouter", "twitter", "zoho_mail"],
                 "description": "Destination tool; staged ids cannot cross tools.",
             },
         },
@@ -111,9 +111,9 @@ STAGE_IMAGE_TOOL = {
     "name": "stage_image",
     "description": (
         "Stream an agent-workspace JPEG, PNG, or WebP into the private Kern tools "
-        "service for Runway, falAI, OpenRouter, OpenAI Image Generation, or Instagram (JPEG only). Returns a short-lived, "
+        "service for Runway, falAI, OpenRouter, OpenAI Image Generation, Instagram (JPEG only), or approved Zoho Mail attachments. Returns a short-lived, "
         "tool-scoped image_asset_id to pass directly to runway_generate_video or "
-        "openai_images_generate_image, openrouter_create_heygen_video, falAI generation/enhancement, or Instagram image publishing; never store it as durable app state."
+        "openai_images_generate_image, openrouter_create_heygen_video, falAI generation/enhancement, Instagram image publishing, or Zoho Mail attachment sending; never store it as durable app state."
     ),
     "inputSchema": {
         "type": "object",
@@ -125,7 +125,7 @@ STAGE_IMAGE_TOOL = {
             },
             "for_tool": {
                 "type": "string",
-                "enum": ["runway", "openai_images", "instagram", "fal_ai", "openrouter"],
+                "enum": ["runway", "openai_images", "instagram", "fal_ai", "openrouter", "zoho_mail"],
                 "description": "Destination tool; staged ids cannot cross tools.",
             },
         },
@@ -464,7 +464,7 @@ def _stage_asset(arguments: dict[str, Any], *, kind: str) -> dict[str, Any]:
     public_path, local_path = _workspace_local_path(path)
     allowed_tools = (
         {"runway", "fal_ai", "openrouter"} if kind == "audio" else
-        {"runway", "instagram", "fal_ai", "openrouter", "twitter"} if kind == "video" else {"runway", "openai_images", "instagram", "fal_ai", "openrouter"}
+        {"runway", "instagram", "fal_ai", "openrouter", "twitter", "zoho_mail"} if kind == "video" else {"runway", "openai_images", "instagram", "fal_ai", "openrouter", "zoho_mail"}
     )
     if for_tool not in allowed_tools:
         choices = ", ".join(sorted(allowed_tools))

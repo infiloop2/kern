@@ -183,12 +183,20 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
             page.mouse.move(box['x'] + box['width'] - 40, box['y'] + box['height'] - 40, steps=6)
             page.mouse.up()
         expect_cards_inside(0)
-        # Wheel pans, Ctrl + wheel zooms around the pointer, 0 fits everything.
+        # Two-finger scrolling zooms around the pointer in both directions.
         before = camera()
-        page.mouse.move(box['x'] + 200, box['y'] + 200)
-        page.mouse.wheel(0, 300)
-        page.wait_for_function("y => Math.abs(new DOMMatrix(document.querySelector('#swarm-canvas').style.transform).f - y) < .01", arg=before[1] - 300)
-        assert abs(camera()[1] - before[1] + 300) < .01, (before, camera())
+        pointer_x, pointer_y = round(box['x'] + 200), round(box['y'] + 200)
+        page.mouse.move(pointer_x, pointer_y)
+        x, y = pointer_x - box['x'], pointer_y - box['y']
+        anchor = [(x - before[0]) / before[2], (y - before[1]) / before[2]]
+        for delta in (200, -200):
+            start = camera()
+            page.mouse.wheel(30, delta)
+            page.wait_for_function("k => Math.abs(new DOMMatrix(document.querySelector('#swarm-canvas').style.transform).a - k) > .01", arg=start[2])
+            after = camera()
+            assert (after[2] < start[2]) if delta > 0 else (after[2] > start[2])
+            assert math.dist([(x - after[0]) / after[2], (y - after[1]) / after[2]], anchor) < .01, (anchor, before, after, x, y)
+        # Trackpad pinch (Ctrl + wheel) still zooms; 0 fits everything.
         page.keyboard.down('Control')
         page.mouse.wheel(0, -200)
         page.keyboard.up('Control')

@@ -359,6 +359,36 @@ class ActionFilterTests(unittest.TestCase):
             }, origin_thread_id=None)
 
 
+class ZohoAssetSocketTests(unittest.TestCase):
+    def test_shim_streams_private_zoho_attachments_and_service_checks_enablement(self) -> None:
+        import threading
+        from host.runtime.agent_shim import mcp_shim
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            socket_path = str(root / "tools.sock")
+            server = tools_api.ToolsServer(socket_path, frozenset({os.getuid()}), asset_root=root / "assets")
+            threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
+            try:
+                (root / "frame.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"p" * 504)
+                (root / "clip.mp4").write_bytes(b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isommp42" + b"v" * 488)
+                with patch.dict(os.environ, {"HOME": directory}), \
+                        patch.object(mcp_shim, "SOCKET_PATH", socket_path), \
+                        patch.object(state, "enabled_tool_ids", return_value={"zoho_mail"}) as enabled:
+                    for kind, path in (("image", "/frame.png"), ("video", "/clip.mp4")):
+                        result = mcp_shim._stage_asset({"path": path, "for_tool": "zoho_mail"}, kind=kind)
+                        asset_id = result[kind + "_asset_id"]
+                        metadata = server.asset_store.describe("zoho_mail", asset_id)
+                        self.assertEqual((metadata.filename, metadata.size_bytes), (path[1:], 512))
+                        with self.assertRaises(AssetError):
+                            server.asset_store.describe("instagram", asset_id)
+                    enabled.return_value = set()
+                    with self.assertRaisesRegex(RuntimeError, "not enabled"):
+                        mcp_shim._stage_image({"path": "/frame.png", "for_tool": "zoho_mail"})
+            finally:
+                server.shutdown()
+                server.server_close()
+
+
 class ToolsApiTestCase(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()

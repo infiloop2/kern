@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import unittest
 import io
+import json
+from dataclasses import replace
 from contextlib import contextmanager
 from typing import Any, Iterator, cast
 from unittest.mock import patch
@@ -81,6 +83,188 @@ def connected_api(*, expires_at: int = FRESH_EXPIRES_AT) -> FakeHostAPI:
 
 
 class ZohoMailToolTests(unittest.TestCase):
+    SEND_INPUT: JSONObject = {
+        "from_address": "alias@example.com", "to": "client@example.com",
+        "cc": "copy@example.com", "bcc": "audit@example.com",
+        "subject": "Re: Project", "blocks": [{"type": "paragraph", "text": "Reviewed <content>"}],
+    }
+    REPLY_DETAILS: JSONObject = {
+        "messageId": "123", "folderId": "2", "threadId": "456",
+        "fromAddress": "client@example.com", "toAddress": "alias@example.com",
+        "subject": "Project",
+    }
+
+    def _provider(self, method: str, url: str, **kwargs: Any) -> JSONObject:
+        if url.endswith("/api/accounts"):
+            return success([ACCOUNT])
+        if url.endswith("/details"):
+            return success(self.REPLY_DETAILS)
+        return success({"messageId": "777"})
+
+    def _queue(self, api: FakeHostAPI, **options: Any):
+        with patch.object(zoho_mail, "json_request", self._provider):
+            result = ZohoMailTool().execute("send_email", {**self.SEND_INPUT, **options}, api)
+        assert isinstance(result, ActionPendingApproval), result
+        return api.approvals.approve(result.approval_id)
+
+    def test_reply_binds_target_and_explicit_content_without_new_thread_fallback(self) -> None:
+        api = connected_api()
+        approved = self._queue(api, reply_to={"folder_id": "2", "message_id": "123"})
+        proposal = cast(JSONObject, approved.payload["proposal"])
+        self.assertEqual(cast(JSONObject, proposal["reply_target"])["thread_id"], "456")
+        self.assertIn("Reply to Zoho message 123", approved.summary)
+        with patch.object(zoho_mail, "json_request", side_effect=self._provider) as request:
+            result = ZohoMailTool().execute_approved(approved, api)
+        self.assertIsInstance(result, ApprovalExecuted)
+        send = request.call_args_list[-1]
+        self.assertEqual(send.args, ("POST", "https://mail.zoho.eu/api/accounts/2560636000000008002/messages/123"))
+        self.assertEqual(send.kwargs["body"], {
+            "fromAddress": "alias@example.com", "toAddress": "client@example.com",
+            "ccAddress": "copy@example.com", "bccAddress": "audit@example.com",
+            "subject": "Re: Project", "content": "<p>Reviewed &lt;content&gt;</p>",
+            "mailFormat": "html", "action": "reply",
+        })
+
+    def test_reply_rejects_wrong_id_or_changed_headers_before_any_send(self) -> None:
+        for changed in ({"messageId": "999"}, {"folderId": "9"}, {"threadId": "789"},
+                        {"fromAddress": "other@example.com"}, {"subject": "Changed"}):
+            with self.subTest(changed=changed):
+                api = connected_api()
+                approved = self._queue(api, reply_to={"folder_id": "2", "message_id": "123"})
+                def provider(method: str, url: str, **kwargs: Any) -> JSONObject:
+                    if url.endswith("/details"):
+                        return success({**self.REPLY_DETAILS, **changed})
+                    return self._provider(method, url, **kwargs)
+                with patch.object(zoho_mail, "json_request", side_effect=provider) as request:
+                    result = ZohoMailTool().execute_approved(approved, api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertTrue(all(call.args[0] == "GET" for call in request.call_args_list))
+
+    def test_invalid_reply_or_attachment_combination_never_queues(self) -> None:
+        for options in ({"reply_to": {"folder_id": "2", "message_id": "../123"}},
+                        {"reply_to": None},
+                        {"reply_to": {"folder_id": "2", "message_id": "123"}, "attachment_asset_ids": ["asset"]}):
+            with self.subTest(options=options), patch.object(zoho_mail, "json_request", self._provider):
+                api = connected_api()
+                result = ZohoMailTool().execute("send_email", {**self.SEND_INPUT, **options}, api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(api.approvals.records, {})
+
+    def test_attachments_upload_only_approved_bytes_and_preserve_exact_body(self) -> None:
+        api = connected_api()
+        png = b"\x89PNG\r\n\x1a\n" + b"p" * 504
+        mp4 = b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isommp42" + b"v" * 488
+        image = api.assets.add("image", filename="frame.png", media_type="image/png", data=png)
+        video = api.assets.add("video", filename="clip.mp4", media_type="video/mp4", data=mp4)
+        with patch.object(zoho_mail, "stream_request_bytes") as upload:
+            approved = self._queue(api, attachment_asset_ids=[image, video], mail_format="plaintext")
+            upload.assert_not_called()
+        before = json.dumps(approved.payload, sort_keys=True)
+        self.assertIn("clip.mp4", approved.summary)
+        self.assertIn("SHA-256", approved.summary)
+        calls: list[tuple[str, Any]] = []
+        def upload_file(method: str, url: str, **kwargs: Any) -> bytes:
+            calls.append((url, kwargs))
+            name = "frame.png" if "frame.png" in url else "clip.mp4"
+            self.assertIn("isInline=false", url)
+            self.assertEqual(kwargs["headers"]["authorization"], "Zoho-oauthtoken zoho-access")
+            self.assertEqual(kwargs["content_length"], 512)
+            if name == "frame.png":
+                # Changing the next stored file during provider I/O cannot
+                # change the already-verified snapshot sent by this approval.
+                metadata, _ = api.assets.records[video]
+                api.assets.records[video] = (metadata, b"changed" * 73)
+            stored_name = "normalized-frame.png" if name == "frame.png" else name
+            return json.dumps(success({"storeName": "store", "attachmentName": stored_name, "attachmentPath": "/Mail/" + stored_name})).encode()
+        with patch.object(zoho_mail, "stream_request_bytes", side_effect=upload_file), \
+                patch.object(zoho_mail, "json_request", side_effect=self._provider) as request, \
+                patch.object(api.assets, "public_asset_url", side_effect=AssertionError("No public URL")):
+            result = ZohoMailTool().execute_approved(approved, api)
+        self.assertIsInstance(result, ApprovalExecuted)
+        self.assertEqual([b"".join(c[1]["body"]) for c in calls], [png, mp4])
+        message = request.call_args_list[-1].kwargs["body"]
+        self.assertEqual(message["content"], "Reviewed <content>")
+        self.assertEqual(message["attachments"], [
+            {"storeName": "store", "attachmentName": "normalized-frame.png", "attachmentPath": "/Mail/normalized-frame.png"},
+            {"storeName": "store", "attachmentName": "clip.mp4", "attachmentPath": "/Mail/clip.mp4"},
+        ])
+        self.assertEqual(json.dumps(approved.payload, sort_keys=True), before)
+        self.assertEqual(api.assets.records, {})
+
+    def test_attachment_aggregate_limit_and_send_failure_retain_sources(self) -> None:
+        api = connected_api()
+        data = b"\x89PNG\r\n\x1a\n" + b"p" * (5_000_001 - 8)
+        ids = [api.assets.add(name, filename=name + ".png", media_type="image/png", data=data)
+               for name in ("first", "second")]
+        with patch.object(zoho_mail, "json_request", self._provider):
+            result = ZohoMailTool().execute("send_email", {**self.SEND_INPUT, "attachment_asset_ids": ids}, api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertEqual(api.approvals.records, {})
+        image = api.assets.add("small", filename="frame.png", media_type="image/png", data=data[:512])
+        approved = self._queue(api, attachment_asset_ids=[image])
+        def fail_send(method: str, url: str, **kwargs: Any) -> JSONObject:
+            return success([ACCOUNT]) if method == "GET" else {"status": {"code": 500}}
+        with patch.object(zoho_mail, "json_request", side_effect=fail_send), \
+                patch.object(zoho_mail, "stream_request_bytes", return_value=json.dumps(success({
+                    "storeName": "store", "attachmentName": "frame.png", "attachmentPath": "/Mail/frame.png",
+                })).encode()) as upload:
+            result = ZohoMailTool().execute_approved(approved, api)
+        self.assertIsInstance(result, ActionFailed)
+        upload.assert_called_once()
+        self.assertIn(image, api.assets.records)
+
+    def test_attachment_changes_expiry_and_corrupt_bytes_fail_before_provider_write(self) -> None:
+        for change in ("bytes", "metadata", "expired", "missing"):
+            with self.subTest(change=change):
+                api = connected_api()
+                image = api.assets.add("image", filename="frame.png", media_type="image/png", data=b"\x89PNG\r\n\x1a\n" + b"p" * 504)
+                approved = self._queue(api, attachment_asset_ids=[image])
+                metadata, data = api.assets.records[image]
+                if change == "bytes":
+                    api.assets.records[image] = (metadata, data[:-1] + b"x")
+                elif change == "metadata":
+                    api.assets.records[image] = (replace(metadata, filename="renamed.png"), data)
+                elif change == "expired":
+                    api.assets.records[image] = (replace(metadata, expires_at=1), data)
+                else:
+                    api.assets.delete(image)
+                with patch.object(zoho_mail, "stream_request_bytes") as upload, \
+                        patch.object(zoho_mail, "json_request", side_effect=self._provider) as request:
+                    result = ZohoMailTool().execute_approved(approved, api)
+                self.assertIsInstance(result, ActionFailed)
+                upload.assert_not_called()
+                self.assertTrue(all(call.args[0] == "GET" for call in request.call_args_list))
+
+    def test_upload_failure_or_invalid_response_does_not_send_or_delete_assets(self) -> None:
+        for response in (WebRequestError("failed", status=401), b"not json", b'{"status":{"code":500}}',
+                         b'{"status":{"code":200},"data":{"storeName":"s"}}',
+                         b'{"status":{"code":200},"data":{"storeName":"s","attachmentName":"","attachmentPath":"/Mail/empty"}}'):
+            with self.subTest(response=response):
+                api = connected_api()
+                image = api.assets.add("image", filename="frame.png", media_type="image/png", data=b"\x89PNG\r\n\x1a\n" + b"p" * 504)
+                approved = self._queue(api, attachment_asset_ids=[image])
+                kwargs = {"side_effect": response} if isinstance(response, Exception) else {"return_value": response}
+                with patch.object(zoho_mail, "stream_request_bytes", **kwargs), \
+                        patch.object(zoho_mail, "json_request", side_effect=self._provider) as request:
+                    result = ZohoMailTool().execute_approved(approved, api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn(image, api.assets.records)
+                self.assertTrue(all(call.args[0] == "GET" for call in request.call_args_list))
+
+    def test_invalid_attachments_never_queue_or_upload(self) -> None:
+        for ids, mime, data in (([], "image/png", b"x" * 512), (["image", "image"], "image/png", b"x" * 512),
+                               (["image"], "image/png", b"x" * 512), (["image"], "image/png", b"x" * 511),
+                               (["image"], "text/plain", b"x" * 512),
+                               (["image"], "image/png", b"\x89PNG\r\n\x1a\n" + b"x" * 10_000_000)):
+            with self.subTest(ids=ids, mime=mime, size=len(data)):
+                api = connected_api()
+                api.assets.add("image", filename="frame.png", media_type=mime, data=data)
+                with patch.object(zoho_mail, "json_request", self._provider), patch.object(zoho_mail, "stream_request_bytes") as upload:
+                    result = ZohoMailTool().execute("send_email", {**self.SEND_INPUT, "attachment_asset_ids": ids}, api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(api.approvals.records, {})
+                upload.assert_not_called()
+
     def test_manifest_is_narrow_and_only_sending_requires_approval(self) -> None:
         tool = ZohoMailTool()
         self.assertEqual(tool.manifest.connection, "oauth")
@@ -513,6 +697,63 @@ class ZohoMailToolTests(unittest.TestCase):
         self.assertEqual(download.approval, "direct")
         self.assertTrue(download.returns_asset)
 
+    def test_download_attachment_uses_metadata_size_without_valid_content_length(self) -> None:
+        for attachment_size in (5, "5"):
+            for raw_length in (None, "", "unknown"):
+                with self.subTest(attachment_size=attachment_size, content_length=raw_length):
+                    info = success({"attachments": [{
+                        "attachmentId": "77", "attachmentName": "Bid Packet.pdf", "attachmentSize": attachment_size,
+                    }]})
+
+                    @contextmanager
+                    def fake_stream(method: str, url: str, **kwargs: Any) -> Iterator[tuple[io.BytesIO, dict[str, str]]]:
+                        headers = {"content-type": "application/pdf"}
+                        if raw_length is not None:
+                            headers["content-length"] = raw_length
+                        yield io.BytesIO(b"%PDF-"), headers
+
+                    with patch.object(zoho_mail, "json_request", return_value=info), \
+                            patch.object(zoho_mail, "open_response_stream", fake_stream):
+                        result = ZohoMailTool().execute(
+                            "download_attachment",
+                            {"folder_id": "2", "message_id": "1", "attachment_id": "77"},
+                            connected_api(),
+                        )
+                        assert isinstance(result, StreamingAsset)
+                        with result.open_stream() as opened:
+                            self.assertEqual(opened.size_bytes, 5)
+                            self.assertEqual(opened.media_type, "application/pdf")
+                            self.assertEqual(opened.source.read(), b"%PDF-")
+
+    def test_download_attachment_retains_size_bounds_with_metadata_fallback(self) -> None:
+        for attachment_size, raw_length in (
+            (0, None), ("invalid", None), (True, None), (-1, None),
+            (zoho_mail.MAX_MEDIA_BYTES + 1, None), (5, "0"), (5, str(zoho_mail.MAX_MEDIA_BYTES + 1)),
+        ):
+            with self.subTest(attachment_size=attachment_size, content_length=raw_length):
+                info = success({"attachments": [{
+                    "attachmentId": "77", "attachmentName": "Bid Packet.pdf", "attachmentSize": attachment_size,
+                }]})
+
+                @contextmanager
+                def fake_stream(method: str, url: str, **kwargs: Any) -> Iterator[tuple[io.BytesIO, dict[str, str]]]:
+                    headers: dict[str, str] = {}
+                    if raw_length is not None:
+                        headers["content-length"] = raw_length
+                    yield io.BytesIO(b"%PDF-"), headers
+
+                with patch.object(zoho_mail, "json_request", return_value=info), \
+                        patch.object(zoho_mail, "open_response_stream", fake_stream):
+                    result = ZohoMailTool().execute(
+                        "download_attachment",
+                        {"folder_id": "2", "message_id": "1", "attachment_id": "77"},
+                        connected_api(),
+                    )
+                    assert isinstance(result, StreamingAsset)
+                    with self.assertRaises(StreamingAssetError):
+                        with result.open_stream():
+                            pass
+
     def test_download_attachment_rejects_ids_not_on_the_message_and_unsized_bodies(self) -> None:
         info = success({"attachments": [{"attachmentId": "77", "attachmentName": "", "attachmentSize": 5}]})
         with patch.object(zoho_mail, "json_request", return_value=info):
@@ -528,7 +769,8 @@ class ZohoMailToolTests(unittest.TestCase):
         def unsized_stream(method: str, url: str, **kwargs: Any) -> Iterator[tuple[io.BytesIO, dict[str, str]]]:
             yield io.BytesIO(b"x"), {"content-type": "weird type"}
 
-        with patch.object(zoho_mail, "json_request", return_value=info), \
+        unsized_info = success({"attachments": [{"attachmentId": "77", "attachmentName": ""}]})
+        with patch.object(zoho_mail, "json_request", return_value=unsized_info), \
                 patch.object(zoho_mail, "open_response_stream", unsized_stream):
             result = ZohoMailTool().execute(
                 "download_attachment",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import html
 import json
 import re
@@ -46,7 +47,7 @@ from host.tools.results import (
 )
 from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field, schema as _schema
-from host.tools.shared.media import MAX_MEDIA_BYTES
+from host.tools.shared.media import MAX_MEDIA_BYTES, MAX_EMAIL_ATTACHMENT_BYTES, matches_media_signature
 from host.tools.shared.oauth2 import (
     IntegrationReconnectRequired,
     OAuth2CredentialStore,
@@ -65,6 +66,7 @@ from host.tools.shared.web import (
     known_provider_transport_error,
     open_response_stream,
     provider_warning,
+    stream_request_bytes,
     transport_or_unmapped_provider_error,
     unmapped_provider_error,
 )
@@ -331,7 +333,7 @@ MANIFEST = ToolManifest(
     display_name="Zoho Mail",
     description=(
         "Connect one Zoho Mail mailbox and let your agent list, search, and read email, "
-        "organize it by creating folders, moving or archiving messages, and send safely rendered email with your approval."
+        "organize it by creating folders, moving or archiving messages, and send or reply with safe email and approved file attachments."
     ),
     connection="oauth",
     actions=protect_inputs((
@@ -508,10 +510,10 @@ MANIFEST = ToolManifest(
         ),
         ActionSpec(
             id="send_email",
-            description="Queue approval to send one safely rendered rich HTML or plaintext email from the connected Zoho mailbox.",
+            description="Queue approval to send a safe HTML/plaintext email, reply to an existing message, or send staged image/video attachments.",
             data_policy=(
                 "Queues operator approval before anything is sent. After approval, the exact sender, recipients, "
-                "subject, chosen format, and rendered body go to Zoho and are delivered to the named recipients."
+                "subject, chosen format, rendered body, reply target, and staged attachment bytes go to Zoho and are delivered to the named recipients."
                 " Limited to 50 send attempts per UTC day across all connected Zoho accounts on this host."
             ),
             input_schema=_schema(
@@ -530,6 +532,21 @@ MANIFEST = ToolManifest(
                         "description": "html (default) safely renders structured blocks; plaintext sends their text form.",
                     },
                     "blocks": BODY_BLOCK_SCHEMA,
+                    "reply_to": {
+                        **_schema(
+                        {
+                            "folder_id": {"type": "string", "description": "Folder id from read_message for the existing message."},
+                            "message_id": {"type": "string", "description": "Existing Zoho message id to reply to; preserves provider threading."},
+                        },
+                        ["folder_id", "message_id"],
+                        ),
+                        "description": "Optional existing Zoho message to reply to. Requires explicit outgoing recipients, subject and blocks. Cannot combine with attachments.",
+                    },
+                    "attachment_asset_ids": {
+                        "type": "array", "minItems": 1, "maxItems": 10,
+                        "items": {"type": "string"},
+                        "description": "Ordered image_asset_id/video_asset_id values from stage_image/stage_video(for_tool=zoho_mail). Up to 10 MB total. Cannot combine with reply_to.",
+                    },
                 },
                 ["to", "subject", "blocks"],
             ),
@@ -579,9 +596,10 @@ MANIFEST = ToolManifest(
         ),
     ),
     protections=(
+        "Outgoing image/video attachments stay in private tool-scoped staging until approval; exact bytes and metadata are checked against the approved hashes before upload.",
         "Mailbox reads stay inside the one Zoho account connected by the operator.",
         "Folder creation, message moves, and archiving run directly with strict names and numeric ids; sending still waits for explicit operator approval.",
-        "Rich messages are rendered only from typed blocks: text is escaped, links require http/https, and raw HTML, images, scripts, styles, and tracking elements are not accepted.",
+        "Rich messages are rendered only from typed blocks: text is escaped, links require http/https, and raw HTML, inline images, scripts, styles, and tracking elements are not accepted.",
         "Kern stores OAuth tokens in its encrypted credential store; the agent never receives the tokens or OAuth client secret.",
         "The OAuth grant can read accounts, folders, and messages, create folders and messages, and move or archive messages; it cannot delete mail or create mailbox filters.",
         PARAM_GUARD_PROTECTION,
@@ -590,6 +608,10 @@ MANIFEST = ToolManifest(
         "Kern uses Zoho's OAuth 2.0 authorization-code flow with offline access and refreshes one-hour access tokens. API and token endpoints are pinned to the configured Zoho data centre.",
         "Folder creation uses ZohoMail.folders.CREATE. Message moves and archives use ZohoMail.messages.UPDATE. These organization actions run directly; folder names pass the outbound parameter guard and ids must use Zoho's numeric id grammar.",
         "Outgoing HTML is deterministically rendered from structured blocks with escaped text and validated links; plaintext remains available. Incoming message content is returned both as bounded plaintext and as up to 256,000 characters of the original HTML so the agent can inspect links and structure without a lossy parser.",
+        "Replies target an existing Zoho message. Approval records that message and its original headers alongside the exact outgoing sender, recipients, subject and body. Kern rechecks the target before sending; it does not add recipients or quoted content, or substitute a new email.",
+        "Image/video attachments use private Zoho-scoped staging: JPEG, PNG, WebP, MP4 or MOV, at least 512 bytes each, up to 10 files and 10 MB total. Kern checks the extension, media type and container signature. Staged files expire after 26 hours or a tools-service restart, so unavailable files require fresh staging and approval.",
+        "View exact request shows the reply target, complete outgoing email and each attachment's filename, media type, size, SHA-256 and expiry. After approval, Kern verifies and snapshots all file bytes before authenticated Zoho uploads. No public file links are created. Files are removed after confirmed sending; failures do not trigger an automatic resend.",
+        "Replies with attachments are unavailable because Zoho's documented reply API does not establish support for that combination. Video is a normal file attachment; inline images and autoplay are unavailable. Replies and attachment sends share the existing send_email approval and daily limit without extra OAuth permissions.",
         PARAM_GUARD_TECHNICAL_DETAIL,
     ),
     setup_steps=(
@@ -653,7 +675,7 @@ MANIFEST = ToolManifest(
                         label="Sends",
                         text=(
                             "Only after approval, the sender, To/Cc/Bcc recipients, subject, chosen format, and rendered body "
-                            "go to Zoho Mail and then to the named recipients."
+                            "plus any reply target and approved image/video attachment bytes go to Zoho Mail and then to the named recipients."
                         ),
                     ),
                     DataSummaryPoint(
@@ -704,8 +726,14 @@ MANIFEST = ToolManifest(
         "Use list_folders to obtain destination folder ids; create_folder also returns the new folder id. create_folder, "
         "move_messages, and archive_messages run directly without approval, so archive only after processing succeeds. "
         "Zoho filter creation has no documented Mail API, so recurring organization must be done by a schedule that searches, "
-        "moves, and archives messages. Raw HTML sending, sending attachments, "
-        "replies, drafts, and deletes are not implemented."
+        "moves, and archives messages. To reply, pass reply_to with the existing folder_id/message_id from read_message; "
+        "To/Cc/Bcc, subject and blocks remain explicit and are approved exactly as supplied; no recipients or original body are added. "
+        "To send image/video files, stage_image or stage_video with for_tool=zoho_mail and pass the returned ids in attachment_asset_ids. "
+        "Supports JPEG/PNG/WebP and MP4/MOV, 512 bytes minimum each, up to 10 attachments and 10 MB total; "
+        "private stages expire after 26 hours or a tools restart. Approval binds the filenames, types, sizes and SHA-256 hashes. "
+        "Video is a file attachment; autoplay/inline media is not supported. reply_to with attachments is rejected because "
+        "Zoho does not document attachments on its reply API. Never silently substitute a new message. "
+        "Raw HTML sending, mailbox drafts, and deletes are not implemented."
     ),
 )
 
@@ -1373,9 +1401,15 @@ def _open_attachment(access_token: str, data_center: str, tool_input: JSONObject
                 timeout=ATTACHMENT_TIMEOUT_SECONDS,
             ) as (source, headers):
                 raw_length = headers.get("content-length", "")
-                if not raw_length.isascii() or not raw_length.isdecimal():
-                    raise StreamingAssetError("Zoho Mail attachment download did not include a valid size.")
-                size_bytes = int(raw_length)
+                if raw_length.isascii() and raw_length.isdecimal():
+                    size_bytes = int(raw_length)
+                else:
+                    # Zoho can omit Content-Length even though attachmentinfo
+                    # supplies the size. The host still checks the streamed
+                    # body against this declared length before saving the file.
+                    size_bytes = cast(int, attachment["size_bytes"])
+                    if size_bytes == 0:
+                        raise StreamingAssetError("Zoho Mail attachment download did not include a valid size.")
                 if not 1 <= size_bytes <= MAX_MEDIA_BYTES:
                     raise StreamingAssetError("Zoho Mail attachment size is outside the supported range (1 byte to 200 MB).")
                 media_type = headers.get("content-type", "").split(";", 1)[0].strip().lower()
@@ -1776,6 +1810,169 @@ def _approval_payload(
     return payload
 
 
+def _reply_target(
+    value: JSONValue, access_token: str, data_center: str, account_id: str,
+) -> JSONObject:
+    if not isinstance(value, dict) or set(value) != {"folder_id", "message_id"}:
+        raise ToolInputValidationError("Zoho Mail reply_to requires exactly folder_id and message_id.")
+    folder_id = _required_id(value, "folder_id")
+    message_id = _required_id(value, "message_id")
+    response = _api_request(
+        access_token, data_center, "GET",
+        f"/accounts/{account_id}/folders/{folder_id}/messages/{message_id}/details",
+        what="reply target metadata",
+    )
+    details = response.get("data")
+    if not isinstance(details, dict) or _id_value(details.get("messageId")) != message_id:
+        raise RuntimeError("Zoho Mail reply target returned an unexpected message.")
+    if details.get("folderId") is not None and _id_value(details["folderId"]) != folder_id:
+        raise RuntimeError("Zoho Mail reply target returned an unexpected folder.")
+    # Only reviewed headers are captured; never copy the original HTML/body
+    # or infer recipients from provider-controlled text.
+    headers = _message_summary(details)
+    return {
+        "folder_id": folder_id, "message_id": message_id,
+        "thread_id": headers["thread_id"], "from": headers["from"],
+        "to": headers["to"], "cc": headers["cc"], "subject": headers["subject"],
+    }
+
+
+def _attachment_bytes(asset_id: str, api: HostAPI) -> bytes:
+    with api.assets.open(asset_id) as source:
+        data = source.read(MAX_EMAIL_ATTACHMENT_BYTES + 1)
+    if not 512 <= len(data) <= MAX_EMAIL_ATTACHMENT_BYTES:
+        raise ToolInputValidationError("Zoho Mail attachment size must be between 512 bytes and 10 MB.")
+    return data
+
+
+def _attachment_proposal(
+    value: JSONValue, api: HostAPI, *, snapshots: list[tuple[JSONObject, bytes]] | None = None,
+) -> list[JSONValue]:
+    if (not isinstance(value, list) or not 1 <= len(value) <= 10
+            or any(not isinstance(asset_id, str) for asset_id in value)
+            or len(set(cast(list[str], value))) != len(value)):
+        raise ToolInputValidationError("Zoho Mail attachment_asset_ids requires 1-10 distinct staged asset ids.")
+    assets: list[JSONValue] = []
+    total = 0
+    for asset_id in cast(list[str], value):
+        metadata = api.assets.describe(asset_id)
+        total += metadata.size_bytes
+        if not 512 <= metadata.size_bytes <= MAX_EMAIL_ATTACHMENT_BYTES or total > MAX_EMAIL_ATTACHMENT_BYTES:
+            raise ToolInputValidationError("Zoho Mail attachments must total at most 10 MB.")
+        if metadata.expires_at <= now():
+            raise ToolInputValidationError("Zoho Mail attachment expired. Stage the file again.")
+        data = _attachment_bytes(asset_id, api)
+        if (len(data) != metadata.size_bytes or hashlib.sha256(data).hexdigest() != metadata.sha256
+                or not matches_media_signature(data[:512], metadata.media_type)):
+            raise ToolInputValidationError("Zoho Mail attachment bytes do not match the staged media metadata.")
+        asset: JSONObject = {
+            "asset_id": asset_id, "filename": metadata.filename, "media_type": metadata.media_type,
+            "size_bytes": metadata.size_bytes, "sha256": metadata.sha256, "expires_at": metadata.expires_at,
+        }
+        assets.append(asset)
+        if snapshots is not None:
+            snapshots.append((asset, data))
+    return assets
+
+
+def _send_options(
+    proposal: JSONObject, tool_input: JSONObject, account_id: str,
+    access_token: str, data_center: str, api: HostAPI,
+) -> None:
+    reply = tool_input.get("reply_to")
+    attachments = tool_input.get("attachment_asset_ids")
+    if "reply_to" in tool_input and "attachment_asset_ids" in tool_input:
+        raise ToolInputValidationError(
+            "Zoho Mail replies with attachments are not verified by the documented reply API; "
+            "do not silently send a new message instead."
+        )
+    if "reply_to" in tool_input:
+        target = _reply_target(reply, access_token, data_center, account_id)
+        proposal["reply_target"] = target
+        message = cast(JSONObject, proposal["message"])
+        message["action"] = "reply"
+        proposal["summary"] = f"Reply to Zoho message {target['message_id']} in folder {target['folder_id']}. {proposal['summary']}"
+    if "attachment_asset_ids" in tool_input:
+        assets = _attachment_proposal(attachments, api)
+        proposal["attachment_assets"] = assets
+        labels = [f"{a['filename']} ({a['size_bytes']} bytes, {a['media_type']}, SHA-256 {str(a['sha256'])[:12]})"
+                  for a in cast(list[JSONObject], assets)]
+        proposal["summary"] = f"{proposal['summary']} Attachments: {'; '.join(labels)}."
+
+
+def _upload_attachment(
+    asset: JSONObject, data: bytes, access_token: str, data_center: str, account_id: str,
+) -> JSONObject:
+    _, _, mail_base = _oauth_urls(data_center)
+    query = encode_query({"fileName": str(asset["filename"]), "isInline": "false"})
+    try:
+        raw = stream_request_bytes(
+            "POST", f"{mail_base}/api/accounts/{account_id}/messages/attachments?{query}",
+            headers={"authorization": f"Zoho-oauthtoken {access_token}",
+                     "content-type": str(asset["media_type"]), "accept": "application/json"},
+            body=(data,), content_length=len(data), timeout=ATTACHMENT_TIMEOUT_SECONDS,
+            failure_message="Zoho Mail attachment upload request failed.",
+        )
+    except WebRequestError as exc:
+        raise _mapped_web_error(exc, "attachment upload") from exc
+    try:
+        response = json.loads(raw)
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise RuntimeError("Zoho Mail attachment upload returned invalid JSON.") from exc
+    if not isinstance(response, dict) or not isinstance(response.get("status"), dict):
+        raise RuntimeError("Zoho Mail attachment upload returned invalid data.")
+    if str(response["status"].get("code")) != "200":
+        raise RuntimeError("Zoho Mail attachment upload did not succeed.")
+    uploaded = response.get("data")
+    if not isinstance(uploaded, dict) or any(
+        not isinstance(uploaded.get(key), str) or not uploaded[key]
+        for key in ("storeName", "attachmentName", "attachmentPath")
+    ):
+        raise RuntimeError("Zoho Mail attachment upload returned invalid attachment metadata.")
+    # Zoho's returned triplet identifies the upload. Its attachmentName can
+    # differ from the requested fileName; approval still binds the source.
+    return {key: uploaded[key] for key in ("storeName", "attachmentName", "attachmentPath")}
+
+
+def _approved_send(
+    proposal: JSONObject, message: JSONObject, access_token: str, data_center: str,
+    account_id: str, api: HostAPI,
+) -> None:
+    path = f"/accounts/{account_id}/messages"
+    target = proposal.get("reply_target")
+    if target is not None:
+        if not isinstance(target, dict) or proposal.get("attachment_assets") is not None:
+            raise RuntimeError("Zoho Mail approval reply target is invalid.")
+        current = _reply_target(
+            {"folder_id": target.get("folder_id"), "message_id": target.get("message_id")},
+            access_token, data_center, account_id,
+        )
+        if current != target or message.get("action") != "reply":
+            raise RuntimeError("Zoho Mail reply target changed after approval. Queue a new approval.")
+        path += f"/{current['message_id']}"
+    elif "action" in message:
+        raise RuntimeError("Zoho Mail approval has no reply target.")
+    approved_assets = proposal.get("attachment_assets")
+    snapshots: list[tuple[JSONObject, bytes]] = []
+    if approved_assets is not None:
+        if not isinstance(approved_assets, list) or any(not isinstance(a, dict) for a in approved_assets):
+            raise RuntimeError("Zoho Mail approval attachment assets are invalid.")
+        assets = cast(list[JSONObject], approved_assets)
+        # Snapshot and hash every actual upload body before any provider write.
+        # Upload those bytes, never reopen a pathname or mutable source later.
+        current_assets = _attachment_proposal([a.get("asset_id") for a in assets], api, snapshots=snapshots)
+        if current_assets != assets:
+            raise RuntimeError("Zoho Mail attachments changed after approval. Queue a new approval.")
+    outgoing = dict(message)
+    if snapshots:
+        outgoing["attachments"] = [
+            _upload_attachment(a, data, access_token, data_center, account_id) for a, data in snapshots
+        ]
+    _api_request(access_token, data_center, "POST", path, what="message send", body=outgoing)
+    for asset, _ in snapshots:
+        api.assets.delete(str(asset["asset_id"]))
+
+
 class ZohoMailTool:
     @property
     def manifest(self) -> ToolManifest:
@@ -1836,6 +2033,7 @@ class ZohoMailTool:
             if action == "send_email":
                 account, account_record = ZOHO_CREDENTIALS.refresh_account(api, access_token, data_center)
                 proposal = _send_proposal(tool_input, account, account_record)
+                _send_options(proposal, tool_input, account["id"], access_token, data_center, api)
                 payload = _approval_payload(proposal, account, ZOHO_SEND_ACTION_TYPE)
                 approval = api.approvals.request(
                     action_id=action,
@@ -1875,14 +2073,7 @@ class ZohoMailTool:
             from_address = message.get("fromAddress")
             if not isinstance(from_address, str) or from_address.lower() not in _account_addresses(account_record):
                 return ActionFailed("Zoho Mail sender changed after approval. Please queue a new approval.")
-            _api_request(
-                access_token,
-                data_center,
-                "POST",
-                f"/accounts/{current_account['id']}/messages",
-                what="message send",
-                body=cast(JSONObject, message),
-            )
+            _approved_send(proposal, message, access_token, data_center, current_account["id"], api)
             to_address = str(message.get("toAddress") or "the approved recipient")
             return ApprovalExecuted(f"Sent Zoho Mail message from {from_address} to {to_address}.")
         except IntegrationReconnectRequired as exc:
