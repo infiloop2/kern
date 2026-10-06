@@ -188,7 +188,7 @@ function renderDetails() {
   const agent = agentById.get(selectedId);
   if (!agent) {
     root.append(node("h2", "", "Agent details"), node("p", "muted", "Select an agent or connection. You sit at the centre; Kern host beside you sends automated deliveries. Agents that message each other more cluster together; more involved agents sit closer to you and look larger. Arrange applies the latest ranking. Dense maps draw only the 500 strongest links."),
-      node("p", "muted", "Drag anywhere to explore. Scroll to pan; pinch, Ctrl + scroll or + and − to zoom; 0 fits everything."));
+      node("p", "muted", "Drag anywhere to explore. Scroll, pinch or + and − to zoom; 0 fits everything."));
     return;
   }
   root.append(node("span", "swarm-type", TYPES[agent.kind]), node("h2", "", agent.name),
@@ -527,15 +527,8 @@ function bindMapPan() {
   viewport.addEventListener("wheel", event => {
     event.preventDefault();
     const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? viewport.clientHeight : 1;
-    if (event.ctrlKey || event.metaKey) {
-      // Trackpad pinches arrive as Ctrl + wheel in every major browser.
-      const [x, y] = point(event);
-      zoomAt(x, y, Math.exp(-event.deltaY * unit * .0035));
-    } else {
-      camera.x -= (event.shiftKey && !event.deltaX ? event.deltaY : event.deltaX) * unit;
-      camera.y -= (event.shiftKey && !event.deltaX ? 0 : event.deltaY) * unit;
-      stopGlide(); requestCamera(true);
-    }
+    const [x, y] = point(event);
+    zoomAt(x, y, Math.exp(-event.deltaY * unit * .0035));
   }, { passive: false });
   viewport.addEventListener("keydown", event => {
     if (event.altKey || event.ctrlKey || event.metaKey) return;

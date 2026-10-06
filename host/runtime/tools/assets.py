@@ -22,6 +22,7 @@ import time
 from typing import BinaryIO, Iterator, Literal
 
 from host.tools.host_api import AssetMetadata
+from host.tools.shared.media import MAX_EMAIL_ATTACHMENT_BYTES, matches_media_signature
 
 DEFAULT_ASSET_ROOT = Path("/mnt/kern-admin/tools-state/assets")
 MAX_VIDEO_BYTES = 200_000_000
@@ -145,6 +146,8 @@ class ToolAssetStore:
             raise AssetError(
                 f"{kind.title()} size must be between {minimum} bytes and {maximum} bytes."
             )
+        if tool_id == "zoho_mail" and (kind not in {"image", "video"} or size_bytes > MAX_EMAIL_ATTACHMENT_BYTES):
+            raise AssetError("Zoho Mail attachments must be images or videos of at most 10 MB.")
         now = int(time.time())
         # Under the lock: check quota and reserve a slot (a placeholder record
         # carrying the declared size) so concurrent stages see the reservation.
@@ -172,6 +175,7 @@ class ToolAssetStore:
             )
             self._records[asset_id] = _AssetRecord(tool_id, reservation, destination, False)
         hasher = hashlib.sha256()
+        prefix = b""
         remaining = size_bytes
         try:
             with destination.open("xb") as output:
@@ -181,8 +185,12 @@ class ToolAssetStore:
                     if not chunk:
                         raise AssetError(f"{kind.title()} upload ended before Content-Length bytes were received.")
                     output.write(chunk)
+                    if len(prefix) < 512:
+                        prefix += chunk[:512 - len(prefix)]
                     hasher.update(chunk)
                     remaining -= len(chunk)
+            if tool_id == "zoho_mail" and not matches_media_signature(prefix, media_type):
+                raise AssetError("Zoho Mail attachment bytes do not match the declared media type.")
         except Exception:
             destination.unlink(missing_ok=True)
             with self._lock:
@@ -244,6 +252,8 @@ class ToolAssetStore:
         """
         with self._lock:
             record = self._locked_record(tool_id, asset_id)
+            if tool_id == "zoho_mail":
+                raise AssetError("Zoho Mail attachments use private authenticated uploads, not public media URLs.")
             if record.metadata.media_type not in ALLOWED_VIDEO_TYPES and record.metadata.media_type not in ALLOWED_IMAGE_TYPES:
                 raise AssetError("Public media must be a supported image or video.")
             token = secrets.token_urlsafe(32)

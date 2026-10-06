@@ -15,6 +15,49 @@ from host.tools.host_api import AssetMetadata
 
 
 class ToolAssetStoreTests(unittest.TestCase):
+    def test_zoho_stages_verified_private_images_and_videos_with_existing_scope_and_expiry(self) -> None:
+        samples = (
+            ("image", "frame.png", "image/png", b"\x89PNG\r\n\x1a\n"),
+            ("image", "frame.jpg", "image/jpeg", b"\xff\xd8\xff"),
+            ("image", "frame.webp", "image/webp", b"RIFF\x00\x00\x00\x00WEBP"),
+            ("video", "clip.mp4", "video/mp4", b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isommp42"),
+            ("video", "hevc.mp4", "video/mp4", b"\x00\x00\x00\x18ftyphvc1\x00\x00\x00\x00hvc1iso6"),
+            ("video", "clip.mov", "video/quicktime", b"\x00\x00\x00\x14ftypqt  \x00\x00\x00\x00qt  "),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            store = ToolAssetStore(Path(directory) / "assets")
+            for kind, filename, mime, signature in samples:
+                with self.subTest(filename=filename):
+                    data = signature + b"x" * (512 - len(signature))
+                    metadata = store.stage(kind=kind, tool_id="zoho_mail", filename=filename,
+                                           media_type=mime, size_bytes=512, source=io.BytesIO(data))
+                    with store.open("zoho_mail", metadata.asset_id) as source:
+                        self.assertEqual(source.read(), data)
+                    with self.assertRaises(AssetError):
+                        store.describe("instagram", metadata.asset_id)
+                    with self.assertRaisesRegex(AssetError, "private authenticated"):
+                        store.create_asset_grant("zoho_mail", metadata.asset_id)
+                    with patch("host.runtime.tools.assets.time.time", return_value=metadata.expires_at):
+                        with self.assertRaises(AssetError):
+                            store.describe("zoho_mail", metadata.asset_id)
+
+    def test_zoho_refuses_disguised_media_and_large_uploads_without_retaining_bytes(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory) / "assets"
+            store = ToolAssetStore(root)
+            for filename, mime in (("frame.png", "image/png"), ("frame.jpg", "image/jpeg"),
+                                   ("frame.webp", "image/webp"), ("clip.mp4", "video/mp4"),
+                                   ("clip.mov", "video/quicktime")):
+                with self.subTest(filename=filename), self.assertRaisesRegex(AssetError, "bytes do not match"):
+                    store.stage(kind="video" if mime.startswith("video") else "image", tool_id="zoho_mail",
+                                filename=filename, media_type=mime, size_bytes=512, source=io.BytesIO(b"<script>" + b"x" * 504))
+                self.assertEqual(list(root.iterdir()), [])
+            source = io.BytesIO(b"x" * 512)
+            with self.assertRaisesRegex(AssetError, "at most 10 MB"):
+                store.stage(kind="video", tool_id="zoho_mail", filename="large.mp4", media_type="video/mp4",
+                            size_bytes=10_000_001, source=source)
+            self.assertEqual(source.tell(), 0)
+
     def test_clean_start_discards_prior_process_files(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory) / "assets"
@@ -479,6 +522,8 @@ class ShimVideoStageTests(unittest.TestCase):
                 tools_mcp_shim._stage_image({"path": "/frame.png", "for_tool": "fal_ai"})
                 self.assertEqual(connection.headers["X-Kern-Tool"], "fal_ai")
                 tools_mcp_shim._stage_image({"path": "/frame.png", "for_tool": "instagram"})
+                tools_mcp_shim._stage_image({"path": "/frame.png", "for_tool": "zoho_mail"})
+                self.assertEqual(connection.headers["X-Kern-Tool"], "zoho_mail")
                 tools_mcp_shim._stage_image({"path": "/frame.png", "for_tool": "openrouter"})
                 self.assertEqual(connection.headers["X-Kern-Tool"], "openrouter")
                 with self.assertRaisesRegex(RuntimeError, "fal_ai, instagram, openai_images, openrouter, runway"):

@@ -30,6 +30,41 @@ MAX_MEDIA_BYTES = 200_000_000
 # filename the operator ends up with.
 VIDEO_SUFFIXES = {"video/mp4": ".mp4", "video/quicktime": ".mov"}
 
+# Conservative email cap leaves room for base64 encoding and message headers
+# under Zoho's smallest documented 20 MB message limit.
+MAX_EMAIL_ATTACHMENT_BYTES = 10_000_000
+
+
+def matches_media_signature(prefix: bytes, media_type: str) -> bool:
+    """Check the supported container signature, not an agent's extension alone.
+
+    This identifies a container; it does not claim to decode its media or scan
+    it for malware. Active formats such as SVG are deliberately excluded.
+    """
+    if media_type in {"image/jpeg", "image/jpg"}:
+        return prefix.startswith(b"\xff\xd8\xff")
+    if media_type == "image/png":
+        return prefix.startswith(b"\x89PNG\r\n\x1a\n")
+    if media_type == "image/webp":
+        return prefix[:4] == b"RIFF" and prefix[8:12] == b"WEBP"
+    if media_type in {"video/mp4", "video/quicktime"}:
+        if len(prefix) < 16 or prefix[4:8] != b"ftyp":
+            return False
+        box_size = int.from_bytes(prefix[:4], "big")
+        if box_size < 16:
+            return False
+        brands = {prefix[8:12], *[prefix[i:i + 4] for i in range(16, min(box_size, len(prefix)), 4)]}
+        if media_type == "video/quicktime":
+            return b"qt  " in brands
+        # ISO BMFF versions identify the container independently of its codec
+        # (for example, HEVC exports commonly advertise compatible iso6).
+        return bool(brands & {
+            b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"iso7",
+            b"iso8", b"iso9", b"isoa", b"isob", b"isoc",
+            b"mp41", b"mp42", b"avc1", b"M4V ", b"dash",
+        })
+    return False
+
 
 @contextmanager
 def open_downloaded_video(

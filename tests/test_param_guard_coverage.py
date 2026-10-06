@@ -516,6 +516,8 @@ EXEMPT_FIELDS = {
     ("zoho_mail", "send_email", "subject"): APPROVAL_GATED,
     ("zoho_mail", "send_email", "mail_format"): TYPED,
     ("zoho_mail", "send_email", "blocks"): APPROVAL_GATED,
+    ("zoho_mail", "send_email", "reply_to"): TYPED,
+    ("zoho_mail", "send_email", "attachment_asset_ids"): "tool-scoped staged ids; verified metadata and bytes are bound to operator approval",
 }
 
 # Tools whose Integration Guide must carry the shared parameter-guard line.
