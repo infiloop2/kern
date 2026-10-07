@@ -9,7 +9,7 @@ from unittest.mock import patch
 from host.param_guard import ParamGuardDenied
 from host.tools import twitterapi_io
 from host.tools.results import ActionExecuted, ActionFailed
-from host.tools.shared.web import UnmappedProviderError, WebRequestError
+from host.tools.shared.web import ProviderWarning, UnmappedProviderError, WebRequestError
 from test_tools import FakeHostAPI, assert_matches_output_schema
 
 
@@ -387,6 +387,73 @@ class TwitterApiIoToolTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(RuntimeError, message):
                     twitterapi_io._search("key", {"query": "Kern", "queryType": "Latest"})
+
+    def test_query_rejection_reports_translated_lengths_without_provider_text(self) -> None:
+        tool_input = {
+            "query": "AI agents -is:reply",
+            "since_time": 1800000000,
+            "until_time": 1800000540,
+            "exclude_retweets": True,
+            "exclude_usernames": ["Builder"],
+        }
+        expanded = twitterapi_io._search_request(tool_input, api()).parameters["query"]
+        with patch.object(twitterapi_io, "json_request", side_effect=WebRequestError(
+            "unsafe exception secret-key", status=400,
+            body=b'{"error":123,"message":"query is too long","extra":"secret-key"}',
+        )) as request:
+            with self.assertRaises(ProviderWarning) as caught:
+                twitterapi_io.BUNDLED_TOOL.execute("search_tweets", tool_input, api())
+        warning = caught.exception
+        self.assertEqual(warning.status, 400)
+        self.assertIn("provider code 123", str(warning))
+        self.assertIn("reason: query length", str(warning))
+        self.assertIn("original query: 19 characters", str(warning))
+        self.assertIn(f"expanded query: {len(expanded)} characters", str(warning))
+        self.assertEqual(warning.response_body, "")
+        self.assertNotIn("secret-key", str(warning))
+        request.assert_called_once()
+
+    def test_unrecognized_query_rejection_never_echoes_provider_content(self) -> None:
+        bodies = (
+            b'{"error":true,"message":"query is too long secret-key"}',
+            b'{"error":"secret-key","message":"invalid query\\nsecret-key"}',
+            b'{"error":9999999999,"message":"invalid query"}',
+            b'not JSON secret-key',
+            b'{"message":"query is too long"}' + b' ' * 4096,
+        )
+        for body in bodies:
+            with self.subTest(body=body), patch.object(
+                twitterapi_io, "json_request",
+                side_effect=WebRequestError("secret-key", status=400, body=body),
+            ):
+                with self.assertRaises(ProviderWarning) as caught:
+                    twitterapi_io.BUNDLED_TOOL.execute("search_tweets", {"query":"Kern"}, api())
+                self.assertNotIn("secret-key", str(caught.exception))
+                self.assertNotIn("provider code", str(caught.exception))
+                self.assertEqual(caught.exception.response_body, "")
+
+    def test_expanded_query_above_512_keeps_all_filters_and_is_not_retried(self) -> None:
+        tool_input = {
+            "query": ("AI agents " * 48).strip(),
+            "since_time": 1800000000,
+            "until_time": 1800000540,
+            "exclude_replies": True,
+            "exclude_retweets": True,
+            "exclude_usernames": ["Builder", "Other_User"],
+        }
+        expanded = twitterapi_io._search_request(tool_input, api()).parameters["query"]
+        self.assertGreater(len(expanded), 512)
+        with patch.object(twitterapi_io, "json_request", side_effect=WebRequestError(
+            "private detail", status=400, body=b'{"message":"unrecognized reason"}',
+        )) as request:
+            with self.assertRaises(ProviderWarning) as caught:
+                twitterapi_io.BUNDLED_TOOL.execute("search_tweets", tool_input, api())
+        self.assertIn(f"expanded query: {len(expanded)} characters", str(caught.exception))
+        self.assertIn("reason: unavailable", str(caught.exception))
+        request.assert_called_once()
+        parameters = urllib.parse.parse_qs(urllib.parse.urlsplit(request.call_args.args[1]).query)
+        self.assertEqual(parameters["query"], [expanded])
+        self.assertIn("-from:builder -from:other_user", expanded)
 
     def test_unmapped_provider_error_reaches_host_boundary(self) -> None:
         with patch.object(

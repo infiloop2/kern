@@ -230,7 +230,7 @@ id needed by the next action.
 | Instagram | `get_profile`, one-item `get_recent_media`, and `get_publishing_limit` | None | Three bounded Meta reads; no Reel is staged or published. |
 | Instagram Discovery | One-item `search_reels`, `get_trending_reels`, and `search_hashtag`; conditional one-item `get_reels_by_audio` and `get_reel_details` | None | Three fixed ScrapeCreators credits, up to five when both dependent reads run. |
 | LinkedIn | `get_profile`; denied `create_post` proposal | None | One profile read; the denied proposal does not publish. |
-| LinkedIn Discovery | One-item `search_posts` | None | One Serper search. |
+| Google Search (Serper) | One-item `search` | None | One Serper search. |
 | OpenAI Image Generation | `generate_image` once with `gpt-image-1-mini` at `low` quality | One image written under `/tool_assets`, deleted in the same check | One low-quality 1024x1024 render, about one cent of OpenAI credit. |
 | Polymarket | `list_markets`, `list_events`, `search`, `get_market`, `get_order_book`, and `price_history` | None | Six public read requests; no trading or authenticated spend. |
 | Runway | `get_task` for a deliberately missing task id | None | One authenticated lookup and zero generation credits. |

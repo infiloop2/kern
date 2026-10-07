@@ -391,6 +391,36 @@ class AgentMessageDatabaseTests(unittest.TestCase):
         self.assertEqual(found[0]["name"], "Researcher")
         self.assertEqual(found[0]["spawned_by_thread_id"], "app-3")
 
+    def test_expiry_archives_only_inactive_spawned_chats_and_preserves_metadata(self):
+        from host.runtime.workspace.chat import backend as chat
+        with db.transaction() as cur:
+            cur.execute("INSERT INTO chat_threads (thread_id, name, archived, spawned_by_thread_id) VALUES"
+                        " ('thread-1', 'Ordinary', FALSE, NULL),"
+                        " ('thread-2', 'Expired', FALSE, 'app-3'),"
+                        " ('thread-3', 'Running', FALSE, 'app-3'),"
+                        " ('thread-4', 'Recent', FALSE, 'app-3'),"
+                        " ('thread-5', 'Archived', TRUE, 'app-3')")
+        summaries = [{"thread_id": f"thread-{i}", "status": "idle", "last_used_at": "2020-01-01T00:00:00Z"}
+                     for i in range(1, 6)]
+        summaries[2]["status"] = "running"
+        summaries[3]["last_used_at"] = "2099-01-01T00:00:00Z"
+        with (
+            patch.object(chat, "_host_thread_summaries", return_value=summaries),
+            patch.object(chat, "call_admin_api", return_value={"thread": summaries[1]}) as host,
+        ):
+            self.assertEqual(chat.archive_idle_spawned_agents(), 1)
+            self.assertEqual(chat.archive_idle_spawned_agents(), 0)
+        host.assert_called_once_with("GET", "/v1/threads/thread-2")
+        with db.transaction() as cur:
+            cur.execute("SELECT thread_id, name, archived, spawned_by_thread_id FROM chat_threads ORDER BY thread_id")
+            self.assertEqual(cur.fetchall(), [
+                ("thread-1", "Ordinary", False, None),
+                ("thread-2", "Expired", True, "app-3"),
+                ("thread-3", "Running", False, "app-3"),
+                ("thread-4", "Recent", False, "app-3"),
+                ("thread-5", "Archived", True, "app-3"),
+            ])
+
     def test_schedule_purpose_survives_edit_history_restore_and_delete(self):
         schedule = schedules.create_schedule({**SESSION, "name": "Research", "triggers": [{"type": "daily", "times": ["09:00"], "prompt": "Research"}],   "purpose": "Research companies"}, actor="agent")
         fields = {key: schedule[key] for key in ("name", "triggers", "agent_runtime", "model", "effort")}

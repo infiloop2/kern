@@ -116,8 +116,8 @@ def run(page, url: str, log_in) -> None:
     expect(send).to_be_enabled()
     expect(mic).to_have_attribute("data-state", "idle")
 
-    # Done allows five seconds, then fences the draft. A late result is cached
-    # for explicit Retry rather than appearing unexpectedly or being wasted.
+    # Done keeps processing beyond the old five-second cutoff, accepting text
+    # that arrives within the fifteen-second finish window.
     page.unroute("**/v1/dictation/transcribe")
     held = []
     page.route("**/v1/dictation/transcribe", lambda route: held.append(route))
@@ -127,7 +127,23 @@ def run(page, url: str, log_in) -> None:
     root.get_by_role("button", name="Stop dictation").click()
     expect(mic).to_have_attribute("data-state", "processing")
     expect(root.locator(".dictation-status")).to_be_hidden()
-    expect(mic).to_have_attribute("data-state", "warning", timeout=7000)
+    page.wait_for_timeout(6000)
+    expect(mic).to_have_attribute("data-state", "processing")
+    expect(send).to_be_disabled()
+    assert len(held) == 1
+    held.pop().fulfill(json={"text": "Slower sentence."})
+    original += " Slower sentence."
+    expect(area).to_have_value(original)
+    expect(send).to_be_enabled()
+
+    # After fifteen seconds the draft settles. A late result is cached for
+    # explicit Retry rather than appearing unexpectedly or being wasted.
+    mic.click()
+    expect(mic).to_have_attribute("data-state", "recording")
+    page.evaluate("sayPhrase()")
+    root.get_by_role("button", name="Stop dictation").click()
+    expect(mic).to_have_attribute("data-state", "processing")
+    expect(mic).to_have_attribute("data-state", "warning", timeout=17000)
     expect(send).to_be_disabled()
     assert len(held) == 1
     held.pop().fulfill(json={"text": "Late sentence."})

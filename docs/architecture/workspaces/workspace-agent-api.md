@@ -49,8 +49,10 @@ name field.
 `archive_spawned_agent` archives only the authenticated caller's idle spawned
 Chats. It explicitly checks the stored spawning thread against the authenticated
 caller under the Chat send lock, then calls the existing archive operation.
-Spawned Chats stay available until explicitly archived. Parents should archive
-agents they no longer need and keep those used for recurring work.
+Spawned Chats are temporary and auto-archive after 24 hours of inactivity,
+checked at startup and hourly. Running agents are skipped. Parents should archive
+agents they no longer need; persistent or recurring work belongs in Standing
+agents, which can have no triggers.
 
 `GET /agent/spawned-agents` returns active spawned Chats across all parents in
 an `agents` array: thread id, display name, parent id, runtime/model/effort,

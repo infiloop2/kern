@@ -26,6 +26,22 @@ A tool integration may deliberately attach a bounded response body to a mapped
 warning when it is useful to the authenticated operator; that response never
 enters the agent-facing result. X write failures use this path.
 
+Browser post preparation failures attach structural snapshots labeled
+`snapshot_phase=after_failure`. Target diagnostics count approved-ID links in
+the page, tweet articles and timestamp permalinks, including query-string and
+extra-path variants. Reply diagnostics record viewport intersection, bounded
+geometry and the center hit's tag, role and known test ID. Page diagnostics
+count visible dialogs and inline/popup editors and identify visible username
+inputs or the account-access route. Link scans cap at 2,000 and page-state scans
+at 200 per element category, with explicit truncation flags. Unknown hit
+attributes become `other`; no page text, raw HTML or links are returned. These
+scripts have a 500 ms execution deadline per scan. Returned fields must pass
+a Python allowlist of bounded integers, booleans and fixed labels, since page
+scripts can override JavaScript built-ins. Failed or invalid snapshots set
+`snapshot_incomplete` and preserve previously collected facts. These
+read-only snapshots neither change the exact target selector nor click, scroll
+or retry, and cannot establish what blocked an action throughout its timeout.
+
 Every variable diagnostic field is bounded before journald ingestion and again
 by storage constraints where applicable: summaries are at most 2 KiB,
 tracebacks 32 KiB, and context 4 KiB. This keeps a single unusual exception
@@ -48,6 +64,13 @@ GET /v1/host-diagnostics/{id}
 `severity` accepts `error` or `warning`. List pages omit traceback, context,
 and fingerprint; the UI loads those fields only when the operator expands a
 row. The panel is display-only.
+
+This feed is an operator boundary, not an agent-safe export. Byte and scalar
+type limits do not redact secrets from exception summaries, context strings,
+provider bodies or source-code traceback lines. There is no agent diagnostics
+API. Any future agent view must independently select typed safe fields for
+both lists and details, including historical rows, instead of forwarding the
+operator response or relying on truncation as redaction.
 
 This is a curated diagnostic view, not a replacement for the system journal.
 Ordinary validation failures, user denials, and successful operational events

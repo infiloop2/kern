@@ -6,11 +6,11 @@ a muted green pulse while recording and a green spinner while finishing.
 Pause releases the microphone; Resume reacquires it. Done ends capture.
 There is no automatic Send.
 
-Done allows up to five seconds for outstanding text to arrive. After that,
+Done allows up to fifteen seconds for outstanding text to arrive. After that,
 the prompt settles and the mic shows an amber warning. Click the mic to Retry,
 or Discard audio to keep only the text already transcribed. A late response
 can be saved for Retry, but cannot change the settled prompt. Retry also has
-a five-second insertion window and can use that saved response immediately.
+a fifteen-second insertion window and can use that saved response immediately.
 Send waits until pending audio for this conversation is resolved or discarded.
 
 ## Recovery and browser storage
@@ -101,7 +101,7 @@ The existing admin stall diagnostic also names the two dictation routes.
 Compare request time with inference time to locate host-side delays. Browser
 chunk formation, IndexedDB persistence, pending-chunk queue time and the browser
 network path are outside these timers. A large wall/CPU difference suggests
-waiting or contention but does not alone identify its cause. The five-second
+waiting or contention but does not alone identify its cause. The fifteen-second
 finish window described above remains a separate browser deadline.
 
 ## Verification
@@ -109,7 +109,7 @@ finish window described above remains a separate browser deadline.
 Run `tests/scripts/test test_transcription test_deploy` for transport,
 readiness, validation and deployment contracts. `tests/smoke-ui/dictation_smokes.py`
 runs in the workspace browser suite. It covers microphone startup, editing,
-five-second timeout, late results, reload, navigation, retry, discard and App
+fifteen-second timeout, late results, reload, navigation, retry, discard and App
 Chat. Recognition is mocked there; those tests do not establish model accuracy
 or production throughput. The shared AWS/Lima live smoke additionally checks
 unauthenticated access, malformed/oversized input, actual speech recognition

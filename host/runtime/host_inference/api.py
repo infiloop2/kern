@@ -15,7 +15,7 @@ from host.runtime.core.unix_socket_service import (
     UnixSocketServer,
     peer_uids,
 )
-from host.runtime.host_inference import providers
+from host.runtime.host_inference import decisions, providers
 from host.runtime.host_inference.providers import OPENAI_MAX_TIMEOUT_SECONDS, JEV_MAX_TIMEOUT_SECONDS
 
 
@@ -24,6 +24,8 @@ MAX_REQUEST_BODY_BYTES = 128 * 1024
 MAX_CONCURRENT_CALLS = 4
 MAX_CONCURRENT_CONNECTIONS = 8
 _CALL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CALLS)
+# Diagnostic comparisons must not consume the four slots used for applied work.
+_DECISION_SLOTS = threading.BoundedSemaphore(1)
 
 
 def caller_uids() -> frozenset[int]:
@@ -54,6 +56,19 @@ def dispatch(path: str, body: dict[str, Any]) -> dict[str, Any]:
                 timeout_seconds=float(timeout),
             )
         }
+    if path == "/openai/decisions":
+        if (set(body) != {"input", "questions", "model", "timeout_seconds"}
+                or not isinstance(body.get("input"), str)
+                or body.get("model") != "gpt-6-luna"):
+            raise ValueError("invalid OpenAI decisions request")
+        decision_questions = decisions.validate_questions(body["questions"])
+        timeout = body["timeout_seconds"]
+        if (isinstance(timeout, bool) or not isinstance(timeout, (int, float))
+                or not 0.1 <= timeout <= OPENAI_MAX_TIMEOUT_SECONDS):
+            raise ValueError("invalid OpenAI decisions timeout")
+        return {"result": providers.openai_decisions(
+            body["input"], decision_questions, model=body["model"], timeout_seconds=float(timeout),
+        )}
     if path == "/typesafe/jev-judgment":
         if set(body) != {"state", "questions", "timeout_seconds"}:
             raise ValueError("invalid TypeSafe Jev judgment request")
@@ -83,13 +98,14 @@ class HostInferenceHandler(UnixSocketRequestHandler):
         if peer_uid not in self.server.allowed_uids:
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "Host service peer required."})
             return
-        if self.path not in {"/openai/text-completion", "/typesafe/jev-judgment"}:
+        if self.path not in {"/openai/text-completion", "/openai/decisions", "/typesafe/jev-judgment"}:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown path."})
             return
         length = self.bounded_content_length(MAX_REQUEST_BODY_BYTES)
         if length is None:
             return
-        if not _CALL_SLOTS.acquire(blocking=False):
+        call_slots = _DECISION_SLOTS if self.path == "/openai/decisions" else _CALL_SLOTS
+        if not call_slots.acquire(blocking=False):
             self._send_json(
                 HTTPStatus.TOO_MANY_REQUESTS,
                 {"error": "Host inference is busy; try again shortly."},
@@ -113,7 +129,7 @@ class HostInferenceHandler(UnixSocketRequestHandler):
                 return
             self._send_json(HTTPStatus.OK, result)
         finally:
-            _CALL_SLOTS.release()
+            call_slots.release()
 
 
 class HostInferenceServer(UnixSocketServer):

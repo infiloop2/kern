@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from http import HTTPStatus
 import json
 from pathlib import Path
@@ -633,6 +634,68 @@ class AgentChatBackendTests(unittest.TestCase):
         self.assertEqual(cursor.execute.call_args.args[1], (False,))
         self.assertEqual(host.call_args.args[1], "/v1/threads?limit=100&prefix=thread-")
 
+    def test_spawned_expiry_requires_24_hours_idle_and_rechecks_live_activity(self) -> None:
+        cutoff = "2026-10-05T12:00:00Z"
+        old = {"thread_id": "thread-1", "status": "idle", "last_used_at": cutoff}
+        cases = [
+            ("exactly 24 hours", old, old, True),
+            ("older", {**old, "last_used_at": "2026-10-04T12:00:00Z"}, old, True),
+            ("recent", {**old, "last_used_at": "2026-10-05T12:00:01Z"}, old, False),
+            ("running", {**old, "status": "running"}, old, False),
+            ("unknown recency", {**old, "last_used_at": None}, old, False),
+            ("started after snapshot", old, {**old, "status": "running"}, False),
+            ("finished after snapshot", old, {**old, "last_used_at": "2026-10-06T12:00:00Z"}, False),
+            ("lost recency", old, {**old, "last_used_at": None}, False),
+        ]
+        for name, summary, live, should_archive in cases:
+            with self.subTest(name=name):
+                cursor = unittest.mock.MagicMock()
+                cursor.fetchall.return_value = [("thread-1",)]
+                cursor.fetchone.side_effect = [(1,), ("thread-1", True)]
+                with (
+                    patch.object(backend.db, "transaction") as transaction,
+                    patch.object(backend, "datetime") as clock,
+                    patch.object(backend, "_host_thread_summaries", return_value=[summary]),
+                    patch.object(backend, "call_admin_api", return_value={"thread": live}),
+                ):
+                    transaction.return_value.__enter__.return_value = cursor
+                    clock.now.return_value = datetime(2026, 10, 6, 12, tzinfo=timezone.utc)
+                    self.assertEqual(backend.archive_idle_spawned_agents(), int(should_archive))
+                updates = [item for item in cursor.execute.call_args_list
+                           if "UPDATE chat_threads" in item.args[0]]
+                self.assertEqual(len(updates), int(should_archive))
+
+    def test_spawned_expiry_skips_candidates_archived_since_discovery(self) -> None:
+        cursor = unittest.mock.MagicMock()
+        cursor.fetchall.return_value = [("thread-1",)]
+        cursor.fetchone.return_value = None
+        old = {"thread_id": "thread-1", "status": "idle", "last_used_at": "2020-01-01T00:00:00Z"}
+        with (
+            patch.object(backend.db, "transaction") as transaction,
+            patch.object(backend, "_host_thread_summaries", return_value=[old]),
+            patch.object(backend, "call_admin_api") as host,
+        ):
+            transaction.return_value.__enter__.return_value = cursor
+            self.assertEqual(backend.archive_idle_spawned_agents(), 0)
+        host.assert_not_called()
+        self.assertIn("spawned_by_thread_id IS NOT NULL AND archived = FALSE FOR UPDATE",
+                      cursor.execute.call_args.args[0])
+
+    def test_spawned_expiry_reports_host_failure_without_archiving(self) -> None:
+        cursor = unittest.mock.MagicMock()
+        cursor.fetchall.return_value = [("thread-1",)]
+        cursor.fetchone.return_value = (1,)
+        old = {"thread_id": "thread-1", "status": "idle", "last_used_at": "2020-01-01T00:00:00Z"}
+        with (
+            patch.object(backend.db, "transaction") as transaction,
+            patch.object(backend, "_host_thread_summaries", return_value=[old]),
+            patch.object(backend, "call_admin_api", side_effect=backend.WorkspaceError(502, "unavailable")),
+        ):
+            transaction.return_value.__enter__.return_value = cursor
+            with self.assertRaises(backend.WorkspaceError):
+                backend.archive_idle_spawned_agents()
+        self.assertFalse(any(item.args[0].startswith("UPDATE") for item in cursor.execute.call_args_list))
+
     def test_generated_thread_creation_stops_at_durable_quota(self) -> None:
         cursor = unittest.mock.MagicMock()
         transaction = unittest.mock.MagicMock()
@@ -1123,8 +1186,10 @@ class AgentChatBackendTests(unittest.TestCase):
         ]
         self.assertEqual(
             [item.args[1] for item in update_calls],
-            [(True, "thread-1"), (False, "thread-1")],
+            [(True, True, "thread-1"), (False, False, "thread-1")],
         )
+        self.assertIn("COALESCE(archived_at, CURRENT_TIMESTAMP)", update_calls[0].args[0])
+        self.assertIn("ELSE NULL END", update_calls[1].args[0])
 
     def test_schedule_transcripts_cannot_be_archived(self) -> None:
         with self.assertRaises(backend.WorkspaceError) as error:

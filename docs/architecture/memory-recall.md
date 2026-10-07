@@ -111,20 +111,29 @@ service. Workspace has no read grant on the provider configuration table.
 Every recall with candidates requests TypeSafe Jev reranking. If Jev is
 disabled, the inference service reports `provider_disabled` over its existing
 socket route without an external provider call, and recall keeps hybrid order.
-There is no random assignment, control bucket, or OpenAI recall reranking.
+There is no random assignment or control bucket. Alongside Jev, recall requests
+a Luna Decisions comparison on an independent copy of the original hybrid
+candidates. The inference service uses the existing OpenAI configuration;
+disabled or unconfigured OpenAI makes no external call. Jev still determines
+memory selection. Luna cannot replace Jev or the hybrid fallback.
 
 Jev uses `jev-latest` with one typed relevance question per candidate. It sees
 the bounded query and descriptions under short local candidate ids; page
 contents and page ids are not sent. Role labels distinguish operator direction from supporting messages. Each role
 bucket is newest first; prior messages resolve references without overriding the latest user direction. Existing provider egress redaction
-applies. See [Host AI inference](host-ai-inference.md) for the service boundary.
+applies. Luna receives the same query and candidate descriptions as text input,
+with one named `predicate` question per candidate on `gpt-6-luna`. The relevance
+criteria and short local IDs match Jev's. Page contents and page IDs are never
+sent to either provider. See [Host AI inference](host-ai-inference.md) for the service boundary.
 
 Only a complete set of finite scores between zero and one changes the order.
 Ties preserve hybrid order. Disabled providers, transport failures, timeouts,
 and malformed or incomplete results retain hybrid order. There is no retry or
-second-provider attempt. Recall explicitly passes `timeout_seconds: 1.2` to the Jev inference route;
+provider failover. Recall explicitly passes `timeout_seconds: 1.2` to both inference routes;
 the inference service binds that timeout to the shared HTTP transport and its socket client adds
-100 ms for local dispatch and response overhead (1.3 seconds for recall). Admission allows three seconds
+100 ms for local dispatch and response overhead (1.3 seconds for each call).
+The calls run concurrently, and recall waits for both before returning diagnostics.
+Admission allows three seconds
 for the full recall, including local search and page loading. These are socket
 timeouts, not a guarantee of identical elapsed latency. Luna task-title
 creation remains asynchronous and explicitly passes a 20-second timeout;
@@ -132,9 +141,11 @@ it does not block agent launch. The inference API has no feature-purpose field;
 callers supply OpenAI model settings, and TypeSafe uses Jev.
 
 The socket allowance is fixed; there is no deadline accounting or per-feature
-timeout logic in the inference service. Recall shares the inference service's existing four-call capacity
-with other features. A busy service also keeps hybrid order; there are no
-reserved recall slots, queues, or retries.
+timeout logic in the inference service. Jev shares the inference service's
+existing four-call capacity with other applied features. Luna Decisions uses
+one separate slot, so diagnostic comparisons cannot consume Jev's capacity.
+Additional overlapping comparisons are rejected as busy and logged without a
+usable Luna ranking. Busy Jev calls keep hybrid order. There are no queues or retries.
 
 ## Diagnostics
 
@@ -145,12 +156,24 @@ returned Jev model), outcome, elapsed milliseconds, the 1.2-second timeout
 setting, and whether hybrid fallback was used. There is no assignment
 probability. A provider or client socket timeout records `outcome: "timeout"`
 and retains hybrid order with `fallback: true`. A disabled Jev provider records
-`outcome: "provider_disabled"` and `fallback: true`. No candidates records
-`outcome: "no_candidates"` and makes no inference request. Every candidate
+`outcome: "provider_disabled"` and `fallback: true`. With no candidates, the
+coordinator records `Rerank skipped: no candidates.` and returns before calling
+either ranking function or starting a worker. Every candidate
 has its local id, page id, revision, original hybrid rank/score, validated
 reranker score, and final rank. `selection` is the proposed top five; the
 separate `Selected` entries record what was actually loaded after revision
 checks. Failed or partial scores are never applied or reported as valid scores.
+
+The separate `Rerank shadow:` JSON entry records version 1, provider `openai`,
+API `decisions`, requested and returned Luna model, outcome, timing, timeout,
+and `applied: false`. Each candidate retains the same hybrid rank, score, and
+page revision as the Jev trace, plus its validated Luna score and `would_rank`.
+`would_select` records the proposed top five. Ties keep hybrid order. Disabled
+OpenAI, transport failures, timeouts, refusals, and incomplete or invalid scores
+record the outcome, null scores, and hybrid order with `fallback: true`.
+Neither a successful nor a failed comparison changes the actual selection.
+Both traces stay in operator diagnostics and are excluded from agent memory
+injection. OpenAI usage and estimated spend appear in the existing Host AI history.
 
 These traces support inspection of ranking, latency, and failure rates,
 including unavailable and timed-out calls. Historical `Rerank experiment:`

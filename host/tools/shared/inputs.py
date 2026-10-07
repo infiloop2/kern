@@ -55,13 +55,20 @@ def decoded_url_component_values(value: str, *, plus: bool) -> tuple[str, ...]:
     return tuple(values)
 
 
-def guard_url_parameter_string(url: str, api: "HostAPI") -> str:
+def guard_url_parameter_string(
+    url: str, api: "HostAPI", allow_longer_text: bool = False,
+    allow_machine_tokens: bool = False,
+) -> str:
     """Guard a wire URL and every nested-decoding view of its path and query."""
-    guarded_url = api.outbound.guard_request_parameter_string(url)
+    guarded_url = api.outbound.guard_request_parameter_string(
+        url, allow_longer_text=allow_longer_text, allow_machine_tokens=allow_machine_tokens,
+    )
     parsed = urllib.parse.urlsplit(guarded_url)
     for component, plus in ((parsed.path, False), (parsed.query, True)):
         for decoded in decoded_url_component_values(component, plus=plus):
-            api.outbound.guard_request_parameter_string(decoded)
+            api.outbound.guard_request_parameter_string(
+                decoded, allow_longer_text=allow_longer_text, allow_machine_tokens=allow_machine_tokens,
+            )
     return guarded_url
 
 

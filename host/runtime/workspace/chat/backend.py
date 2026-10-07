@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from http import HTTPStatus
 import json
 import re
@@ -583,7 +584,9 @@ def _require_sendable_thread(thread_id: str) -> dict[str, str] | None:
         return None
 
 
-def set_chat_thread_archived(thread_id: str, *, archived: bool) -> dict[str, Any]:
+def set_chat_thread_archived(
+    thread_id: str, *, archived: bool, inactive_before: str | None = None,
+) -> dict[str, Any]:
     if SCHEDULE_THREAD_ID_RE.fullmatch(thread_id) is not None:
         raise WorkspaceError(
             HTTPStatus.CONFLICT, "schedule transcripts cannot be archived"
@@ -591,7 +594,10 @@ def set_chat_thread_archived(thread_id: str, *, archived: bool) -> dict[str, Any
     with db.transaction() as cur:
         # Serialize the idle check and archive with Workspace message admission.
         cur.execute(
-            "SELECT 1 FROM chat_threads WHERE thread_id = %s FOR UPDATE",
+            "SELECT 1 FROM chat_threads WHERE thread_id = %s"
+            + (" AND spawned_by_thread_id IS NOT NULL AND archived = FALSE"
+               if inactive_before is not None else "")
+            + " FOR UPDATE",
             (thread_id,),
         )
         if cur.fetchone() is None:
@@ -612,10 +618,19 @@ def set_chat_thread_archived(thread_id: str, *, archived: bool) -> dict[str, Any
                     HTTPStatus.CONFLICT,
                     "threads can only be archived while their agent is idle",
                 )
+            # Recheck recency after taking both the send lock (in the sweep)
+            # and row lock. A message may have finished since the list snapshot.
+            if inactive_before is not None and (
+                not thread.get("last_used_at")
+                or str(thread["last_used_at"]) > inactive_before
+            ):
+                raise WorkspaceError(HTTPStatus.CONFLICT, "thread was recently active")
         cur.execute(
-            "UPDATE chat_threads SET archived = %s WHERE thread_id = %s"
+            "UPDATE chat_threads SET archived = %s, archived_at = CASE"
+            " WHEN %s THEN COALESCE(archived_at, CURRENT_TIMESTAMP) ELSE NULL END"
+            " WHERE thread_id = %s"
             " RETURNING thread_id, archived",
-            (archived, thread_id),
+            (archived, archived, thread_id),
         )
         row = cur.fetchone()
     if not row:
@@ -632,6 +647,39 @@ def archive_chat_thread(thread_id: str) -> dict[str, Any]:
 
 def unarchive_chat_thread(thread_id: str) -> dict[str, Any]:
     return set_chat_thread_archived(thread_id, archived=False)
+
+
+def archive_idle_spawned_agents() -> int:
+    """Archive spawned Chats idle for at least 24 hours; retain their history."""
+    cutoff = (datetime.now(timezone.utc) - timedelta(hours=24)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT thread_id FROM chat_threads"
+            " WHERE spawned_by_thread_id IS NOT NULL AND archived = FALSE",
+        )
+        candidates = {row[0] for row in cur.fetchall()}
+    if not candidates:
+        return 0
+    archived = 0
+    for summary in _host_thread_summaries("thread-"):
+        thread_id = summary.get("thread_id")
+        if (
+            not isinstance(thread_id, str)
+            or thread_id not in candidates
+            or summary.get("status") != "idle"
+            or not summary.get("last_used_at")
+            or str(summary["last_used_at"]) > cutoff
+        ):
+            continue
+        with _message_send_lock(thread_id):
+            try:
+                set_chat_thread_archived(thread_id, archived=True, inactive_before=cutoff)
+            except WorkspaceError as exc:
+                if exc.status in {HTTPStatus.CONFLICT, HTTPStatus.NOT_FOUND}:
+                    continue
+                raise
+            archived += 1
+    return archived
 
 
 THREAD_NAME_MAX_CHARS = 100

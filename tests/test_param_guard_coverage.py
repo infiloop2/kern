@@ -31,8 +31,15 @@ from test_tools import FakeHostAPI
 # (tool_id, action_id, field) -> guarded free-text parameter. The tool's
 # package test and the behavioral tests below exercise each.
 GUARDED_FIELDS = {
+    ("seo_metrics_api", "get_keyword_metrics", "keywords"),
+    ("ahrefs_domain_rating", "get_domain_rating", "domain"),
     ("openrouter", "create_heygen_video", "prompt"),
     ("instagram", "get_recent_media", "after"),
+    ("instagram", "get_comments", "after"),
+    ("instagram", "get_comment_replies", "after"),
+    ("instagram", "get_conversations", "after"),
+    ("instagram", "get_messages", "after"),
+    ("instagram", "get_messages", "conversation_id"),
     ("cloudwatch_logs", "filter_log_events", "request_id"),
     ("cloudwatch_logs", "filter_log_events", "search_text"),
     ("cloudwatch_logs", "filter_log_events", "next_token"),
@@ -113,11 +120,12 @@ GUARDED_FIELDS = {
     ("gmail", "list_drafts", "page_token"),
     ("gmail", "list_drafts", "query"),
     ("google_search_console", "inspect_url", "inspection_url"),
+    ("google_search_console", "query_search_analytics", "dimension_filters"),
     ("fal_ai", "generate_video", "prompt"),
     ("instagram_discovery", "search_reels", "query"),
     ("instagram_discovery", "search_hashtag", "hashtag"),
     ("instagram_discovery", "get_reels_by_audio", "cursor"),
-    ("linkedin_discovery", "search_posts", "query"),
+    ("google_search", "search", "query"),
     ("openai_images", "generate_image", "prompt"),
     ("polymarket", "search", "query"),
     ("polymarket", "get_market", "slug"),
@@ -147,6 +155,8 @@ APPROVAL_GATED = "approval-gated content: the operator approval is the control"
 TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning"
 
 EXEMPT_FIELDS = {
+    ("seo_metrics_api", "get_keyword_metrics", "country"): "Exactly two ASCII letters, normalized uppercase.",
+    ("ahrefs_domain_rating", "get_domain_rating", "version"): TYPED,
     ("openrouter", "create_heygen_video", "mode"): TYPED,
     **{("openrouter", "create_heygen_video", key): TYPED for key in ("image_asset_id", "reference_image_asset_ids", "reference_video_asset_ids", "reference_audio_asset_ids")},
     ("openrouter", "create_heygen_video", "duration_seconds"): TYPED,
@@ -372,6 +382,16 @@ EXEMPT_FIELDS = {
     ("ibkr", "get_trades", "days"): TYPED,
     ("instagram", "get_recent_media", "limit"): TYPED,
     ("instagram", "get_reel_insights", "media_id"): TYPED,
+    ("instagram", "get_comments", "media_id"): TYPED,
+    ("instagram", "get_comments", "limit"): TYPED,
+    ("instagram", "get_comment_replies", "comment_id"): TYPED,
+    ("instagram", "get_comment_replies", "limit"): TYPED,
+    ("instagram", "get_conversations", "limit"): TYPED,
+    ("instagram", "get_messages", "limit"): TYPED,
+    ("instagram", "reply_to_comment", "comment_id"): APPROVAL_GATED,
+    ("instagram", "reply_to_comment", "text"): APPROVAL_GATED,
+    ("instagram", "reply_to_conversation", "conversation_id"): APPROVAL_GATED,
+    ("instagram", "reply_to_conversation", "text"): APPROVAL_GATED,
     ("instagram", "post_image", "image_asset_id"): TYPED,
     ("instagram", "post_image", "caption"): APPROVAL_GATED,
     ("instagram", "post_carousel", "image_asset_ids"): TYPED,
@@ -390,8 +410,10 @@ EXEMPT_FIELDS = {
     ("instagram_discovery", "get_reels_by_audio", "audio_id"): TYPED,
     ("instagram_discovery", "get_reels_by_audio", "limit"): TYPED,
     ("instagram_discovery", "get_reel_details", "url"): TYPED,
-    ("linkedin_discovery", "search_posts", "page"): TYPED,
-    ("linkedin_discovery", "search_posts", "limit"): TYPED,
+    ("google_search", "search", "page"): TYPED,
+    ("google_search", "search", "limit"): TYPED,
+    ("google_search", "search", "country"): TYPED,
+    ("google_search", "search", "language"): TYPED,
     ("linkedin", "create_post", "text"): APPROVAL_GATED,
     ("linkedin", "create_post", "visibility"): TYPED,
     ("polymarket", "search", "limit_per_type"): TYPED,
@@ -611,6 +633,17 @@ class BehavioralDenialTest(unittest.TestCase):
         self.assertIn(fragment, result.error)
         self.assertIn("retry", result.error)
 
+    def test_ahrefs_domain_denied_before_provider_request(self) -> None:
+        from host.tools import ahrefs_domain_rating
+
+        with patch.object(ahrefs_domain_rating, "json_request") as request:
+            result = ahrefs_domain_rating.BUNDLED_TOOL.execute(
+                "get_domain_rating", {"domain": "AKIAIOSFODNN7EXAMPLE.com"},
+                FakeHostAPI(config={"AHREFS_API_KEY": "k"}),
+            )
+        self.assert_denied(result, "credential")
+        request.assert_not_called()
+
     def test_openrouter_prompt_denied_before_provider_request(self) -> None:
         from host.tools import openrouter
 
@@ -653,6 +686,21 @@ class BehavioralDenialTest(unittest.TestCase):
             "get_recent_media", {"after": "AKIAIOSFODNN7EXAMPLE"}, connected_api()
         )
         self.assert_denied(result, "credential")
+
+    def test_instagram_interaction_cursors_and_conversation_id_denied_before_provider_request(self) -> None:
+        from host.tools import instagram
+        from test_tools_instagram import connected_api
+        for action, tool_input in (
+            ("get_comments", {"media_id": "123", "after": "AKIAIOSFODNN7EXAMPLE"}),
+            ("get_comment_replies", {"comment_id": "456", "after": "AKIAIOSFODNN7EXAMPLE"}),
+            ("get_conversations", {"after": "AKIAIOSFODNN7EXAMPLE"}),
+            ("get_messages", {"conversation_id": "t_123", "after": "AKIAIOSFODNN7EXAMPLE"}),
+            ("get_messages", {"conversation_id": "AKIAIOSFODNN7EXAMPLE"}),
+        ):
+            with self.subTest(action=action, tool_input=tool_input), patch.object(instagram, "json_request") as request:
+                result = instagram.BUNDLED_TOOL.execute(action, tool_input, connected_api())
+                self.assert_denied(result, "credential")
+                request.assert_not_called()
 
     def test_search_console_inspection_url_denied(self) -> None:
         from host.tools import google_search_console
@@ -760,12 +808,12 @@ class BehavioralDenialTest(unittest.TestCase):
         )
         self.assert_denied(result, "credential")
 
-    def test_linkedin_discovery_query_denied(self) -> None:
-        from host.tools.linkedin_discovery import BUNDLED_TOOL
+    def test_google_search_query_denied(self) -> None:
+        from host.tools.google_search import BUNDLED_TOOL
 
         api = FakeHostAPI(config={"SERPERAPI_API_KEY": "k"})
         result = BUNDLED_TOOL.execute(
-            "search_posts", {"query": "posts by alice.smith@acme.com"}, api
+            "search", {"query": "posts by alice.smith@acme.com"}, api
         )
         self.assert_denied(result, "email address")
 

@@ -7,6 +7,7 @@ import subprocess
 from pathlib import Path
 import socket
 import struct
+from time import monotonic
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -18,6 +19,7 @@ from host.runtime.browser.actions import x_post_tweet
 from host.runtime.browser.actions.x_diagnostics import preparation_facts
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser_network.config import LOCATIONS, Settings
+from host.runtime.core.host_errors import _safe_context
 
 EDITOR = '''<div data-testid="tweetTextarea_0" contenteditable="true" style="white-space:pre-wrap"
  oninput="setTimeout(() => this.parentElement.querySelector('button').disabled=false, 150)"></div>
@@ -219,17 +221,95 @@ def check_reply_diagnostics(page):
         (article.replace('<button ', '<button hidden '), {"reply_visible": False}),
         (article.replace('<button ', '<button disabled '), {"reply_enabled": False}),
         (article + '<div style="position:fixed;inset:0;background:white"></div>',
-         {"reply_visible": True, "reply_enabled": True, "reply_center_unobstructed": False}),
-        (article, {"reply_visible": True, "reply_enabled": True, "reply_center_unobstructed": True}),
-        (article + f'<div role="dialog">{EDITOR}</div>', {"dialog_count": 1, "composer_count": 1}),
+         {"reply_visible": True, "reply_enabled": True, "reply_center_unobstructed": False,
+          "reply_in_viewport": True, "reply_center_hit_tag": "div"}),
+        (article, {"reply_visible": True, "reply_enabled": True, "reply_center_unobstructed": True,
+                   "target_id_link_count": 1, "target_id_article_count": 1}),
+        (article + f'<div role="dialog">{EDITOR}</div>', {"dialog_count": 1, "composer_count": 1,
+          "visible_dialog_count": 1, "visible_popup_editor_count": 1, "inline_editor_count": 0}),
+        (article.replace('/status/12345', '/status/12345?private-query'),
+         {"target_count": 0, "target_id_article_count": 1, "target_id_query_link_count": 1,
+          "target_id_exact_suffix_link_count": 0}),
+        (article.replace('/status/12345', '/status/12345/photo/1'),
+         {"target_count": 0, "target_id_extra_path_link_count": 1}),
+        (article.replace('>private target text</a>', '><time>private timestamp</time></a>'),
+         {"target_id_timestamp_article_count": 1}),
+        ('<a href="https://x.com/someone/status/12345?private-query">private text</a>' +
+         article.replace('/status/12345', '/status/123456'),
+         {"target_count": 0, "target_id_link_count": 1, "target_id_article_count": 0}),
+        (article.replace('/someone/status/12345', 'https://private.example/status/12345?private-query'),
+         {"target_count": 0, "target_id_link_count": 0}),
+        (article.replace('<button ', '<button style="position:absolute;top:5000px" '),
+         {"reply_visible": True, "reply_in_viewport": False, "reply_center_hit_tag": ""}),
+        (article + '<div data-testid="mask" role="dialog" style="position:fixed;inset:0;background:white"></div>',
+         {"reply_center_unobstructed": False, "reply_center_hit_test_id": "mask", "reply_center_hit_role": "dialog"}),
+        (article + '<private-secret data-testid="private-token" role="private-role" style="display:block;position:fixed;inset:0"></private-secret>',
+         {"reply_center_hit_tag": "other", "reply_center_hit_test_id": "other", "reply_center_hit_role": "other"}),
+        (INLINE + f'<div role="dialog" hidden>{EDITOR}</div>',
+         {"inline_editor_count": 1, "popup_editor_count": 1, "visible_popup_editor_count": 0,
+          "visible_dialog_count": 0}),
+        ('<input autocomplete="username" value="private-account"><input type="password" value="private-password">',
+         {"login_input_visible": True}),
+        ('<input autocomplete="username" hidden value="private-account">', {"login_input_visible": False}),
+        ('<a href="/other/status/99999?private-token">private</a>' * 2000 + article,
+         {"target_link_scan_truncated": True, "target_id_link_count": 0, "target_count": 1}),
     ]
     for html, expected in fixtures:
-        page.set_content("<!doctype html>" + html)
+        page.set_content('<!doctype html><base href="https://x.com/">' + html)
         facts = preparation_facts(page, "12345")
         assert {key: facts[key] for key in expected} == expected, facts
         assert "snapshot_incomplete" not in facts, facts
+        assert facts["snapshot_phase"] == "after_failure", facts
+        assert len(json.dumps(facts).encode()) < 4096, facts
+        assert _safe_context(facts) == facts, facts
         assert "private" not in json.dumps(facts), facts
-    print("Reply diagnostics distinguish missing/duplicate targets, hidden/disabled/covered controls and open composers.", flush=True)
+        assert "https://" not in json.dumps(facts), facts
+        # A read-only snapshot must not scroll to an offscreen control.
+        assert page.evaluate('scrollY') == 0
+    # Main-world scripts may replace built-ins. Return values must pass the
+    # Python allowlist, and looping DOM APIs must not trap the failure handler.
+    hostile_fixtures = [
+        (article + '''<script>
+            const assign = Object.assign;
+            Object.assign = (target, ...sources) => {
+                const result = assign(target, ...sources);
+                result.body_text = document.body.textContent;
+                result.visible_dialog_count = document.body.textContent;
+                result.reply_target_id = document.body.textContent;
+                return result;
+            };
+        </script>''', {"target_count": 1, "target_id_link_count": 1},
+         ("body_text", "visible_dialog_count")),
+        (article + '''<private-secret data-testid="private-token" role="private-role"
+            style="display:block;position:fixed;inset:0"></private-secret>
+            <script>Array.prototype.includes = () => true;</script>''',
+         {"target_count": 1, "reply_center_unobstructed": False},
+         ("reply_center_hit_tag", "reply_center_hit_role", "reply_center_hit_test_id")),
+        (article + '<script>Object.assign = () => { while (true) {} };</script>',
+         {"target_count": 1, "reply_center_unobstructed": True}, ("target_id_link_count",)),
+        (article + '<script>document.querySelectorAll = () => { while (true) {} };</script>',
+         {"target_count": 1}, ("reply_center_unobstructed", "target_id_link_count")),
+    ]
+    for html, expected, excluded in hostile_fixtures:
+        hostile_page = page.context.new_page()
+        try:
+            hostile_page.route('**/*', lambda route: route.abort())
+            hostile_page.set_content('<!doctype html><base href="https://x.com/">' + html)
+            started = monotonic()
+            facts = preparation_facts(hostile_page, "12345")
+            assert monotonic() - started < 3, facts
+            assert facts["snapshot_incomplete"] is True, facts
+            assert {key: facts[key] for key in expected} == expected, facts
+            assert not any(key in facts for key in excluded), facts
+            assert facts["reply_target_id"] == "12345", facts
+            assert facts["snapshot_phase"] == "after_failure", facts
+            assert "private" not in json.dumps(facts), facts
+            assert _safe_context(facts) == facts, facts
+            assert hostile_page.evaluate('scrollY') == 0
+        finally:
+            hostile_page.close()
+    print("Reply diagnostics distinguish link shapes, missing/duplicate targets, offscreen/covered controls, editors and login inputs without page content.", flush=True)
+    print("Hostile page scripts cannot inject raw fields or trap snapshot execution; original locator facts survive.", flush=True)
 
 
 def run(playwright):

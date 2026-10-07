@@ -213,7 +213,7 @@ def encode_query(params: Mapping[str, str]) -> str:
     return urllib.parse.urlencode(params)
 
 
-def is_public_https_url(value: str) -> bool:
+def is_public_https_url(value: str, max_chars: int = 2_048) -> bool:
     """Structural checks only — this does NOT pin the hostname.
 
     Media providers return upload and output URLs from their own authenticated
@@ -223,7 +223,7 @@ def is_public_https_url(value: str) -> bool:
     plain HTTPS on the default port to a named public host — no userinfo, no IP
     literals, no oversized URLs.
     """
-    if len(value) > 2_048:
+    if len(value) > max_chars:
         return False
     try:
         parsed = urllib.parse.urlsplit(value)

@@ -2,7 +2,7 @@
 "use strict";
 if (window.KernDictation) return;
 const SAMPLE_RATE = 16000;
-const FINISH_MS = 5000;
+const FINISH_MS = 15000;
 let database;
 function openDatabase() {
   if (!database) database = new Promise((resolve, reject) => {

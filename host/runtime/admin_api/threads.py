@@ -14,7 +14,7 @@ from host import agent_messages as message_templates
 from host.config import AGENT_RUNTIMES
 from host.runtime.memory_context import load_query
 from host.memory_recall_rules import RELEVANT_PAGE_LIMIT
-from host.runtime.agent_runtime import agent_activity, codex_app_server, orchestrator, turn_retries
+from host.runtime.agent_runtime import agent_activity, orchestrator, turn_retries
 from host.runtime.admin_api import workspace_proxy
 from host.runtime.admin_api.errors import ApiError
 from host.runtime.admin_api.request_params import clip_json_encoded_text as _clip_json_encoded_text, one as _one
@@ -525,50 +525,6 @@ def stop_thread(thread_id: str) -> dict[str, str]:
         with state.mutation() as cur:
             state.append_agent_event(cur, "thread.stopped", thread_id, {}, run_number=config["run_number"])
     return {"status": "accepted"}
-
-def sweep_archived_codex_sessions() -> int:
-    """Delete provider sessions for archived Chats; retain the Chats themselves.
-
-    No age or size cutoff. Each runtime uses one short-lived, agent-owned
-    app-server without resuming a thread or invoking a model. Restored chats
-    use the ordinary history handoff on their next message.
-    """
-    deleted = 0
-    for runtime in codex_app_server.CODEX_RUNTIME_TYPES:
-        candidates = state.archived_thread_session_ids(runtime)
-        if not candidates:
-            continue
-        server = codex_app_server.CodexAppServer(runtime_type=runtime)
-        try:
-            server.start(init_timeout=5)
-            for thread_id in candidates:
-                # Serialize the snapshot/detach with sends. The live fence
-                # also covers idle-in-the-database turns still tearing down.
-                with _thread_send_lock(thread_id):
-                    if thread_id in orchestrator.live_thread_ids():
-                        continue
-                    with state.mutation() as cur:
-                        session_id = state.detach_archived_thread_session(cur, thread_id, runtime)
-                if session_id is not None:
-                    # Detach commits first. A restore/send can now safely start
-                    # a different session even while this deletion is pending.
-                    codex_app_server.delete_session(server, session_id)
-                    deleted += 1
-        except Exception as exc:
-            # Stop this runtime's pass on a transport/delete failure so a dead
-            # app-server cannot detach all the remaining candidates needlessly.
-            host_errors.report_unexpected(
-                "admin_api.archived_codex_sweep", exc, context={"runtime": runtime},
-            )
-        finally:
-            try:
-                server.close()
-            except Exception as exc:
-                host_errors.report_unexpected(
-                    "admin_api.archived_codex_sweep.close", exc, context={"runtime": runtime},
-                )
-    return deleted
-
 
 def clear_thread_memory(thread_id: str) -> dict[str, str]:
     """Drop the thread's provider session so its next run starts fresh.

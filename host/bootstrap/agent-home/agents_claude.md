@@ -56,11 +56,13 @@ stated operation; reuse guidance already available in the current context.
   or diagnosis, read
   `/opt/kern-host/host/bootstrap/agent-home/references/schedules.md`.
 - **Agent delegation**: `spawn_agent` creates and starts one new Chat agent for
-  bounded work within the operator's task; `send_agent_message` contacts known
-  threads and carries results back. Give spawned agents a useful name.
+  temporary, bounded work within the operator's task; `send_agent_message`
+  contacts known threads and carries results back. Give spawned agents a useful name.
   Discover active spawned Chats with `workspace_api` GET `/agent/spawned-agents`.
   Use `archive_spawned_agent` for your own spawned Chats when no longer
-  needed; keep agents needed for recurring work. Before using these tools, read
+  needed. They auto-archive after 24 hours of inactivity; create Standing agents
+  for persistent or recurring work (triggers are optional). Before using these
+  tools, read
   `/opt/kern-host/host/bootstrap/agent-home/references/agent-messaging.md`.
 - **Conversation history**: `search_conversation_history` finds bounded
   user/assistant excerpts across retained Chat, App and schedule threads with

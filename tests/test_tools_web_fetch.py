@@ -13,6 +13,7 @@ from unittest.mock import MagicMock, patch
 from host.tools import web_fetch
 from host.tools.web_fetch import BUNDLED_TOOL
 from host.tools.results import ActionExecuted, ActionFailed, OpenedStreamingAsset, StreamingAsset, StreamingAssetError
+from host.tools.shared.web import is_public_https_url
 from test_tools import FakeHostAPI, assert_matches_output_schema
 
 HTML_PAGE = (
@@ -34,6 +35,124 @@ def _response(
 
 def _addrinfo(address: str) -> list[tuple[object, object, int, str, tuple[str, int]]]:
     return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 443))]
+
+
+class WebFetchLongUrlTests(unittest.TestCase):
+    host = "scontent-iad3-2.cdninstagram.com"
+    # Synthetic opaque CDN parameters: no live signature or expiring asset.
+    url = f"https://{host}/o1/video.mp4?efg=" + "Ab9_ef-X3" * 160 + "&oh=example"
+
+    def test_listed_host_accepts_opaque_urls_in_all_actions(self) -> None:
+        for action in ("fetch_page", "fetch_page_file", "head_url", "download_media"):
+            with self.subTest(action=action), patch.object(
+                web_fetch, "_fetch_once", return_value=_response(),
+            ) as fetch, patch.object(web_fetch, "_open_media_stream") as stream:
+                result = BUNDLED_TOOL.execute(action, {"url": self.url}, FakeHostAPI())
+                self.assertNotIsInstance(result, ActionFailed)
+                if action == "download_media":
+                    assert isinstance(result, StreamingAsset)
+                    result.open_stream()
+                    stream.assert_called_once_with(self.url)
+                else:
+                    self.assertEqual(fetch.call_args.args[0], self.url)
+
+    def test_host_match_is_exact_and_case_insensitive(self) -> None:
+        self.assertEqual(web_fetch._validated_page_url(self.url.replace(self.host, self.host.upper())),
+                         self.url.replace(self.host, self.host.upper()))
+        for host in ("example.com", "cdninstagram.com", "scontent-iad3-1.cdninstagram.com",
+                     "sub." + self.host, self.host + ".example.com", self.host + ".",
+                     self.host + "@example.com", "user@" + self.host, self.host + ":8443"):
+            with self.subTest(host=host), patch.object(web_fetch, "_fetch_once") as fetch:
+                result = BUNDLED_TOOL.execute("fetch_page", {"url": self.url.replace(self.host, host)}, FakeHostAPI())
+                self.assertIsInstance(result, ActionFailed)
+                fetch.assert_not_called()
+
+    def test_length_boundaries_and_shared_default_unchanged(self) -> None:
+        for host, limit in ((self.host, 4096), ("example.com", 200)):
+            prefix = f"https://{host}/"
+            url = prefix + "a" * (limit - len(prefix))
+            with self.subTest(host=host):
+                self.assertEqual(web_fetch._validated_page_url(url), url)
+                with self.assertRaises(ValueError):
+                    web_fetch._validated_page_url(url + "a")
+                if host == self.host:
+                    with patch.object(web_fetch, "_fetch_once", return_value=_response()) as fetch:
+                        result = BUNDLED_TOOL.execute("fetch_page", {"url": url}, FakeHostAPI())
+                        self.assertIsInstance(result, ActionExecuted)
+                        self.assertEqual(fetch.call_args.args[0], url)
+        # Other callers of the shared validator still have their 2,048 cap.
+        self.assertFalse(is_public_https_url(f"https://{self.host}/" + "a" * 2100))
+
+    def test_secrets_identifiers_and_nested_encoding_still_blocked(self) -> None:
+        for value in ("AKIAIOSFODNN7EXAMPLE", "%41KIAIOSFODNN7EXAMPLE",
+                      "%2541KIAIOSFODNN7EXAMPLE", "alice%2540example.com",
+                      "password%2520is%2520correcthorsebattery", "%2500"):
+            for component in ("path", "query"):
+                url = self.url + "&q=" + value if component == "query" else self.url.replace("/o1/", "/" + value + "/")
+                with self.subTest(value=value, component=component), patch.object(web_fetch, "_fetch_once") as fetch:
+                    result = BUNDLED_TOOL.execute("fetch_page", {"url": url}, FakeHostAPI())
+                    self.assertIsInstance(result, ActionFailed)
+                    fetch.assert_not_called()
+
+    def test_unlisted_short_urls_keep_machine_token_guard(self) -> None:
+        url = "https://example.com/?q=" + "Ab9_ef-X3" * 16
+        self.assertLess(len(url), 200)
+        with patch.object(web_fetch, "_fetch_once") as fetch:
+            result = BUNDLED_TOOL.execute("fetch_page", {"url": url}, FakeHostAPI())
+        self.assertIsInstance(result, ActionFailed)
+        fetch.assert_not_called()
+
+    def test_redirects_recompute_length_permission_for_every_hop(self) -> None:
+        for source, target in (("https://example.com/start", self.url),
+                               (self.url, "https://example.com/short")):
+            with self.subTest(source=source), patch.object(web_fetch, "_fetch_once", side_effect=[
+                _response(status=302, headers={"location": target}), _response(),
+            ]) as fetch:
+                result = BUNDLED_TOOL.execute("fetch_page", {"url": source}, FakeHostAPI())
+                self.assertIsInstance(result, ActionExecuted)
+                self.assertEqual(fetch.call_args.args[0], target)
+        for target in (self.url.replace(self.host, "example.com"),
+                       self.url.replace(self.host, "sub." + self.host),
+                       self.url.replace(self.host, "127.0.0.1"),
+                       f"https://{self.host}/" + "a" * 4096):
+            with self.subTest(target=target), patch.object(web_fetch, "_fetch_once", return_value=
+                _response(status=302, headers={"location": target}),
+            ) as fetch:
+                result = BUNDLED_TOOL.execute("fetch_page", {"url": self.url}, FakeHostAPI())
+                self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(fetch.call_count, 1)
+
+    def test_listed_host_still_rejects_private_dns(self) -> None:
+        with patch.object(web_fetch.socket, "getaddrinfo", return_value=_addrinfo("10.0.0.8")), patch.object(
+            web_fetch, "_PinnedHTTPSConnection",
+        ) as connection:
+            result = BUNDLED_TOOL.execute("fetch_page", {"url": self.url}, FakeHostAPI())
+        self.assertIsInstance(result, ActionFailed)
+        connection.assert_not_called()
+
+    def test_long_signed_mp4_stream_keeps_bytes_and_query(self) -> None:
+        body = b"\x00\x00\x00\x18ftypisomvideo bytes"
+        connection = MagicMock()
+        response = connection.getresponse.return_value
+        response.status = 200
+        response.getheaders.return_value = [
+            ("Content-Type", "video/mp4"), ("Content-Length", str(len(body))),
+        ]
+        media = io.BytesIO(body)
+        response.read.side_effect = media.read
+        response.read1.side_effect = media.read
+        with patch.object(web_fetch, "_public_addresses", return_value=("93.184.216.34",)), patch.object(
+            web_fetch, "_PinnedHTTPSConnection", return_value=connection,
+        ), patch.object(web_fetch, "_response_socket", return_value=MagicMock()):
+            result = BUNDLED_TOOL.execute("download_media", {"url": self.url}, FakeHostAPI())
+            assert isinstance(result, StreamingAsset)
+            with result.open_stream() as opened:
+                self.assertEqual(opened.source.read(), body)
+                self.assertEqual(opened.media_type, "video/mp4")
+                self.assertEqual(opened.size_bytes, len(body))
+        connection.request.assert_called_once_with(
+            "GET", self.url.removeprefix(f"https://{self.host}"), headers=web_fetch._REQUEST_HEADERS,
+        )
 
 
 class WebFetchUrlValidationTests(unittest.TestCase):

@@ -213,6 +213,203 @@ class GoogleSearchConsoleToolTests(unittest.TestCase):
             "first_incomplete_hour": "",
         })
 
+    def test_analytics_filters_map_all_dimensions_and_operators_without_rewriting(self) -> None:
+        for operator in sorted(search_console.FILTER_OPERATORS):
+            filters = [
+                {"dimension": dimension, "operator": operator, "expression": " Kern.* "}
+                for dimension in sorted(search_console.FILTER_DIMENSIONS)
+            ]
+            with self.subTest(operator=operator), patch.object(
+                search_console, "google_json_request", side_effect=[PROPERTY_RESPONSE, {}]
+            ) as request:
+                result = search_console.BUNDLED_TOOL.execute(
+                    "query_search_analytics",
+                    {"site_url": SITE, "start_date": "2026-08-01", "end_date": "2026-08-07",
+                     "dimension_filters": filters},
+                    connected_api(),
+                )
+            self.assertIsInstance(result, ActionExecuted)
+            self.assertEqual(request.call_args.kwargs["body"]["dimensionFilterGroups"],
+                             [{"groupType": "and", "filters": filters}])
+            self.assertNotIn("dimensions", request.call_args.kwargs["body"])
+
+    def test_analytics_filter_defaults_and_empty_lists_preserve_existing_requests(self) -> None:
+        for filters in ([], [{"dimension": "query", "expression": "Kern"}]):
+            with self.subTest(filters=filters), patch.object(
+                search_console, "google_json_request", side_effect=[PROPERTY_RESPONSE, {}]
+            ) as request:
+                result = search_console.BUNDLED_TOOL.execute(
+                    "query_search_analytics",
+                    {"site_url": SITE, "start_date": "2026-08-01", "end_date": "2026-08-07",
+                     "dimension_filters": filters},
+                    connected_api(),
+                )
+            self.assertIsInstance(result, ActionExecuted)
+            body = request.call_args.kwargs["body"]
+            self.assertEqual(body["rowLimit"], 25)
+            self.assertEqual(body["startRow"], 0)
+            self.assertEqual(body["dataState"], "final")
+            if filters:
+                self.assertEqual(body["dimensionFilterGroups"][0]["filters"][0]["operator"], "equals")
+            else:
+                self.assertNotIn("dimensionFilterGroups", body)
+
+    def test_analytics_rejects_malformed_filters_before_analytics_request(self) -> None:
+        valid = {"dimension": "query", "expression": "Kern"}
+        invalid = [None, {}, "Kern", [None], ["Kern"], [{}],
+                   [dict(valid, dimension="date")], [dict(valid, dimension="hour")],
+                   [dict(valid, dimension=None)], [dict(valid, operator=None)],
+                   [dict(valid, operator="or")], [dict(valid, groupType="or")],
+                   [dict(valid, expression=123)], [dict(valid, expression="x" * 4097)],
+                   [dict(valid, expression="界" * 1366)], [valid] * 11]
+        for filters in invalid:
+            with self.subTest(filters=str(filters)[:80]), patch.object(
+                search_console, "google_json_request", return_value=PROPERTY_RESPONSE
+            ) as request:
+                result = search_console.BUNDLED_TOOL.execute(
+                    "query_search_analytics",
+                    {"site_url": SITE, "start_date": "2026-08-01", "end_date": "2026-08-07",
+                     "dimension_filters": filters},
+                    connected_api(),
+                )
+            self.assertIsInstance(result, ActionFailed)
+            self.assertEqual(request.call_count, 1, "only the live property check may run")
+
+    def test_analytics_filter_guard_blocks_secrets_and_encoded_page_identifiers(self) -> None:
+        for dimension, expression in (("query", "AKIAIOSFODNN7EXAMPLE"),
+                                      ("page", "https://example.com/alice%2540example.com")):
+            with self.subTest(dimension=dimension), patch.object(
+                search_console, "google_json_request", return_value=PROPERTY_RESPONSE
+            ) as request:
+                result = search_console.BUNDLED_TOOL.execute(
+                    "query_search_analytics",
+                    {"site_url": SITE, "start_date": "2026-08-01", "end_date": "2026-08-07",
+                     "dimension_filters": [{"dimension": dimension, "expression": expression}]},
+                    connected_api(),
+                )
+            self.assertIsInstance(result, ActionFailed)
+            self.assertEqual(request.call_count, 1)
+
+    def test_analytics_filter_expression_and_count_boundaries(self) -> None:
+        expression = "analytics " * 409 + "Kern.*"  # Exactly 4096 bytes, above the normal 1 KB guard tier.
+        filters = [{"dimension": "query", "expression": expression}] * 10
+        with patch.object(search_console, "google_json_request", side_effect=[PROPERTY_RESPONSE, {}]) as request:
+            result = search_console.BUNDLED_TOOL.execute(
+                "query_search_analytics",
+                {"site_url": SITE, "start_date": "2026-08-01", "end_date": "2026-08-07",
+                 "dimension_filters": filters}, connected_api(),
+            )
+        self.assertIsInstance(result, ActionExecuted)
+        self.assertEqual(request.call_args.kwargs["body"]["dimensionFilterGroups"][0]["filters"],
+                         [dict(item, operator="equals") for item in filters])
+
+    def test_analytics_larger_pages_dimensions_freshness_and_output_cap(self) -> None:
+        dimensions = ["country", "date", "device", "hour", "page", "query"]
+        response = {
+            "rows": [{"keys": ["usa", "2026-08-07", "MOBILE", "12", SITE, "Kern"],
+                      "clicks": 1, "impressions": 4, "ctr": 0.25, "position": 2.5}] * 1001,
+            "responseAggregationType": "byPage",
+            "metadata": {"first_incomplete_hour": "2026-08-07T12:00:00-07:00"},
+        }
+        for row_limit in ("1000", 1):
+            with self.subTest(row_limit=row_limit), patch.object(
+                search_console, "google_json_request", side_effect=[PROPERTY_RESPONSE, response]
+            ) as request:
+                result = search_console.BUNDLED_TOOL.execute(
+                    "query_search_analytics",
+                    {"site_url": SITE, "start_date": "2026-08-01", "end_date": "2026-08-07",
+                     "dimensions": dimensions, "data_state": "hourly_all", "row_limit": row_limit,
+                     "start_row": "50000"}, connected_api(),
+                )
+            assert_matches_output_schema(self, search_console.MANIFEST, "query_search_analytics", result)
+            assert isinstance(result, ActionExecuted)
+            self.assertEqual(len(result.result["rows"]), int(row_limit))
+            self.assertEqual(result.result["rows"][0]["keys"], response["rows"][0]["keys"])
+            self.assertEqual(result.result["rows"][0]["ctr"], 0.25)
+            self.assertEqual(result.result["metadata"]["first_incomplete_hour"],
+                             response["metadata"]["first_incomplete_hour"])
+            self.assertEqual(request.call_args.kwargs["body"]["dimensions"], dimensions)
+            self.assertEqual(request.call_args.kwargs["body"]["startRow"], 50000)
+            self.assertEqual(request.call_count, 2, "no automatic pagination")
+
+    def test_analytics_limits_offsets_and_dimension_combinations(self) -> None:
+        for options in ({"row_limit": "1001"}, {"row_limit": "0"}, {"row_limit": True},
+                        {"start_row": "2147483648"}, {"start_row": -1}, {"start_row": False},
+                        {"dimensions": ["page", "page"]},
+                        {"dimensions": ["searchAppearance", "page"]}):
+            with self.subTest(options=options), patch.object(
+                search_console, "google_json_request", return_value=PROPERTY_RESPONSE
+            ) as request:
+                result = search_console.BUNDLED_TOOL.execute(
+                    "query_search_analytics",
+                    {"site_url": SITE, "start_date": "2026-08-01", "end_date": "2026-08-07", **options},
+                    connected_api(),
+                )
+            self.assertIsInstance(result, ActionFailed)
+            self.assertEqual(request.call_count, 1)
+        with patch.object(search_console, "google_json_request", side_effect=[PROPERTY_RESPONSE, {}]) as request:
+            result = search_console.BUNDLED_TOOL.execute(
+                "query_search_analytics",
+                {"site_url": SITE, "start_date": "2026-08-01", "end_date": "2026-08-07",
+                 "start_row": "2147483647", "dimensions": ["searchAppearance"]}, connected_api(),
+            )
+        self.assertIsInstance(result, ActionExecuted)
+        assert isinstance(result, ActionExecuted)
+        self.assertEqual(result.result["rows"], [])
+        self.assertEqual(request.call_args.kwargs["body"]["startRow"], 2147483647)
+
+    def test_analytics_filter_aggregation_constraints(self) -> None:
+        showcase = {"dimension": "searchAppearance", "expression": "NEWS_SHOWCASE"}
+        page = {"dimension": "page", "expression": "/news"}
+        for options in (
+            {"aggregation_type": "byProperty", "dimension_filters": [page]},
+            *[{"search_type": kind, "dimension_filters": [{"dimension": "query", "expression": "Kern"}]}
+              for kind in ("discover", "googleNews")],
+            *[{"aggregation_type": "byNewsShowcasePanel", "search_type": "discover", **extra}
+              for extra in ({}, {"dimension_filters": [page]},
+                            {"dimension_filters": [showcase, page]},
+                            {"dimension_filters": [showcase], "dimensions": ["page"]},
+                            {"dimension_filters": [dict(showcase, operator="includingRegex")]},
+                            {"dimension_filters": [showcase, dict(showcase, expression="AMP_BLUE_LINK")]})],
+            {"aggregation_type": "byNewsShowcasePanel", "dimension_filters": [showcase]},
+        ):
+            with self.subTest(options=options), patch.object(
+                search_console, "google_json_request", return_value=PROPERTY_RESPONSE
+            ) as request:
+                result = search_console.BUNDLED_TOOL.execute(
+                    "query_search_analytics",
+                    {"site_url": SITE, "start_date": "2026-08-01", "end_date": "2026-08-07", **options},
+                    connected_api(),
+                )
+            self.assertIsInstance(result, ActionFailed)
+            self.assertEqual(request.call_count, 1)
+        for kind in ("discover", "googleNews"):
+            with self.subTest(kind=kind), patch.object(
+                search_console, "google_json_request",
+                side_effect=[PROPERTY_RESPONSE, {"responseAggregationType": "byNewsShowcasePanel",
+                                                "rows": [{"keys": ["usa"], "clicks": 1, "impressions": 4, "ctr": 0.25}]}],
+            ):
+                result = search_console.BUNDLED_TOOL.execute(
+                    "query_search_analytics",
+                    {"site_url": SITE, "start_date": "2026-08-01", "end_date": "2026-08-07",
+                     "aggregation_type": "byNewsShowcasePanel", "search_type": kind,
+                     "dimension_filters": [showcase], "dimensions": ["country"]}, connected_api(),
+                )
+            assert_matches_output_schema(self, search_console.MANIFEST, "query_search_analytics", result)
+            assert isinstance(result, ActionExecuted)
+            self.assertEqual(result.result["response_aggregation_type"], "byNewsShowcasePanel")
+            self.assertNotIn("position", result.result["rows"][0])
+
+    def test_filtered_analytics_preserves_live_property_authorization(self) -> None:
+        with patch.object(search_console, "google_json_request", return_value=PROPERTY_RESPONSE) as request:
+            result = search_console.BUNDLED_TOOL.execute(
+                "query_search_analytics",
+                {"site_url": "https://attacker.example/", "start_date": "2026-08-01", "end_date": "2026-08-07",
+                 "dimension_filters": [{"dimension": "page", "expression": SITE}]}, connected_api(),
+            )
+        self.assertIsInstance(result, ActionFailed)
+        self.assertEqual(request.call_count, 1)
+
     def test_scoped_action_can_use_a_readable_property_beyond_the_display_cap(self) -> None:
         properties = [
             {

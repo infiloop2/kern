@@ -283,44 +283,53 @@ def clear_thread_provider_session(
         )
 
 
-def archived_thread_session_ids(runtime: str) -> list[str]:
-    """Archived Chats with an idle provider mapping, bounded by the Chat quota."""
+def codex_cleanup_candidates(runtime: str) -> list[tuple[str, str, bool]]:
+    """Idle mappings eligible for size checks or seven-day archive cleanup."""
     with _read() as cur:
         cur.execute(
-            "SELECT session.thread_id FROM thread_sessions AS session"
-            " JOIN chat_threads AS chat USING (thread_id)"
-            " WHERE chat.archived = TRUE AND session.agent_runtime = %s"
-            " AND session.run_status = 'idle' AND session.provider_session_id IS NOT NULL"
-            " ORDER BY session.thread_id",
-            (runtime,),
+            "SELECT session.thread_id, session.provider_session_id, COALESCE(chat.archived, FALSE)"
+            " FROM thread_sessions AS session LEFT JOIN chat_threads AS chat USING (thread_id)"
+            " WHERE session.agent_runtime = %s AND session.run_status = 'idle'"
+            " AND session.provider_session_id IS NOT NULL"
+            " AND (COALESCE(chat.archived, FALSE) = FALSE"
+            " OR chat.archived_at <= CURRENT_TIMESTAMP - INTERVAL '7 days')"
+            " ORDER BY session.thread_id", (runtime,),
         )
-        return [str(row[0]) for row in cur.fetchall()]
+        return [(str(row[0]), str(row[1]), bool(row[2])) for row in cur.fetchall()]
 
 
-def detach_archived_thread_session(cur: Any, thread_id: str, runtime: str) -> str | None:
-    """Detach an archived Chat's provider context without clearing Kern history.
-
-    Lock archive state only through this short commit. A concurrent restore
-    either wins first (we skip it), or sees the detached mapping afterward.
-    Skip busy Workspace rows rather than wait while holding the host mutation
-    lock: Workspace may be calling the host while it owns that row.
-    """
+def detach_idle_codex_session(
+    cur: Any, thread_id: str, runtime: str, session_id: str, *, archived: bool,
+) -> bool:
+    """Recheck idle ownership and archive policy, then preserve Kern history."""
     cur.execute(
-        "SELECT 1 FROM chat_threads WHERE thread_id = %s AND archived = TRUE"
-        " FOR SHARE SKIP LOCKED",
-        (thread_id,),
+        "SELECT archived, archived_at <= CURRENT_TIMESTAMP - INTERVAL '7 days'"
+        " FROM chat_threads WHERE thread_id = %s FOR SHARE SKIP LOCKED", (thread_id,),
     )
-    if cur.fetchone() is None:
-        return None
+    chat = cur.fetchone()
+    if chat is None:
+        # A busy Chat must be skipped; Apps/Standing agents have no Chat row.
+        cur.execute("SELECT 1 FROM chat_threads WHERE thread_id = %s", (thread_id,))
+        if archived or cur.fetchone() is not None:
+            return False
+    elif bool(chat[0]) != archived or (archived and not chat[1]):
+        return False
     session = thread_session_config(thread_id, cur)
-    if (
-        session is None or session["agent_runtime"] != runtime
-        or session["status"] != "idle" or not session["provider_session_id"]
-    ):
-        return None
-    session_id = str(session["provider_session_id"])
+    if (session is None or session["agent_runtime"] != runtime
+        or session["status"] != "idle" or session["provider_session_id"] != session_id):
+        return False
     clear_thread_provider_session(cur, thread_id, session["run_number"], session_id)
-    return session_id
+    return True
+
+
+def referenced_provider_session_ids(runtime: str) -> set[str]:
+    """Protect every current provider mapping, including archive grace periods."""
+    with _read() as cur:
+        cur.execute(
+            "SELECT provider_session_id FROM thread_sessions"
+            " WHERE agent_runtime = %s AND provider_session_id IS NOT NULL", (runtime,),
+        )
+        return {str(row[0]) for row in cur.fetchall()}
 
 
 def touch_thread_session(cur: Any, thread_id: str, last_used_at: str) -> None:

@@ -392,14 +392,16 @@ class StageToolChecks:
             )
         else:
             calls = {
+                "seo_metrics_api": (("get_keyword_metrics", {"keywords": ["seo api"], "country": "US"}), ("get_usage", {})),
+                "ahrefs_domain_rating": (("get_domain_rating", {"domain": "ahrefs.com"}),),
                 "instagram": (
                     ("get_profile", {}),
                     ("get_recent_media", {"limit": "1"}),
                     ("get_publishing_limit", {}),
                 ),
                 "linkedin": (("get_profile", {}),),
-                "linkedin_discovery": (
-                    ("search_posts", {"query": "Kern", "limit": "1"}),
+                "google_search": (
+                    ("search", {"query": "Kern", "country": "us", "language": "en", "limit": "1"}),
                 ),
                 "web_fetch": tuple((action, {"url": "https://example.com/"}) for action in ("fetch_page", "fetch_page_file", "head_url")),
             }[tool_id]

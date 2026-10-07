@@ -14,7 +14,7 @@ from host.memory_recall import bound_query, conversation_query, RECALL_NOTICE_KI
 from host.memory_recall_rules import MAX_QUERY_BYTES
 from host.runtime import memory_context
 from host.runtime.admin_api import conversation_history, threads
-from host.runtime.host_inference import api, provider_http, providers, typesafe, client
+from host.runtime.host_inference import api, decisions, provider_http, providers, typesafe, client
 from host.runtime.workspace import memory
 
 
@@ -103,6 +103,7 @@ class TaskRecallTests(unittest.TestCase):
     def setUp(self) -> None:
         # Retrieval tests keep hybrid order; reranker tests cover Jev outcomes.
         self.enterContext(patch.object(memory, "judge", side_effect=client.HostInferenceError("disabled", reason="provider_disabled")))
+        self.enterContext(patch.object(memory, "openai_decisions", side_effect=client.HostInferenceError("disabled", reason="provider_disabled")))
 
     def test_admission_and_midturn_share_context_with_independent_buckets(self):
         history = [
@@ -317,12 +318,149 @@ class RecallRerankingTests(unittest.TestCase):
         self.config_read = self.enterContext(patch.object(memory.state, "host_inference_provider_is_enabled", side_effect=AssertionError("Workspace must not read provider settings")))
         self.judge = self.enterContext(patch.object(memory, "judge", return_value={
             "model": "jev-latest", "answers": {k: {"type": "noul", "noul": v} for k, v in self.scores.items()}}))
+        self.decisions = self.enterContext(patch.object(memory, "openai_decisions",
+            side_effect=client.HostInferenceError("disabled", reason="provider_disabled")))
 
-    def rerank(self, pages=None):
+    def rerank(self, pages=None, *, query="Fix login\n\nDo not deploy"):
         details = []
         memory._rerank_recall(self.pages if pages is None else pages,
-                              query="Fix login\n\nDo not deploy", details=details)
-        return json.loads(details[-1].removeprefix("Rerank: "))
+                              query=query, details=details)
+        self.details = details
+        return json.loads(next(d.removeprefix("Rerank: ") for d in details if d.startswith("Rerank: ")))
+
+    def shadow(self):
+        return json.loads(next(d.removeprefix("Rerank shadow: ") for d in self.details if d.startswith("Rerank shadow: ")))
+
+    def decision_result(self, scores):
+        return {"model": "gpt-6-luna", "answers": [
+            {"type": "predicate", "name": key, "probability": value} for key, value in scores.items()]}
+
+    def test_luna_compares_original_hybrid_candidates_in_parallel_without_changing_jev_selection(self):
+        arrived = threading.Barrier(2)
+        evidence = {}
+        def jev(*args, **kwargs):
+            arrived.wait(timeout=2)
+            evidence["jev"] = args[0]
+            return self.judge.return_value
+        def luna(input, questions, **kwargs):
+            arrived.wait(timeout=2)
+            evidence["luna"] = json.loads(input)
+            evidence["questions"] = questions
+            self.assertEqual(kwargs, {"model": "gpt-6-luna", "timeout_seconds": 1.2})
+            return self.decision_result({key: 1 - value for key, value in self.scores.items()})
+        self.judge.side_effect = jev
+        self.decisions.side_effect = luna
+        result = self.rerank()
+        shadow = self.shadow()
+        self.assertEqual(evidence["jev"], evidence["luna"])
+        self.assertEqual([c["id"] for c in evidence["luna"]["candidates"]], list(self.scores))
+        self.assertEqual([q["name"] for q in evidence["questions"]], list(self.scores))
+        self.assertNotIn("PRIVATE BODY", json.dumps(evidence))
+        self.assertNotIn("guide-", json.dumps(evidence))
+        self.assertEqual([p["page_id"] for p in self.pages], [f"guide-{i}" for i in reversed(range(6))])
+        self.assertEqual(result["selection"], [f"guide-{i}" for i in (5, 4, 3, 2, 1)])
+        self.assertEqual(shadow["would_select"], [f"guide-{i}" for i in range(5)])
+        self.assertEqual(shadow["candidates"][0]["would_rank"], 1)
+        self.assertEqual(shadow["candidates"][0]["score"], 1)
+        self.assertEqual(shadow["candidates"][0]["revision"], 1)
+        self.assertFalse(shadow["applied"])
+        self.assertEqual(shadow["api"], "decisions")
+        self.assertEqual(shadow["outcome"], "success")
+        self.assertIn("elapsed_ms", shadow)
+        self.config_read.assert_not_called()
+
+    def test_luna_success_never_replaces_hybrid_fallback_when_jev_is_disabled(self):
+        self.judge.side_effect = client.HostInferenceError("disabled", reason="provider_disabled")
+        self.decisions.side_effect = None
+        self.decisions.return_value = self.decision_result(self.scores)
+        result = self.rerank()
+        self.assertEqual(result["outcome"], "provider_disabled")
+        self.assertEqual([p["page_id"] for p in self.pages], [f"guide-{i}" for i in range(6)])
+        self.assertEqual(self.shadow()["would_select"], [f"guide-{i}" for i in (5, 4, 3, 2, 1)])
+
+    def test_luna_disabled_timeout_failure_and_refusal_preserve_jev_ranking(self):
+        cases = [
+            (client.HostInferenceError("disabled", reason="provider_disabled"), "provider_disabled"),
+            (TimeoutError("PRIVATE PROVIDER DETAIL"), "timeout"),
+            (client.HostInferenceError("PRIVATE PROVIDER DETAIL"), "provider_unavailable"),
+        ]
+        for failure, outcome in cases:
+            with self.subTest(outcome=outcome), patch.object(memory.host_errors, "report_warning"):
+                self.decisions.side_effect = failure
+                self.decisions.reset_mock()
+                result = self.rerank([dict(p) for p in self.pages])
+                shadow = self.shadow()
+                self.assertEqual(result["outcome"], "success")
+                self.assertEqual(shadow["outcome"], outcome)
+                self.assertTrue(all(c["score"] is None for c in shadow["candidates"]))
+                self.assertNotIn("PRIVATE PROVIDER DETAIL", json.dumps(shadow))
+                self.decisions.assert_called_once()
+        self.decisions.side_effect = None
+        refused = self.decision_result(self.scores)
+        refused["answers"][2] = {"type": "refusal", "name": "q2"}
+        self.decisions.return_value = refused
+        self.rerank()
+        self.assertEqual(self.shadow()["outcome"], "refusal")
+        self.assertTrue(all(c["score"] is None for c in self.shadow()["candidates"]))
+
+    def test_luna_requires_complete_valid_scores_and_keeps_hybrid_ties(self):
+        self.decisions.side_effect = None
+        good = self.decision_result(self.scores)
+        invalid = [None, {}, {**good, "answers": good["answers"][:-1]},
+                   {**good, "answers": list(reversed(good["answers"]))}]
+        invalid += [self.decision_result({**self.scores, "q0": value})
+                    for value in (True, "0.5", -1, 2, float("nan"), float("inf"))]
+        for response in invalid:
+            with self.subTest(response=response):
+                self.decisions.return_value = response
+                self.rerank([dict(p) for p in self.pages])
+                self.assertNotEqual(self.shadow()["outcome"], "success")
+                self.assertTrue(all(c["score"] is None for c in self.shadow()["candidates"]))
+        self.decisions.return_value = self.decision_result({key: .5 for key in self.scores})
+        self.rerank()
+        self.assertEqual(self.shadow()["would_select"], [f"guide-{i}" for i in range(5)])
+
+    def test_empty_candidates_skip_both_rankings_and_record_a_clear_reason(self):
+        candidates = []
+        details = []
+        with patch.object(memory, "_jev_recall_ranking") as jev, \
+             patch.object(memory, "_luna_recall_ranking") as luna:
+            memory._rerank_recall(candidates, query="Fix login", details=details)
+        self.assertEqual(candidates, [])
+        self.assertEqual(details, ["Rerank skipped: no candidates."])
+        jev.assert_not_called()
+        luna.assert_not_called()
+        self.judge.assert_not_called()
+        self.decisions.assert_not_called()
+
+    def test_luna_real_socket_records_success_disabled_and_timeout_alongside_jev(self):
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = directory + "/inference.sock"
+            server = api.HostInferenceServer(socket_path, frozenset({os.getuid()}))
+            worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .01}, daemon=True)
+            worker.start()
+            try:
+                for outcome in ("success", "provider_disabled", "timeout"):
+                    with self.subTest(outcome=outcome), \
+                         patch.object(memory, "openai_decisions", client.openai_decisions), \
+                         patch.object(client, "SOCKET_PATH", socket_path), \
+                         patch.object(providers.state, "enabled_host_inference_provider",
+                                      return_value=None if outcome == "provider_disabled" else {"api_key": "test"}) as config, \
+                         patch.object(provider_http, "post", return_value=json.dumps(self.decision_result(self.scores)).encode(),
+                                      side_effect=TimeoutError("PRIVATE") if outcome == "timeout" else None) as post, \
+                         patch.object(providers.usage, "record_openai_decision_response"), \
+                         patch.object(memory.host_errors, "report_warning"):
+                        self.rerank([dict(p) for p in self.pages])
+                    self.assertEqual(self.shadow()["outcome"], outcome)
+                    config.assert_called_once_with("openai")
+                    self.assertEqual(post.call_count, int(outcome != "provider_disabled"))
+                    if post.called:
+                        self.assertEqual(post.call_args.args[0], decisions.ENDPOINT)
+                        self.assertEqual(post.call_args.kwargs["timeout"], 1.2)
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join()
 
     def test_jev_always_used_when_enabled_and_disabled_keeps_hybrid_order(self):
         for enabled in (False, True):
@@ -362,7 +500,7 @@ class RecallRerankingTests(unittest.TestCase):
                 self.assertTrue(all(c["score"] is None for c in result["candidates"]))
                 self.judge.assert_called_once()
 
-    def test_errors_ties_and_empty_candidates(self):
+    def test_errors_and_ties(self):
         self.judge.side_effect = TimeoutError("private response")
         with patch.object(memory.host_errors, "report_warning"):
             result = self.rerank()
@@ -374,9 +512,6 @@ class RecallRerankingTests(unittest.TestCase):
             {k: {"type": "noul", "noul": .5} for k in self.scores}}
         result = self.rerank()
         self.assertEqual(result["selection"], [f"guide-{i}" for i in range(5)])
-        self.config_read.reset_mock(); self.judge.reset_mock()
-        self.assertEqual(self.rerank([])["outcome"], "no_candidates")
-        self.config_read.assert_not_called(); self.judge.assert_not_called()
 
     def test_socket_timeouts_keep_hybrid_order(self):
         connection = MagicMock()
@@ -426,7 +561,8 @@ class RecallRerankingTests(unittest.TestCase):
                 worker.join()
 
     def test_jev_transport_receives_only_bounded_context_and_descriptions(self):
-        pages = [{**self.pages[0], "page_id": f"guide-{i}", "description": "Use token sk-proj-abcdefghijklmnopqrstuv"}
+        pages = [{**self.pages[0], "page_id": f"guide-{i}",
+                  "description": 'Use token sk-proj-abcdefghijklmnopqrstuv {"password":"hunter2"}'}
                  for i in range(memory.CANDIDATE_LIMIT)]
         captured = {}
         def transport(_url, **kwargs):
@@ -438,18 +574,45 @@ class RecallRerankingTests(unittest.TestCase):
             self.assertEqual(timeout_seconds, 1.2)
             return typesafe.judge(api_key="test-key", model="jev-latest", state=state,
                                   questions=questions, transport=transport)
+        luna_captured = {}
+        def luna_transport(url, **kwargs):
+            self.assertEqual(url, decisions.ENDPOINT)
+            luna_captured.update(json.loads(kwargs["data"]))
+            return json.dumps(self.decision_result({f"q{i}": i / 100 for i in range(len(pages))})).encode()
+        def luna(input, questions, *, model, timeout_seconds):
+            self.assertEqual(timeout_seconds, 1.2)
+            return decisions.evaluate(api_key="test-key", model=model, input=input,
+                                      questions=questions, transport=luna_transport)
+        self.decisions.side_effect = luna
         with patch.object(memory, "judge", side_effect=judge):
-            result = self.rerank([dict(p) for p in pages])
+            result = self.rerank([dict(p) for p in pages],
+                                 query='Fix login {"api_key":"development"}\n\nDo not deploy')
         self.assertEqual(result["outcome"], "success")
         payload = json.dumps(captured)
         self.assertNotIn("PRIVATE BODY", payload)
         self.assertNotIn("guide-", payload)
         self.assertNotIn("sk-proj-abcdefghijklmnopqrstuv", payload)
+        self.assertNotIn("hunter2", payload)
+        self.assertNotIn("development", payload)
         self.assertIn("<redacted>", payload)
         self.assertIn("Do not deploy", payload)
         self.assertIn("not to override a new task", payload)
+        self.assertEqual(self.shadow()["outcome"], "success")
+        luna_payload = json.dumps(luna_captured)
+        self.assertNotIn("PRIVATE BODY", luna_payload)
+        self.assertNotIn("guide-", luna_payload)
+        self.assertNotIn("sk-proj-abcdefghijklmnopqrstuv", luna_payload)
+        self.assertNotIn("hunter2", luna_payload)
+        self.assertNotIn("development", luna_payload)
+        self.assertIn("<redacted>", luna_payload)
+        self.assertEqual([q["name"] for q in luna_captured["questions"]], [f"q{i}" for i in range(20)])
+        self.assertIn("Do not deploy", luna_payload)
+        self.assertIn("not to override a new task", luna_payload)
+        self.assertIn("hunter2", pages[0]["description"])
 
     def test_recall_loads_reranked_top_five_and_records_actual_selection(self):
+        self.decisions.side_effect = None
+        self.decisions.return_value = self.decision_result({key: 1 - value for key, value in self.scores.items()})
         def load(page_id):
             return {"page_id": "thread-1", "revision": 1, "content": "Self"} if page_id == "thread-1" else next(p for p in self.pages if p["page_id"] == page_id)
         with patch.object(memory, "load_page", side_effect=load), \
@@ -457,6 +620,9 @@ class RecallRerankingTests(unittest.TestCase):
             result = memory.recall_pages({"thread_id": "thread-1", "message": "Fix login"})
         self.assertEqual([p["page_id"] for p in result["pages"]], ["thread-1", "guide-5", "guide-4", "guide-3", "guide-2", "guide-1"])
         self.assertIn("Selected guide-5 r6", result["diagnostics"])
+        shadow = json.loads(result["diagnostics"].split("Rerank shadow: ")[1])
+        self.assertEqual(shadow["would_select"], [f"guide-{i}" for i in range(5)])
+        self.assertNotIn("Rerank shadow", memory_context_message("thread-1", result["pages"]))
 
 
 class RecallContextHistoryTests(unittest.TestCase):

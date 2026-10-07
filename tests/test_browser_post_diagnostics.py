@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from playwright.sync_api import TimeoutError
 
 from host.runtime.browser.actions import x_post_tweet as posts
+from host.runtime.browser.actions import x_diagnostics as diagnostics
 from host.runtime.browser.accounts import Profile
 from host.runtime.browser.client import BrowserError
 from host.runtime.host_diagnostics_collector.collector import parse_journal_record
@@ -23,6 +24,8 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
         self.page.get_by_role.return_value.count.return_value = 0
         self.page.get_by_role.return_value.get_by_test_id.return_value.count.return_value = 0
         self.page.goto.return_value = SimpleNamespace(status=200)
+        self.session = self.page.context.new_cdp_session.return_value
+        self.session.send.return_value = {"result": {"value": {}}}
         self.browser = Mock(page=self.page)
         self.browser.save_state.return_value = {"cookies": [], "origins": []}
         self.store = MemoryStore()
@@ -96,7 +99,11 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
         reply.count.return_value = 1
         reply.is_visible.return_value = True
         reply.is_enabled.return_value = False
-        reply.evaluate.return_value = False
+        self.session.send.side_effect = [
+            {"result": {"value": {"reply_center_unobstructed": False, "reply_in_viewport": True,
+                "reply_center_hit_tag": "div", "reply_center_hit_role": "dialog", "reply_center_hit_test_id": "mask"}}},
+            {"result": {"value": {}}},
+        ]
         reply.click.side_effect = TimeoutError("private-live-token")
         self.assert_failed_step("open_reply_composer", {**self.body, "in_reply_to_tweet_id": "12345"})
         context = self.emit.call_args.args[0]["context"]
@@ -106,7 +113,99 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
         self.assertEqual(context["page_route"], "target")
         self.assertFalse(context["reply_enabled"])
         self.assertFalse(context["reply_center_unobstructed"])
+        self.assertEqual(context["snapshot_phase"], "after_failure")
+        self.assertEqual(context["reply_center_hit_test_id"], "mask")
         reply.click.assert_called_once()
+
+    def test_enriched_snapshot_survives_reporter_and_collector_without_changing_target(self):
+        self.page.url = "https://x.com/someone/status/12345?private-live-token"
+        expected = {"target_id_link_count": 1, "target_id_article_count": 1,
+            "target_id_timestamp_article_count": 1, "target_id_query_link_count": 1,
+            "target_id_extra_path_link_count": 0, "target_id_exact_suffix_link_count": 0,
+            "target_link_scan_truncated": False, "visible_dialog_count": 0,
+            "inline_editor_count": 1, "popup_editor_count": 0, "visible_inline_editor_count": 1,
+            "visible_popup_editor_count": 0, "login_input_visible": False, "page_state_scan_truncated": False}
+        self.session.send.return_value = {"result": {"value": expected}}
+        self.expect.return_value.to_have_count.side_effect = AssertionError("private-live-token")
+        self.assert_failed_step("find_reply_target", {**self.body, "in_reply_to_tweet_id": "12345"}, "AssertionError")
+        context = self.emit.call_args.args[0]["context"]
+        for key, value in expected.items():
+            self.assertEqual(context[key], value)
+        self.assertEqual(context["target_count"], 0)
+        self.assertEqual(context["reply_target_id"], "12345")
+        self.page.locator.return_value.filter.return_value.get_by_test_id.return_value.click.assert_not_called()
+
+    def test_page_snapshot_failure_preserves_original_failure_and_does_not_click(self):
+        self.session.send.side_effect = RuntimeError("private-live-token")
+        self.expect.return_value.to_have_count.side_effect = AssertionError("private-live-token")
+        self.assert_failed_step("find_reply_target", {**self.body, "in_reply_to_tweet_id": "12345"}, "AssertionError")
+        self.assertTrue(self.emit.call_args.args[0]["context"]["snapshot_incomplete"])
+        self.assertEqual(self.emit.call_args.args[0]["context"]["target_count"], 0)
+        self.page.locator.return_value.filter.return_value.get_by_test_id.return_value.click.assert_not_called()
+
+    def test_control_snapshot_failure_still_collects_page_state(self):
+        target = self.page.locator.return_value.filter.return_value
+        target.count.return_value = 1
+        reply = target.get_by_test_id.return_value
+        reply.count.return_value = 1
+        reply.is_visible.return_value = True
+        reply.is_enabled.return_value = True
+        reply.click.side_effect = TimeoutError("private-live-token")
+        self.session.send.side_effect = [RuntimeError("private-live-token"),
+            {"result": {"value": {"inline_editor_count": 1}}}]
+        self.assert_failed_step("open_reply_composer", {**self.body, "in_reply_to_tweet_id": "12345"})
+        context = self.emit.call_args.args[0]["context"]
+        self.assertTrue(context["snapshot_incomplete"])
+        self.assertEqual(context["inline_editor_count"], 1)
+        self.assertEqual(context["target_count"], 1)
+        reply.click.assert_called_once()
+
+    def test_page_result_is_validated_before_reporting_and_cannot_overwrite_bound_facts(self):
+        self.session.send.return_value = {"result": {"value": {
+            "target_id_link_count": 1, "reply_in_viewport": True, "reply_rect_x": -10,
+            "reply_center_hit_tag": "button", "body_text": "private-live-token",
+            "reply_target_id": "private-live-token", "snapshot_phase": "private-live-token",
+            "visible_dialog_count": "private-live-token", "target_id_article_count": True,
+            "target_id_query_link_count": -1, "target_id_extra_path_link_count": 2001,
+            "reply_rect_y": 100001, "reply_rect_width": 1.5,
+            "reply_fully_in_viewport": 1, "reply_center_hit_role": "private-live-token",
+        }}}
+        self.expect.return_value.to_have_count.side_effect = AssertionError("private-live-token")
+        self.assert_failed_step("find_reply_target", {**self.body, "in_reply_to_tweet_id": "12345"}, "AssertionError")
+        context = self.emit.call_args.args[0]["context"]
+        self.assertEqual(context["reply_target_id"], "12345")
+        self.assertEqual(context["snapshot_phase"], "after_failure")
+        self.assertEqual(context["target_id_link_count"], 1)
+        self.assertEqual(context["reply_rect_x"], -10)
+        self.assertTrue(context["snapshot_incomplete"])
+        for key in ("body_text", "visible_dialog_count", "target_id_article_count",
+                    "target_id_query_link_count", "target_id_extra_path_link_count",
+                    "reply_rect_y", "reply_rect_width", "reply_fully_in_viewport", "reply_center_hit_role"):
+            self.assertNotIn(key, context)
+
+    def test_snapshot_execution_is_bounded_and_exception_details_are_discarded(self):
+        self.session.send.return_value = {"exceptionDetails": {"text": "private-live-token"}}
+        self.assertEqual(diagnostics._evaluate_facts(self.page, diagnostics.PAGE_FACTS, "12345"),
+                         {"snapshot_incomplete": True})
+        method, params = self.session.send.call_args.args
+        self.assertEqual(method, "Runtime.evaluate")
+        self.assertEqual(params["timeout"], 500)
+        self.assertTrue(params["returnByValue"])
+        self.session.detach.assert_called_once()
+
+    def test_missing_or_nonobject_snapshot_values_are_incomplete(self):
+        for value in (None, [], "private-live-token", 1):
+            with self.subTest(value=value):
+                self.session.send.return_value = {"result": {"value": value}}
+                self.assertEqual(diagnostics._evaluate_facts(self.page, diagnostics.PAGE_FACTS, "12345"),
+                                 {"snapshot_incomplete": True})
+
+    def test_failed_cdp_cleanup_does_not_mask_snapshot_or_original_failure(self):
+        self.session.send.side_effect = RuntimeError("private-live-token")
+        self.session.detach.side_effect = RuntimeError("private-live-token")
+        self.expect.return_value.to_have_count.side_effect = AssertionError("private-live-token")
+        self.assert_failed_step("find_reply_target", {**self.body, "in_reply_to_tweet_id": "12345"}, "AssertionError")
+        self.session.detach.assert_called_once()
 
     def test_snapshot_failure_preserves_original_step_and_partial_facts(self):
         self.page.locator.return_value.count.side_effect = RuntimeError("private-live-token")
