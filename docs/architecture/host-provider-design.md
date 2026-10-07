@@ -243,11 +243,12 @@ contract is expressed in resource postconditions:
 - Storage creation either returns one discoverable detached disk or leaves a
   visible resource the next run identifies by exact id. It never silently
   deletes a durable disk.
-- A launch failure deletes the disposable compute record selected for that
-  launch and preserves both durable disks.
-- Compute deletion is idempotent for an already absent resource and waits
-  until both durable devices are detached, within a bounded window.
-- Shared provisioning failure triggers the same compute cleanup.
+- Failed provisioning retains compute for diagnostics rather than automatically
+  terminating the instance. SSH-delivery failures stop EC2 compute and close
+  temporary provisioning SSH ingress; detached GitHub-delivery failures retain
+  the running instance until the operator stops or recovers it.
+- OS-level shutdown stops rather than terminates EC2.
+- Explicit recovery may replace compute while preserving durable volumes.
 - Cleanup never invokes a provider storage-delete operation. Durable storage
   deletion is an explicit, separately confirmed operator action.
 - A failed first deploy may leave one or two newly created blank durable

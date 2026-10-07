@@ -107,6 +107,7 @@ def _render_github_user_data(payload: dict[str, Any], commit_sha: str) -> str:
     # and can never collide with the heredoc delimiter.
     return (
         GITHUB_USER_DATA_TEMPLATE
+        .replace("@APT_HELPERS@", _load_template("apt.sh"))
         .replace("@PAYLOAD_JSON@", json.dumps(payload, sort_keys=True))
         .replace("@GITHUB_REPOSITORY@", PUBLIC_GITHUB_REPOSITORY)
         .replace("@COMMIT_SHA@", commit_sha)
@@ -187,6 +188,7 @@ def _agent_preview_nftables_rules() -> str:
 def _render_bootstrap() -> str:
     return (
         BOOTSTRAP_TEMPLATE
+        .replace("@APT_HELPERS@", _load_template("apt.sh"))
         .replace("@ADMIN_PORT@", str(ADMIN_API_PORT))
         .replace("@BROWSER_NETWORK_PORT@", str(BROWSER_NETWORK_PORT))
         .replace("@BROWSER_DEBUG_PORT@", str(BROWSER_DEBUG_PORT))

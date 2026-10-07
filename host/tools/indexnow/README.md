@@ -1,11 +1,39 @@
 # IndexNow
 
-Generate a random 8–128 character key using ASCII letters, digits and hyphens.
-Publish a UTF-8 `https://<host>/<key>.txt` file containing the exact key on each
-site, then save `INDEXNOW_KEY` and enable IndexNow in Home > Integrations. The
-same configured key serves all submitted hosts. No OAuth, reconnect or search
-engine dashboard registration is required. Site deployment and host key
-configuration are operator steps, not tool actions.
+Enable IndexNow in Home > Integrations. There is no manual configuration,
+OAuth, reconnect or search engine dashboard registration.
+
+`get_verification_file` accepts `{}` only (unknown fields are rejected) and
+runs directly without approval or provider requests. On first retrieval or
+valid submission proposal, Kern generates a random 32-character lowercase
+hexadecimal key and persists it in its encrypted, tool-scoped database
+storage. It survives calls, process restarts and host upgrades; disabling and
+re-enabling the integration does not rotate it. Concurrent handlers share the
+same key. There is no rotation action.
+
+The closed JSON result contains exactly `key`, `filename`, `content` and
+`path`. For a generated key `0123456789abcdef0123456789abcdef`, the result is:
+
+```json
+{
+  "key": "0123456789abcdef0123456789abcdef",
+  "filename": "0123456789abcdef0123456789abcdef.txt",
+  "content": "0123456789abcdef0123456789abcdef",
+  "path": "/0123456789abcdef0123456789abcdef.txt"
+}
+```
+
+Publish the returned UTF-8 file at `https://<host>/<key>.txt` on each owned
+site. One stored key serves all submitted hosts. The action returns deployment
+details; the agent needs separate site repository or hosting access to publish
+it. Previous manual `INDEXNOW_KEY` configuration is no longer read: deploy the
+returned file before submitting, and re-propose any old pending approvals.
+
+Retrieval exposes this intentionally published verification key and file
+details to the calling agent and its selected model provider. The private
+approval-binding salt is never returned. No caller strings need parameter
+guarding because retrieval has no inputs or provider request. Both actions
+have no IndexNow fee; normal Kern runtime costs are separate.
 
 `submit_urls` requires only `urls`: a flat array of 1–100 distinct HTTPS URL
 strings, each at most 2,048 UTF-8 bytes, on the same exact named host. Complete
@@ -22,7 +50,7 @@ full wire URL plus every nested-decoding view of its path and query. The
 longer-text guard tier is used under the stricter URL byte bound, with no
 identifier or machine-token exceptions. Guard failures reject the batch;
 there is no rewriting, redaction, page fetch or submission on this path.
-The host-owned configured key is not caller content and is not scanned.
+The host-generated stored key is not caller content and is not scanned.
 
 Every batch queues operator approval. Home > Approvals > View exact request
 displays the full exact URL list, including paths and queries. The immutable
@@ -34,7 +62,7 @@ structure, every guard and key binding; a changed key or missing binding fails
 closed. The host's single-use lifecycle prevents a second execution.
 
 After approval, Kern makes one redirect-free JSON POST of the exact URL list,
-host and configured key to `https://api.indexnow.org/indexnow`. Provider
+host and stored key to `https://api.indexnow.org/indexnow`. Provider
 ownership verification fetches the key file. The host's normal 64 KiB JSON
 input/approval bounds still apply to the complete batch. There are no automatic
 retries. Errors are curated without returning raw provider bodies.

@@ -420,10 +420,14 @@ class StageToolChecks:
         return f"{read_count} live read(s) completed{suffix}"
 
     def _check_indexnow_proposal(self) -> str:
+        first = self._successful_tool_call("indexnow_get_verification_file", {})
+        second = self._successful_tool_call("indexnow_get_verification_file", {})
+        if first != second:
+            raise RuntimeError("IndexNow verification file changed across retrievals")
         self._queue_and_deny(
             "indexnow", "indexnow_submit_urls", {"urls": ["https://example.com/new"]}
         )
-        return "bounded IndexNow notification proposal queued and denied; no live submission made"
+        return "stable managed verification file retrieved; bounded IndexNow notification proposal queued and denied; no live submission made"
 
     def _check_pagespeed_insights_live(self) -> str:
         result = self._successful_tool_call(

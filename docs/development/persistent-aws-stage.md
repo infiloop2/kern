@@ -34,8 +34,9 @@ with testing and start/stop actions. It leaves the recovered instance running
 and prints its connection details; run `kern-stage` afterward to test it, or
 `kern-stage-stop` after manual inspection.
 
-Upgrade failures can still terminate incomplete compute under the CLI's
-provisioning-failure policy. Inspect the original failure before explicitly
+Upgrade failures retain incomplete compute and diagnostic root volumes under
+the CLI's provisioning-failure policy. Attached failures attempt to stop compute;
+detached bootstrap failures leave it running for diagnosis. Inspect the original failure before explicitly
 recovering; the stage workflow does not hide it behind an automatic rebuild.
 
 The first-ever deployment remains a separate operator setup step:

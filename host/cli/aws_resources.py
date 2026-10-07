@@ -99,7 +99,7 @@ def _instance_settings() -> dict[str, Any]:
     return {
         "InstanceType": INSTANCE_TYPE,
         "CreditSpecification": {"CpuCredits": "unlimited"},
-        "InstanceInitiatedShutdownBehavior": "terminate",
+        "InstanceInitiatedShutdownBehavior": "stop",
         "MetadataOptions": {"HttpTokens": "required", "HttpEndpoint": "enabled"},
     }
 
@@ -197,12 +197,9 @@ def _launch_instance(
         "--security-group-ids",
         security_group_id,
         "--associate-public-ip-address",
-        # Instances are cattle: the root volume is disposable by contract and
-        # the durable data volumes survive termination, so an OS-initiated
-        # shutdown terminates the instance. This lets a detached (GitHub
-        # delivery) provisioning failure clean up its own instance, and the
-        # stop command still parks compute through the EC2 API, which this
-        # attribute does not affect.
+        # Stop rather than terminate on OS shutdown. Failed user-data bootstrap
+        # remains inspectable, including its root volume and cloud-init logs.
+        # The lifecycle CLI can explicitly replace compute during recovery.
         "--instance-initiated-shutdown-behavior",
         settings["InstanceInitiatedShutdownBehavior"],
         "--metadata-options",

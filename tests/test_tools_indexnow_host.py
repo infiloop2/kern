@@ -14,8 +14,15 @@ class IndexNowHostTests(ToolsHostTestCase):
         super().setUp()
         with state.mutation() as cur:
             state.set_tool_enabled(cur, "indexnow", True)
-            state.save_tool_config_value(cur, "indexnow", "INDEXNOW_KEY", "test-key")
         self.request = self.enterContext(patch.object(indexnow, "request_bytes"))
+
+    def test_verification_key_persists_across_host_calls_without_configuration(self):
+        first = tools_host.execute_action("indexnow", "get_verification_file", {}, origin_thread_id=None)
+        second = tools_host.execute_action("indexnow", "get_verification_file", {}, origin_thread_id=None)
+        self.assertEqual(first["status"], "executed")
+        self.assertEqual(first["result"], second["result"])
+        self.assertEqual(state.tool_secret("indexnow")["key"], first["result"]["key"])
+        self.request.assert_not_called()
 
     def call(self, tool_input):
         return tools_host.execute_action("indexnow", "submit_urls", tool_input, origin_thread_id=None)
@@ -36,21 +43,23 @@ class IndexNowHostTests(ToolsHostTestCase):
         approval_id = pending["approval_id"]
         record = state.tool_approval(approval_id)
         self.assertEqual(record["payload"]["urls"], urls)
-        self.assertNotIn("test-key", json.dumps(record["payload"]))
+        verification = tools_host.execute_action("indexnow", "get_verification_file", {}, origin_thread_id=None)
+        key = verification["result"]["key"]
+        self.assertNotIn(key, json.dumps(record["payload"]))
         self.request.assert_not_called()
         result = tools_host.decide_approval(approval_id, "approve", public_hostname=None)
         self.assertEqual(result["approval"]["status"], "executed")
-        self.assertEqual(json.loads(self.request.call_args.kwargs["data"])["urlList"], urls)
+        self.assertEqual(json.loads(self.request.call_args.kwargs["data"]), {"host": "example.com", "key": key, "urlList": urls})
         self.request.assert_called_once()
         with self.assertRaisesRegex(tools_host.ToolCallError, "not pending"):
             tools_host.decide_approval(approval_id, "approve", public_hostname=None)
 
-    def test_denial_and_configuration_change_do_not_submit(self):
+    def test_denial_and_stored_key_change_do_not_submit(self):
         denied = self.call({"urls": ["https://example.com/new"]})
         self.assertEqual(tools_host.decide_approval(denied["approval_id"], "deny", public_hostname=None)["approval"]["status"], "denied")
         pending = self.call({"urls": ["https://example.com/new"]})
-        with state.mutation() as cur:
-            state.save_tool_config_value(cur, "indexnow", "INDEXNOW_KEY", "changed-key")
+        private = state.tool_secret("indexnow")
+        state.put_tool_secret("indexnow", json.dumps({**private, "key": "f" * 32}))
         result = tools_host.decide_approval(pending["approval_id"], "approve", public_hostname=None)
         self.assertEqual(result["approval"]["status"], "failed")
         self.assertIn("key changed", result["result"]["error"])
