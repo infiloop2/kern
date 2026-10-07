@@ -23,7 +23,6 @@ def configured_api() -> FakeHostAPI:
     return FakeHostAPI(
         config={
             "PAGESPEED_INSIGHTS_API_KEY": "pagespeed-secret",
-            "INDEXNOW_KEY": "0123456789abcdef0123456789abcdef",
         }
     )
 
@@ -144,6 +143,34 @@ class PageSpeedInsightsTests(unittest.TestCase):
 
 
 class IndexNowTests(unittest.TestCase):
+    def test_verification_file_is_generated_once_and_survives_api_recreation(self):
+        api = configured_api()
+        api.secrets.save({"fingerprint_salt": "a" * 64, "other": "preserved"})
+        with patch.object(indexnow, "request_bytes") as request, patch.object(api.approvals, "request") as queue:
+            result = indexnow.BUNDLED_TOOL.execute("get_verification_file", {}, api)
+            self.assertIsInstance(result, ActionExecuted)
+            assert_matches_output_schema(self, indexnow.MANIFEST, "get_verification_file", result)
+            key = result.result["key"]
+            self.assertEqual(result.result, {"key": key, "filename": f"{key}.txt", "content": key, "path": f"/{key}.txt"})
+            recreated = replace(api, config={})
+            self.assertEqual(indexnow.BUNDLED_TOOL.execute("get_verification_file", {}, recreated), result)
+            self.assertEqual(api.secrets.load()["other"], "preserved")
+            self.assertEqual(api.secrets.load()["fingerprint_salt"], "a" * 64)
+            queue.assert_not_called()
+            request.assert_not_called()
+        self.assertFalse(indexnow.MANIFEST.config)
+        self.assertFalse(api.costs.calls)
+
+    def test_verification_file_rejects_inputs_and_corrupt_key_without_replacing_it(self):
+        api = configured_api()
+        result = indexnow.BUNDLED_TOOL.execute("get_verification_file", {"key": "caller-key"}, api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIsNone(api.secrets.load())
+        api.secrets.save({"key": "invalid"})
+        result = indexnow.BUNDLED_TOOL.execute("get_verification_file", {}, api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertEqual(api.secrets.load(), {"key": "invalid"})
+
     def test_approval_omits_key_and_posts_exact_batch(self):
         api = configured_api()
         urls = ["https://example.com/new", "https://example.com/changed?version=2"]
@@ -152,8 +179,10 @@ class IndexNowTests(unittest.TestCase):
             self.assertIsInstance(pending, ActionPendingApproval)
             assert isinstance(pending, ActionPendingApproval)
             approval = api.approvals.approve(pending.approval_id)
-            self.assertNotIn(api.config["INDEXNOW_KEY"], json.dumps(approval.payload))
-            self.assertNotEqual(approval.payload["key_fingerprint"], hashlib.sha256(api.config["INDEXNOW_KEY"].encode()).hexdigest())
+            self.assertNotIn(api.secrets.load()["key"], json.dumps(approval.payload))
+            self.assertNotEqual(approval.payload["key_fingerprint"], hashlib.sha256(api.secrets.load()["key"].encode()).hexdigest())
+            verification = indexnow.BUNDLED_TOOL.execute("get_verification_file", {}, api)
+            self.assertEqual(verification.result["key"], api.secrets.load()["key"])
             self.assertNotIn(api.secrets.load()["fingerprint_salt"], json.dumps(approval.payload))
             self.assertEqual(approval.payload["urls"], urls)
             request.assert_not_called()
@@ -163,7 +192,7 @@ class IndexNowTests(unittest.TestCase):
         request.assert_called_once()
         self.assertEqual(request.call_args.args, ("POST", indexnow.ENDPOINT))
         self.assertEqual(json.loads(request.call_args.kwargs["data"]), {
-            "host": "example.com", "key": api.config["INDEXNOW_KEY"], "urlList": urls,
+            "host": "example.com", "key": api.secrets.load()["key"], "urlList": urls,
         })
 
     def test_invalid_or_mixed_hosts_and_key_change_fail_before_post(self):
@@ -183,7 +212,7 @@ class IndexNowTests(unittest.TestCase):
             pending = indexnow.BUNDLED_TOOL.execute("submit_urls", {"urls": ["https://example.com/new"]}, api)
             assert isinstance(pending, ActionPendingApproval)
             approval = api.approvals.approve(pending.approval_id)
-            api.config["INDEXNOW_KEY"] = "fedcba9876543210fedcba9876543210"
+            api.secrets.save({**api.secrets.load(), "key": "fedcba9876543210fedcba9876543210"})
             self.assertIsInstance(indexnow.BUNDLED_TOOL.execute_approved(approval, api), ActionFailed)
         request.assert_not_called()
 
@@ -259,13 +288,14 @@ class IndexNowTests(unittest.TestCase):
             return value
         def fingerprint(_):
             start.wait(timeout=5)
-            return indexnow._key_fingerprint(api.config["INDEXNOW_KEY"], api, create=True)
+            key = indexnow._key(api, create=True)
+            return key, indexnow._key_fingerprint(key, api, create=True)
         with patch.object(api.secrets, "load", side_effect=slow_initial_load), patch.object(api.secrets, "save", wraps=api.secrets.save) as save:
             with ThreadPoolExecutor(max_workers=4) as pool:
                 bindings = list(pool.map(fingerprint, range(4)))
-        save.assert_called_once()
+        self.assertEqual(save.call_count, 2)  # One key, one private binding salt.
         self.assertEqual(len(set(bindings)), 1)
-        self.assertEqual(bindings[0], indexnow._key_fingerprint(api.config["INDEXNOW_KEY"], api))
+        self.assertEqual(bindings[0], (api.secrets.load()["key"], indexnow._key_fingerprint(api.secrets.load()["key"], api)))
 
     def test_complete_approval_json_size_checked_before_queue_and_execution(self):
         api = configured_api()

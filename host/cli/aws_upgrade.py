@@ -71,6 +71,8 @@ def replace_root(
     target_version: str,
     ssh_ingress: bool,
     cloudflare_egress: bool,
+    *,
+    temporary_ssh_ingress: bool = False,
 ) -> tuple[str, str]:
     instance_id = plan.instance["InstanceId"]
     root_device = plan.instance["RootDeviceName"]
@@ -91,10 +93,11 @@ def replace_root(
         "--tag-specifications", aws._tag_spec("volume", config.agent_name),
     )["VolumeId"]
     replacing = False
+    group: str | None = None
     old_root = plan.root["VolumeId"]
     try:
         aws._aws(env, "ec2", "wait", "volume-available", "--volume-ids", new_root)
-        # Protect data before any failure path is allowed to terminate compute.
+        # Protect data against later explicit recovery or termination.
         aws._preserve_existing_storage_volumes_on_instance_termination(config, env, [instance_id])
         _log(f"stopping {instance_id}; preserving its CPU credits and data disks")
         _stop_instance(env, instance_id, plan.instance["State"]["Name"])
@@ -118,16 +121,24 @@ def replace_root(
         aws._aws(env, "ec2", "start-instances", "--instance-ids", instance_id)
         return instance_id, group
     except BaseException:
-        if replacing:
-            # Match launch/bootstrap failure semantics: no exposed half-install,
-            # no rollback of databases already migrated on preserved storage.
+        if temporary_ssh_ingress and group is not None:
             try:
-                aws._terminate_instances([instance_id], env)
+                aws._close_security_group_ssh_ingress(env, group)
             except Exception as exc:
-                _log(f"warning: failed to terminate incomplete upgrade {instance_id}: {exc}")
-        for volume_id in (old_root if replacing else "", new_root):
-            if volume_id:
-                _delete_unused_root(env, volume_id)
+                _log(f"warning: could not close provisioning SSH ingress: {exc}")
+        if replacing:
+            # Leave the root attached for diagnosis, stopping compute rather
+            # than terminating an incomplete upgrade.
+            try:
+                aws._aws(env, "ec2", "stop-instances", "--instance-ids", instance_id)
+            except Exception as exc:
+                _log(f"warning: failed to stop incomplete upgrade {instance_id}: {exc}")
+        # A failed attach can leave no root on the instance. Never delete the
+        # detached original on this path: it may be the only diagnostic root.
+        # Do not boot it automatically; durable state may already have changed.
+        if old_root:
+            _log(f"preserving original root {old_root} for diagnosis; remove it explicitly after recovery")
+        _delete_unused_root(env, new_root)
         _log("upgrade failed; use recover --allow-upgrade to rebuild compute from the preserved data disks")
         raise
 

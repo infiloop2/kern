@@ -11,20 +11,25 @@ def run(page, url, log_in, open_home_integration):
     log_in(page, url)
     for tool_id, key, action in (
         ("pagespeed_insights", "PAGESPEED_INSIGHTS_API_KEY", "analyze_page"),
-        ("indexnow", "INDEXNOW_KEY", "submit_urls"),
+        ("indexnow", None, "submit_urls"),
         ("google_search_console", "GOOGLE_OAUTH_CLIENT_ID", "inspect_urls"),
     ):
         open_home_integration(page, f"tool:{tool_id}")
         guide = page.locator(f"[data-guide-section='tool:{tool_id}']")
         expect(guide).to_contain_text("2,048")
         expect(guide.locator(".guide-technical-details")).to_contain_text("Parameter guard")
-        expect(page.locator(f"#tool-config-{tool_id}-{key}")).to_have_attribute("type", "password")
+        if key:
+            expect(page.locator(f"#tool-config-{tool_id}-{key}")).to_have_attribute("type", "password")
+        else:
+            expect(page.locator("#tool-config-indexnow-INDEXNOW_KEY")).to_have_count(0)
         capability = guide.locator(".guide-capability").filter(has=page.locator("h4 code", has_text=action))
         capability.locator(".guide-action-contract > summary").click()
         if tool_id == "pagespeed_insights":
             expect(capability.locator(".guide-input-protection").first).to_contain_text("longer text")
             expect(guide).to_contain_text("free")
         elif tool_id == "indexnow":
+            expect(guide).to_contain_text("get_verification_file")
+            expect(guide).to_contain_text("no manual key configuration")
             expect(guide).to_contain_text("not Google")
             expect(guide).to_contain_text("before approval and again before submission")
         else:

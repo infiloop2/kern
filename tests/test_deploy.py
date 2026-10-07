@@ -578,7 +578,7 @@ class DeployUnitTests(unittest.TestCase):
         self.assertEqual(admin_mapping, [{"DeviceName": "/dev/sdf", "Ebs": {"DeleteOnTermination": False}}])
         self.assertEqual(agent_mapping, [{"DeviceName": "/dev/sdg", "Ebs": {"DeleteOnTermination": False}}])
 
-    def test_launch_instance_sets_unlimited_cpu_credits_and_terminate_on_shutdown(self) -> None:
+    def test_launch_instance_sets_unlimited_cpu_credits_and_stop_on_shutdown(self) -> None:
         config = sample_input_config()
         calls: list[tuple[str, ...]] = []
 
@@ -611,10 +611,9 @@ class DeployUnitTests(unittest.TestCase):
         self.assertEqual(instance_id, "i-123")
         run = next(call for call in calls if call[:2] == ("ec2", "run-instances"))
         self.assertEqual(json.loads(run[run.index("--credit-specification") + 1]), {"CpuCredits": "unlimited"})
-        # An OS-initiated shutdown terminates the instance, so a detached
-        # provisioning failure can clean up its own instance.
+        # An OS-initiated shutdown stops the instance, preserving bootstrap logs.
         self.assertIn("--instance-initiated-shutdown-behavior", run)
-        self.assertEqual(run[run.index("--instance-initiated-shutdown-behavior") + 1], "terminate")
+        self.assertEqual(run[run.index("--instance-initiated-shutdown-behavior") + 1], "stop")
 
     def test_storage_volume_lookup_rejects_attached_or_duplicate_state(self) -> None:
         config = sample_input_config()
@@ -1094,7 +1093,7 @@ class DeployUnitTests(unittest.TestCase):
             self.assertNotIn("operator_connections", upgrade_result)
             self.assertEqual(os.listdir(tmp), [])
 
-    def test_provisioning_timeout_returns_controlled_failure(self) -> None:
+    def test_provisioning_timeout_stops_instance_even_if_ssh_cleanup_fails(self) -> None:
         # A bounded SSH transfer or bootstrap that expires must exit through
         # the normal diagnostic/return-code contract, not a traceback.
         with tempfile.TemporaryDirectory() as tmp:
@@ -1106,6 +1105,7 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle_aws._existing_storage_volume_availability_zone", return_value=None), \
                         patch("host.cli.lifecycle_aws._existing_storage_roles", return_value=set()), \
                         patch("host.cli.lifecycle_aws._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")), \
+                        patch("host.cli.lifecycle_aws._launch_access_state", return_value=(False, True)), \
                         patch("host.cli.lifecycle_aws._generate_deploy_key", side_effect=_fake_deploy_key), \
                         patch("host.cli.lifecycle_aws._launch_instance", return_value=("i-123", "sg-1")), \
                         patch(
@@ -1119,6 +1119,8 @@ class DeployUnitTests(unittest.TestCase):
                             side_effect=subprocess.TimeoutExpired(["scp"], timeout=600),
                         ), \
                         patch("host.cli.lifecycle_aws._terminate_instances") as terminate, \
+                        patch("host.cli.lifecycle_aws._close_security_group_ssh_ingress", side_effect=ConfigError("revoke denied")), \
+                        patch("host.cli.lifecycle_aws._aws", return_value={}) as stop_aws, \
                         patch("host.cli.aws_resources._aws", return_value={}), \
                         patch("sys.stdout", _StringOutput()) as stdout, \
                         patch("sys.stderr", _StringOutput()) as stderr:
@@ -1138,9 +1140,11 @@ class DeployUnitTests(unittest.TestCase):
                     )
             finally:
                 os.chdir(cwd)
-        terminate.assert_called_once()
+        terminate.assert_not_called()
+        stop_aws.assert_called_once_with(unittest.mock.ANY, "ec2", "stop-instances", "--instance-ids", "i-123")
         self.assertEqual(stdout.value, "")
         self.assertIn("deploy command failed", stderr.value)
+        self.assertIn("revoke denied", stderr.value)
 
     def test_failed_deploy_reports_created_data_volumes_without_deleting(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1166,6 +1170,7 @@ class DeployUnitTests(unittest.TestCase):
                         patch("host.cli.lifecycle_aws._attach_storage_volumes"), \
                         patch("host.cli.lifecycle_aws._provision_over_ssh", side_effect=ConfigError("bootstrap failed")), \
                         patch("host.cli.lifecycle_aws._terminate_instances") as terminate, \
+                        patch("host.cli.lifecycle_aws._aws", return_value={}) as stop_aws, \
                         patch("host.cli.aws_resources._aws", return_value={}), \
                         patch("sys.stdout", _StringOutput()), \
                         patch("sys.stderr", _StringOutput()) as stderr:
@@ -1188,7 +1193,8 @@ class DeployUnitTests(unittest.TestCase):
 
         # One volume rule, both deliveries: created volumes are never
         # auto-deleted; the retry refuses them until the operator deletes them.
-        terminate.assert_called_once()
+        terminate.assert_not_called()
+        stop_aws.assert_called_once_with(unittest.mock.ANY, "ec2", "stop-instances", "--instance-ids", "i-123")
         self.assertIn("vol-admin, vol-agent", stderr.value)
         self.assertIn("delete the tagged volumes before retrying deploy", stderr.value)
 
@@ -1274,18 +1280,18 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn("git fetch -q --depth 1 origin '" + "b" * 40 + "'", user_data)
         self.assertIn("python3 -m host.bootstrap.self_provision", user_data)
         # The CLI preflight already proved the commit readable, so host-side
-        # fetch failures are transient; both network steps retry for an
-        # extended window instead of bricking the instance.
-        self.assertEqual(user_data.count("for attempt in $(seq 1 60); do"), 2)
+        # Git fetch retries for an extended window. Missing Git is installed
+        # through the same bounded APT helper as the main bootstrap.
+        self.assertEqual(user_data.count("for attempt in $(seq 1 60); do"), 1)
         self.assertIn("sleep 30", user_data)
         # The first-boot apt timers are stopped before the git install (they
         # hold the dpkg lock for unbounded archive downloads otherwise); the
-        # same-version bootstrap restarts them after its own apt work.
+        # bootstrap restarts them after all APT work, or on failure.
         self.assertIn("systemctl stop apt-daily.timer apt-daily-upgrade.timer", user_data)
-        self.assertNotIn("systemctl start apt-daily.timer", user_data)
+        self.assertIn("systemctl start apt-daily.timer apt-daily-upgrade.timer", user_data)
         self.assertLess(
             user_data.index("systemctl stop apt-daily.timer"),
-            user_data.index("apt-get -q -o DPkg::Lock::Timeout=300"),
+            user_data.index("apt_get update"),
         )
         self.assertIn("useradd --create-home --shell /bin/bash kern-operator", user_data)
         self.assertIn("gpasswd -d ubuntu sudo", user_data)
@@ -1293,10 +1299,10 @@ class DeployUnitTests(unittest.TestCase):
         # in this delivery.
         self.assertIn(SAMPLE_ADMIN_PASSWORD_SHA256, user_data)
         self.assertNotIn("authorized_keys2", user_data)
-        # A provisioning failure shuts the instance down, which terminates it
-        # because instances launch with terminate-on-shutdown behavior.
+        # A provisioning failure leaves the instance running for diagnosis.
         self.assertIn("trap on_exit EXIT", user_data)
-        self.assertIn("shutdown -h now", user_data)
+        self.assertNotIn("shutdown -h now", user_data)
+        self.assertIn("preserving instance for diagnosis", user_data)
         self.assertNotIn("@PAYLOAD_JSON@", user_data)
         self.assertNotIn("@GITHUB_REPOSITORY@", user_data)
         self.assertNotIn("@COMMIT_SHA@", user_data)
@@ -1847,22 +1853,15 @@ class DeployUnitTests(unittest.TestCase):
         bootstrap = render._render_bootstrap()
 
         self.assertIn("APT_COMMAND_TIMEOUT=300s", bootstrap)
-        self.assertIn("APT_ACQUIRE_RETRIES=2", bootstrap)
-        self.assertIn("APT_ACQUIRE_TIMEOUT=20", bootstrap)
-        self.assertIn("APT_REGIONAL_UPDATE_COMMAND_TIMEOUT=60s", bootstrap)
-        self.assertIn("APT_REGIONAL_UPDATE_ACQUIRE_RETRIES=0", bootstrap)
-        self.assertIn("APT_REGIONAL_UPDATE_ACQUIRE_TIMEOUT=10", bootstrap)
-        self.assertIn("has_ec2_ubuntu_archive_source", bootstrap)
-        self.assertIn(
-            'APT_ARCHIVE_FALLBACK_ACTIVE" == false && "${1:-}" == "update" ]] \\\n'
-            "    && has_ec2_ubuntu_archive_source",
-            bootstrap,
-        )
+        self.assertIn("APT_ACQUIRE_RETRIES=0", bootstrap)
+        self.assertIn("APT_ACQUIRE_TIMEOUT=10", bootstrap)
+        self.assertIn("APT_UPDATE_COMMAND_TIMEOUT=60s", bootstrap)
         self.assertIn('timeout --signal=TERM --kill-after=30s "$command_timeout"', bootstrap)
         self.assertIn("APT::Update::Error-Mode=any", bootstrap)
-        self.assertIn("switch_to_ubuntu_archive_fallback", bootstrap)
-        self.assertIn("http://archive.ubuntu.com/ubuntu", bootstrap)
-        self.assertIn("APT_ARCHIVE_FALLBACK_ACTIVE=true", bootstrap)
+        self.assertIn("select_ubuntu_mirror", bootstrap)
+        self.assertIn("--connect-timeout 2 --max-time 6", bootstrap)
+        self.assertIn("--download-only", bootstrap)
+        self.assertIn("--no-download", bootstrap)
 
     def test_rendered_bootstrap_reads_the_nested_grok_platform_payload(self) -> None:
         bootstrap = render._render_bootstrap()
@@ -1907,11 +1906,11 @@ class DeployUnitTests(unittest.TestCase):
         # server package installs; the real data directory lives on the
         # durable admin volume, versioned by Postgres major.
         self.assertIn("create_main_cluster = false", bootstrap)
-        self.assertIn('apt_get install -y "postgresql-${PG_MAJOR}"', bootstrap)
+        self.assertIn('apt_get install --no-upgrade -y "postgresql-${PG_MAJOR}"', bootstrap)
         self.assertIn("PG_MAJOR=14", bootstrap)
         self.assertLess(
             bootstrap.index("create_main_cluster = false"),
-            bootstrap.index('apt_get install -y "postgresql-${PG_MAJOR}"'),
+            bootstrap.index('apt_get install --no-upgrade -y "postgresql-${PG_MAJOR}"'),
         )
 
         self.assertIn('runuser -u postgres -- "$PG_BIN/initdb" -D "$PGDATA_DIR"', bootstrap)

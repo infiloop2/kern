@@ -9,15 +9,14 @@ set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 umask 077
 
-# Failed provisioning leaves no instance, same as the SSH delivery where the
-# CLI terminates it: instances launch with instance-initiated shutdown
-# behavior set to terminate, so shutting down on any failure terminates this
-# instance and deletes its root volume. Attached data volumes survive.
+# Preserve the instance and root volume when provisioning fails so operators
+# can inspect cloud-init logs and repair networking/packages before retrying.
+# The lifecycle command can later recover or replace the failed host.
 on_exit() {
   code=$?
   if [ "$code" != 0 ]; then
-    echo "Kern provisioning failed (exit $code); shutting down to terminate this instance" >&2
-    shutdown -h now
+    systemctl start apt-daily.timer apt-daily-upgrade.timer || echo "warning: could not restart APT maintenance timers" >&2
+    echo "Kern provisioning failed (exit $code); preserving instance for diagnosis" >&2
   fi
 }
 trap on_exit EXIT
@@ -41,21 +40,14 @@ chmod 600 /tmp/kern_payload.json
 systemctl stop apt-daily.timer apt-daily-upgrade.timer
 systemctl stop apt-daily.service apt-daily-upgrade.service
 
-# The lifecycle CLI already proved the pinned commit exists and is readable
-# before launching this instance, so failures below are transient network or
-# GitHub availability issues. Retry for an extended window (roughly half an
-# hour each) so an outage delays provisioning instead of failing it.
-for attempt in $(seq 1 60); do
-  if apt-get -q -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 -o Acquire::Languages=none update \
-    && apt-get -q -o DPkg::Lock::Timeout=300 -o Acquire::Retries=3 -o Acquire::Languages=none install -y git; then
-    break
-  fi
-  if [ "$attempt" = 60 ]; then
-    echo "could not install git for Kern provisioning" >&2
-    exit 1
-  fi
-  sleep 20
-done
+@APT_HELPERS@
+
+# Ubuntu AMIs normally include git. If it is missing, use the same bounded
+# mirror fallback as the fetched bootstrap, before depending on GitHub.
+if ! command -v git >/dev/null 2>&1; then
+  apt_get update
+  apt_get install --no-upgrade -y git
+fi
 
 rm -rf /tmp/kern-checkout
 git init -q /tmp/kern-checkout

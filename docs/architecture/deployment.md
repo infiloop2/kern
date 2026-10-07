@@ -364,22 +364,25 @@ Upgrade/recovery safety checks exist in two layers:
 
 A failure before root detachment leaves the original instance (possibly stopped)
 and removes the unused replacement root. Once root replacement begins, a failed
-upgrade terminates incomplete compute and cleans up disposable roots; the operator
-uses `recover --allow-upgrade` to rebuild from the protected data volumes.
-A failed provisioning run leaves no instance, on either delivery. While the
-CLI is attached it terminates the instance itself. After the CLI returns (the
-GitHub delivery), the user-data script shuts the instance down on any failure,
-which terminates it: instances launch with instance-initiated shutdown
-behavior set to terminate, because the root volume is disposable by contract
-and the durable data volumes survive termination. The `stop` command parks
-compute through the EC2 API, which that attribute does not affect; an
-OS-level shutdown on any Kern host terminates it, and `recover`
-rebuilds the host from the preserved volumes.
+upgrade stops incomplete compute for diagnosis and removes only an unused replacement
+root. If the original root has not yet been deleted, failure handling preserves it,
+even when detached, and logs its ID for explicit cleanup after diagnosis. It is
+never automatically booted again because durable state may already have changed.
+The operator uses `recover --allow-upgrade` to rebuild from the protected data volumes.
+Failed provisioning preserves the EC2 instance and its root filesystem for
+diagnosis. Attached SSH-delivery failures stop the instance and close temporary
+provisioning SSH ingress; detached GitHub-delivery failures leave the instance
+running with cloud-init logs intact. EC2 instance-initiated shutdown behavior
+is `stop`, not `terminate`, preserving the root volume and any remaining CPU
+credits (subject to AWS credit retention rules). Retained instances can incur
+charges and must be stopped or explicitly recovered by the operator. An explicit
+`recover` operation may replace compute while retaining durable data volumes.
 
 Data volumes created by a failed run are left in place and their ids are
 printed when the CLI is attached. A later `deploy` retry refuses those
 existing volumes and explains that blank volumes from a failed first install
-must be deleted before retrying; preserved volumes are never deleted.
+and any retained compute instance must be explicitly removed before retrying;
+preserved volumes are never automatically deleted.
 Recovery commands are reserved for initialized Kern volumes with admin
 state.
 
@@ -388,6 +391,21 @@ Upgrade preserves credentials by reading the existing stored config (the
 `admin_password_sha256` and `operator_connections`.
 `reconfigure` replaces `operator_connections` from the input config and
 installs the `--admin-password-sha256` digest every time.
+
+Bootstrap and pre-fetch Git installation share the same APT retry and official
+Ubuntu mirror selection helper. It compares the configured EC2 mirror and the
+official archive/security endpoints over HTTP and HTTPS using parallel probes
+capped at six seconds, then selects by measured throughput. Real APT failures
+exclude that endpoint and select another responsive candidate; a source change
+refreshes signed indexes before retrying an install. If probes all fail, the
+existing sources remain available for bounded APT retries. Playwright's browser
+dependencies also use this
+helper. Installs use `--no-upgrade`: existing packages stay in place unless a
+change is required to satisfy a new dependency. Download attempts are bounded;
+unpacking/configuring downloaded packages is not killed by a network timeout.
+Signed indexes and package authentication remain required. Ubuntu's automatic
+update timers stay paused through all bootstrap APT work, then resume; failure
+cleanup also attempts to resume them on retained hosts.
 
 ## Secret handling
 

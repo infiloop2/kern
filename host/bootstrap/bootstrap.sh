@@ -458,98 +458,7 @@ chmod -R a+rX /opt/kern-host
 chmod 644 /opt/kern-host/VERSION
 }
 
-# Fail the initial regional-mirror update quickly: it is safe to restart and
-# its only purpose is to populate package indexes. Package installs keep the
-# longer limits because terminating dpkg or a legitimate large download after
-# one minute would be unsafe. The archive fallback also keeps the longer limits
-# so a slow but working global mirror does not make the deployment brittle.
-APT_ARCHIVE_FALLBACK_ACTIVE=false
-APT_COMMAND_TIMEOUT=300s
-APT_ACQUIRE_RETRIES=2
-APT_ACQUIRE_TIMEOUT=20
-APT_REGIONAL_UPDATE_COMMAND_TIMEOUT=60s
-APT_REGIONAL_UPDATE_ACQUIRE_RETRIES=0
-APT_REGIONAL_UPDATE_ACQUIRE_TIMEOUT=10
-
-apt_get_once() {
-  local command_timeout="$1" acquire_retries="$2" acquire_timeout="$3"
-  shift 3
-  timeout --signal=TERM --kill-after=30s "$command_timeout" \
-    apt-get -q \
-      -o DPkg::Lock::Timeout=300 \
-      -o APT::Keep-Downloaded-Packages=true \
-      -o Acquire::Retries="$acquire_retries" \
-      -o Acquire::http::Timeout="$acquire_timeout" \
-      -o Acquire::https::Timeout="$acquire_timeout" \
-      -o Acquire::Languages=none \
-      -o APT::Update::Error-Mode=any \
-      "$@"
-}
-
-has_ec2_ubuntu_archive_source() {
-  local source_file
-  local -a source_files
-  shopt -s nullglob
-  source_files=(
-    /etc/apt/sources.list
-    /etc/apt/sources.list.d/*.list
-    /etc/apt/sources.list.d/*.sources
-  )
-  shopt -u nullglob
-  for source_file in "${source_files[@]}"; do
-    if grep -Eq '^[[:space:]]*(deb|URIs:).*https?://[^/]*\.ec2\.archive\.ubuntu\.com/ubuntu' "$source_file"; then
-      return 0
-    fi
-  done
-  return 1
-}
-
-switch_to_ubuntu_archive_fallback() {
-  local changed=false source_file
-  local -a source_files
-  shopt -s nullglob
-  source_files=(
-    /etc/apt/sources.list
-    /etc/apt/sources.list.d/*.list
-    /etc/apt/sources.list.d/*.sources
-  )
-  shopt -u nullglob
-  for source_file in "${source_files[@]}"; do
-    if grep -Eq '^[[:space:]]*(deb|URIs:).*https?://[^/]*\.ec2\.archive\.ubuntu\.com/ubuntu' "$source_file"; then
-      sed -i -E \
-        's#https?://[^/]*\.ec2\.archive\.ubuntu\.com/ubuntu#http://archive.ubuntu.com/ubuntu#g' \
-        "$source_file"
-      changed=true
-    fi
-  done
-  [[ "$changed" == true ]]
-}
-
-apt_get() {
-  local command_timeout="$APT_COMMAND_TIMEOUT"
-  local acquire_retries="$APT_ACQUIRE_RETRIES"
-  local acquire_timeout="$APT_ACQUIRE_TIMEOUT"
-  if [[ "$APT_ARCHIVE_FALLBACK_ACTIVE" == false && "${1:-}" == "update" ]] \
-    && has_ec2_ubuntu_archive_source; then
-    command_timeout="$APT_REGIONAL_UPDATE_COMMAND_TIMEOUT"
-    acquire_retries="$APT_REGIONAL_UPDATE_ACQUIRE_RETRIES"
-    acquire_timeout="$APT_REGIONAL_UPDATE_ACQUIRE_TIMEOUT"
-  fi
-
-  if apt_get_once "$command_timeout" "$acquire_retries" "$acquire_timeout" "$@"; then
-    return 0
-  fi
-  if [[ "$APT_ARCHIVE_FALLBACK_ACTIVE" == true ]] || ! switch_to_ubuntu_archive_fallback; then
-    return 1
-  fi
-
-  APT_ARCHIVE_FALLBACK_ACTIVE=true
-  echo "apt-get failed against the regional EC2 Ubuntu mirror; retrying via archive.ubuntu.com" >&2
-  if [[ "${1:-}" != "update" ]]; then
-    apt_get_once "$APT_COMMAND_TIMEOUT" "$APT_ACQUIRE_RETRIES" "$APT_ACQUIRE_TIMEOUT" update
-  fi
-  apt_get_once "$APT_COMMAND_TIMEOUT" "$APT_ACQUIRE_RETRIES" "$APT_ACQUIRE_TIMEOUT" "$@"
-}
+@APT_HELPERS@
 
 # Install pgvector from the two architecture-specific packages committed with
 # this pinned Kern revision. Keeping the small runtime packages in-tree removes
@@ -608,8 +517,9 @@ echo "== installing system packages =="
 # hold the apt/dpkg locks while downloading the pending security batch, and
 # the installs below wait on the lock (2026-07-27: two smokes spent 13 minutes
 # in this normally 40-second phase). Stop them for the duration of this
-# function; they are restarted below and patch the host in the background off
+# bootstrap's APT work, including browser dependencies; they then patch the host off
 # the deploy critical path.
+trap 'systemctl start apt-daily.timer apt-daily-upgrade.timer || echo "warning: could not restart APT maintenance timers" >&2' EXIT
 systemctl stop apt-daily.timer apt-daily-upgrade.timer
 systemctl stop apt-daily.service apt-daily-upgrade.service
 
@@ -617,16 +527,16 @@ systemctl stop apt-daily.service apt-daily-upgrade.service
 # npm package pulls in hundreds of node-* dependencies.
 bootstrap_cache restore-debs
 apt_get update
-apt_get install -y ca-certificates curl gh git iproute2 jq nftables openssl python3 python3-venv sudo unattended-upgrades xz-utils
+apt_get install --no-upgrade -y ca-certificates curl gh git iproute2 jq nftables openssl python3 python3-venv sudo unattended-upgrades xz-utils
 bootstrap_cache save-debs
 
 # PostgreSQL for admin state. postgresql-common is installed first so its
 # default-cluster creation can be disabled: the data directory must live on
 # the durable admin volume (set up below), not on this replaceable root volume.
-apt_get install -y postgresql-common
+apt_get install --no-upgrade -y postgresql-common
 bootstrap_cache save-debs
 sed -i 's/^#\?create_main_cluster.*/create_main_cluster = false/' /etc/postgresql-common/createcluster.conf
-apt_get install -y "postgresql-${PG_MAJOR}"
+apt_get install --no-upgrade -y "postgresql-${PG_MAJOR}"
 bootstrap_cache save-debs
 # pgvector keeps semantic-search vectors in the existing durable Postgres
 # database. Install the pinned, repository-signed binary without retaining a
@@ -636,12 +546,8 @@ install_pgvector_package
 # tooling; the Kern cluster runs under its own unit below.
 systemctl disable --now postgresql.service >/dev/null 2>&1 || true
 
-# Security updates are deliberately not applied inline: the pending batch is
-# unbounded (it grows with the age of the current Canonical AMI) and would put
-# archive download time on the deploy critical path. The restarted timers run
-# unattended-upgrades in the background shortly after boot instead, so a fresh
-# host is patched within the hour without delaying the deploy.
-systemctl start apt-daily.timer apt-daily-upgrade.timer
+# Timers stay paused through the later browser dependency install. The EXIT
+# trap resumes maintenance on failure too, including SSH-delivered bootstrap.
 }
 
 # Idempotent legacy migration for releases that provisioned one PostgreSQL
@@ -957,8 +863,19 @@ install_browser() (
       --python /usr/local/lib/kern-browser-venv/bin/python --link-mode copy \
       "playwright==${BROWSER_PLAYWRIGHT_VERSION}"
   fi
-  # Ubuntu dependencies still use apt and its restored archive cache.
-  /usr/local/lib/kern-browser-venv/bin/python -m playwright install-deps chromium
+  # Playwright owns its dependency list, but its apt commands must use our
+  # retries, mirror fallback, cache and no-upgrade policy as well. Scope the
+  # wrapper to this child process; apt_get_once uses the absolute system binary.
+  mkdir -p "$browser_downloads/apt-bin"
+  cat > "$browser_downloads/apt-bin/apt-get" <<'APT_WRAPPER'
+#!/bin/bash
+set -euo pipefail
+source /opt/kern-host/host/bootstrap/apt.sh
+apt_get "$@"
+APT_WRAPPER
+  chmod 700 "$browser_downloads/apt-bin/apt-get"
+  PATH="$browser_downloads/apt-bin:$PATH" \
+    /usr/local/lib/kern-browser-venv/bin/python -m playwright install-deps chromium
   bootstrap_cache save-debs
   PLAYWRIGHT_BROWSERS_PATH="$browser_downloads/browsers" \
     /usr/local/lib/kern-browser-venv/bin/python -m playwright install chromium --no-shell
@@ -2193,6 +2110,9 @@ main() {
   migrate_admin_state_and_write_config
   configure_operator_ssh
   install_agent_clis
+  # Resume normal Ubuntu security maintenance after the last APT operation.
+  systemctl start apt-daily.timer apt-daily-upgrade.timer
+  trap - EXIT
   configure_cloudflared
   write_codex_policy
   write_grok_policy

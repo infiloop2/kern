@@ -17,7 +17,6 @@ from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
     ActionSpec,
-    ConfigRequirement,
     DataSummary,
     DataSummaryCard,
     DataSummaryLink,
@@ -25,7 +24,7 @@ from host.tools.manifest import (
     ToolManifest,
     protect_inputs,
 )
-from host.tools.results import ActionFailed, ActionPendingApproval, ActionResult, ApprovalExecuted, ApprovalResult
+from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ActionResult, ApprovalExecuted, ApprovalResult
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, decoded_url_component_values, guard_url_parameter_string, schema
 from host.tools.shared.web import WebRequestError, known_provider_transport_error, request_bytes, unmapped_provider_error
 from host.tools.tool import Tool
@@ -39,9 +38,18 @@ MAX_URLS = 100
 MAX_URL_BYTES = 2_048
 # Match the documented host approval JSON limit, including all binding metadata.
 MAX_APPROVAL_BYTES = 64 * 1024
-KEY_PATTERN = re.compile(r"[A-Za-z0-9-]{8,128}\Z")
 # One kern-tools process serves concurrent handler threads on each host.
-_BINDING_LOCK = threading.Lock()
+_KEY_LOCK = threading.Lock()
+
+VERIFICATION_OUTPUT = schema(
+    {
+        "key": {"type": "string", "description": "The reusable public verification key: 32 lowercase hexadecimal characters."},
+        "filename": {"type": "string", "description": "The key followed by .txt."},
+        "content": {"type": "string", "description": "The reusable public verification key: 32 lowercase hexadecimal characters."},
+        "path": {"type": "string", "description": "Root-relative publication path: /<key>.txt."},
+    },
+    ["key", "filename", "content", "path"],
+)
 
 SUBMIT_INPUT = schema(
     {
@@ -64,62 +72,73 @@ MANIFEST = ToolManifest(
     actions=protect_inputs(
         (
             ActionSpec(
+                id="get_verification_file",
+                description="Get the reusable IndexNow key and text file details to deploy on each owned site.",
+                data_policy="Runs directly without approval or provider requests. On first use, Kern generates a random key and persists it in encrypted tool storage. Returns only the public verification key, filename, content and root path to the agent and its selected model provider. No site file is deployed by this action. No IndexNow fee; normal Kern runtime costs are separate.",
+                input_schema=schema({}),
+                output_schema=VERIFICATION_OUTPUT,
+            ),
+            ActionSpec(
                 id="submit_urls",
                 description="Queue one to 100 changed URLs on one host for an approved IndexNow notification.",
-                data_policy="Before queuing approval, Kern structurally validates and parameter-guards every exact URL, including decoded paths and query strings, locally. Kern sends nothing to IndexNow before approval. After approval, Kern sends the exact URLs, host and configured key to the fixed IndexNow endpoint. The endpoint may share notifications with participating search engines. Receipt does not guarantee crawling or indexing. IndexNow notifications are free, subject to provider rate limits; normal Kern runtime costs are separate.",
+                data_policy="Before queuing approval, Kern structurally validates and parameter-guards every exact URL, including decoded paths and query strings, locally. Kern sends nothing to IndexNow before approval. After approval, Kern sends the exact URLs, host and stored key to the fixed IndexNow endpoint. The endpoint may share notifications with participating search engines. Receipt does not guarantee crawling or indexing. IndexNow notifications are free, subject to provider rate limits; normal Kern runtime costs are separate.",
                 input_schema=SUBMIT_INPUT,
                 approval="operator",
             ),
         ),
         {},
     ),
-    config=(ConfigRequirement("INDEXNOW_KEY", "An 8–128 character IndexNow key also deployed as a public key file on each submitted host."),),
     protections=(
         PARAM_GUARD_PROTECTION,
         "Every exact URL and every nested-decoding view of its path and query are guarded before approval and again before submission. Only the longer-text tier is allowed, under the stricter 2,048-byte URL bound; no identifier or machine-token exceptions apply.",
         "Every submitted URL must use HTTPS, a public named host, and the same exact hostname; credentials, IP addresses, fragments and duplicate URLs are rejected.",
         "The fixed global endpoint receives at most 100 URLs per approved batch. Kern never fetches a caller-supplied URL.",
-        "The IndexNow key stays in write-only host configuration and is omitted from approval records and agent results. A key change invalidates a pending approval.",
+        "The reusable IndexNow key is generated once and stored encrypted. Only get_verification_file returns it for public site deployment; submission results and approval records omit it. A key change invalidates a pending approval.",
     ),
     technical_details=(
         PARAM_GUARD_TECHNICAL_DETAIL,
         "Every exact URL and every nested-decoding view of its path and query are guarded before approval and again before submission. Only the longer-text tier is allowed, under the stricter 2,048-byte URL bound; no identifier or machine-token exceptions apply.",
-        "The action accepts only urls, a flat array of 1–100 strings. Unknown fields and nested arrays/objects are rejected. Complete compact UTF-8 approval JSON, including the exact URL list, host and key-binding metadata, must fit the host's 65,536-byte bound; oversized batches fail before queuing and must be split. Approval records contain the complete exact batch, host and a host-secret HMAC key fingerprint; Home > Approvals > View exact request shows all paths and queries. Execution revalidates structure, guards and key binding. The configured key is never treated as caller input.",
-        "IndexNow notifications are free and reach Bing and other participating engines, not Google. No key configuration, site deployment or URL submission happens until the operator sets up and uses the integration.",
+        "The action accepts only urls, a flat array of 1–100 strings. Unknown fields and nested arrays/objects are rejected. Complete compact UTF-8 approval JSON, including the exact URL list, host and key-binding metadata, must fit the host's 65,536-byte bound; oversized batches fail before queuing and must be split. Approval records contain the complete exact batch, host and a host-secret HMAC key fingerprint; Home > Approvals > View exact request shows all paths and queries. Execution revalidates structure, guards and key binding. The stored key is never treated as caller input.",
+        "IndexNow notifications are free and reach Bing and other participating engines, not Google. get_verification_file accepts only an empty object and returns key, filename, content and path without provider requests or approval. The key is 32 lowercase hexadecimal characters, generated on first retrieval or valid submission proposal and reused across domains and restarts. Site deployment requires separate access to the site repository or hosting system. Previous manually configured keys are no longer used; deploy the returned file before submitting.",
         "IndexNow verifies host ownership by fetching https://<host>/<key>.txt, which must contain the exact key. Deploy that file on every new domain; no search engine dashboard registration is needed for this notification flow.",
         "Kern makes one redirect-free JSON POST to api.indexnow.org after approval. HTTP 200 means received; HTTP 202 means received with key validation pending. Neither is proof of indexing.",
     ),
     setup_steps=(
-        SetupStep("Generate a key", "Create a random 8–128 character alphanumeric or hyphenated key. Keep a copy for your site deployments. This integration uses the same configured key across your domains.", DOCS, "IndexNow protocol"),
-        SetupStep("Deploy the key file", "For each domain you want to notify, publish a UTF-8 text file at https://<domain>/<key>.txt whose only content is the key. Add it to each site's deployment template so new domains need no dashboard registration.", FAQ, "Key file setup"),
-        SetupStep("Save the key and enable", "Open IndexNow under Home > Integrations, save the same key below, and enable the integration. Submit only changed URLs; every batch asks for operator approval.", show_config=True),
+        SetupStep("Enable IndexNow", "Enable the integration in Home > Integrations. There is no manual key configuration, OAuth connection or search engine dashboard registration."),
+        SetupStep("Get the verification file", "Ask an agent to call get_verification_file with {}. Kern generates and stores a key on first use and returns the same key, filename, content and root path on later calls. One key serves all your domains."),
+        SetupStep("Deploy the key file", "For each domain you want to notify, publish the returned UTF-8 text file at https://<domain>/<key>.txt with the exact returned content. An agent needs site repository or deployment access to do this. Replace any previous manual key file with the returned file before submitting. Submit only changed URLs; every batch asks for operator approval.", FAQ, "Key file setup"),
     ),
     data_summary=DataSummary(cards=(
-        DataSummaryCard("What leaves this host", "After operator approval, the configured key, one public host and up to 100 changed public URLs go to IndexNow. The full exact approval batch can be sent to the configured host approval-assessment provider before a decision. Approval outcomes become available to the agent and its selected model provider."),
+        DataSummaryCard("What leaves this host", "get_verification_file exposes the public verification key and file details to the agent and its selected model provider. After operator approval, the stored key, one public host and up to 100 changed public URLs go to IndexNow. The full exact approval batch can be sent to the configured host approval-assessment provider before a decision. Approval outcomes become available to the agent and its selected model provider."),
         DataSummaryCard("Where it can go", "Kern calls only the fixed IndexNow global endpoint. IndexNow may share valid URL notifications with participating search engines.", links=(DataSummaryLink("IndexNow documentation", DOCS),)),
         DataSummaryCard("What search engines can do with it", "Participating engines may recrawl submitted URLs and decide independently whether to index them. Notifications do not change Google indexing or guarantee ranking.", links=(DataSummaryLink("IndexNow FAQ", FAQ),)),
         DataSummaryCard("How long providers retain it", "Search engines control retention of received notifications and crawl records. IndexNow's published privacy terms cover its website and do not specify retention for submitted URLs. Disabling the integration stops future notifications but cannot retract submitted URLs.", links=(DataSummaryLink("IndexNow website privacy terms", TERMS),)),
     )),
-    agent_notes="Use only for URLs added, materially updated or deleted on a host with its IndexNow key file already deployed. Group URLs by exact hostname. A 200 or 202 confirms receipt, not indexing; continue using Search Console for Google measurements. The key configured here must match the public key file on each host.",
+    agent_notes="First call get_verification_file with {} and deploy its returned file at the root of each owned site using your site deployment access. Retrieval generates the key once and returns it directly; it does not publish a file. Use only for URLs added, materially updated or deleted on a host with its IndexNow key file already deployed. Group URLs by exact hostname. A 200 or 202 confirms receipt, not indexing; continue using Search Console for Google measurements. The stored key must match the public key file on each host.",
 )
 
 
-def _key(api: HostAPI) -> str:
-    value = api.config["INDEXNOW_KEY"]
-    if not isinstance(value, str) or not KEY_PATTERN.fullmatch(value):
-        raise ToolInputValidationError("IndexNow key is invalid. Replace it in Home > Integrations.")
-    return value
+def _key(api: HostAPI, *, create: bool = False) -> str:
+    with _KEY_LOCK:
+        private = api.secrets.load() or {}
+        value = private.get("key")
+        if value is None and create:
+            value = secrets.token_hex(16)
+            api.secrets.save({**private, "key": value})
+        if not isinstance(value, str) or not re.fullmatch(r"[a-f0-9]{32}", value):
+            raise ToolInputValidationError("IndexNow stored key is unavailable or invalid. Retrieve the verification file before submitting a new request.")
+        return value
 
 
 def _key_fingerprint(key: str, api: HostAPI, *, create: bool = False) -> str:
     # A private, persistent salt prevents the approval-risk provider from
-    # recovering short configured keys by offline dictionary attack.
-    with _BINDING_LOCK:
+    # learning the key from approval records.
+    with _KEY_LOCK:
         private = api.secrets.load() or {}
         salt = private.get("fingerprint_salt")
         if salt is None and create:
             salt = secrets.token_hex(32)
-            api.secrets.save({"fingerprint_salt": salt})
+            api.secrets.save({**private, "fingerprint_salt": salt})
         if not isinstance(salt, str) or not re.fullmatch(r"[0-9a-f]{64}", salt):
             raise ToolInputValidationError("IndexNow key binding is unavailable. Submit a new request.")
         return hmac.new(bytes.fromhex(salt), key.encode(), hashlib.sha256).hexdigest()
@@ -201,11 +220,16 @@ class IndexNowTool(Tool):
         return None
 
     def execute(self, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:
-        if action != "submit_urls":
+        if action not in {"get_verification_file", "submit_urls"}:
             return ActionFailed("Unsupported IndexNow action.")
         try:
-            key = _key(api)
+            if action == "get_verification_file":
+                if tool_input:
+                    raise ToolInputValidationError("IndexNow verification file retrieval accepts only an empty object.")
+                key = _key(api, create=True)
+                return ActionExecuted({"key": key, "filename": f"{key}.txt", "content": key, "path": f"/{key}.txt"})
             host, urls = _urls(tool_input, api)
+            key = _key(api, create=True)
             payload: JSONObject = {
                 "tool_id": MANIFEST.tool_id,
                 "action": action,

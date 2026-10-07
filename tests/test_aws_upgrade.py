@@ -114,9 +114,23 @@ class RootUpgradeTests(unittest.TestCase):
         self.group = self.enterContext(patch.object(aws, "_ensure_security_group", return_value="sg-current"))
         self.workdir = Path(self.enterContext(tempfile.TemporaryDirectory()))
 
-    def run_upgrade(self):
+    def run_upgrade(self, *, temporary_ssh_ingress=False):
         plan = upgrade.prepare_upgrade(self.config, {}, "i-old")
-        return upgrade.replace_root(self.config, plan, "#!/bin/bash\necho fresh\n", self.workdir, {}, "2.0.0", True, False)
+        return upgrade.replace_root(self.config, plan, "#!/bin/bash\necho fresh\n", self.workdir, {}, "2.0.0", True, False,
+                                    temporary_ssh_ingress=temporary_ssh_ingress)
+
+    def test_failed_swap_closes_only_temporary_ssh(self):
+        for temporary in (False, True):
+            with self.subTest(temporary=temporary):
+                self.ec2.__init__()
+                self.ec2.fail = "attach-volume"
+                with patch.object(aws, "_close_security_group_ssh_ingress") as close:
+                    with self.assertRaisesRegex(RuntimeError, "injected attach-volume"):
+                        self.run_upgrade(temporary_ssh_ingress=temporary)
+                self.assertEqual(close.call_count, int(temporary))
+                if temporary:
+                    close.assert_called_once_with({}, "sg-current")
+                self.assertEqual(self.ec2.instance["State"]["Name"], "stopped")
 
     def test_running_and_stopped_retain_compute_and_data_apply_settings_then_boot(self):
         for state in ("running", "stopped"):
@@ -177,15 +191,21 @@ class RootUpgradeTests(unittest.TestCase):
         self.assertEqual(set(self.ec2.volumes), {"vol-old", "vol-admin", "vol-agent"})
         self.assertNotIn("detach-volume", [c[0] for c in self.ec2.calls])
 
-    def test_swap_failures_terminate_incomplete_compute_and_keep_only_data(self):
+    def test_swap_failures_stop_incomplete_compute_and_keep_data(self):
         for action in ("detach-volume", "attach-volume", "delete-volume", "start-instances"):
             with self.subTest(action=action):
                 self.ec2.__init__()
                 self.ec2.fail = action
                 with self.assertRaisesRegex(RuntimeError, "injected"):
                     self.run_upgrade()
-                self.assertEqual(self.ec2.instance["State"]["Name"], "terminated")
-                self.assertEqual(set(self.ec2.volumes), {"vol-admin", "vol-agent"})
+                self.assertEqual(self.ec2.instance["State"]["Name"], "stopped")
+                self.assertTrue({"vol-admin", "vol-agent"}.issubset(self.ec2.volumes))
+                self.assertNotIn("terminate-instances", [call[0] for call in self.ec2.calls])
+                if action != "start-instances":
+                    self.assertIn("vol-old", self.ec2.volumes)
+                if action == "attach-volume":
+                    self.assertEqual(self.ec2.volumes["vol-old"]["State"], "available")
+                    self.assertNotIn("vol-new", self.ec2.volumes)
 
     def test_credit_api_partial_failure_is_not_treated_as_success(self):
         original = self.ec2.__call__

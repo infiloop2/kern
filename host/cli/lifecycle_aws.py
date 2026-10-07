@@ -69,6 +69,7 @@ from host.constants import ADMIN_API_PORT, OPERATOR_TUNNEL_TOKEN_ENV_NAME, PUBLI
 from host.cli.aws_resources import (
     _attach_storage_volumes,
     _aws_env,
+    _aws,
     _close_security_group_ssh_ingress,
     _default_network,
     _ensure_storage_volumes,
@@ -154,6 +155,8 @@ def _main_for_lifecycle_locked(command: LifecycleCommand, config: InputConfig) -
             _terminate_instances(existing, aws_env)
         created_storage_volumes: list[str] = []
         instance_id: str | None = None
+        deploy_key: Path | None = None
+        security_group_id: str | None = None
         try:
             storage_volumes = upgrade.volumes if upgrade is not None else _ensure_storage_volumes(
                 config,
@@ -182,7 +185,6 @@ def _main_for_lifecycle_locked(command: LifecycleCommand, config: InputConfig) -
                     allow_upgrade=command.allow_upgrade,
                     reset_admin_passkeys=command.reset_admin_passkeys,
                 )
-                deploy_key: Path | None = None
                 if github_commit_sha is not None:
                     user_data = _render_github_user_data(payload, github_commit_sha)
                 else:
@@ -196,6 +198,7 @@ def _main_for_lifecycle_locked(command: LifecycleCommand, config: InputConfig) -
                     instance_id, security_group_id = replace_root(
                         config, upgrade, user_data, workdir, aws_env, target_version,
                         ssh_ingress or deploy_key is not None, cloudflare_egress,
+                        temporary_ssh_ingress=deploy_key is not None and not ssh_ingress,
                     )
                 else:
                     _log("launching EC2 instance")
@@ -229,24 +232,28 @@ def _main_for_lifecycle_locked(command: LifecycleCommand, config: InputConfig) -
                         "from the pinned commit. Operator endpoints come up when it succeeds."
                     )
         except BaseException:
-            # A failure here can leave a running instance with temporary
-            # provisioning access still open. Tear it down so a retry starts
-            # clean and nothing is exposed. The same invariant holds on the
-            # GitHub delivery after the CLI returns: a host-side provisioning
-            # failure shuts the instance down, which terminates it.
+            # Preserve compute and its root disk for postmortem inspection.
+            # Close temporary provisioning SSH access before stopping a failed
+            # instance; retained operator SSH access is managed separately.
             if instance_id is not None:
-                _log(f"provisioning failed; terminating {instance_id} to avoid a half-provisioned, exposed host")
+                _log(f"provisioning failed; stopping {instance_id} for diagnosis")
+                if deploy_key is not None and not ssh_ingress and security_group_id is not None:
+                    try:
+                        _close_security_group_ssh_ingress(aws_env, security_group_id)
+                    except Exception as cleanup_exc:  # noqa: BLE001
+                        _log(f"warning: could not close provisioning SSH ingress: {cleanup_exc}")
                 try:
-                    _terminate_instances([instance_id], aws_env)
-                except Exception as cleanup_exc:  # noqa: BLE001 — best-effort cleanup
-                    _log(f"warning: could not terminate {instance_id}: {cleanup_exc}")
+                    _aws(aws_env, "ec2", "stop-instances", "--instance-ids", instance_id)
+                except Exception as cleanup_exc:  # noqa: BLE001
+                    _log(f"warning: could not safely stop {instance_id}: {cleanup_exc}")
             if created_storage_volumes:
                 _log(
                     "provisioning failed after creating data volume(s) "
                     f"{', '.join(created_storage_volumes)}; leaving them in place. "
                     "A later deploy retry will refuse existing data volumes. If this was a failed first install "
                     "and those volumes contain no initialized Kern state, delete the tagged volumes before "
-                    "retrying deploy."
+                    "retrying deploy. Any retained instance must also be explicitly terminated before "
+                    f"retrying deploy (instance: {instance_id or 'check tagged Kern instances'})."
                 )
             raise
         result = {

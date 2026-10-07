@@ -190,7 +190,7 @@ SMOKE_MANAGED_DOMAINS = (
 SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
     "seo_metrics_api": (("get_keyword_metrics", {"keywords": ["seo api"], "country": "US"}), ("get_usage", {})),
     "ahrefs_domain_rating": (("get_domain_rating", {"domain": "ahrefs.com"}),),
-    "indexnow": (("submit_urls", {"urls": ["https://example.com/new"]}),),
+    "indexnow": (("get_verification_file", {}), ("submit_urls", {"urls": ["https://example.com/new"]}),),
     "cloudwatch_logs": (
         (
             "filter_log_events",
@@ -777,7 +777,7 @@ class AwsSmoke:
             raise AssertionError("upgrade did not converge launch settings")
         shutdown = self._aws("ec2", "describe-instance-attribute", "--instance-id", instance_id,
                              "--attribute", "instanceInitiatedShutdownBehavior")
-        if shutdown["InstanceInitiatedShutdownBehavior"]["Value"] != "terminate":
+        if shutdown["InstanceInitiatedShutdownBehavior"]["Value"] != "stop":
             raise AssertionError("upgrade did not restore shutdown behavior")
         self._session_cookie = None
         # A fresh root has new SSH host keys even if AWS reuses the same IP.
@@ -3936,7 +3936,17 @@ PY""", check=True)
                 # three WhatsApp local-state reads are also valid while no
                 # account is linked; only its send must fail closed.
                 direct_without_connection = (tool_id == "whatsapp" and action_id != "send_message") or (tool_id == "browser" and action_id == "x_connection_status")
-                if tool_id in ("polymarket", "web_fetch") or direct_without_connection:
+                if tool_id == "indexnow":
+                    if response.get("isError") or not isinstance(parsed, dict):
+                        raise AssertionError(f"managed-key {name} failed")
+                    if action_id == "submit_urls":
+                        approval_id = parsed.get("approval_id")
+                        if not approval_id:
+                            raise AssertionError("IndexNow submission did not queue approval")
+                        denied = self._api("POST", f"/v1/tools/indexnow/approvals/{approval_id}/deny", {})
+                        if denied["approval"]["status"] != "denied":
+                            raise AssertionError("IndexNow smoke proposal was not denied")
+                elif tool_id in ("polymarket", "web_fetch") or direct_without_connection:
                     if response.get("isError") or not isinstance(parsed, dict):
                         raise AssertionError(f"credential-free {name} failed: {response} {parsed}")
                     if tool_id == "polymarket":
