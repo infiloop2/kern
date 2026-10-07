@@ -32,9 +32,11 @@ The smoke verifies:
 - the tampered-definition power contract: stopping remains available as the
   safe response, starting the untrusted definition is refused, and restoring
   the exact generated definition permits start again;
-- idempotent stop/start without replacing compute;
+- idempotent stop/start without replacing compute or changing SSH host keys;
 - upgrade with the disposable root replaced and both data disks preserved;
 - upgrade from older version metadata with both durable disks preserved;
+- browser cache reuse and offline package installation during root-replacement
+  upgrade, followed by a real Chromium launch, screenshot and cleanup;
 - reconfigure rotating both the admin password and operator SSH key while the
   old credentials stop working; and
 - direct VM deletion followed by recover from the two preserved disks.

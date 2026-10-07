@@ -25,7 +25,7 @@ account id inside each approval payload instead.
 
 ## Where tool code runs, and its internet access
 
-Tool packages make outbound HTTPS calls to third parties (Google, Apify, Brave, X,
+Tool packages make outbound HTTPS calls to third parties (Google, IndexNow, Apify, Brave, X,
 LinkedIn, Serper, Meta/Instagram, ScrapeCreators, Polymarket, Interactive
 Brokers, Runway, BytePlus ModelArk, and OpenAI) and
 parse their responses, so unlike other host code they need direct egress and are
@@ -210,24 +210,13 @@ context instead of rewriting its prefix:
   1 GB total are staged across both media types. This private spool preserves
   the Instagram approval boundary: Meta receives no image or video bytes until approval.
 
-  X video posts use `stage_video {path, for_tool: "twitter"}`, then
-  `post_tweet {text, video_asset_id}` on the selected X connection. Replies and
-  quote posts accept the same optional video. One approval binds the account,
-  exact caption, target, and video metadata (filename, type, byte count, SHA256).
-  Existing connections can still publish text; video requires reconnecting for
-  `media.write`, which new OAuth connections request alongside `tweet.write`.
-  After approval, the tool revalidates the account and staged bytes, uploads
-  bounded 4 MiB chunks via X v2 initialize/append/finalize, waits for processing,
-  then submits one post with `media.media_ids`. Upload and processing share a
-  five-minute deadline and at most 30 status checks. Expired/changed assets,
-  provider failures, or processing timeouts stop before post submission. Uploads
-  and posts have no automatic retries. X receives bytes directly over HTTPS;
-  this does not use a public asset URL or require a Cloudflare hostname. The
-  staged source remains available until its normal TTL for explicit recovery.
-  X enforces account-specific codec, duration, and posting entitlements; Kern
-  accepts MP4/MOV up to its existing 200 MB staging cap and does not transcode.
-  See [X chunked uploads](https://docs.x.com/x-api/media/quickstart/media-upload-chunked)
-  and [OAuth scopes](https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code).
+  X image/video publication uses the same private spool and revalidates the
+  complete ordered metadata and bytes after approval, before any upload.
+  Images use simple X v2 uploads; videos retain their bounded chunked upload
+  and processing flow. Neither path creates public asset grants. Exact X
+  approval details show the sender, target, complete text and ordered filenames,
+  sizes and full SHA256 digests. The package guide owns action inputs/setup;
+  [X implementation contract](x.md) records endpoint and verification details.
 
   The reusable `Assets.public_asset_url` context supports only the existing
   staged JPEG, PNG, WebP, MP4 and MOV types. Instagram is its only consumer,
@@ -470,8 +459,8 @@ child but retains its registered session and cache, and the admin UI keeps
 Disconnect available in that suspended state. Before terminating the child,
 the supervisor asks it to flush any pending debounced cache write. The systemd
 unit signals the Python parent first and reserves bounded time before killing
-the remaining cgroup. Its 60-second stop deadline exceeds the gateway's
-40-second request deadline plus bounded child termination and final cache-flush
+the remaining cgroup. Its 300-second stop deadline exceeds the gateway's
+240-second media request deadline (ordinary requests remain 40 seconds) plus bounded child termination and final cache-flush
 RPC, so an in-flight request cannot make systemd kill the child before that
 graceful path runs.
 Disconnect, QR rendering, remote logout handling, reconnect behavior, session
@@ -485,9 +474,13 @@ host state machine or audit stream: the admin UI refreshes it while linking or
 while the integration is open. If the child exits unexpectedly, the small
 Python supervisor exits and systemd restarts the tools service. Reads return
 the local cache directly. A send
-is one direct-recipient plain-text approval whose payload snapshots account id,
-E.164 recipient, and exact text; execution rechecks the linked account before
-calling WhatsApp.
+is one direct-recipient approval whose payload snapshots account id, E.164
+recipient, exact text/caption, and optional WhatsApp-scoped staged media.
+Execution rechecks the linked account and approved asset before calling
+WhatsApp. Images/videos use the existing private staging actions and a bounded,
+hash-checked handoff to the child; no public asset URL is created. See the
+[WhatsApp media contract](whatsapp.md) for exact
+inputs, limits, approval preview, and retention.
 
 ## Operator flow
 

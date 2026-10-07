@@ -18,12 +18,16 @@ another host implementation of the same contract.
 
 - [Outbound parameter filtering](outbound-request-filtering.md) describes the
   shared input guard, its exceptions, and its limits.
+- [X image and DM contract](x.md) documents approved media publication, bounded
+  private DM reads and exact text sends.
+- [WhatsApp media contract](whatsapp.md) documents private staging, approved
+  native image/video sends, previews, and verification boundaries.
 
 Tool-specific documentation lives on each admin UI **Home > Integrations** page
 and is rendered from the guide content owned by each package under `host/tools/`. Those
 guides are the source of truth for what an integration does, setup, protections,
-data flow, and technical notes. Per-tool Markdown references do not live here,
-so adding or changing a package updates one operator-facing source.
+data flow, and technical notes. Technical Markdown references in this folder
+supplement those operator-facing guides with implementation contracts.
 
 A tool package is pure tool logic: action handlers, input schemas, third-party
 API calls, third-party auth (OAuth flows, token refresh), and per-action data

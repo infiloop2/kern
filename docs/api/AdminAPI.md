@@ -1634,6 +1634,7 @@ POST /v1/tools/{tool_id}/service/connect
 POST /v1/tools/{tool_id}/service/disconnect
 GET  /v1/tools/{tool_id}/approvals
 GET  /v1/tools/{tool_id}/approvals/{approval_id}
+GET|HEAD /v1/tools/whatsapp/approvals/{approval_id}/media
 POST /v1/tools/{tool_id}/approvals/{approval_id}/approve
 POST /v1/tools/{tool_id}/approvals/{approval_id}/deny
 GET  /v1/tools/events
@@ -1661,6 +1662,7 @@ Tool endpoints:
 | `POST` | `/v1/tools/{tool_id}/service/disconnect` | none | Service status | Asks the tool-owned service to disconnect. For WhatsApp this logs out the linked device and deletes its durable session keys and bounded local message cache. Available even while the tool is disabled. |
 | `GET` | `/v1/tools/{tool_id}/approvals` | none | Approval list response | Lists `{tool_id}`'s action approvals as a bounded working set: pending first (so open decisions surface at the top), then newest decided ones as bounded history. The unified operator queue uses `/v1/approvals`; this tool-scoped endpoint remains available. Payload is omitted from the list; fetch it per approval. The paginated audit trail is `/v1/tools/events`. |
 | `GET` | `/v1/tools/{tool_id}/approvals/{approval_id}` | none | `{"approval"}` | The full approval record for `{approval_id}`, including its (up to 64 KiB) payload. `404` when `{approval_id}` is not an approval of `{tool_id}`. |
+| `GET`, `HEAD` | `/v1/tools/whatsapp/approvals/{approval_id}/media` | Optional single `Range` header | Private image/video stream | Requires the admin session. Streams only the exact live staged asset in a pending WhatsApp `send_message` approval; no public grant or source path is accepted. `200` full body, `206` valid byte range, `416` invalid range, `404` missing/nonpending approval or unavailable/changed asset, `503` media capacity exhausted. `HEAD` returns headers only. Responses are private/no-store; query parameters and fragments are unsupported. See [WhatsApp media contract](../architecture/tools/whatsapp.md). |
 | `POST` | `/v1/tools/{tool_id}/approvals/{approval_id}/approve` | none | `{"approval", "result"}` | Approves a pending approval and immediately executes the recorded payload exactly once; the response carries the terminal approval record (`executed` or `failed`) and the execution result. `404` when `{approval_id}` is not an approval of `{tool_id}`; `409` when it is not pending. |
 | `POST` | `/v1/tools/{tool_id}/approvals/{approval_id}/deny` | none | `{"approval"}` | Denies a pending approval; terminal. `404` when `{approval_id}` is not an approval of `{tool_id}`; `409` when it is not pending. |
 | `GET` | `/v1/tools/events` | `?before=&limit=` | `{"events": [...]}` | The tool audit log, newest first: tool calls, approval decisions, OAuth connect/disconnect, enable/disable, and config set/clear events. Linked-device session changes are live connection state rather than durable audit events. Pages with the same `before` (an event `seq`) and `limit` cursor model as `/v1/events` and `/v1/network/events`. |

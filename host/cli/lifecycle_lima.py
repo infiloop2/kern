@@ -393,6 +393,14 @@ _DISK_METADATA_PROVISION_SCRIPT = """\
 #!/bin/bash
 set -eu
 umask 077
+# Lima changes its cloud-init instance ID on every start. First-boot SSH key
+# generation has already finished before this final-stage provision script;
+# preserve those unique keys when cloud-init runs again on the same root disk.
+# A replacement VM starts from a fresh image and still generates new keys.
+mkdir -p /etc/cloud/cloud.cfg.d
+cat > /etc/cloud/cloud.cfg.d/99-kern-lima-ssh.cfg <<'CLOUD_CONFIG'
+ssh_deletekeys: false
+CLOUD_CONFIG
 # Lima exports LIMA_CIDATA_DISK_<n>_NAME/_DEVICE to provisioning scripts;
 # source the cidata environment file as a fallback for releases that do not.
 # set -a exports every sourced assignment so the python3 child sees them.

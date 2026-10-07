@@ -190,6 +190,7 @@ SMOKE_MANAGED_DOMAINS = (
 SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
     "seo_metrics_api": (("get_keyword_metrics", {"keywords": ["seo api"], "country": "US"}), ("get_usage", {})),
     "ahrefs_domain_rating": (("get_domain_rating", {"domain": "ahrefs.com"}),),
+    "indexnow": (("submit_urls", {"urls": ["https://example.com/new"]}),),
     "cloudwatch_logs": (
         (
             "filter_log_events",
@@ -308,6 +309,10 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
             },
         ),
         (
+            "inspect_urls",
+            {"site_url": "https://example.com/", "urls": ["https://example.com/"]},
+        ),
+        (
             "submit_sitemap",
             {
                 "site_url": "https://example.com/",
@@ -315,6 +320,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
             },
         ),
     ),
+    "pagespeed_insights": (("analyze_page", {"url": "https://example.com/"}),),
     "openrouter": (
         ("create_heygen_video", {"prompt": "Kern smoke", "duration_seconds": "5", "resolution": "480p"}),
         ("get_task", {"task_id": "gen-vid-0000000000-00000000000000000000"}),
@@ -420,6 +426,9 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("get_personalized_trends", {}),
         ("lookup_user", {"username": "kern"}),
         ("post_tweet", {"text": "Kern smoke. Never published."}),
+        ("list_dm_events", {"max_results": 1}),
+        ("read_dm_conversation", {"recipient_user_id": "1", "max_results": 1}),
+        ("send_dm", {"recipient_user_id": "1", "text": "Kern smoke. Never sent."}),
     ),
     "upwork": (
         ('list_accounts', {}),
@@ -2783,7 +2792,8 @@ PY""", check=True)
         paths (search) are forwarded and answer with GitHub's own status; writes
         are gated on the write repo (infiloop2/kern), so a write to an
         unlisted repo is denied by the proxy while a write to the listed repo
-        reaches upstream and returns GitHub's 401 (no credential installed).
+        reaches upstream without a credential. Its audit decision, rather than
+        an assumed upstream status, proves that the proxy forwarded the write.
         Repository administration is denied even on the write repo, at the guard
         before any credential, so the full admin-write denylist (forks, hooks,
         keys, pages, actions secrets/permissions/oidc, protections, statuses,
@@ -2838,13 +2848,6 @@ PY""", check=True)
                 "api write to unlisted denied",
                 f"{curl} -X POST -d '{{}}' https://api.github.com/repos/torvalds/linux/issues || true",
                 "403",
-            ),
-            # A write to the listed repo passes the proxy and reaches upstream,
-            # which answers 401 without a credential (a proxy denial is 403).
-            (
-                "api write to listed reaches upstream",
-                f"{curl} -X POST -d '{{}}' https://api.github.com/repos/infiloop2/kern/issues || true",
-                "401",
             ),
             # GraphQL is denied outright (can mutate, cannot be parsed).
             (
@@ -2906,6 +2909,7 @@ PY""", check=True)
                 continue
             if got != expected:
                 raise AssertionError(f"{name}: expected {expected}, got {got!r}")
+        self._check_github_write_forwarding(curl)
         # Repository administration is denied even on the listed write repo, and
         # the proxy denies it at the guard before any credential — so the full
         # denylist is exercised here without a token (a proxy 403, not GitHub's
@@ -2969,6 +2973,27 @@ PY""", check=True)
             f"{len(checks)} guard-branch checks + {len(admin_writes)} admin-write denials "
             "+ git ls-remote/push-denial across the github domains"
         )
+
+    def _check_github_write_forwarding(self, curl: str) -> None:
+        """An upstream 403 must not be mistaken for a local proxy denial."""
+        baseline = max((event["seq"] for event in self._network_events()), default=0)
+        path = "/repos/infiloop2/kern/issues"
+        status = self._ssh_code(
+            f"{curl} -X POST -d '{{}}' https://api.github.com{path} || true"
+        ).strip()
+        events = [
+            event for event in self._network_events(since=baseline)
+            if event["method"] == "POST" and event["host"] == "api.github.com"
+            and event["path"] == path and not event.get("query")
+        ]
+        if len(events) != 1 or events[0]["decision"] != "allowed":
+            reasons = [event.get("reason_code") for event in events]
+            raise AssertionError(f"listed GitHub write was not forwarded: HTTP {status}, reasons={reasons}")
+        # No credential is installed. GitHub can reject shared runner egress
+        # with 403/429 rather than 401; the exact allowed audit event above
+        # still proves the guard admitted this request. Never accept success.
+        if status not in {"401", "403", "429"}:
+            raise AssertionError(f"unauthenticated GitHub write: unexpected HTTP {status}")
 
     def check_proxy_edge_cases(self) -> None:
         self._step("proxy protocol edge cases (ports, hosts, encodings, wildcards)")

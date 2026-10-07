@@ -26,7 +26,7 @@ from host.tools.tool import (
     OAuthStartConnectParams,
     OAuthStartConnectResult,
 )
-from host.tools.twitter import costs, video
+from host.tools.twitter import costs, video, images, dms
 from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI, StoredCredential
 from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, clip_text, int_field, schema as _schema
@@ -58,7 +58,7 @@ X_AUTHORIZE_URL = "https://x.com/i/oauth2/authorize"
 X_TOKEN_URL = "https://api.x.com/2/oauth2/token"
 X_REVOKE_URL = "https://api.x.com/2/oauth2/revoke"
 X_API_BASE_URL = "https://api.x.com/2"
-X_OAUTH_SCOPES = ("tweet.read", "users.read", "tweet.write", "media.write", "offline.access")
+X_OAUTH_SCOPES = ("tweet.read", "users.read", "tweet.write", "media.write", "dm.read", "dm.write", "offline.access")
 # offline.access is required at connect time: without it X issues no refresh
 # token, and the 2-hour access token would strand the connection.
 REQUIRED_X_READ_SCOPES = frozenset(("tweet.read", "users.read", "offline.access"))
@@ -66,7 +66,11 @@ REQUIRED_X_CONNECT_SCOPES = frozenset(X_OAUTH_SCOPES)
 REQUIRED_X_WRITE_SCOPES = REQUIRED_X_READ_SCOPES | {"tweet.write"}
 X_RECONNECT_MESSAGE = "X (Twitter) is no longer connected. Please reconnect the tool."
 REQUIRED_X_VIDEO_SCOPES = REQUIRED_X_WRITE_SCOPES | {"media.write"}
-X_VIDEO_RECONNECT_MESSAGE = "Reconnect X to grant media.write and tweet.write before publishing video."
+X_VIDEO_RECONNECT_MESSAGE = "Reconnect X to grant media.write and tweet.write before publishing media."
+REQUIRED_X_DM_READ_SCOPES = REQUIRED_X_READ_SCOPES | {"dm.read"}
+REQUIRED_X_DM_WRITE_SCOPES = REQUIRED_X_READ_SCOPES | {"dm.write"}
+X_DM_READ_RECONNECT_MESSAGE = "Reconnect X to grant dm.read before reading direct messages."
+X_DM_WRITE_RECONNECT_MESSAGE = "Reconnect X to grant dm.write before sending direct messages."
 X_WRITE_RECONNECT_MESSAGE = "Reconnect X to grant tweet.write before publishing."
 DEFAULT_TOKEN_LIFETIME_SECONDS = 7200
 MAX_QUERY_CHARS = 512
@@ -203,8 +207,8 @@ MANIFEST = ToolManifest(
     display_name="X (Twitter)",
     description=(
         "Connect one or more X accounts and let your agent search and read X posts, trends, and "
-        "public profiles, and publish posts, replies, or quote posts with optional video and your approval. Direct "
-        "messages are prepared as X links that you open, review, and send yourself."
+        "public profiles, read recent direct messages, and publish posts, replies, quote posts with images or video, "
+        "or send text direct messages with your approval."
     ),
     connection="oauth",
     actions=protect_inputs((
@@ -292,11 +296,11 @@ MANIFEST = ToolManifest(
                 "Queue approval to publish exactly one standalone post, reply, or quote post as "
                 "the selected connected account. Set neither target id for a standalone post, or "
                 "exactly one reply/quote id; Kern fetches and shows the target in the approval. "
-                "Optionally attach one staged MP4 or MOV video (up to 200 MB)."
+                "Optionally attach 1–4 staged JPEG/PNG/WebP images (5 MB each) or one MP4/MOV video (200 MB)."
             ),
             data_policy=(
                 "Publishes a post from the selected X account, visible per that account's audience "
-                "settings. Video bytes and post text reach X only after operator approval. Posting consumes the "
+                "settings. Image/video bytes and post text reach X only after operator approval. Posting consumes the "
                 "deployment's X API credits, and the approval stays bound to the selected account."
             ),
             input_schema=_schema(
@@ -304,13 +308,38 @@ MANIFEST = ToolManifest(
                     "text": {"type": "string", "description": "Post text (up to 4,000 characters)."},
                     "in_reply_to_tweet_id": {"type": "string", "description": "Reply to this numeric post id."},
                     "quote_tweet_id": {"type": "string", "description": "Quote this numeric post id."},
+                    "image_asset_ids": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"type": "string"}, "description": "Ordered stage_image(for_tool=twitter) ids; JPEG/PNG/WebP, 5 MB each. Cannot combine with video_asset_id."},
                     "video_asset_id": {"type": "string", "description": "Optional tool-scoped MP4 or MOV reference from stage_video with for_tool=twitter; at most 200 MB."},
                 },
                 ["text"],
             ),
             approval="operator",
         ),
+        ActionSpec(
+            id="list_dm_events",
+            description="Read one page of recent DM events for the selected authenticated account. X provides up to 30 days of available events, not an exhaustive inbox. Continue explicitly with next_token.",
+            cost_description="$0.010 per DM event and user (authenticated identity and expanded senders/participants); repeated resources counted once per app per UTC day. No owned-read discount assumed.",
+            data_policy="Read-only authenticated X request. Pagination values go to X; private message text, participant ids and timestamps enter active model context without approval. Uses X API credits.",
+            input_schema=_schema(dms.PAGE_PROPERTIES), output_schema=dms.OUTPUT_SCHEMA,
+        ),
+        ActionSpec(
+            id="read_dm_conversation",
+            description="Read one page of available DM events by resolved numeric recipient or existing conversation id. Supply exactly one target. Coverage is up to 30 days; use next_token for the next page.",
+            cost_description="$0.010 per DM event and user (authenticated identity and expanded senders/participants); repeated resources counted once per app per UTC day. No owned-read discount assumed.",
+            data_policy="Read-only authenticated X request. Exact target and pagination values go to X; private message text, participant ids and timestamps enter active model context without approval. Uses X API credits.",
+            input_schema=_schema({**dms.PAGE_PROPERTIES, **dms.TARGET_PROPERTIES}), output_schema=dms.OUTPUT_SCHEMA,
+        ),
+        ActionSpec(
+            id="send_dm",
+            description="Queue approval to send one exact text DM to a resolved numeric recipient or existing conversation id. Supply exactly one target; no media or group management. One submission attempt per approval.",
+            cost_description="Preparation may incur a user lookup charge. Confirmed DM creation is $0.015 per request.",
+            data_policy="Only after operator approval, sends the exact text to the exact recipient/conversation as the selected account. Consumes X API credits. Failed or unconfirmed sends are terminal; inspect DM history before requesting another approval.",
+            input_schema=_schema({**dms.TARGET_PROPERTIES, "text": {"type": "string", "description": "Exact nonblank DM text, at most 10,000 Unicode characters."}}, ["text"]),
+            approval="operator",
+        ),
     ), {
+        "list_dm_events": {"max_results": validated_input("Integer 1–100."), "pagination_token": validated_input("Bounded base32hex provider pagination token.")},
+        "read_dm_conversation": {"max_results": validated_input("Integer 1–100."), "pagination_token": validated_input("Bounded base32hex provider pagination token."), "recipient_user_id": validated_input("Numeric user ID; exactly one target."), "dm_conversation_id": validated_input("15–19 digit conversation ID, or two 1–19 digit user IDs joined by a hyphen; exactly one target.")},
         "search_tweets": {
             "query": guarded_input(),
             "max_results": validated_input("Integer within the action’s documented result range."),
@@ -341,18 +370,18 @@ MANIFEST = ToolManifest(
         ConfigRequirement(key="X_APP_OWNER_USER_ID", description="Optional numeric X user id of the developer app owner, to apply $0.001 owned-read pricing. Leave unset for standard rates."),
     ),
     protections=(
-        "Reading does not require approval. Publishing a post, reply, or quote post happens only after your approval.",
-        "Each approval is bound to the selected X account. Direct messages remain links that you open, review, and send yourself.",
+        "Reading does not require approval. Publishing a post or sending a direct message happens only after your approval.",
+        "Each approval binds the selected account, exact text, target and optional immutable media. DM reads expose private content to the agent.",
         "Public reads and writes consume X pay-per-use credits. Your X credentials stay encrypted in write-only tool config.",
         PARAM_GUARD_PROTECTION,
     ),
     technical_details=(PARAM_GUARD_TECHNICAL_DETAIL,),
     agent_notes=(
         "Use post_tweet for an approval-gated standalone post, reply, or quote post from the "
-        "selected connected account. For native video, stage_video with for_tool=twitter and "
+        "selected connected account. X quote posting requires Enterprise access. For images, stage_image with for_tool=twitter and pass 1–4 image_asset_ids (JPEG/PNG/WebP, 5 MB each); cannot mix images and video. For native video, stage_video with for_tool=twitter and "
         "pass video_asset_id to post_tweet. Reconnect existing accounts for media.write. The "
-        "approval binds the exact video and text; uploads start only after approval. Failed or "
-        "unconfirmed submissions are terminal: check X before requesting another approval. To help the operator send a direct message, draft the text "
+        "approval binds the ordered media digests, account, target and exact text; uploads start only after approval. Failed or "
+        "unconfirmed submissions are terminal: check X before requesting another approval. Use list_dm_events for one page of recent private events, read_dm_conversation for history by recipient_user_id or dm_conversation_id; pass next_token unchanged as pagination_token for the same account and target. X coverage is at most 30 days, never assume a complete inbox. Use send_dm with exact text and one numeric recipient (resolve with lookup_user) or existing conversation id. Each send needs operator approval; check history after any ambiguous failure before requesting another approval. Scopes do not prove live API eligibility; access and credits are required. To help the operator send a direct message, draft the text "
         "and return this Markdown link: "
         "https://x.com/messages/compose?recipient_id=<numeric-user-id>&text=<percent-encoded-message>, "
         "resolving a handle to that id with lookup_user first. "
@@ -369,7 +398,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure user authentication",
             show_callback=True,
-            description="Open the app's User authentication settings and choose Set up or Edit. Enable OAuth 2.0, set App permissions to Read and write, and choose Web App, Automated App or Bot so X issues a confidential-client secret. Add the exact callback URI displayed in this guide. Kern requests tweet.read, users.read, tweet.write, media.write, and offline.access; it requests no direct-message scope. offline.access lets X issue refresh tokens after the two-hour access token expires.",
+            description="Open the app's User authentication settings and choose Set up or Edit. Enable OAuth 2.0, set App permissions to Read, write, and direct messages, and choose Web App, Automated App or Bot so X issues a confidential-client secret. Add the exact callback URI displayed in this guide. Kern requests tweet.read, users.read, tweet.write, media.write, dm.read, dm.write, and offline.access. offline.access lets X issue refresh tokens after the two-hour access token expires.",
             link_url="https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code",
             link_label="View X OAuth 2.0 authorization-code documentation",
         ),
@@ -380,7 +409,7 @@ MANIFEST = ToolManifest(
         SetupStep(
             title="Configure and connect Kern",
             show_config=True,
-            description="Open X under Home > Integrations. Save the OAuth 2.0 values as X_OAUTH_CLIENT_ID and X_OAUTH_CLIENT_SECRET and the app-only token as X_BEARER_TOKEN. Enable the tool, connect every X identity the agent may use, and approve the displayed scopes. Existing read-only connections keep working for reads but must be reconnected before publishing; existing text-posting connections must reconnect for video permission. Confirm every expected @username appears.",
+            description="Open X under Home > Integrations. Save the OAuth 2.0 values as X_OAUTH_CLIENT_ID and X_OAUTH_CLIENT_SECRET and the app-only token as X_BEARER_TOKEN. Enable the tool, connect every X identity the agent may use, and approve the displayed scopes. Existing read-only connections keep working for reads but must be reconnected before publishing; existing text-posting connections must reconnect for media.write, dm.read and dm.write as needed. Scopes alone do not establish endpoint eligibility: verify the app has current X API access, sufficient credits and allowed recipient messaging settings. Confirm every expected @username appears.",
         ),
     ),
     data_summary=DataSummary(
@@ -389,8 +418,8 @@ MANIFEST = ToolManifest(
                 title="What leaves this host",
                 points=(
                     DataSummaryPoint(label="Reads", text="Search queries, post ids, usernames, trend locations, and paging values go to X directly. Query text is received and logged like any other request, so it is itself data sent to X. The search query first passes the host parameter guard (see Technical notes), which denies secret- or credential-shaped values before the request is sent."),
-                    DataSummaryPoint(label="Posts, replies, and quote posts", text="A post, reply, or quote post reaches X only after your approval. Kern sends exactly the approved text and, for a reply or quote post, the target post id as the selected account. If a video is attached, Kern also sends its approved bytes to X for upload and processing before publishing."),
-                    DataSummaryPoint(label="Message drafts", text="Kern does not send direct messages through the API. X receives a message draft only when you open its official compose link in your browser."),
+                    DataSummaryPoint(label="Posts, replies, and quote posts", text="A post, reply, or quote post reaches X only after your approval. Kern sends exactly the approved text and, for a reply or quote post, the target post id as the selected account. For images or video, Kern sends only the approved bytes to X before publishing."),
+                    DataSummaryPoint(label="Direct messages", text="DM reads return private event text and participant ids to the agent, without approval, within X’s available 30-day window. An API send reaches the exact recipient or conversation only after approval of the exact sender, target and text. Compose links remain an optional operator-send flow."),
                     DataSummaryPoint(label="Profile lookups", text="A handle or user id you ask the agent to resolve goes to X and returns that account's public id, handle, display name, and public follower, following, and post counts. This is the same public lookup the X website performs and sends no message text."),
                 ),
             ),
@@ -398,13 +427,13 @@ MANIFEST = ToolManifest(
                 title="Where it can go",
                 points=(
                     DataSummaryPoint(label="X", text="Reads and the OAuth connection stay within X's services under the connected account."),
-                    DataSummaryPoint(label="The public internet", text="An approved post is published under the selected X account's audience settings. Direct-message drafts remain reviewable browser links."),
+                    DataSummaryPoint(label="The public internet", text="An approved post is published under the selected X account's audience settings. Approved direct messages reach only their selected conversation on X."),
                 ),
             ),
             DataSummaryCard(
                 title="What X can do with it",
                 description=(
-                    "X processes approved video uploads, searches, retrieved content, API activity, and request metadata under its Privacy Policy and "
+                    "X processes approved media uploads, direct messages, searches, retrieved content, API activity, and request metadata under its Privacy Policy and "
                     "developer terms: service operation, personalization, analytics, advertising, safety, and legal uses."
                 ),
                 links=(
@@ -673,7 +702,7 @@ class XCredentialStore(OAuth2CredentialStore):
         if "media.write" in required_scopes and not access_token_is_fresh(
             updated_payload, now(), skew_seconds=skew_seconds
         ):
-            raise RuntimeError("X refreshed token is too short-lived for video publishing. Try again later.")
+            raise RuntimeError("X refreshed token is too short-lived for media publishing. Try again later.")
         return str(updated_payload["access_token"])
 
     def refresh_identity(self, api: HostAPI, access_token: str) -> ConnectionAccount:
@@ -1002,10 +1031,10 @@ def _lookup_user(access_token: str, tool_input: JSONObject, api: HostAPI) -> JSO
 
 
 def _post_proposal(tool_input: JSONObject, api: HostAPI) -> JSONObject:
-    extra = set(tool_input) - {"text", "in_reply_to_tweet_id", "quote_tweet_id", "video_asset_id"}
+    extra = set(tool_input) - {"text", "in_reply_to_tweet_id", "quote_tweet_id", "video_asset_id", "image_asset_ids"}
     if extra:
         raise ToolInputValidationError(
-            "X post tool input only supports text, in_reply_to_tweet_id, quote_tweet_id, and video_asset_id."
+            "X post tool input only supports text, in_reply_to_tweet_id, quote_tweet_id, video_asset_id, and image_asset_ids."
         )
     text = tool_input.get("text")
     if not isinstance(text, str) or not text.strip():
@@ -1030,6 +1059,10 @@ def _post_proposal(tool_input: JSONObject, api: HostAPI) -> JSONObject:
         raise ToolInputValidationError(
             "X post supports either in_reply_to_tweet_id or quote_tweet_id, not both."
         )
+    if "video_asset_id" in tool_input and "image_asset_ids" in tool_input:
+        raise ToolInputValidationError("X posts cannot combine images and video.")
+    if "image_asset_ids" in tool_input:
+        proposal["image_assets"] = images.snapshots(tool_input["image_asset_ids"], api)
     if "video_asset_id" in tool_input:
         proposal["video_asset"] = video.snapshot(tool_input["video_asset_id"], api)
     return proposal
@@ -1069,6 +1102,9 @@ def _post_summary(
     asset = proposal.get("video_asset")
     if isinstance(asset, dict):
         count += f" with video {clip_text(str(asset.get('filename') or 'video'), 30)} ({asset.get('size_bytes')} bytes, SHA256 {str(asset.get('sha256') or '')[:12]})"
+    image_assets = proposal.get("image_assets")
+    if isinstance(image_assets, list):
+        count += f" with {len(image_assets)} image(s); exact files and SHA256 digests in request details"
     account_label = clip_text(account_label, 80)
     for text_clip, target_clip in ((240, 120), (160, 80), (100, 40)):
         if target is not None and "in_reply_to_tweet_id" in proposal:
@@ -1090,6 +1126,44 @@ def _post_summary(
         if len(summary.encode("utf-8")) <= SUMMARY_MAX_BYTES:
             return summary
     return summary.encode("utf-8")[:SUMMARY_MAX_BYTES - 3].decode("utf-8", "ignore") + "..."
+
+
+def _send_dm_approved(approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
+    payload = approval.payload
+    raw = payload.get("proposal")
+    approved = payload.get("x_account")
+    if payload.get("action") != "send_dm" or payload.get("tool_id") != "twitter" or not isinstance(raw, dict) or not isinstance(approved, dict):
+        return ActionFailed("X DM approval payload is invalid.")
+    proposal = dms.proposal(cast(JSONObject, raw))
+    token = X_CREDENTIALS.access_token(api, required_scopes=REQUIRED_X_DM_WRITE_SCOPES, reconnect_message=X_DM_WRITE_RECONNECT_MESSAGE)
+    account = X_CREDENTIALS.refresh_identity(api, token)
+    if approved.get("id") != account["id"]:
+        return ActionFailed("X sender changed after approval. Queue a new approval.")
+    try:
+        response = json_request("POST", X_API_BASE_URL + dms.route(proposal, "messages"),
+            headers={"authorization": f"Bearer {token}"}, body={"text": proposal["text"]},
+            failure_message="X DM send failed; check history before requesting another approval.",
+            invalid_response_message="X did not confirm the DM; check history before requesting another approval.")
+    except WebRequestError as exc:
+        if exc.status == 401:
+            raise IntegrationReconnectRequired("Reconnect X; DM submission was not confirmed. Check history before requesting another approval.") from exc
+        raise provider_warning("X", "DM send", exc,
+            "X DM submission failed or was not confirmed. Check history before requesting another approval.") from exc
+    data = response.get("data")
+    event_id = data.get("dm_event_id") if isinstance(data, dict) else None
+    conversation_id = data.get("dm_conversation_id") if isinstance(data, dict) else None
+    # X bills successful write requests even when confirmation is incomplete.
+    # Fully confirmed IDs deduplicate; an ambiguous response is one request.
+    confirmed = (not response.get("errors") and isinstance(event_id, str) and dms.USER_ID.fullmatch(event_id)
+        and isinstance(conversation_id, str) and dms.CONVERSATION_ID.fullmatch(conversation_id))
+    if confirmed:
+        api.costs.record("0.015", charge_id=f"dm:{event_id}")
+    else:
+        api.costs.record("0.015")
+        return ActionFailed("X did not confirm the DM; check history before requesting another approval.")
+    if "dm_conversation_id" in proposal and conversation_id != proposal["dm_conversation_id"]:
+        return ActionFailed("X returned an unexpected DM conversation; check history before requesting another approval.")
+    return ApprovalExecuted(f"Sent X DM as {account['label']} (dm_event_id {event_id}, dm_conversation_id {conversation_id}).")
 
 
 class XTool:
@@ -1116,12 +1190,37 @@ class XTool:
                 return ActionExecuted(_personalized_trends(X_CREDENTIALS.access_token(api), tool_input, api))
             if action == "lookup_user":
                 return ActionExecuted(_lookup_user(X_CREDENTIALS.access_token(api), tool_input, api))
+            if action in {"list_dm_events", "read_dm_conversation"}:
+                path, maximum = dms.read_request(tool_input, history=action == "read_dm_conversation")
+                token = X_CREDENTIALS.access_token(api, required_scopes=REQUIRED_X_DM_READ_SCOPES, reconnect_message=X_DM_READ_RECONNECT_MESSAGE)
+                account = X_CREDENTIALS.refresh_identity(api, token)
+                response = _api_get(token, path, what="DM lookup")
+                return ActionExecuted(dms.read_result(response, account["id"], maximum, api))
+            if action == "send_dm":
+                proposal = dms.proposal(tool_input)
+                token = X_CREDENTIALS.access_token(api, required_scopes=REQUIRED_X_DM_WRITE_SCOPES, reconnect_message=X_DM_WRITE_RECONNECT_MESSAGE)
+                account = X_CREDENTIALS.refresh_identity(api, token)
+                target_label = str(proposal.get("recipient_user_id") or proposal.get("dm_conversation_id"))
+                recipient = None
+                if "recipient_user_id" in proposal:
+                    recipient = _lookup_user(token, {"user_id": proposal["recipient_user_id"]}, api)["user"]
+                    if isinstance(recipient, dict):
+                        target_label = f"@{recipient['username']} (user {recipient['id']})"
+                dm_payload: JSONObject = {"action": action, "tool_id": MANIFEST.tool_id,
+                    "x_account": {"id": account["id"], "label": account["label"]}, "proposal": proposal}
+                if recipient is not None:
+                    dm_payload["recipient"] = recipient
+                summary = f"Send X DM as {clip_text(account['label'], 80)} to {target_label}, {len(str(proposal['text']))} characters: {clip_text(str(proposal['text']), 100)}"
+                if len(summary.encode("utf-8")) > SUMMARY_MAX_BYTES:
+                    summary = summary.encode("utf-8")[:SUMMARY_MAX_BYTES - 3].decode("utf-8", "ignore") + "..."
+                approval = api.approvals.request(action_id=action, summary=summary, payload=dm_payload)
+                return ActionPendingApproval(approval.approval_id, approval.summary)
             if action == "post_tweet":
                 proposal = _post_proposal(tool_input, api)
                 access_token = X_CREDENTIALS.access_token(
                     api,
-                    required_scopes=REQUIRED_X_VIDEO_SCOPES if "video_asset" in proposal else REQUIRED_X_WRITE_SCOPES,
-                    reconnect_message=X_VIDEO_RECONNECT_MESSAGE if "video_asset" in proposal else X_WRITE_RECONNECT_MESSAGE,
+                    required_scopes=REQUIRED_X_VIDEO_SCOPES if "video_asset" in proposal or "image_assets" in proposal else REQUIRED_X_WRITE_SCOPES,
+                    reconnect_message=X_VIDEO_RECONNECT_MESSAGE if "video_asset" in proposal or "image_assets" in proposal else X_WRITE_RECONNECT_MESSAGE,
                 )
                 account = X_CREDENTIALS.refresh_identity(api, access_token)
                 target_id = proposal.get("in_reply_to_tweet_id") or proposal.get("quote_tweet_id")
@@ -1154,6 +1253,8 @@ class XTool:
 
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
         try:
+            if approval.action_id == "send_dm":
+                return _send_dm_approved(approval, api)
             if approval.action_id != "post_tweet":
                 return ActionFailed("X approval action is invalid.")
             payload = approval.payload
@@ -1164,8 +1265,8 @@ class XTool:
             proposal_object = cast(JSONObject, proposal)
             access_token = X_CREDENTIALS.access_token(
                 api,
-                required_scopes=REQUIRED_X_VIDEO_SCOPES if "video_asset" in proposal_object else REQUIRED_X_WRITE_SCOPES,
-                reconnect_message=X_VIDEO_RECONNECT_MESSAGE if "video_asset" in proposal_object else X_WRITE_RECONNECT_MESSAGE,
+                required_scopes=REQUIRED_X_VIDEO_SCOPES if "video_asset" in proposal_object or "image_assets" in proposal_object else REQUIRED_X_WRITE_SCOPES,
+                reconnect_message=X_VIDEO_RECONNECT_MESSAGE if "video_asset" in proposal_object or "image_assets" in proposal_object else X_WRITE_RECONNECT_MESSAGE,
             )
             current_account = X_CREDENTIALS.refresh_identity(api, access_token)
             if approved_account.get("id") != current_account["id"]:
@@ -1193,6 +1294,10 @@ class XTool:
             if isinstance(quote_id, str):
                 body["quote_tweet_id"] = quote_id
             try:
+                if "image_assets" in proposal_object and "video_asset" in proposal_object:
+                    raise ToolInputValidationError("X approved post cannot mix images and video.")
+                if "image_assets" in proposal_object:
+                    body["media"] = {"media_ids": images.upload(access_token, proposal_object["image_assets"], api)}
                 if "video_asset" in proposal_object:
                     approved_video = proposal_object["video_asset"]
                     if not isinstance(approved_video, dict):
@@ -1208,7 +1313,7 @@ class XTool:
                     invalid_response_message="X post returned an invalid response.",
                 )
             except WebRequestError as exc:
-                raise _mapped_web_error(exc, "video upload or post" if "video_asset" in proposal_object else "post") from exc
+                raise _mapped_web_error(exc, "media upload or post" if "video_asset" in proposal_object or "image_assets" in proposal_object else "post") from exc
             data = response.get("data")
             posted_id = data.get("id") if isinstance(data, dict) else None
             valid_posted_id = posted_id if isinstance(posted_id, str) and TWEET_ID_RE.fullmatch(posted_id) else None

@@ -107,10 +107,12 @@ class LimaSmoke(AwsSmoke):
             self._public_key(),
         )
         self._assert_result(self.result, expected_state="running")
+        first_host_key = self._ssh("cat /etc/ssh/ssh_host_ed25519_key.pub").strip()
         self._remember_disk_identities()
         first_definition = self._definition_signature()
         self._check_definition_contract()
         self._check_definition_tamper_power_contract()
+        self._assert_ssh_host_key(first_host_key)
         self._assert_admin_not_directly_forwarded()
         self._write_sentinel()
         self._write_root_sentinel()
@@ -144,6 +146,7 @@ class LimaSmoke(AwsSmoke):
         if started_again.get("initial_state") != "running":
             raise AssertionError(f"second start was not idempotent: {started_again}")
         self.result = started_again
+        self._assert_ssh_host_key(first_host_key)
         if self._definition_signature() != first_definition:
             raise AssertionError("power operations replaced or rewrote the VM definition")
         self._check_live_host()
@@ -161,6 +164,7 @@ class LimaSmoke(AwsSmoke):
         # stored only on the disposable root proves replacement instead.
         self._assert_root_sentinel(present=False)
         self._check_live_host()
+        self.check_browser_lifecycle()
         self._write_root_sentinel()
         self._ok(
             "upgrade replaced compute and preserved both durable disks"
@@ -317,6 +321,13 @@ class LimaSmoke(AwsSmoke):
             ) from exc
         if not isinstance(result, dict):
             raise AssertionError(f"{module} returned a non-object result: {result!r}")
+        if module == "upgrade":
+            if "Bootstrap cache: browser hit" not in proc.stderr:
+                raise AssertionError("root-replacement upgrade did not reuse the browser cache")
+            if "browser package cache unusable" in proc.stderr:
+                raise AssertionError("restored browser package cache could not install offline")
+            if re.search(r"downloaded to [^\r\n]*/browsers/(?:chromium|ffmpeg)", proc.stderr):
+                raise AssertionError("root-replacement upgrade downloaded browser binaries again")
         return result
 
     def _run(
@@ -566,6 +577,11 @@ class LimaSmoke(AwsSmoke):
         self._close_tunnel()
         self.known_hosts.unlink(missing_ok=True)
         self.session_cookie = None
+
+    def _assert_ssh_host_key(self, expected: str) -> None:
+        current = self._ssh("cat /etc/ssh/ssh_host_ed25519_key.pub").strip()
+        if not expected or current != expected:
+            raise AssertionError("stop/start changed the VM's SSH host key")
 
     def _assert_admin_not_directly_forwarded(self) -> None:
         deadline = time.monotonic() + 10

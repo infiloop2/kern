@@ -473,12 +473,14 @@ class ActionListingTests(ToolsApiTestCase):
             self.assertNotIn("agent_notes", entry)
             self.assertNotIn("actions", entry)
 
-        catalog = {
-            entry["tool_id"]: entry
-            for entry in tools_api.call_action(
-                "list_bundled_tools", {"tool_ids": list(tools_host.BUNDLED_TOOLS)}, origin_thread_id=None
+        # Focused discovery is bounded even when the bundled catalog grows.
+        tool_ids = list(tools_host.BUNDLED_TOOLS)
+        catalog = {}
+        for offset in range(0, len(tool_ids), 32):
+            result = tools_api.call_action(
+                "list_bundled_tools", {"tool_ids": tool_ids[offset:offset + 32]}, origin_thread_id=None
             )["result"]["tools"]
-        }
+            catalog.update({entry["tool_id"]: entry for entry in result})
         # Always stated, empty included, so "this tool has nothing to add" is
         # distinguishable from "this surface does not carry it".
         for tool_id, entry in catalog.items():
@@ -1209,7 +1211,24 @@ class McpShimTests(ToolsApiTestCase):
             server.asset_store.describe("instagram", x_asset_id)
         with self.assertRaises(AssetError):
             server.asset_store.describe("twitter", staged_result["video_asset_id"])
+        image = Path(socket_dir.name) / "x-frame.png"
+        image.write_bytes(b"i" * 512)
+        def stage_x_image():
+            return self.rpc(shim, {"jsonrpc": "2.0", "id": 19, "method": "tools/call",
+                "params": {"name": "stage_image", "arguments": {"path": "/x-frame.png", "for_tool": "twitter"}}})
+        with state.mutation() as cur:
+            state.set_tool_enabled(cur, "twitter", False)
+        self.assertTrue(stage_x_image()["result"]["isError"])
+        with state.mutation() as cur:
+            state.set_tool_enabled(cur, "twitter", True)
+        staged_image = stage_x_image()
+        self.assertFalse(staged_image["result"]["isError"])
+        image_id = json.loads(staged_image["result"]["content"][0]["text"])["image_asset_id"]
+        self.assertEqual(server.asset_store.describe("twitter", image_id).media_type, "image/png")
+        with self.assertRaises(AssetError):
+            server.asset_store.describe("instagram", image_id)
         twitter = describe("twitter")
+        self.assertIn("image_asset_ids", twitter["post_tweet"]["properties"])
         self.assertIn("video_asset_id", twitter["post_tweet"]["properties"])
 
         # Both ingress layers admit falAI and preserve per-tool isolation.

@@ -9,6 +9,54 @@ import unittest
 
 @unittest.skipUnless(shutil.which('node'), 'node is required')
 class SwarmLayoutTests(unittest.TestCase):
+    def test_hub_teams_have_separate_space_despite_weak_bridges(self) -> None:
+        source = (Path(__file__).parents[1] / 'host/runtime/admin_api/admin_ui/swarm_layout.js').read_bytes()
+        module = 'data:text/javascript;base64,' + base64.b64encode(source).decode()
+        script = """
+            const teams = Array.from({length: 3}, (_, t) =>
+                Array.from({length: 7}, (_, i) => `agent-${i * 3 + t}`));
+            const agents = ['operator', 'kern-host', ...teams.flat(),
+                ...Array.from({length: 45}, (_, i) => `quiet-${i}`)].map(thread_id => ({thread_id}));
+            // Two shared hubs, like an App and CEO, with no specialist-to-
+            // specialist traffic. Names contain no team hint.
+            const edges = teams.flatMap(team => team.slice(1).flatMap((id, i) => [
+                {sender_thread_id: team[0], target_thread_id: id, count: 100},
+                ...(i ? [{sender_thread_id: team[1], target_thread_id: id, count: 30}] : []),
+            ]));
+            edges.push({sender_thread_id: teams[0][0], target_thread_id: teams[1][0], count: 1},
+                {sender_thread_id: teams[1][0], target_thread_id: teams[2][0], count: 1});
+            const metrics = Object.fromEntries(teams.flatMap(team => team.map((id, i) =>
+                [id, {operator_messages: i ? 0 : 10, agent_peers: i ? 2 : 6, total_tokens: 1000}])));
+            const layout = layoutAgents(agents, edges, metrics);
+            const overlap = (a, b) => a.left < b.right && b.left < a.right && a.top < b.bottom && b.top < a.bottom;
+            for (const team of teams) {
+                const boxes = team.map(id => footprint(layout.positions.get(id)));
+                const bounds = {left: Math.min(...boxes.map(b => b.left)), right: Math.max(...boxes.map(b => b.right)),
+                    top: Math.min(...boxes.map(b => b.top)), bottom: Math.max(...boxes.map(b => b.bottom))};
+                if (bounds.right - bounds.left > 850 || bounds.bottom - bounds.top > 850)
+                    throw Error('hub team remains scattered');
+                for (const [id, point] of layout.positions) {
+                    if (!team.includes(id) && overlap(bounds, footprint(point)))
+                        throw Error(`unrelated ${id} intrudes into team ${team[0]}`);
+                    const box = footprint(point);
+                    if (box.left < 0 || box.top < 0 || box.right > layout.width || box.bottom > layout.height)
+                        throw Error('packed agent outside map');
+                }
+            }
+            if (layout.positions.size !== agents.length) throw Error('lost disconnected agent');
+            const reverse = layoutAgents([...agents].reverse(), [...edges].reverse(), metrics);
+            if (JSON.stringify([...layout.positions]) !== JSON.stringify([...reverse.positions]))
+                throw Error('community placement depends on input order');
+            const synthetic = agents.slice(2).map(a => ({sender_thread_id: 'operator', target_thread_id: a.thread_id, count: 99999}));
+            synthetic.push({sender_thread_id: 'kern-host', target_thread_id: teams[0][0], count: 99999});
+            synthetic.push({sender_thread_id: 'archived', target_thread_id: teams[1][0], count: 99999});
+            const ignored = layoutAgents(agents, [...edges, ...synthetic], metrics);
+            if (JSON.stringify([...layout.positions]) !== JSON.stringify([...ignored.positions]))
+                throw Error('synthetic or absent identities alter communities');
+        """
+        subprocess.run(['node', '--input-type=module', '-e',
+                        f'import {{layoutAgents, footprint}} from {json.dumps(module)};\n' + script], check=True)
+
     def test_layout_includes_disconnected_agents_without_overlap(self) -> None:
         source = (Path(__file__).parents[1] / 'host/runtime/admin_api/admin_ui/swarm_layout.js').read_bytes()
         module = 'data:text/javascript;base64,' + base64.b64encode(source).decode()

@@ -15,9 +15,14 @@ class InputProtectionTests(unittest.TestCase):
                 with self.subTest(tool=manifest.tool_id, action=action.id):
                     if action.approval == "operator":
                         self.assertFalse(action.input_protections)
-                        text = json.dumps(action.input_schema).lower()
-                        for phrase in ('parameter guard', 'parameter-guarded', 'validated:', 'protection:'):
-                            self.assertNotIn(phrase, text)
+                        for name, field in action.input_schema['properties'].items():
+                            # Approval actions have no direct-input metadata, but
+                            # IndexNow explicitly guards its URLs before queueing.
+                            if (manifest.tool_id, action.id, name) in GUARDED_FIELDS:
+                                continue
+                            text = json.dumps(field).lower()
+                            for phrase in ('parameter guard', 'parameter-guarded', 'validated:', 'protection:'):
+                                self.assertNotIn(phrase, text)
                         continue
                     self.assertEqual(set(action.input_protections), set(action.input_schema['properties']))
                     for name, protection in action.input_protections.items():

@@ -35,6 +35,7 @@ a pending approval and the operator decides in the admin UI (see ``admin_api``).
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import asdict
 
 from http import HTTPStatus
@@ -44,7 +45,7 @@ import re
 import secrets
 import threading
 import time
-from typing import Any, BinaryIO, NoReturn, cast
+from typing import Any, BinaryIO, Iterator, NoReturn, cast
 from urllib.parse import quote, unquote
 
 from host.runtime.core.peer_identity import peer_thread_id
@@ -57,6 +58,8 @@ from host.runtime.core.unix_socket_service import (
     peer_uids,
 )
 from host.runtime.tools import assets as tool_assets, tools_host
+from host.tools.host_api import AssetMetadata
+from host.tools.whatsapp.media import media_snapshot
 from host.tools import ConnectionKind, ToolServiceError
 from host.tools import OpenedStreamingAsset, StreamingAssetError
 from host.tools.shared.web import ProviderWarning, UnmappedProviderError
@@ -614,19 +617,37 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
     def do_HEAD(self) -> None:
         self._send_tool_media(head=True)
 
+    @contextmanager
+    def _open_whatsapp_approval_media(self, approval_id: str) -> Iterator[tuple[AssetMetadata, BinaryIO]]:
+        record = state.tool_approval(approval_id, tool_id="whatsapp")
+        if record is None or record.get("status") != "pending" or record.get("action_id") != "send_message":
+            raise tool_assets.AssetError("Unknown media.")
+        payload = record.get("payload")
+        media = payload.get("media_asset") if isinstance(payload, dict) else None
+        if not isinstance(media, dict) or not isinstance(media.get("asset_id"), str):
+            raise tool_assets.AssetError("Unknown media.")
+        metadata = self.server.asset_store.describe("whatsapp", media["asset_id"])
+        if media_snapshot(metadata) != media:
+            raise tool_assets.AssetError("Unknown media.")
+        with self.server.asset_store.open("whatsapp", metadata.asset_id) as source:
+            yield metadata, source
+
     def _send_tool_media(self, *, head: bool = False) -> None:
         if not self._peer_is_admin():
             self._send_json(HTTPStatus.FORBIDDEN, {"error": "Peer not allowed."})
             return
         match = re.fullmatch(r"/operator/tool-media/([A-Za-z0-9_-]{43})", self.path)
-        if not match:
+        approval_match = re.fullmatch(r"/operator/whatsapp-approval-media/([A-Za-z0-9._:-]{1,128})", self.path)
+        if not match and not approval_match:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown media."})
             return
         if not _MEDIA_SLOTS.acquire(blocking=False):
             self._send_json(HTTPStatus.SERVICE_UNAVAILABLE, {"error": "Media service busy."})
             return
         try:
-            with self.server.asset_store.open_asset_grant(match.group(1)) as (metadata, source):
+            opened = (self.server.asset_store.open_asset_grant(match.group(1)) if match else
+                      self._open_whatsapp_approval_media(approval_match.group(1) if approval_match else ""))
+            with opened as (metadata, source):
                 size = metadata.size_bytes
                 start, end = 0, size - 1
                 requested = self.headers.get("Range")
@@ -674,7 +695,7 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:
-        if self.path.startswith("/operator/tool-media/"):
+        if self.path.startswith(("/operator/tool-media/", "/operator/whatsapp-approval-media/")):
             self._send_tool_media()
             return
         # The remaining GET route belongs to the agent MCP surface.
@@ -894,7 +915,7 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
             tool_id = self.headers.get("X-Kern-Tool") or ""
             allowed_tools = (
                 {"runway", "fal_ai", "openrouter"} if kind == "audio" else
-                {"runway", "instagram", "fal_ai", "openrouter", "twitter", "zoho_mail"} if kind == "video" else {"runway", "openai_images", "instagram", "fal_ai", "openrouter", "zoho_mail"}
+                {"runway", "instagram", "fal_ai", "openrouter", "twitter", "zoho_mail", "whatsapp"} if kind == "video" else {"runway", "openai_images", "instagram", "fal_ai", "openrouter", "twitter", "zoho_mail", "whatsapp"}
             )
             if tool_id not in allowed_tools:
                 self._send_json(

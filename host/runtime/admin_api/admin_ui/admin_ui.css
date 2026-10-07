@@ -1306,6 +1306,8 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 .integration-logo-tool-ahrefs_domain_rating { background: #ff8800; color: #fff; }
 .integration-logo-tool-brave_search { background: #fb542b; }
 .integration-logo-tool-gmail { background: #fff; }
+.integration-logo-tool-indexnow { background: #13a788; }
+.integration-logo-word-indexnow { font-family: Arial, sans-serif; font-size: 1.35rem; }
 .integration-logo-tool-gmail svg, .integration-logo-tool-google_calendar svg { height: 2.2rem; width: 2.2rem; }
 .gmail-blue, .calendar-blue { fill: #4285f4; }
 .gmail-red, .calendar-red { fill: #ea4335; }
@@ -1315,6 +1317,7 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 .integration-logo-tool-google_search { background: #fff; }
 .integration-logo-tool-google_search_console { background: #fff; }
 .integration-logo-tool-google_search_console svg { height: 2.25rem; width: 2.25rem; }
+.integration-logo-tool-pagespeed_insights { background: #4285f4; }
 .integration-logo-tool-ibkr { background: #fff; color: #d9272e; }
 .integration-logo-tool-instagram, .integration-logo-tool-instagram_discovery { background: radial-gradient(circle at 32% 105%, #ffd600 0 18%, #ff7a00 34%, #ff0169 57%, #d300c5 75%, #7638fa 100%); }
 .integration-logo-tool-linkedin { --logo-badge: #0a66c2; background: #0a66c2; }
@@ -3166,6 +3169,7 @@ html.iphone-standalone, html.iphone-standalone body {
 .approval-card details { margin-top: 8px; }
 .approval-card summary { cursor: pointer; color: var(--text-dim); padding: 8px 0; font: 12px/1.5 var(--font-ui); }
 .approval-payload { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 360px; overflow: auto; background: var(--bg); padding: 14px; border-radius: var(--radius-sm); font-size: 12px; }
+.approval-media-preview { display: block; max-width: 100%; max-height: 420px; margin-top: 14px; object-fit: contain; border-radius: var(--radius-sm); }
 .approval-card-bottom { margin-top: 8px; padding-top: 12px; border-top: 1px solid var(--border); }
 .approval-progress { font-size: 12px; color: var(--text-dim); }
 .approval-result { white-space: pre-wrap; font-size: 12px; margin-top: 12px; max-height: 220px; overflow: auto; }

@@ -22,6 +22,7 @@ import time
 from typing import BinaryIO, Iterator, Literal
 
 from host.tools.host_api import AssetMetadata
+from host.tools.whatsapp.media import validate_media as validate_whatsapp_media
 from host.tools.shared.media import MAX_EMAIL_ATTACHMENT_BYTES, matches_media_signature
 
 DEFAULT_ASSET_ROOT = Path("/mnt/kern-admin/tools-state/assets")
@@ -148,6 +149,11 @@ class ToolAssetStore:
             )
         if tool_id == "zoho_mail" and (kind not in {"image", "video"} or size_bytes > MAX_EMAIL_ATTACHMENT_BYTES):
             raise AssetError("Zoho Mail attachments must be images or videos of at most 10 MB.")
+        if tool_id == "whatsapp":
+            try:
+                validate_whatsapp_media(media_type, size_bytes)
+            except ValueError as exc:
+                raise AssetError(str(exc)) from exc
         now = int(time.time())
         # Under the lock: check quota and reserve a slot (a placeholder record
         # carrying the declared size) so concurrent stages see the reservation.
@@ -189,8 +195,9 @@ class ToolAssetStore:
                         prefix += chunk[:512 - len(prefix)]
                     hasher.update(chunk)
                     remaining -= len(chunk)
-            if tool_id == "zoho_mail" and not matches_media_signature(prefix, media_type):
-                raise AssetError("Zoho Mail attachment bytes do not match the declared media type.")
+            if tool_id in {"zoho_mail", "whatsapp"} and not matches_media_signature(prefix, media_type):
+                label = "WhatsApp" if tool_id == "whatsapp" else "Zoho Mail"
+                raise AssetError(f"{label} attachment bytes do not match the declared media type.")
         except Exception:
             destination.unlink(missing_ok=True)
             with self._lock:
@@ -252,8 +259,9 @@ class ToolAssetStore:
         """
         with self._lock:
             record = self._locked_record(tool_id, asset_id)
-            if tool_id == "zoho_mail":
-                raise AssetError("Zoho Mail attachments use private authenticated uploads, not public media URLs.")
+            if tool_id in {"zoho_mail", "whatsapp"}:
+                label = "WhatsApp" if tool_id == "whatsapp" else "Zoho Mail"
+                raise AssetError(f"{label} attachments use private authenticated uploads, not public media URLs.")
             if record.metadata.media_type not in ALLOWED_VIDEO_TYPES and record.metadata.media_type not in ALLOWED_IMAGE_TYPES:
                 raise AssetError("Public media must be a supported image or video.")
             token = secrets.token_urlsafe(32)

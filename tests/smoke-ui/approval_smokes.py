@@ -1,8 +1,125 @@
 """Exercise visible-page scope, concurrency, failures, and responsive review."""
 import time
+import base64
 from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import expect
+
+
+def whatsapp_media_smoke(browser, url, screenshot_dir=None):
+    context = browser.new_context(viewport={"width": 390, "height": 900})
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.add_init_script("window.mediaCspViolations = []; document.addEventListener('securitypolicyviolation', e => window.mediaCspViolations.push(e.violatedDirective));")
+    rows = [{"id": "wa-image", "kind": "tool", "source": "WhatsApp", "tool_id": "whatsapp",
+             "status": "pending", "summary": "Send frame.png to +447700900123 from Infiverse",
+             "action_id": "send_message", "account_label": "Infiverse", "created_at": 1788960000,
+             "updated_at": 1788960000}]
+    page.route("**/v1/approvals?*", lambda route: route.fulfill(json={
+        "items": rows, "page": 1, "pages": 1, "page_size": 10, "total": len(rows),
+        "pending_count": len(rows), "history_count": 0}))
+    mime = ["image/png"]
+    held_details = []
+    hold_details = [False]
+    def detail(route):
+        if hold_details[0]:
+            held_details.append(route)
+            return
+        finish_detail(route)
+    def finish_detail(route):
+        route.fulfill(json={"approval": {"payload": {
+            "recipient": "+447700900123", "account_label": "Infiverse", "text": "Exact 📷 caption <script>",
+            "media_asset": {"filename": "frame.png", "media_type": mime[0], "size_bytes": 512,
+                            "sha256": "a" * 64, "asset_id": "opaque"}}}})
+    page.route("**/v1/tools/whatsapp/approvals/wa-image", detail)
+    png = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aLc0AAAAASUVORK5CYII=")
+    missing_video = [True]
+    media_requests = []
+    def media_response(route):
+        media_requests.append(route.request.url)
+        assert route.request.headers.get("x-kern-csrf") == "1", "preview must use authenticated apiBlob"
+        if mime[0] == "image/png":
+            route.fulfill(content_type="image/png", body=png)
+        elif missing_video[0]:
+            route.fulfill(status=404)
+        else:
+            # An undecodable MP4 tests local blob loading and decode feedback;
+            # this fixture does not claim to verify playback or a real send.
+            route.fulfill(content_type="video/mp4", body=b"\x00\x00\x00\x18ftypmp42mock-video")
+    page.route("**/v1/tools/whatsapp/approvals/wa-image/media", media_response)
+    page.goto(url + "#approvals")
+    page.locator("#password").fill("dev")
+    page.locator('[data-action="login"]').click()
+    page.locator("[data-approval-details] summary").click()
+    expect(page.locator(".approval-payload")).to_contain_text("Exact 📷 caption <script>")
+    expect(page.locator("img.approval-media-preview")).to_be_visible()
+    page.wait_for_function("() => document.querySelector('img.approval-media-preview')?.naturalWidth > 0")
+    assert page.locator("img.approval-media-preview").get_attribute("src").startswith("blob:")
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    if screenshot_dir:
+        page.screenshot(path=str(screenshot_dir / "whatsapp-media-mobile.png"), full_page=True)
+    # Closing/reopening while detail requests are held must discard the old load,
+    # even if both responses arrive after the details element is open again.
+    page.locator("[data-approval-details] summary").click()
+    expect(page.locator(".approval-media-review")).to_have_count(0)
+    hold_details[0] = True
+    page.locator("[data-approval-details] summary").click()
+    expect(page.locator(".approval-payload")).to_have_text("Loading request...")
+    page.locator("[data-approval-details] summary").click()
+    page.locator("[data-approval-details] summary").click()
+    def wait_for_routes(routes, count):
+        deadline = time.monotonic() + 5
+        while len(routes) < count and time.monotonic() < deadline:
+            page.wait_for_timeout(10)
+        assert len(routes) == count
+    wait_for_routes(held_details, 2)
+    before = len(media_requests)
+    finish_detail(held_details[0])
+    finish_detail(held_details[1])
+    page.wait_for_function("() => document.querySelector('img.approval-media-preview')?.naturalWidth > 0")
+    expect(page.locator(".approval-media-review")).to_have_count(1)
+    assert len(media_requests) == before + 1, "stale detail loads must not fetch another preview"
+    hold_details[0] = False
+    mime[0] = "video/mp4"
+    page.locator('[data-action="approval-refresh"]').click()
+    page.locator("[data-approval-details] summary").click()
+    expect(page.locator("video.approval-media-preview")).to_have_attribute("controls", "")
+    expect(page.locator("[data-approval-details]")).to_contain_text("Attachment preview unavailable")
+    missing_video[0] = False
+    page.locator("[data-approval-details] summary").click()
+    expect(page.locator(".approval-media-review")).to_have_count(0)
+    page.locator("[data-approval-details] summary").click()
+    page.wait_for_function("() => document.querySelector('video.approval-media-preview')?.src.startsWith('blob:')")
+    # Slow WhatsApp approvals are submitted one at a time; unrelated tools still
+    # start immediately. Releasing each response must start only its successor.
+    rows.extend([{**rows[0], "id": "wa-second"}, {**rows[0], "id": "wa-third"},
+                 {**rows[0], "id": "mail", "tool_id": "gmail", "source": "Gmail", "action_id": "send_email"}])
+    held_decisions = []
+    page.route("**/v1/tools/whatsapp/approvals/*/approve", lambda route: held_decisions.append(route))
+    page.route("**/v1/tools/gmail/approvals/*/approve", lambda route: held_decisions.append(route))
+    page.locator('[data-action="approval-refresh"]').click()
+    expect(page.locator(".approval-card")).to_have_count(4)
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.locator('[data-action="approval-bulk"][data-decision="approve"]').click()
+    expect(page.locator(".approval-progress", has_text="Approving...")).to_have_count(2)
+    expect(page.locator(".approval-progress", has_text="Queued")).to_have_count(2)
+    wait_for_routes(held_decisions, 2)
+    first = {urlparse(route.request.url).path.split("/")[-2]: route for route in held_decisions}
+    assert set(first) == {"wa-image", "mail"}
+    first["mail"].fulfill(json={"result": {"status": "executed"}})
+    first["wa-image"].fulfill(json={"result": {"status": "executed"}})
+    wait_for_routes(held_decisions, 3)
+    assert held_decisions[-1].request.url.endswith("/wa-second/approve")
+    expect(page.locator('[data-approval-key="tool:wa-third"] .approval-progress')).to_have_text("Queued")
+    held_decisions[-1].fulfill(json={"result": {"status": "executed"}})
+    wait_for_routes(held_decisions, 4)
+    assert held_decisions[-1].request.url.endswith("/wa-third/approve")
+    held_decisions[-1].fulfill(json={"result": {"status": "executed"}})
+    expect(page.locator("#approval-feedback")).to_contain_text("4 approved")
+    assert page.evaluate("window.mediaCspViolations") == [], "preview must obey the admin CSP"
+    assert not errors, errors
+    context.close()
 
 
 def assert_review_layout(page, width):
@@ -295,5 +412,46 @@ def approval_smoke(browser, url, screenshot_dir=None):
         expect(page.locator(".approval-empty h2")).to_have_css("text-transform", "none")
         if screenshot_dir:
             page.screenshot(path=str(screenshot_dir / f"empty-{width}.png"), full_page=True, animations="disabled")
+    assert not errors, errors
+    context.close()
+
+
+def x_exact_request_smoke(browser, url):
+    """Exact X sender, target, text and ordered digests render safely on mobile."""
+    context = browser.new_context(viewport={"width": 390, "height": 900})
+    page = context.new_page()
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    rows = [{"id": "x-request", "kind": "tool", "source": "X", "tool_id": "twitter",
+             "status": "pending", "summary": "Publish exact request", "action_id": "post_tweet",
+             "account_label": "@claw", "created_at": 1788960000, "updated_at": 1788960000}]
+    page.route("**/v1/approvals?*", lambda route: route.fulfill(json={
+        "items": rows, "page": 1, "pages": 1, "page_size": 10, "total": 1,
+        "pending_count": 1, "history_count": 0}))
+    payload = {"x_account": {"id": "111", "label": "@claw"}, "proposal": {
+        "text": " Exact 📷 <script> text\n", "in_reply_to_tweet_id": "55",
+        "image_assets": [{"filename": f"frame-{i}.png", "media_type": "image/png",
+                          "size_bytes": 512, "sha256": str(i) * 64} for i in (1, 2)]}}
+    page.route("**/v1/tools/twitter/approvals/x-request", lambda route: route.fulfill(json={"approval": {"payload": payload}}))
+    page.goto(url + "#approvals")
+    page.locator("#password").fill("dev")
+    page.locator('[data-action="login"]').click()
+    page.locator("[data-approval-details] summary").click()
+    review = page.locator(".approval-x-review")
+    expect(review).to_contain_text("@claw (111) to reply to post 55")
+    expect(review.locator("pre")).to_have_text(payload["proposal"]["text"])
+    expect(review).to_contain_text("Attachment 1: frame-1.png")
+    expect(review).to_contain_text("SHA256 " + "2" * 64)
+    assert review.locator("script").count() == 0
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+    page.locator("[data-approval-details] summary").click()
+    expect(review).to_have_count(0)
+    rows[0]["action_id"] = "send_dm"
+    payload["proposal"] = {"text": "Exact private <script> text", "dm_conversation_id": "111-222"}
+    page.locator('[data-action="approval-refresh"]').click()
+    page.locator("[data-approval-details] summary").click()
+    expect(review).to_contain_text("Direct message from @claw (111) to conversation 111-222")
+    expect(review.locator("pre")).to_have_text("Exact private <script> text")
+    expect(review).not_to_contain_text("Attachment")
     assert not errors, errors
     context.close()

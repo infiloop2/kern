@@ -932,6 +932,44 @@ fi
 }
 
 # Runtime CLIs used by the unprivileged agent user.
+install_browser() (
+  # Download caches live on the preserved volume; installations stay on root.
+  # Work on root first so downloads never consume the database's free space.
+  browser_downloads="$(mktemp -d)"
+  trap 'rm -rf -- "$browser_downloads"' EXIT
+  uv venv --python /usr/bin/python3 /usr/local/lib/kern-browser-venv
+  browser_cache_hit=no
+  if bootstrap_cache restore-browser "$BROWSER_PLAYWRIGHT_VERSION" "$UV_VERSION" "$browser_downloads"; then
+    if uv --cache-dir "$browser_downloads/uv" --offline pip install \
+      --python /usr/local/lib/kern-browser-venv/bin/python --link-mode copy \
+      "playwright==${BROWSER_PLAYWRIGHT_VERSION}"; then
+      browser_cache_hit=yes
+    else
+      echo "Bootstrap cache: browser package cache unusable; downloading again"
+      rm -rf -- "$browser_downloads/uv" "$browser_downloads/browsers"
+    fi
+  else
+    restore_status=$?
+    if [ "$restore_status" != 3 ]; then exit "$restore_status"; fi
+  fi
+  if [ "$browser_cache_hit" = no ]; then
+    uv --cache-dir "$browser_downloads/uv" pip install \
+      --python /usr/local/lib/kern-browser-venv/bin/python --link-mode copy \
+      "playwright==${BROWSER_PLAYWRIGHT_VERSION}"
+  fi
+  # Ubuntu dependencies still use apt and its restored archive cache.
+  /usr/local/lib/kern-browser-venv/bin/python -m playwright install-deps chromium
+  bootstrap_cache save-debs
+  PLAYWRIGHT_BROWSERS_PATH="$browser_downloads/browsers" \
+    /usr/local/lib/kern-browser-venv/bin/python -m playwright install chromium --no-shell
+  install -d -m 0755 /usr/local/share/kern-browsers
+  cp -a "$browser_downloads/browsers/." /usr/local/share/kern-browsers/
+  if [ "$browser_cache_hit" = no ]; then
+    bootstrap_cache save-browser "$BROWSER_PLAYWRIGHT_VERSION" "$UV_VERSION" "$browser_downloads"
+  fi
+  chmod -R a+rX /usr/local/lib/kern-browser-venv /usr/local/share/kern-browsers
+)
+
 install_agent_clis() {
 echo "== installing Node.js ${NODE_VERSION} =="
 arch="$(dpkg --print-architecture)"
@@ -1083,11 +1121,7 @@ PYTHON
 chmod -R a+rX /usr/local/lib/kern-transcription-venv /usr/local/share/kern-transcription-models
 # Private browser runtime. Saved auth state stays on the admin volume;
 # Chromium working files are temporary. Binaries are replaced on deploy.
-uv venv --python /usr/bin/python3 /usr/local/lib/kern-browser-venv
-uv pip install --python /usr/local/lib/kern-browser-venv/bin/python "playwright==${BROWSER_PLAYWRIGHT_VERSION}"
-PLAYWRIGHT_BROWSERS_PATH=/usr/local/share/kern-browsers \
-  /usr/local/lib/kern-browser-venv/bin/python -m playwright install --with-deps chromium --no-shell
-chmod -R a+rX /usr/local/lib/kern-browser-venv /usr/local/share/kern-browsers
+install_browser
 # npm inherits the script's umask 077, which would leave the CLI root-only;
 # the agent user must be able to run it.
 chmod -R a+rX /usr/local/lib/node_modules
@@ -1716,10 +1750,10 @@ Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.tools.service
 ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-tools
 KillMode=mixed
-# A gateway request can hold its adapter lock for 40s, then bounded child
+# A media gateway request can hold its adapter lock for 240s, then bounded child
 # termination can take 2s. Leave enough time for that request to unwind and
 # the parent's final 2s cache-flush RPC before systemd kills the child cgroup.
-TimeoutStopSec=60s
+TimeoutStopSec=300s
 Restart=always
 RestartSec=3
 
@@ -2176,6 +2210,7 @@ main() {
   verify_deployment
   # Only a verified deployment may discard obsolete cached downloads.
   bootstrap_cache prune $(printf '%s\n%s\n' "$EMBEDDING_MODEL_SHA256" "$TRANSCRIPTION_MODEL_SHA256" | awk '{print $1}')
+  bootstrap_cache prune-browser "$BROWSER_PLAYWRIGHT_VERSION" "$UV_VERSION"
   finalize_deploy
 }
 

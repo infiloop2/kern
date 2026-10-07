@@ -25,11 +25,11 @@ MAX_STATUS_CHECKS = 30
 MEDIA_ID_RE = re.compile(r"^[0-9]{1,19}$")
 
 
-def _provider_failure(message: str, response: JSONObject) -> ProviderWarning:
+def _provider_failure(message: str, response: JSONObject, *, operation: str = "video upload") -> ProviderWarning:
     # Preserve bounded processing/upload errors for operator diagnostics;
     # never return raw provider text to the agent.
     error = WebRequestError(message, status=200, body=json.dumps(response).encode()[:4096])
-    return provider_warning("X", "video upload", error, message)
+    return provider_warning("X", operation, error, message)
 
 
 def snapshot(asset_id: object, api: HostAPI) -> JSONObject:

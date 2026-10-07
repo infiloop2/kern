@@ -26,13 +26,13 @@ def connected_api(*, expires_at: int = FRESH_EXPIRES_AT) -> FakeHostAPI:
             "account": {
                 "id": "111",
                 "label": "@claw",
-                "scopes": ["tweet.read", "users.read", "tweet.write", "media.write", "offline.access"],
+                "scopes": ["tweet.read", "users.read", "tweet.write", "media.write", "dm.read", "dm.write", "offline.access"],
             },
             "secret": {
                 "access_token": "x-access",
                 "expires_at": expires_at,
                 "refresh_token": "x-refresh-1",
-                "scope": "tweet.read users.read tweet.write media.write offline.access",
+                "scope": "tweet.read users.read tweet.write media.write dm.read dm.write offline.access",
                 "token_type": "bearer",
             },
             "metadata": {"created_at": 1, "updated_at": 1},
@@ -60,6 +60,9 @@ class XToolReadTests(unittest.TestCase):
                 "get_personalized_trends",
                 "lookup_user",
                 "post_tweet",
+                "list_dm_events",
+                "read_dm_conversation",
+                "send_dm",
             ],
         )
         self.assertIn("publish posts", tool.manifest.description)
@@ -480,20 +483,14 @@ class XToolUserLookupTests(unittest.TestCase):
                     "",
                 )
 
-    def test_only_posting_is_approval_gated(self) -> None:
+    def test_posts_and_dm_sends_are_approval_gated(self) -> None:
         approvals = {spec.id: spec.approval for spec in XTool().manifest.actions}
         self.assertEqual(approvals["post_tweet"], "operator")
-        self.assertTrue(all(
-            approval == "direct" for action, approval in approvals.items() if action != "post_tweet"
-        ))
-        self.assertNotIn("send_dm", [spec.id for spec in XTool().manifest.actions])
-        self.assertIn("tweet.write", twitter.X_OAUTH_SCOPES)
-        self.assertNotIn("dm.read", twitter.X_OAUTH_SCOPES)
-        with patch.object(twitter, "json_request") as request:
-            result = XTool().execute("send_dm", {"text": "hi", "recipient_user_id": "222"}, connected_api())
-            request.assert_not_called()
-        assert isinstance(result, ActionFailed)
-        self.assertIn("Unsupported X action", result.error)
+        self.assertEqual(approvals["send_dm"], "operator")
+        self.assertTrue(all(approval == "direct" for action, approval in approvals.items()
+                            if action not in {"post_tweet", "send_dm"}))
+        self.assertIn("dm.read", twitter.X_OAUTH_SCOPES)
+        self.assertIn("dm.write", twitter.X_OAUTH_SCOPES)
 
 
 class XToolPostTests(unittest.TestCase):
@@ -661,7 +658,8 @@ class XCredentialFlowTests(unittest.TestCase):
         self.assertTrue(result["authorization_url"].startswith("https://x.com/i/oauth2/authorize?"))
         self.assertIn("code_challenge_method=S256", result["authorization_url"])
         self.assertIn("users.read", result["authorization_url"])
-        self.assertNotIn("dm.", result["authorization_url"])
+        self.assertIn("dm.read", result["authorization_url"])
+        self.assertIn("dm.write", result["authorization_url"])
         self.assertIn("tweet.write", result["authorization_url"])
         self.assertIn("state=", result["authorization_url"])
         self.assertIn(".", result["state"])
@@ -678,7 +676,7 @@ class XCredentialFlowTests(unittest.TestCase):
                 self.assertEqual(kwargs["form"]["grant_type"], "authorization_code")
                 self.assertTrue(kwargs["form"]["code_verifier"])
                 return {"access_token": "x-access", "refresh_token": "x-refresh", "expires_in": 7200,
-                        "scope": "tweet.read users.read tweet.write media.write offline.access",
+                        "scope": "tweet.read users.read tweet.write media.write dm.read dm.write offline.access",
                         "token_type": "bearer"}
             if "/users/me" in url:
                 return me_response()
@@ -703,7 +701,7 @@ class XCredentialFlowTests(unittest.TestCase):
 
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
             return {"access_token": "x-access", "expires_in": 7200,
-                    "scope": "tweet.read users.read tweet.write media.write offline.access",
+                    "scope": "tweet.read users.read tweet.write media.write dm.read dm.write offline.access",
                     "token_type": "bearer"}
 
         with patch.object(twitter, "json_request", fake_json_request):
