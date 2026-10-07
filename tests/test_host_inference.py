@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import json
 import http.client
 import os
@@ -19,6 +20,7 @@ from host.runtime.host_inference import (
     approval_risk,
     api,
     client,
+    decisions,
     json_contract,
     openai,
     provider_http,
@@ -603,6 +605,114 @@ class TypeSafeJevAdapterTests(unittest.TestCase):
         self.assertLess(len(sent), 64 * 1024)
         self.assertIn("😀".encode("utf-8"), sent)
 
+class OpenAIDecisionsTests(unittest.TestCase):
+    def setUp(self):
+        self.questions = [{"type": "predicate", "name": "q0", "instructions": "Is this relevant?"}]
+        self.response = {"model": "gpt-6-luna-2026-09-01", "answers": [
+            {"type": "predicate", "name": "q0", "probability": .8}],
+            "usage": {"input_tokens": 100, "input_tokens_details": {"cached_tokens": 20, "cache_write_tokens": 0},
+                      "output_tokens": 0}}
+
+    def evaluate(self, response=None, **kwargs):
+        return decisions.evaluate(
+            api_key="sk-test", model="gpt-6-luna", input="User: Fix login", questions=self.questions,
+            transport=lambda *_args, **_kwargs: json.dumps(self.response if response is None else response).encode(),
+            **kwargs,
+        )
+
+    def test_fixed_endpoint_serialized_egress_redacts_content_and_preserves_question_names(self):
+        seen = {}
+        name = "q123456789012"
+        questions = [{"type": "predicate", "name": name, "instructions": "Check token=short-secret"}]
+        response = {**self.response, "answers": [{"type": "predicate", "name": name, "probability": .8}]}
+        def transport(url, **kwargs):
+            seen.update(url=url, **kwargs)
+            return json.dumps(response).encode()
+        input = '{"task_query":"User: Do not deploy password=hunter2", "candidates":[{"id":"q0","description":"token sk-proj-abcdefghijklmnopqrstuv"}]}'
+        result = decisions.evaluate(api_key="sk-test", model="gpt-6-luna", input=input,
+                                    questions=questions, transport=transport)
+        self.assertEqual(seen["url"], "https://api.openai.com/v1/decisions")
+        self.assertEqual(seen["max_bytes"], decisions.MAX_RESPONSE_BYTES)
+        self.assertEqual(seen["headers"]["Authorization"], "Bearer sk-test")
+        body = json.loads(seen["data"])
+        self.assertEqual(body["questions"][0]["name"], name)
+        self.assertEqual(body["questions"][0]["type"], "predicate")
+        self.assertEqual(body["model"], "gpt-6-luna")
+        self.assertNotIn("hunter2", body["input"])
+        self.assertNotIn("sk-proj-abcdefghijklmnopqrstuv", body["input"])
+        self.assertNotIn("short-secret", body["questions"][0]["instructions"])
+        self.assertIn("Do not deploy", body["input"])
+        self.assertIn("<redacted>", body["input"])
+        self.assertEqual(input, '{"task_query":"User: Do not deploy password=hunter2", "candidates":[{"id":"q0","description":"token sk-proj-abcdefghijklmnopqrstuv"}]}')
+        self.assertEqual(result, {"model": response["model"], "answers": response["answers"]})
+
+    def test_rejects_invalid_partial_duplicate_and_nonfinite_answers_but_accepts_refusal(self):
+        invalid = [{}, {**self.response, "model": "gpt-6.1-sol"}, {**self.response, "answers": []},
+                   {**self.response, "answers": self.response["answers"] * 2}]
+        invalid += [{**self.response, "answers": [{"type": "predicate", "name": "q0", "probability": v}]}
+                    for v in (None, True, "0.8", -1, 2, float("inf"), float("nan"))]
+        invalid += [{**self.response, "answers": [{"type": "predicate", "name": "wrong", "probability": .8}]}]
+        for response in invalid:
+            with self.subTest(response=response), self.assertRaises(decisions.DecisionResponseError):
+                self.evaluate(response)
+        refusal = {**self.response, "answers": [{"type": "refusal", "name": "q0"}]}
+        self.assertEqual(self.evaluate(refusal)["answers"], refusal["answers"])
+
+    def test_bounds_input_and_questions_before_transport(self):
+        cases = [{"model": "gpt-6.1-sol"}, {"input": ""}, {"input": "😀" * decisions.MAX_INPUT_BYTES},
+                 {"questions": []}, {"questions": self.questions * 2},
+                 {"questions": [{**self.questions[0], "type": "score"}]},
+                 {"questions": [{**self.questions[0], "instructions": "x" * decisions.MAX_REQUEST_BYTES}]}]
+        for override in cases:
+            transport = MagicMock()
+            with self.subTest(override=list(override)), self.assertRaises(ValueError):
+                decisions.evaluate(**{ "api_key": "test", "model": "gpt-6-luna", "input": "query",
+                    "questions": self.questions, "transport": transport, **override})
+            transport.assert_not_called()
+
+    def test_usage_recorded_even_when_answers_are_invalid_with_decision_pricing(self):
+        response = {**self.response, "answers": []}
+        recorder = MagicMock()
+        with self.assertRaises(decisions.DecisionResponseError):
+            self.evaluate(response, usage_recorder=recorder)
+        recorder.assert_called_once_with("gpt-6-luna", response)
+        with patch.object(usage, "_schedule") as save:
+            usage.record_openai_decision_response("gpt-6-luna", self.response)
+        self.assertEqual(save.call_args.args[:3], ("openai", "gpt-6-luna",
+            {"input_tokens": 100, "cached_input_tokens": 20, "output_tokens": 0}))
+        self.assertAlmostEqual(save.call_args.args[3], 80 * .1 / 1_000_000)
+        with patch.object(usage, "_schedule") as text_save:
+            usage.record_openai_response("gpt-6-luna", self.response)
+        self.assertGreater(text_save.call_args.args[3], save.call_args.args[3])
+
+    def test_disabled_provider_does_not_call_adapter_or_log_warning(self):
+        adapter = MagicMock()
+        with patch.object(providers.state, "enabled_host_inference_provider", return_value=None), \
+             patch.object(providers.host_errors, "report_warning") as warning, \
+             self.assertRaises(providers.ProviderDisabledError):
+            providers.openai_decisions("query", self.questions, model="gpt-6-luna", timeout_seconds=1.2, adapter=adapter)
+        adapter.assert_not_called()
+        warning.assert_not_called()
+
+    def test_dispatch_and_client_require_bounded_timeout_and_fixed_model(self):
+        body = {"input": "query", "model": "gpt-6-luna", "questions": self.questions, "timeout_seconds": 1.2}
+        with patch.object(api.providers, "openai_decisions", return_value=self.response) as call:
+            self.assertEqual(api.dispatch("/openai/decisions", body), {"result": self.response})
+        call.assert_called_once_with("query", self.questions, model="gpt-6-luna", timeout_seconds=1.2)
+        for timeout in (True, None, "1.2", 0, -1, 60.1, float("nan"), float("inf")):
+            with self.subTest(timeout=timeout), patch.object(client, "_request") as request, \
+                 patch.object(api.providers, "openai_decisions") as call:
+                with self.assertRaises(ValueError):
+                    client.openai_decisions("query", self.questions, model="gpt-6-luna", timeout_seconds=timeout)
+                with self.assertRaises(ValueError):
+                    api.dispatch("/openai/decisions", {**body, "timeout_seconds": timeout})
+                request.assert_not_called()
+                call.assert_not_called()
+        for override in ({"model": "gpt-6.1-sol"}, {"questions": []}, {"extra": 1}):
+            with self.subTest(override=override), self.assertRaises(ValueError):
+                api.dispatch("/openai/decisions", {**body, **override})
+
+
 class ConcreteProviderTests(unittest.TestCase):
     def test_disabled_provider_never_calls_adapter_or_logs_failure(self) -> None:
         for provider in ("openai", "typesafe"):
@@ -676,6 +786,68 @@ class ConcreteProviderTests(unittest.TestCase):
 
 
 class HostInferenceBoundaryTests(unittest.TestCase):
+    def test_shadow_decision_keeps_all_four_jev_slots_available(self) -> None:
+        shadow_started = threading.Event()
+        jev_started = threading.Barrier(api.MAX_CONCURRENT_CALLS + 1)
+        release = threading.Event()
+        jev_result = {"model": "jev-latest", "answers": {"q": {"type": "noul", "noul": .8}}}
+        luna_result = {"model": "gpt-6-luna", "answers": [{"name": "q", "type": "predicate", "probability": .8}]}
+        questions = [{"name": "q", "type": "predicate", "instructions": "Assess relevance"}]
+
+        def shadow(*args, **kwargs):
+            shadow_started.set()
+            if not release.wait(timeout=3):
+                raise TimeoutError("Test did not release shadow call")
+            return luna_result
+
+        def jev(*args, **kwargs):
+            jev_started.wait(timeout=1)
+            if not release.wait(timeout=3):
+                raise TimeoutError("Test did not release Jev calls")
+            return jev_result
+
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = str(Path(directory) / "capacity.sock")
+            server = api.HostInferenceServer(socket_path, frozenset({os.getuid()}))
+            worker = threading.Thread(target=server.serve_forever,
+                                      kwargs={"poll_interval": .01}, daemon=True)
+            worker.start()
+            try:
+                with patch.object(client, "SOCKET_PATH", socket_path), \
+                     patch.object(api.providers, "openai_decisions", side_effect=shadow) as decisions_call, \
+                     patch.object(api.providers, "typesafe_jev_judgment", side_effect=jev), \
+                     ThreadPoolExecutor(max_workers=api.MAX_CONCURRENT_CALLS + 1) as executor:
+                    try:
+                        luna = executor.submit(client.openai_decisions, "query", questions,
+                                               model="gpt-6-luna", timeout_seconds=4)
+                        self.assertTrue(shadow_started.wait(timeout=1))
+                        jev_calls = [executor.submit(client.typesafe_jev_judgment, {},
+                                     {"q": {"type": "noul", "instructions": "Assess relevance"}})
+                                     for _ in range(api.MAX_CONCURRENT_CALLS)]
+                        # All four Jev calls enter the provider while Luna is still active.
+                        jev_started.wait(timeout=1)
+                        connection = client._HostInferenceConnection(1)
+                        try:
+                            connection.request("POST", "/openai/decisions", body=json.dumps({
+                                "input": "query", "questions": questions,
+                                "model": "gpt-6-luna", "timeout_seconds": 1,
+                            }))
+                            response = connection.getresponse()
+                            self.assertEqual(response.status, 429)
+                            response.read()
+                        finally:
+                            connection.close()
+                        decisions_call.assert_called_once()
+                    finally:
+                        release.set()
+                    self.assertEqual(luna.result(), luna_result)
+                    self.assertEqual([call.result() for call in jev_calls],
+                                     [jev_result] * api.MAX_CONCURRENT_CALLS)
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join()
+
     def test_service_exposes_only_concrete_provider_actions(self) -> None:
         with patch.object(
             api.providers, "openai_text_completion", return_value={"ok": True}

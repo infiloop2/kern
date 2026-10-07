@@ -6441,7 +6441,8 @@ class ToolRoutesTests(unittest.TestCase):
         status, body = self.request("GET", "/v1/tools")
         self.assertEqual(status, 200)
         # New bundled packages should not need an edit here; released ids may
-        # not vanish. (test_tools_host uses the same issubset contract.)
+        # not vanish without explicit retirement. linkedin_discovery was replaced
+        # by google_search without inheriting configuration or enablement.
         self.assertTrue(
             {
                 "brave_search",
@@ -6451,13 +6452,18 @@ class ToolRoutesTests(unittest.TestCase):
                 "instagram",
                 "instagram_discovery",
                 "linkedin",
-                "linkedin_discovery",
+                "google_search",
                 "polymarket",
                 "runway",
                 "twitter",
                 "zoho_mail",
             }.issubset({entry["tool_id"] for entry in body["tools"]})
         )
+        self.assertNotIn("linkedin_discovery", {entry["tool_id"] for entry in body["tools"]})
+        search = self.tool_entry(body, "google_search")
+        self.assertEqual(search["display_name"], "Google Search (Serper)")
+        self.assertFalse(search["enabled"])
+        self.assertEqual([action["id"] for action in search["actions"]], ["search"])
         gmail = self.tool_entry(body, "gmail")
         self.assertFalse(gmail["enabled"])
         self.assertEqual(gmail["connection"], "oauth")

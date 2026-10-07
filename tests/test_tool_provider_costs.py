@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from host.runtime.tools.tools_host import BUNDLED_TOOLS
-from host.tools import apify, brave_search, instagram_discovery, linkedin_discovery, openai_images
+from host.tools import apify, brave_search, instagram_discovery, google_search, openai_images
 from host.tools import elevenlabs
 from host.tools.results import ActionFailed
 from host.tools.shared.cost_reporting import report_priced_units
@@ -17,7 +17,7 @@ from test_tools_openai_images import image_response
 class ProviderCostTests(unittest.TestCase):
     def test_reporting_manifests_describe_every_action(self):
         names = ('apify', 'apify_developer', 'brave_search', 'elevenlabs', 'fal_ai',
-                 'instagram_discovery', 'linkedin_discovery', 'openai_images',
+                 'instagram_discovery', 'google_search', 'openai_images',
                  'reddit_scrapecreators')
         for name in names:
             with self.subTest(tool=name):
@@ -55,8 +55,8 @@ class ProviderCostTests(unittest.TestCase):
 
     def test_serper_uses_published_rate(self):
         api = FakeHostAPI(config={'SERPERAPI_API_KEY': 'key'})
-        with patch.object(linkedin_discovery, '_search', return_value={}):
-            linkedin_discovery.LinkedInDiscoveryTool().execute('search_posts', {'query': 'agents'}, api)
+        with patch.object(google_search, '_search', return_value={}):
+            google_search.GoogleSearchTool().execute('search', {'query': 'agents'}, api)
         self.assertEqual(api.costs.calls, [('0.001000000', '')])
 
     def test_h3max_reports_simple_mode_but_skips_reference_inputs(self):

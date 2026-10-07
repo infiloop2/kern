@@ -182,13 +182,13 @@ supplied settings apply only when admitting a new turn, without queuing changes.
 
 ## Automatic Codex session rotation
 
-After a successful turn, Kern measures the current Codex session's JSONL
-rollout. At 100 MiB or more (`SESSION_ROLLOUT_MAX_BYTES`), it clears that run's
-exact provider-session mapping and asks Codex to delete the retired session
-and its native descendants. This applies to all three Codex accounts and to
-Chat, App, and scheduled threads. The existing FINISHING fence blocks another
-turn until rotation and process teardown finish; stopped or failed turns do
-not trigger rotation.
+At startup and every 24 hours, one reconciliation pass checks idle Codex
+sessions across all three accounts. At 100 MiB or more
+(`SESSION_ROLLOUT_MAX_BYTES`), it clears the exact provider-session mapping and
+asks Codex to delete the retired root and its internal native children. This
+applies to Chat, App, and scheduled threads. Running and FINISHING turns are
+skipped; the live check and detach share the admission mutation lock.
+Turn completion no longer performs size measurement or deletion.
 
 The Kern thread, schedule, messages, activity, self-memory, and model settings
 remain. The next ordinary message or scheduled firing starts a fresh provider
@@ -201,16 +201,20 @@ the admin service gains no filesystem access. Kern commits the cleared mapping
 before deletion, so an interrupted or partially failed deletion cannot leave
 the next firing resuming a retired session. Measurement or detach failures
 leave the session alone. Deletion failures are host diagnostics and may leave
-orphaned provider data; they do not fail completed work or create a retry queue.
+orphaned provider data; they do not fail completed work. Daily maintenance
+rediscovers stale unmapped provider sessions instead of keeping a retry queue.
 
-This is a soft per-session limit, checked only after successful turns, not a
+This is a soft per-session limit, checked during daily reconciliation, not a
 whole-directory quota. One turn may exceed the limit. Codex owns deletion of
 its metadata; Kern never edits or truncates its databases directly.
 
 ### Daily archived-chat sweep
 
 The admin maintenance loop also sweeps all archived Chats at startup and every
-24 hours thereafter. There is no age or size cutoff. For each archived Chat
+24 hours thereafter. Chats retain their Codex context for seven days after
+archiving; repeated archive requests preserve the original clock, and restoring
+then rearchiving starts a new one. Existing archives start their grace period
+at upgrade because their original archive time was not recorded. For each eligible archived Chat
 with an idle Codex mapping, it rechecks archive state, skips live executions
 (including FINISHING), detaches the mapping, and deletes that Codex session
 through the same supported API. All three Codex accounts are covered, including
@@ -228,9 +232,19 @@ This is fixed host maintenance, with no model call or user-managed schedule.
 A provider startup failure preserves the mappings. A deletion failure is
 reported in host diagnostics and ends that account's pass; already detached
 sessions stay detached so partial deletion cannot break the next message.
-Unprocessed mappings are considered by the next daily sweep. Unmapped orphaned
-sessions, unarchived inactive Chats, logs, generated images, and SQLite allocated
-space remain outside these policies.
+Unprocessed mappings are considered by the next daily sweep.
+
+Daily maintenance also lists persisted app-server root sessions across all three
+Codex accounts and compares their IDs with Kern's current mappings and live
+turns. Unreferenced `kern-host` roots in agent home are deleted after seven days
+of inactivity; ownership, activity and references are checked again before
+native deletion. Kern always creates independent roots with `thread/start`, so
+native deletion removes only that root and its internal Codex children. Failed
+post-detach deletions are rediscovered on a later pass. An incomplete listing
+aborts that account's orphan pass. No model call or direct rollout/database
+edit is used. Referenced idle sessions use the 100 MiB policy in this same pass.
+Provider log databases, generated images, and allocated SQLite space remain
+outside these policies.
 
 ## Refresh triggers
 

@@ -137,7 +137,9 @@ write only its own active app. Other agents request changes through messaging. A
 mutation. Agents can create a Chat with `spawn_agent` and send a peer-labeled message
 to a known eligible thread with `send_agent_message`. `GET /agent/spawned-agents`
 discovers active spawned Chats by name; only their authenticated
-parent can use `archive_spawned_agent` to archive them. See
+parent can use `archive_spawned_agent` to archive them. Spawned Chats are temporary
+and auto-archive after 24 hours of inactivity; use Standing agents for persistent
+or recurring work, with optional triggers. See
 [Workspace agent API](workspace-agent-api.md).
 Agents can also list, search, fetch, create, edit, and delete swarm memory
 pages. Individual `app-*`, `thread-*`, and `schedule-*` pages are absent from

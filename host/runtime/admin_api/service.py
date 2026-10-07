@@ -149,7 +149,6 @@ from host.runtime.admin_api.threads import (
     list_threads,
     send_thread_message,
     stop_thread,
-    sweep_archived_codex_sessions,
     thread_route,
 )
 from host.runtime.core.state import (
@@ -160,6 +159,7 @@ from host.runtime.core.state import (
     read_xai_account,
     utc_now,
 )
+from host.runtime.admin_api.codex_cleanup import reconcile_codex_sessions
 from host.version import version_status
 
 
@@ -293,7 +293,7 @@ THREAD_HANDOFF_ACTIVITY_DETAIL_LIMIT = 1_000
 THREAD_HANDOFF_ACTIVITY_OUTPUT_LIMIT = 8_000
 THREAD_HANDOFF_ACTIVITY_EVENT_CHARACTER_LIMIT = 8_000
 MAINTENANCE_INTERVAL_SECONDS = 3600  # scheduled state cleanup cadence (not per-request)
-ARCHIVED_CODEX_SWEEP_INTERVAL_SECONDS = 24 * 3600
+CODEX_RECONCILIATION_INTERVAL_SECONDS = 24 * 3600
 THREAD_EVENT_MESSAGE_BYTES_LIMIT = 200_000
 # The in-thread boundary text. Retained events remain available to audit and
 # history APIs, while Chat treats this marker as the new visible beginning.
@@ -1717,16 +1717,19 @@ def prune_state() -> None:
     tools_host.maintain_approvals()
 
 
-def maintenance_loop() -> None:
+def maintenance_loop(interrupted_threads: list[str] | None = None) -> None:
     """Prune bounded state on a schedule, never on the request path."""
-    next_archived_sweep = 0.0
+    # Admit recovery first so cleanup sees its live fences and running rows.
+    if interrupted_threads:
+        restart_interrupted_agents(interrupted_threads)
+    next_codex_reconciliation = 0.0
     while True:
         try:
             prune_state()
             now = time.monotonic()
-            if now >= next_archived_sweep:
-                next_archived_sweep = now + ARCHIVED_CODEX_SWEEP_INTERVAL_SECONDS
-                sweep_archived_codex_sessions()
+            if now >= next_codex_reconciliation:
+                next_codex_reconciliation = now + CODEX_RECONCILIATION_INTERVAL_SECONDS
+                reconcile_codex_sessions()
         except Exception as exc:
             host_errors.report_unexpected("admin_api.maintenance", exc)
         time.sleep(MAINTENANCE_INTERVAL_SECONDS)
@@ -2035,11 +2038,7 @@ def main() -> int:
     # kern-tools service (its own user, egress, and scoped DB role); the
     # admin service only forwards operator operations to it.
     orchestrator.start_background_loops()
-    if interrupted:
-        threading.Thread(
-            target=restart_interrupted_agents, args=(interrupted,), daemon=True
-        ).start()
-    threading.Thread(target=maintenance_loop, daemon=True).start()
+    threading.Thread(target=maintenance_loop, args=(interrupted,), daemon=True).start()
     threading.Thread(target=orchestrator.turn_retries.run, args=(retry_failed_turn,), name="turn-retries", daemon=True).start()
     threading.Thread(target=auto_approvals.run, name="auto-approvals", daemon=True).start()
     threading.Thread(target=memory_monitor.run, name="memory-monitor", daemon=True).start()

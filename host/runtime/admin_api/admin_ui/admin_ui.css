@@ -1302,6 +1302,8 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 .integration-logo-word-npm { font-family: ui-monospace, monospace; font-size: 0.94rem; letter-spacing: -0.12em; margin-left: -0.1em; }
 .integration-logo-tool-apify, .integration-logo-tool-apify_developer { background: #6c5ce7; }
 .integration-logo-word-apify { font-family: Arial, sans-serif; font-size: 1.55rem; }
+.integration-logo-tool-seo_metrics_api { background: #182c47; color: #fff; }
+.integration-logo-tool-ahrefs_domain_rating { background: #ff8800; color: #fff; }
 .integration-logo-tool-brave_search { background: #fb542b; }
 .integration-logo-tool-gmail { background: #fff; }
 .integration-logo-tool-gmail svg, .integration-logo-tool-google_calendar svg { height: 2.2rem; width: 2.2rem; }
@@ -1310,11 +1312,12 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 .gmail-yellow, .calendar-yellow { fill: #fbbc04; }
 .gmail-green, .calendar-green { fill: #34a853; }
 .integration-logo-tool-google_calendar { background: #fff; }
+.integration-logo-tool-google_search { background: #fff; }
 .integration-logo-tool-google_search_console { background: #fff; }
 .integration-logo-tool-google_search_console svg { height: 2.25rem; width: 2.25rem; }
 .integration-logo-tool-ibkr { background: #fff; color: #d9272e; }
 .integration-logo-tool-instagram, .integration-logo-tool-instagram_discovery { background: radial-gradient(circle at 32% 105%, #ffd600 0 18%, #ff7a00 34%, #ff0169 57%, #d300c5 75%, #7638fa 100%); }
-.integration-logo-tool-linkedin, .integration-logo-tool-linkedin_discovery { --logo-badge: #0a66c2; background: #0a66c2; }
+.integration-logo-tool-linkedin { --logo-badge: #0a66c2; background: #0a66c2; }
 .integration-logo-word-linkedin { font-family: Arial, sans-serif; font-size: 1.5rem; letter-spacing: -0.08em; margin-left: -0.06em; }
 .integration-logo-tool-polymarket { background: #635bff; }
 .integration-logo-tool-reddit, .integration-logo-tool-reddit_scrapecreators { background: #ff4500; }

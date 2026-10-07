@@ -35,9 +35,14 @@ actually needs:
 - `typesafe_jev_judgment(...)` sends bounded state and yes/no Jev questions and
   validates the returned probabilities using `jev-latest`. Its existing timeout
   range remains 0.1 to 2 seconds.
+- `openai_decisions(...)` sends bounded text and named predicate questions to
+  `POST https://api.openai.com/v1/decisions`. The caller supplies `gpt-6-luna`
+  and a timeout from 0.1 to 60 seconds. Responses must contain an ordered answer
+  for every question, with finite probabilities from zero to one or a refusal.
+  It uses the existing OpenAI provider configuration and secret.
 
 The service binds the caller's timeout to the shared HTTP transport before
-passing it to either adapter. Adapters only build provider requests and parse
+passing it to each adapter. Adapters only build provider requests and parse
 responses; they do not choose or carry timeout settings.
 
 This makes differences between providers explicit. Adding another provider
@@ -60,7 +65,11 @@ Each request limits the input size, response size, number of simultaneous
 calls, and network inactivity time. Before provider egress, the adapters replace
 credential-shaped values with `<redacted>`. They also replace runs of at least
 11 letters, digits, underscores, or hyphens that contain a digit. This applies to
-GPT prompts and Jev state content. The original local input is not changed.
+GPT prompts, Decisions input and question instructions, and Jev state content.
+The original local input is not changed. Host-authored Decisions question names
+and types remain intact.
+Recall redacts structured evidence with the same shared redactor before encoding
+it as Decisions text, so embedded JSON credential fields remain recognizable.
 Values whose object keys collide after redaction are retained together;
 credential-field values are redacted in full. Jev question ids and OpenAI
 response-schema fields are set by host code.
@@ -80,14 +89,25 @@ fallback.
 
 Memory recall uses TypeSafe Jev when enabled to score the bounded task query
 and up to 20 candidate descriptions under short local ids. Every recall with
-candidates requests Jev; there is no random assignment or OpenAI reranking.
+candidates requests Jev. In parallel, it requests a diagnostic comparison from
+Luna Decisions using the same query and candidate descriptions. OpenAI must be
+enabled and configured; otherwise its adapter is not called. Luna never changes
+memory selection, including when Jev is unavailable. There is no random assignment.
+Decisions has one separate concurrency slot; it cannot consume the existing four
+slots used by Jev and text completion. Extra comparisons fail as busy without queuing.
 Disabled Jev makes no external call and keeps hybrid order. The inference
 service owns enablement checks and reports `provider_disabled` or `timeout` to
 callers without exposing configuration tables or credentials. Page contents
-are never sent to Jev. Unsuccessful reranking also retains hybrid order.
+are never sent to either provider. Unsuccessful Jev reranking retains hybrid order.
 Swarm task titles use the same bounded query text as recall, passed to Luna
 with task-title instructions. See [Memory recall](memory-recall.md) for
 retrieval, reranking, and diagnostics.
+
+Decisions usage joins the existing OpenAI/Luna usage history. Its price differs
+from text completion: $0.10 per million uncached input tokens, with no cache-read,
+cache-write surcharge, or output-token charges, reviewed against
+[OpenAI's Decisions pricing](https://developers.openai.com/api/docs/guides/decisions#pricing-and-availability)
+on October 6, 2026. Stored costs for prior calls remain unchanged.
 
 ## Auto-approval
 

@@ -10,6 +10,8 @@ on:
         options:
           - all
           - all_runtimes
+          - seo_metrics_api
+          - ahrefs_domain_rating
           - apify
           - apify_developer
           - browser
@@ -24,7 +26,7 @@ on:
           - instagram
           - instagram_discovery
           - linkedin
-          - linkedin_discovery
+          - google_search
           - openai_images
           - openrouter
           - polymarket
@@ -208,6 +210,8 @@ jobs:
           # See docs/development/persistent-aws-stage.md.
           KERN_STAGE_APIFY_API_TOKEN: ${{ secrets.KERN_STAGE_APIFY_API_TOKEN }}
           KERN_STAGE_BRAVE_SEARCH_API_KEY: ${{ secrets.KERN_STAGE_BRAVE_SEARCH_API_KEY }}
+          KERN_STAGE_SEO_METRICS_API_KEY: ${{ secrets.KERN_STAGE_SEO_METRICS_API_KEY }}
+          KERN_STAGE_AHREFS_API_KEY: ${{ secrets.KERN_STAGE_AHREFS_API_KEY }}
           KERN_STAGE_CLOUDWATCH_LOGS_AWS_ACCESS_KEY_ID: ${{ secrets.KERN_STAGE_CLOUDWATCH_LOGS_AWS_ACCESS_KEY_ID }}
           KERN_STAGE_CLOUDWATCH_LOGS_AWS_SECRET_ACCESS_KEY: ${{ secrets.KERN_STAGE_CLOUDWATCH_LOGS_AWS_SECRET_ACCESS_KEY }}
           KERN_STAGE_CLOUDWATCH_LOGS_AWS_REGION: ${{ secrets.KERN_STAGE_CLOUDWATCH_LOGS_AWS_REGION }}

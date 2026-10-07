@@ -452,7 +452,7 @@ class ActionListingTests(ToolsApiTestCase):
         self.assertIn("umbrella topics", described_action("polymarket", "list_events")["description"])
         self.assertIn("not public-post", described_action("instagram", "get_recent_media")["description"])
         self.assertIn("not an objective global ranking", described_action("instagram_discovery", "get_trending_reels")["description"])
-        self.assertIn("not a LinkedIn feed", described_action("linkedin_discovery", "search_posts")["description"])
+        self.assertIn("do not infer absolute rank", described_action("google_search", "search")["description"])
 
         # A described result names its fields and says what each one means, so
         # the agent can plan the next call without running this one first.

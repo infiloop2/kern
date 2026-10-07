@@ -1352,65 +1352,101 @@ class CodexAppServerTests(unittest.TestCase):
         self.assertEqual(server.call.call_count, 2)
         self.assertEqual(server.call.call_args.args[1]["serviceTier"], "ultrafast")
 
-    def test_run_turn_rejects_completion_after_only_an_intermediate_message(self) -> None:
+    def test_silent_turn_uses_provider_completion_status(self) -> None:
+        # thread-394 received a routine agent update, emitted an explicitly
+        # empty final, and completed successfully. Silence must not turn that
+        # provider success into a host error (and an automatic retry).
+        for status in ("completed", "failed", "interrupted"):
+            for empty_final in (False, True):
+                with self.subTest(status=status, empty_final=empty_final):
+                    server = MagicMock()
+                    server.call.side_effect = [
+                        {"thread": {"id": "thread_existing"}},
+                        {"turn": {"id": "turn_1"}},
+                    ]
+                    server.is_memory_suggestion.return_value = False
+                    notifications = []
+                    if empty_final:
+                        item = {"type": "agentMessage", "phase": "final_answer", "text": ""}
+                        notifications.extend([
+                            {"method": "item/started", "params": {"item": item}},
+                            {"method": "item/completed", "params": {"item": item}},
+                        ])
+                    notifications.append({
+                        "method": "turn/completed",
+                        "params": {"turn": {
+                            "status": status,
+                            **({"error": {"message": "Provider failed"}} if status == "failed" else {}),
+                        }},
+                    })
+                    server.read_message.side_effect = notifications
+                    messages = []
+                    if status == "completed":
+                        result = run_turn(server, "Status update", "thread_existing", "gpt-6.1-sol", "high", messages.append)
+                        self.assertEqual(result, ("thread_existing", ""))
+                    else:
+                        expected = "Provider failed" if status == "failed" else "Codex turn failed"
+                        with self.assertRaisesRegex(CodexAppServerError, expected):
+                            run_turn(server, "Status update", "thread_existing", "gpt-6.1-sol", "high", messages.append)
+                    self.assertEqual(messages, [])
+                    server.clear_active_turn.assert_called_once_with()
+
+    def test_run_turn_accepts_completion_after_only_an_intermediate_message(self) -> None:
         messages: list[str | dict[str, object]] = []
         with CodexAppServer(
             [sys.executable, "-u", "-c", FAKE_MESSAGELESS_SERVER]
         ) as server:
-            with self.assertRaisesRegex(
-                CodexAppServerError,
-                "completed without a final response",
-            ):
-                run_turn(
-                    server,
-                    "do the task",
-                    None,
-                    "gpt-6.1-sol",
-                    "high",
-                    messages.append,
-                )
+            thread_id, output = run_turn(
+                server,
+                "do the task",
+                None,
+                "gpt-6.1-sol",
+                "high",
+                messages.append,
+            )
+
+        self.assertEqual(thread_id, "thread_1")
+        self.assertEqual(output, "")
 
         self.assertEqual(messages[0], "I'll run the tests.")
         self.assertEqual(len(messages), 3)
         self.assertTrue(all(isinstance(message, dict) for message in messages[1:]))
 
-    def test_run_turn_rejects_textless_final_message_item(self) -> None:
+    def test_run_turn_accepts_textless_final_message_item(self) -> None:
         messages: list[str | dict[str, object]] = []
         with CodexAppServer(
             [sys.executable, "-u", "-c", FAKE_TEXTLESS_FINAL_SERVER]
         ) as server:
-            with self.assertRaisesRegex(
-                CodexAppServerError,
-                "completed without a final response",
-            ):
-                run_turn(
-                    server,
-                    "do the task",
-                    None,
-                    "gpt-6.1-sol",
-                    "high",
-                    messages.append,
-                )
+            thread_id, output = run_turn(
+                server,
+                "do the task",
+                None,
+                "gpt-6.1-sol",
+                "high",
+                messages.append,
+            )
+
+        self.assertEqual(thread_id, "thread_1")
+        self.assertEqual(output, "")
 
         self.assertEqual(messages, ["First final answer."])
 
-    def test_run_turn_rejects_explicit_commentary_as_final_response(self) -> None:
+    def test_run_turn_accepts_commentary_only_without_returning_it_as_final(self) -> None:
         messages: list[str | dict[str, object]] = []
         with CodexAppServer(
             [sys.executable, "-u", "-c", FAKE_COMMENTARY_ONLY_SERVER]
         ) as server:
-            with self.assertRaisesRegex(
-                CodexAppServerError,
-                "completed without a final response",
-            ):
-                run_turn(
-                    server,
-                    "do the task",
-                    None,
-                    "gpt-6.1-sol",
-                    "high",
-                    messages.append,
-                )
+            thread_id, output = run_turn(
+                server,
+                "do the task",
+                None,
+                "gpt-6.1-sol",
+                "high",
+                messages.append,
+            )
+
+        self.assertEqual(thread_id, "thread_1")
+        self.assertEqual(output, "")
 
         self.assertEqual(messages, ["I'll run the tests."])
 
@@ -1436,22 +1472,22 @@ class CodexAppServerTests(unittest.TestCase):
             ("reasoning completion without start", True, "final_answer", [], [reasoning[-1], empty_end], "Saved thesis."),
             ("reasoning without follow-up response", True, "final_answer", [], reasoning, "Saved thesis."),
             ("reasoning and replacement final", True, "final_answer", [], [*reasoning, empty_start, replacement], "Updated."),
-            ("ordinary input and reasoning", False, "final_answer", [], [*reasoning, empty_start, empty_end], None),
-            ("reasoning before suggestion", True, "final_answer", reasoning, [empty_start, empty_end], None),
-            ("command after memory reasoning", True, "final_answer", [], [*reasoning, command, empty_start, empty_end], None),
-            ("tool completion after memory reasoning", True, "final_answer", [], [*reasoning, tool, empty_start, empty_end], None),
-            ("operator after memory reasoning", True, "final_answer", [], [*reasoning, operator, empty_start, empty_end], None),
-            ("commentary after memory reasoning", True, "final_answer", [], [*reasoning, commentary, empty_start, empty_end], None),
-            ("reasoning after empty reply", True, "final_answer", [], [*reasoning, empty_start, empty_end, *reasoning], None),
+            ("ordinary input and reasoning", False, "final_answer", [], [*reasoning, empty_start, empty_end], ""),
+            ("reasoning before suggestion", True, "final_answer", reasoning, [empty_start, empty_end], ""),
+            ("command after memory reasoning", True, "final_answer", [], [*reasoning, command, empty_start, empty_end], ""),
+            ("tool completion after memory reasoning", True, "final_answer", [], [*reasoning, tool, empty_start, empty_end], ""),
+            ("operator after memory reasoning", True, "final_answer", [], [*reasoning, operator, empty_start, empty_end], ""),
+            ("commentary after memory reasoning", True, "final_answer", [], [*reasoning, commentary, empty_start, empty_end], ""),
+            ("reasoning after empty reply", True, "final_answer", [], [*reasoning, empty_start, empty_end, *reasoning], ""),
             ("no follow-up response", True, "final_answer", [], [], "Saved thesis."),
             ("completion without start", True, "final_answer", [], [empty_end], "Saved thesis."),
             ("new final replaces old", True, "final_answer", [], [empty_start, event("item/completed", {**final, "text": "Updated."})], "Updated."),
-            ("same text from operator", False, "final_answer", [], [empty_start, empty_end], None),
-            ("commentary is not final", True, "commentary", [], [empty_start, empty_end], None),
-            ("work before suggestion", True, "final_answer", [command], [empty_start, empty_end], None),
-            ("work after suggestion", True, "final_answer", [], [command, empty_start, empty_end], None),
-            ("request after suggestion", True, "final_answer", [], [operator, empty_start, empty_end], None),
-            ("consumed suggestion cannot mask repeated text", True, "final_answer", [], [event("item/completed", memory), empty_start, empty_end], None),
+            ("same text from operator", False, "final_answer", [], [empty_start, empty_end], ""),
+            ("commentary is not final", True, "commentary", [], [empty_start, empty_end], ""),
+            ("work before suggestion", True, "final_answer", [command], [empty_start, empty_end], ""),
+            ("work after suggestion", True, "final_answer", [], [command, empty_start, empty_end], ""),
+            ("request after suggestion", True, "final_answer", [], [operator, empty_start, empty_end], ""),
+            ("consumed suggestion cannot mask repeated text", True, "final_answer", [], [event("item/completed", memory), empty_start, empty_end], ""),
         ]
         for name, trusted, phase, before, after, expected in cases:
             with self.subTest(name=name):
@@ -1484,12 +1520,8 @@ for line in sys.stdin:
                         server.steer(suggestion, memory_suggestion=trusted)
                         return True
                     server._on_ready = ready
-                    if expected is None:
-                        with self.assertRaisesRegex(CodexAppServerError, "completed without a final response"):
-                            run_turn(server, "research", None, "gpt-6.1-sol", "high", messages.append)
-                    else:
-                        _, output = run_turn(server, "research", None, "gpt-6.1-sol", "high", messages.append)
-                        self.assertEqual(output, expected)
+                    _, output = run_turn(server, "research", None, "gpt-6.1-sol", "high", messages.append)
+                    self.assertEqual(output, expected)
                 self.assertEqual(messages[0], "Saved thesis.")
                 self.assertNotIn("", messages)
 
@@ -1518,18 +1550,17 @@ for line in sys.stdin:
         with CodexAppServer(
             [sys.executable, "-u", "-c", FAKE_FINAL_THEN_COMMAND_SERVER]
         ) as server:
-            with self.assertRaisesRegex(
-                CodexAppServerError,
-                "completed without a final response",
-            ):
-                run_turn(
-                    server,
-                    "do the task",
-                    None,
-                    "gpt-6.1-sol",
-                    "high",
-                    messages.append,
-                )
+            thread_id, output = run_turn(
+                server,
+                "do the task",
+                None,
+                "gpt-6.1-sol",
+                "high",
+                messages.append,
+            )
+
+        self.assertEqual(thread_id, "thread_1")
+        self.assertEqual(output, "")
 
         self.assertEqual(messages[0], "Done")
         self.assertEqual(len(messages), 3)

@@ -134,6 +134,19 @@ def openai_text_completion(
     )
 
 
+def openai_decisions(
+    input: str, questions: list[dict[str, Any]], *, model: str, timeout_seconds: float,
+) -> dict[str, Any]:
+    if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
+            or not 0.1 <= timeout_seconds <= OPENAI_MAX_TIMEOUT_SECONDS):
+        raise ValueError(f"decision timeout_seconds must be between 0.1 and {OPENAI_MAX_TIMEOUT_SECONDS}")
+    return _request(
+        "/openai/decisions",
+        {"input": input, "questions": questions, "model": model, "timeout_seconds": timeout_seconds},
+        float(timeout_seconds), MAX_REQUEST_BYTES,
+    )
+
+
 def typesafe_jev_judgment(
     state: Any,
     questions: dict[str, dict[str, Any]],

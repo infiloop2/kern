@@ -118,11 +118,19 @@ def _schedule(
 
 
 def record_openai_response(_requested_model: str, response: Any | None) -> None:
+    _record_openai_response(response, decisions=False)
+
+
+def record_openai_decision_response(_requested_model: str, response: Any | None) -> None:
+    _record_openai_response(response, decisions=True)
+
+
+def _record_openai_response(response: Any | None, *, decisions: bool) -> None:
     # Bill against the model that actually served the response. The request
     # name can be an alias that OpenAI routes to a dated model revision.
     response_model = response.get("model") if isinstance(response, dict) else None
     match = _OPENAI_MODEL_RE.fullmatch(response_model) if isinstance(response_model, str) else None
-    if match is None:
+    if match is None or (decisions and match.group(1) != "gpt-6-luna"):
         host_errors.report_warning(
             "host_inference.usage",
             ValueError("OpenAI response model is missing or unsupported; usage was not recorded"),
@@ -166,6 +174,10 @@ def record_openai_response(_requested_model: str, response: Any | None) -> None:
             }
     model = match.group(1)
     input_price, cached_price, output_price = _OPENAI_PRICES[model]
+    if decisions:
+        # Decisions pricing reviewed 2026-10-06: input only, no cache or output charges.
+        # https://developers.openai.com/api/docs/guides/decisions#pricing-and-availability
+        cached_price = output_price = 0.0
     cost: float | None = None
     if measured is not None:
         uncached = measured["input_tokens"] - measured["cached_input_tokens"]

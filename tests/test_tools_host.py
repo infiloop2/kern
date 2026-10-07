@@ -270,7 +270,8 @@ class ToolRegistryTests(unittest.TestCase):
     def test_released_tool_ids_remain_installed(self) -> None:
         # These ids key persisted config, credentials, approvals, and audit
         # records. New packages need no edit here. h3max was explicitly retired
-        # in favor of fal_ai; operators reconnect with a new key.
+        # in favor of fal_ai. linkedin_discovery was explicitly replaced by
+        # google_search; operators configure a new key and enable it anew.
         self.assertTrue(
             {
                 "brave_search",
@@ -282,13 +283,15 @@ class ToolRegistryTests(unittest.TestCase):
                 "instagram",
                 "instagram_discovery",
                 "linkedin",
-                "linkedin_discovery",
+                "google_search",
                 "polymarket",
                 "runway",
                 "twitter",
                 "zoho_mail",
             }.issubset(tools_host.BUNDLED_TOOLS)
         )
+
+        self.assertNotIn("linkedin_discovery", tools_host.BUNDLED_TOOLS)
 
     def test_bundled_action_inputs_are_self_describing(self) -> None:
         for tool_id, tool in tools_host.BUNDLED_TOOLS.items():

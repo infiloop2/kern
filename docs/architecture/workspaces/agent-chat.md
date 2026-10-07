@@ -48,9 +48,14 @@ Chat list. Agents can discover active spawned Chats from any parent through
 ids, names, parent ids, runtime/model/effort, and status. Ordinary and archived
 Chats are excluded. Listing reserves large-response capacity; spawning and
 archiving return small status objects.
-Spawned Chats have no inactivity expiry. The spawning thread should call
-`archive_spawned_agent` when it no longer needs one, while keeping agents needed
-for recurring work. Archive explicitly checks the authenticated parent against
+Spawned Chats are temporary. Workspace checks at startup and hourly, archiving
+spawned Chats idle for at least 24 hours according to the host `last_used_at`
+timestamp, which advances on message admission and turn completion. The sweep
+rechecks archive eligibility, idle state, and recency under the Chat send and
+row locks before archiving. History and self-memory remain readable. Use
+Standing agents for persistent or recurring work, with optional triggers.
+The spawning thread should call `archive_spawned_agent` when it no longer needs
+one. This tool explicitly checks the authenticated parent against
 the stored origin under the Chat send lock, then calls the existing idle-only
 archive operation. Other agents cannot archive it. The operator can archive and
 restore spawned Chats normally.

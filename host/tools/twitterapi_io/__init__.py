@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+import json
 import re
 import urllib.parse
 from dataclasses import dataclass
@@ -29,7 +30,7 @@ from host.tools.shared import outputs
 from host.tools.shared.inputs import ToolInputValidationError, int_field, schema
 from host.tools.shared.oauth2 import now
 from host.tools.shared.web import (
-    UnmappedProviderError,
+    ProviderWarning,
     WebRequestError,
     encode_query,
     json_request,
@@ -342,6 +343,9 @@ MANIFEST = ToolManifest(
         "billable_post_reads can exceed the displayed posts because TwitterAPI.io has no page-size "
         "parameter. Use the official X tool for connected-account reads, profile counts, or actions "
         "this tool does not provide."
+        " HTTP 400 failures report original/expanded query lengths, a bounded provider error "
+        "code when available, and a recognized validation category or unavailable reason. "
+        "They do not establish a provider length limit; never drop exclusions or retry automatically."
     ),
 )
 
@@ -349,6 +353,7 @@ MANIFEST = ToolManifest(
 @dataclass(frozen=True)
 class SearchRequest:
     parameters: dict[str, str]
+    original_query_chars: int
     max_results: int
     exclude_replies: bool
     exclude_retweets: bool
@@ -405,6 +410,7 @@ def _search_request(tool_input: JSONObject, api: HostAPI) -> SearchRequest:
     if not isinstance(raw_query, str) or not raw_query.strip():
         raise ToolInputValidationError("TwitterAPI.io query is required.")
     query = raw_query.strip()
+    original_query_chars = len(query)
     if len(query) > MAX_QUERY_CHARS:
         raise ToolInputValidationError(
             f"TwitterAPI.io query must be at most {MAX_QUERY_CHARS} characters."
@@ -466,6 +472,7 @@ def _search_request(tool_input: JSONObject, api: HostAPI) -> SearchRequest:
             f"TwitterAPI.io query plus structured filters must be at most {MAX_WIRE_QUERY_CHARS} characters."
         )
     return SearchRequest(
+        original_query_chars=original_query_chars,
         parameters={
             "query": provider_query,
             "queryType": query_type,
@@ -504,7 +511,40 @@ def _search_parameters(tool_input: JSONObject, api: HostAPI) -> dict[str, str]:
     return _search_request(tool_input, api).parameters
 
 
-def _search(api_key: str, parameters: dict[str, str]) -> dict[str, Any]:
+def _query_rejection(exc: WebRequestError, original_chars: int | None, expanded_chars: int) -> ProviderWarning:
+    # Never echo free-form provider text, queries or credentials. Recognize
+    # only complete messages and emit host-owned categories plus a bounded code.
+    code = None
+    reason = "unavailable"
+    if len(exc.body) <= 4096:
+        try:
+            payload = json.loads(exc.body)
+        except (ValueError, UnicodeDecodeError, RecursionError):
+            payload = None
+        if isinstance(payload, dict):
+            value = payload.get("error")
+            if type(value) is int and 0 <= value <= 99999:
+                code = value
+            message = payload.get("message")
+            if isinstance(message, str) and len(message) <= 256:
+                reason = {
+                    "query is too long": "query length",
+                    "query too long": "query length",
+                    "invalid query": "query syntax",
+                    "invalid search query": "query syntax",
+                }.get(message.strip().lower().removesuffix("."), "unavailable")
+    code_detail = f", provider code {code}" if code is not None else ""
+    original = str(original_chars) if original_chars is not None else "unknown"
+    return ProviderWarning(
+        "TwitterAPI.io", "search",
+        f"TwitterAPI.io rejected the search query (HTTP 400{code_detail}; reason: {reason}; "
+        f"original query: {original} characters; expanded query: {expanded_chars} characters). "
+        "Review query syntax and structured filters; no query limit is inferred from this rejection.",
+        status=400,
+    )
+
+
+def _search(api_key: str, parameters: dict[str, str], *, original_query_chars: int | None = None) -> dict[str, Any]:
     url = f"{SEARCH_ENDPOINT}?{encode_query(parameters)}"
     try:
         return json_request(
@@ -516,7 +556,7 @@ def _search(api_key: str, parameters: dict[str, str]) -> dict[str, Any]:
         )
     except WebRequestError as exc:
         if exc.status == 400:
-            message = "TwitterAPI.io rejected the search query."
+            raise _query_rejection(exc, original_query_chars, len(parameters["query"])) from None
         elif exc.status in {401, 403}:
             message = "TwitterAPI.io rejected the configured API key."
         elif exc.status == 402:
@@ -633,7 +673,10 @@ class TwitterApiIoTool(Tool):
             return ActionFailed("Unsupported TwitterAPI.io action.")
         try:
             request = _search_request(tool_input, api)
-            response = _search(api.config["TWITTERAPI_IO_API_KEY"], request.parameters)
+            response = _search(
+                api.config["TWITTERAPI_IO_API_KEY"], request.parameters,
+                original_query_chars=request.original_query_chars,
+            )
             raw_posts = response.get("tweets")
             api.costs.record(str(Decimal("0.00015") * max(1, len(raw_posts) if isinstance(raw_posts, list) else 1)))
             posts, provider_posts, filtered, truncated = _normalized_posts(
@@ -657,7 +700,7 @@ class TwitterApiIoTool(Tool):
                 "posts": cast(list[JSONValue], posts),
             }
             return ActionExecuted(result)
-        except UnmappedProviderError:
+        except ProviderWarning:
             raise
         except Exception as exc:
             return ActionFailed(str(exc) or "TwitterAPI.io tool request failed.")

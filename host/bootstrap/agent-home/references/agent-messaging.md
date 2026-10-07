@@ -3,8 +3,8 @@
 `spawn_agent` requires `message`, `agent_runtime`, `model`, and `effort`, and
 accepts an optional `name` (nonblank, up to 100 characters). Give spawned agents
 a useful display name so the operator can identify them in the UI.
-Use it to delegate a bounded part of the operator-authorized task to one new
-Kern Chat agent. Read the current interactive configuration matrix with
+Use it only to delegate temporary, bounded work within the operator-authorized
+task to one new Kern Chat agent. Read the current interactive configuration matrix with
 `GET /agent/apps/session-options` through `workspace_api` when needed, then
 provide one complete supported tuple. An accepted call creates a durable
 `thread-N`, starts its first turn with the message, and returns that thread id.
@@ -17,11 +17,13 @@ blocking question through `send_agent_message`, but delegation never expands
 the operator's authority or task scope. There is no agent registry, completion
 queue, automatic retry, or separate reply operation.
 
-Spawned agents stay available until explicitly archived; there is no inactivity
-expiry. The spawning thread should use `archive_spawned_agent` with `thread_id`
-when it no longer needs an agent. Keep agents available when they are needed for
-recurring work. Only the authenticated spawning thread can archive its own
-spawned Chats, and the target must be idle. The operator can also archive or
+Spawned agents are temporary. Kern checks at startup and hourly, archiving
+agents idle for at least 24 hours since their last activity. Running agents are
+not archived. Create Standing agents for persistent or recurring work; they can
+have an empty trigger list and receive messages as needed. The spawning thread
+should use `archive_spawned_agent` with `thread_id` when it no longer needs an
+agent. Only the authenticated spawning thread can use that tool to archive its
+own spawned Chats, and the target must be idle. The operator can also archive or
 restore them through the normal UI. Archived transcripts and self-memory remain
 readable, but archived agents cannot receive agent or operator messages.
 
@@ -54,8 +56,8 @@ and multibyte characters. Reference files or App data for larger results.
 
 On-demand Chats handle operator requests. App agents maintain their own App;
 Standing agents own ongoing work and their optional triggers. Both advertise a
-purpose that the owner or operator can update. Spawned agents can be temporary
-or permanent collaborators; they have a name and parent, but no purpose field.
+purpose that the owner or operator can update. Spawned agents are temporary
+collaborators; they have a name and parent, but no purpose field.
 Only on-demand Chats receive generated task summaries.
 
 To change another agent’s App or standing-agent definition and triggers,

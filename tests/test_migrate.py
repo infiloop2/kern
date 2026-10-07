@@ -91,6 +91,42 @@ class MigrateRunnerTests(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.migrations = Path(self.temp_dir.name)
 
+    def test_google_search_replacement_drops_only_retired_config_and_enablement(self) -> None:
+        migrate.up(target=86, quiet=True)
+        with db.transaction() as cur:
+            cur.execute("INSERT INTO enabled_tools (tool_id) VALUES ('linkedin_discovery'), ('brave_search')")
+            cur.execute("INSERT INTO tool_config (tool_id, key, value) VALUES"
+                        " ('linkedin_discovery', 'SERPERAPI_API_KEY', 'retired-key'),"
+                        " ('brave_search', 'BRAVE_SEARCH_API_KEY', 'other-key')")
+            cur.execute("INSERT INTO tool_events (created_at, tool_id, action_id, outcome)"
+                        " VALUES ('now', 'linkedin_discovery', 'search_posts', 'executed')")
+            cur.execute("INSERT INTO tool_costs (tool_id, charge_id, execution_id, action_id, amount_nano_usd)"
+                        " VALUES ('linkedin_discovery', 'old-charge', 'old-run', 'search_posts', 1000000)")
+            cur.execute("INSERT INTO tool_cost_daily (day, tool_id, action_id, amount_nano_usd, charges)"
+                        " VALUES (CURRENT_DATE, 'linkedin_discovery', 'search_posts', 1000000, 1)")
+        self.assertEqual(migrate.up(target=87, quiet=True), [87])
+        with db.transaction() as cur:
+            cur.execute("SELECT tool_id FROM enabled_tools ORDER BY tool_id")
+            self.assertEqual(cur.fetchall(), [('brave_search',)])
+            cur.execute("SELECT tool_id, key, value FROM tool_config ORDER BY tool_id")
+            self.assertEqual(cur.fetchall(), [('brave_search', 'BRAVE_SEARCH_API_KEY', 'other-key')])
+            cur.execute("SELECT tool_id, action_id, outcome FROM tool_events")
+            self.assertEqual(cur.fetchall(), [('linkedin_discovery', 'search_posts', 'executed')])
+            cur.execute("SELECT tool_id, amount_nano_usd FROM tool_costs")
+            self.assertEqual(cur.fetchall(), [('linkedin_discovery', 1000000)])
+            cur.execute("SELECT tool_id, amount_nano_usd::bigint, charges FROM tool_cost_daily")
+            self.assertEqual(cur.fetchall(), [('linkedin_discovery', 1000000, 1)])
+            # A later explicit new-tool configuration is independent and survives repeat up.
+            cur.execute("INSERT INTO enabled_tools (tool_id) VALUES ('google_search')")
+            cur.execute("INSERT INTO tool_config (tool_id, key, value) VALUES"
+                        " ('google_search', 'SERPERAPI_API_KEY', 'new-key')")
+        self.assertEqual(migrate.up(target=87, quiet=True), [])
+        with db.transaction() as cur:
+            cur.execute("SELECT value FROM tool_config WHERE tool_id = 'google_search'")
+            self.assertEqual(cur.fetchone(), ('new-key',))
+            cur.execute("SELECT tool_id FROM enabled_tools WHERE tool_id = 'google_search'")
+            self.assertEqual(cur.fetchone(), ('google_search',))
+
     def test_notice_migration_preserves_history_and_bounded_context(self) -> None:
         migrate.up(target=85, quiet=True)
         with db.transaction() as cur:
@@ -1675,7 +1711,7 @@ class MigrateRunnerTests(unittest.TestCase):
                     )
                     self.assertEqual(
                         {str(row[0]) for row in cur.fetchall()},
-                        {"thread_id", "archived", "name", "spawned_by_thread_id"},
+                        {"thread_id", "archived", "archived_at", "name", "spawned_by_thread_id"},
                     )
                     cur.execute(
                         "SELECT column_name FROM information_schema.columns"

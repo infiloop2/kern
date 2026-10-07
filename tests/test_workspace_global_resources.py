@@ -130,6 +130,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         self.addCleanup(db.close_pool)
         # Retrieval tests keep hybrid order; reranker tests cover Jev outcomes.
         self.enterContext(patch.object(memory, "judge", side_effect=memory.HostInferenceError("disabled", reason="provider_disabled")))
+        self.enterContext(patch.object(memory, "openai_decisions", side_effect=memory.HostInferenceError("disabled", reason="provider_disabled")))
 
     def test_onboarding_status_is_derived_from_live_resources(self) -> None:
         active = patch.object(

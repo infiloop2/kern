@@ -239,14 +239,15 @@ SPAWN_AGENT_TOOL: JSONObject = {
     "name": "spawn_agent",
     "description": (
         "Start a new Kern Chat agent and send its first message in one operation. Use this "
-        "to delegate a bounded part of the operator-authorized task. A successful call returns "
+        "only to delegate temporary, bounded work within the operator-authorized task. A successful call returns "
         "the new thread-N id. The spawned agent receives your host-authenticated thread id and "
         "instructions to send its result or blocking question back with send_agent_message. "
         "Provide a complete supported agent_runtime, model, and effort tuple; use "
         "GET /agent/apps/session-options with workspace_api when you need the current choices. "
         "Give the agent a useful name for discovery. The new agent appears "
-        "under Spawned agents with the ordinary Chat controls and stays available until archived. "
-        "Use archive_spawned_agent when you no longer need it; keep agents needed for recurring work. One creation "
+        "under Spawned agents with the ordinary Chat controls and auto-archives after 24 hours of inactivity. "
+        "Create Standing agents for persistent or recurring work; triggers are optional. "
+        "Use archive_spawned_agent when you no longer need it. One creation "
         "attempt, no queue; accepted means the work started, not that it completed. Spawning an "
         "agent does not expand the operator's authority or task scope."
     ),
@@ -286,7 +287,8 @@ ARCHIVE_SPAWNED_AGENT_TOOL: JSONObject = {
     "name": "archive_spawned_agent",
     "description": (
         "Archive an idle Kern Chat agent that your current thread spawned. "
-        "Archive spawned agents when you no longer need them; keep those needed for recurring work. "
+        "Archive spawned agents when you no longer need them; they also auto-archive after 24 hours of inactivity. "
+        "Create Standing agents for persistent or recurring work. "
         "Only the authenticated spawning thread can use this action. Running agents cannot be "
         "archived. History and self-memory remain readable; archived agents cannot receive "
         "messages. The operator can restore them through the UI."

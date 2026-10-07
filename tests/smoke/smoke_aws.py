@@ -188,6 +188,8 @@ SMOKE_MANAGED_DOMAINS = (
     "bedrock-runtime.us-west-2.amazonaws.com",
 )
 SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
+    "seo_metrics_api": (("get_keyword_metrics", {"keywords": ["seo api"], "country": "US"}), ("get_usage", {})),
+    "ahrefs_domain_rating": (("get_domain_rating", {"domain": "ahrefs.com"}),),
     "cloudwatch_logs": (
         (
             "filter_log_events",
@@ -337,6 +339,12 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("get_recent_media", {"limit": "1"}),
         ("get_reel_insights", {"media_id": "1"}),
         ("get_publishing_limit", {}),
+        ("get_comments", {"media_id": "1", "limit": "1"}),
+        ("get_comment_replies", {"comment_id": "1", "limit": "1"}),
+        ("reply_to_comment", {"comment_id": "1", "text": "Kern smoke test"}),
+        ("get_conversations", {"limit": "1"}),
+        ("get_messages", {"conversation_id": "t_1", "limit": "1"}),
+        ("reply_to_conversation", {"conversation_id": "t_1", "text": "Kern smoke test"}),
         ("post_image", {"image_asset_id": "$INSTAGRAM_IMAGE"}),
         ("post_carousel", {"image_asset_ids": ["$INSTAGRAM_IMAGE", "$INSTAGRAM_IMAGE_2"]}),
         ("post_reel", {"video_asset_id": "$INSTAGRAM_VIDEO"}),
@@ -352,8 +360,8 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("get_profile", {}),
         ("create_post", {"text": "Kern smoke; never published."}),
     ),
-    "linkedin_discovery": (
-        ("search_posts", {"query": "Kern", "limit": "1"}),
+    "google_search": (
+        ("search", {"query": "Kern", "country": "us", "language": "en", "limit": "1"}),
     ),
     # The remaining Polymarket actions need a live market/token from this
     # run's listing. check_tools_surface derives those after these three calls.

@@ -20,6 +20,7 @@ from unittest.mock import MagicMock, patch
 
 import pg_harness
 
+from host.runtime.admin_api import codex_cleanup
 from host.runtime.admin_api import service, threads as admin_threads
 from host.runtime.agent_runtime import orchestrator, provider_account_trust
 from host.runtime.admin_api.errors import ApiError
@@ -147,130 +148,6 @@ def save_attested_claude_account(account_id: str, **extra: object) -> None:
     )
 
 
-class ArchivedCodexSweepTests(unittest.TestCase):
-    """Exercise deletion responses through the sweep without a database."""
-
-    def setUp(self) -> None:
-        self.session_ids = [
-            "01900000-0000-7000-8000-000000000001",
-            "01900000-0000-7000-8000-000000000002",
-        ]
-        self.servers = {
-            runtime: MagicMock(runtime_type=runtime)
-            for runtime in admin_threads.codex_app_server.CODEX_RUNTIME_TYPES
-        }
-        self.enterContext(patch.object(
-            admin_threads.codex_app_server, "CodexAppServer",
-            side_effect=lambda runtime_type: self.servers[runtime_type],
-        ))
-        self.enterContext(patch.object(
-            admin_threads.state, "archived_thread_session_ids",
-            return_value=["thread-71", "thread-72"],
-        ))
-        self.enterContext(patch.object(admin_threads.orchestrator, "live_thread_ids", return_value=[]))
-        self.enterContext(patch.object(admin_threads.state, "mutation"))
-        self.detach = self.enterContext(patch.object(
-            admin_threads.state, "detach_archived_thread_session",
-            side_effect=lambda cur, thread_id, runtime: self.session_ids[int(thread_id.removeprefix("thread-")) - 71],
-        ))
-        self.report = self.enterContext(patch.object(admin_threads.host_errors, "report_unexpected"))
-
-    def test_missing_rollout_continues_cleanup_without_error_reporting(self) -> None:
-        for server in self.servers.values():
-            server.call.side_effect = [
-                admin_threads.codex_app_server.CodexAppServerError(
-                    f"no rollout found for thread id {self.session_ids[0]}"
-                ),
-                {},
-            ]
-        self.assertEqual(admin_threads.sweep_archived_codex_sessions(), 2 * len(self.servers))
-        self.assertEqual(self.detach.call_count, 2 * len(self.servers))
-        self.report.assert_not_called()
-        for server in self.servers.values():
-            self.assertEqual([call.args for call in server.call.call_args_list], [
-                ("thread/delete", {"threadId": session_id}) for session_id in self.session_ids
-            ])
-            server.close.assert_called_once_with()
-
-    def test_other_delete_failure_is_reported_and_stops_each_runtime_pass(self) -> None:
-        error = admin_threads.codex_app_server.CodexAppServerError("failed to delete rollout: permission denied")
-        for server in self.servers.values():
-            server.call.side_effect = error
-        self.assertEqual(admin_threads.sweep_archived_codex_sessions(), 0)
-        self.assertEqual(self.detach.call_count, len(self.servers))
-        self.assertEqual(self.report.call_count, len(self.servers))
-        for runtime, server in self.servers.items():
-            self.report.assert_any_call("admin_api.archived_codex_sweep", error, context={"runtime": runtime})
-            server.call.assert_called_once_with("thread/delete", {"threadId": self.session_ids[0]}, timeout=10)
-            server.close.assert_called_once_with()
-
-
-class CodexRotationTests(unittest.TestCase):
-    """Exercise cleanup failures without requiring the production database."""
-
-    def setUp(self) -> None:
-        self.size = self.enterContext(patch.object(
-            orchestrator.codex_app_server, "session_rollout_size",
-            return_value=orchestrator.codex_app_server.SESSION_ROLLOUT_MAX_BYTES,
-        ))
-        self.delete = self.enterContext(patch.object(orchestrator.codex_app_server, "delete_session"))
-        self.mutation = self.enterContext(patch.object(orchestrator.state, "mutation"))
-        self.clear = self.enterContext(patch.object(orchestrator.state, "clear_thread_provider_session"))
-        self.report = self.enterContext(patch.object(orchestrator.host_errors, "report_unexpected"))
-        self.server = MagicMock()
-        self.turn = orchestrator._Turn(
-            "codex", "schedule-1", "gpt-6-astra", "high", 4,
-            phase=orchestrator.ExecutionPhase.FINISHING,
-            provider_session_id="old-session", retry_attempt=0,
-        )
-
-    def test_threshold_detaches_before_delete_for_each_codex_account(self) -> None:
-        for runtime in orchestrator.codex_app_server.CODEX_RUNTIME_TYPES:
-            with self.subTest(runtime=runtime):
-                self.turn.runtime_type = runtime
-                self.turn.provider_session_id = "old-session"
-
-                def delete(server, session_id):
-                    self.assertIsNone(self.turn.provider_session_id)
-                    self.assertEqual(self.turn.phase, orchestrator.ExecutionPhase.FINISHING)
-                    self.clear.assert_called_with(
-                        self.mutation.return_value.__enter__.return_value,
-                        "schedule-1", 4, "old-session",
-                    )
-
-                self.delete.side_effect = delete
-                orchestrator._rotate_large_codex_session(self.turn, self.server)
-                self.delete.assert_called_with(self.server, "old-session")
-        self.report.assert_not_called()
-
-    def test_small_and_non_codex_sessions_are_preserved(self) -> None:
-        self.size.return_value -= 1
-        orchestrator._rotate_large_codex_session(self.turn, self.server)
-        self.size.assert_called_once()
-        self.turn.runtime_type = "claude_code"
-        orchestrator._rotate_large_codex_session(self.turn, self.server)
-        self.size.assert_called_once()
-        self.mutation.assert_not_called()
-        self.delete.assert_not_called()
-        self.assertEqual(self.turn.provider_session_id, "old-session")
-
-    def test_measurement_or_detach_failure_never_deletes(self) -> None:
-        for stage in (self.size, self.clear, self.mutation.return_value.__exit__):
-            with self.subTest(stage=stage):
-                stage.side_effect = RuntimeError("failed")
-                orchestrator._rotate_large_codex_session(self.turn, self.server)
-                self.delete.assert_not_called()
-                self.assertEqual(self.turn.provider_session_id, "old-session")
-                stage.side_effect = None
-        self.assertEqual(self.report.call_count, 3)
-
-    def test_delete_failure_does_not_restore_the_retired_mapping(self) -> None:
-        self.delete.side_effect = RuntimeError("partial deletion")
-        orchestrator._rotate_large_codex_session(self.turn, self.server)
-        self.assertIsNone(self.turn.provider_session_id)
-        self.report.assert_called_once()
-
-
 class OrchestratorTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
@@ -301,6 +178,7 @@ class OrchestratorTests(unittest.TestCase):
         self.server_patch = patch.object(orchestrator.codex_app_server, "CodexAppServer", FakeServer)
         self.server_patch.start()
         self.addCleanup(self.server_patch.stop)
+        self.enterContext(patch.object(orchestrator.codex_app_server, "stored_sessions", return_value=[]))
         self.rollout_size = self.enterContext(patch.object(
             orchestrator.codex_app_server, "session_rollout_size", return_value=0,
         ))
@@ -626,6 +504,19 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual((message["sender_thread_id"], message["target_thread_id"]),
                          ("thread-2", "thread-chat"))
         self.assertEqual(set(message), {"sender_thread_id", "target_thread_id", "count"})
+
+    def test_silent_codex_completion_records_no_error_message_or_retry(self) -> None:
+        with patch.object(orchestrator.codex_app_server, "run_turn", return_value=("codex-silent", "")):
+            response = self.send_message("thread-chat", "Status update", peer_sender_thread_id="thread-2")
+            self.assertEqual(response["status"], "accepted")
+            self.wait_until_idle("thread-chat")
+
+        events = thread_events("thread-chat")
+        self.assertFalse(any(event["event_type"] == "thread.error" for event in events))
+        self.assertFalse(any(event["event_type"] == "thread.message" for event in events))
+        self.assertIsNone(orchestrator.turn_retries.pending("thread-chat"))
+        self.assertEqual(state.thread_session_config("thread-chat")["provider_session_id"], "codex-silent")
+        self.assertTrue(FakeServer.instances[0].closed)
 
     def test_message_to_idle_thread_runs_and_records_the_message(self) -> None:
         observed_config: list[tuple[str, str]] = []
@@ -1514,18 +1405,51 @@ class OrchestratorTests(unittest.TestCase):
             "replacement-session",
         )
 
+    def test_archived_session_grace_and_detach_recheck(self) -> None:
+        with state.mutation() as cur:
+            cur.execute("INSERT INTO chat_threads (thread_id, archived, archived_at) VALUES"
+                        " ('thread-71', TRUE, CURRENT_TIMESTAMP - INTERVAL '8 days'),"
+                        " ('thread-72', TRUE, CURRENT_TIMESTAMP - INTERVAL '6 days'),"
+                        " ('thread-73', TRUE, NULL)")
+            for n in (71, 72, 73):
+                state.save_thread_session(cur, "codex", f"thread-{n}", f"session-{n}",
+                                          state.utc_now(), "gpt-6-astra", "high")
+        self.assertEqual([t[0] for t in state.codex_cleanup_candidates("codex") if t[2]], ["thread-71"])
+        with state.mutation() as cur:
+            for n in (72, 73):
+                self.assertFalse(state.detach_idle_codex_session(cur, f"thread-{n}", "codex", f"session-{n}", archived=True))
+            # A stale discovery result must not bypass a restarted grace period.
+            cur.execute("UPDATE chat_threads SET archived_at = CURRENT_TIMESTAMP WHERE thread_id = 'thread-71'")
+            self.assertFalse(state.detach_idle_codex_session(cur, "thread-71", "codex", "session-71", archived=True))
+        for n in (71, 72, 73):
+            self.assertEqual(state.thread_session_config(f"thread-{n}")["provider_session_id"], f"session-{n}")
+
+    def test_archiving_again_after_restore_starts_a_new_grace_period(self) -> None:
+        with state.mutation() as cur:
+            cur.execute("INSERT INTO chat_threads (thread_id, archived, archived_at)"
+                        " VALUES ('thread-71', TRUE, CURRENT_TIMESTAMP - INTERVAL '8 days')")
+            state.save_thread_session(cur, "codex", "thread-71", "session-71", state.utc_now(), "gpt-6-astra", "high")
+        with patch.object(chat, "call_admin_api", return_value={"thread": {"status": "idle"}}):
+            chat.archive_chat_thread("thread-71")
+            self.assertEqual([t[0] for t in state.codex_cleanup_candidates("codex") if t[2]], ["thread-71"])
+            chat.unarchive_chat_thread("thread-71")
+            chat.archive_chat_thread("thread-71")
+        self.assertEqual([t[0] for t in state.codex_cleanup_candidates("codex") if t[2]], [])
+        self.assertEqual(state.thread_session_config("thread-71")["provider_session_id"], "session-71")
+
     def test_archived_chat_sweep_preserves_history_for_restore(self) -> None:
         thread_id = "thread-71"
         with state.mutation() as cur:
-            cur.execute("INSERT INTO chat_threads (thread_id, archived) VALUES (%s, TRUE)", (thread_id,))
+            cur.execute("INSERT INTO chat_threads (thread_id, archived, archived_at)"
+                        " VALUES (%s, TRUE, CURRENT_TIMESTAMP - INTERVAL '8 days')", (thread_id,))
             state.save_thread_session(cur, "codex", thread_id, "retired-session", state.utc_now(), "gpt-6-astra", "high")
             state.append_agent_event(cur, "thread.message", thread_id, {
                 "source": "user", "message": "Keep the deployment paused until Friday.",
             })
         before = thread_events(thread_id)
-        with patch.object(admin_threads.codex_app_server, "delete_session") as delete:
-            self.assertEqual(admin_threads.sweep_archived_codex_sessions(), 1)
-            self.assertEqual(admin_threads.sweep_archived_codex_sessions(), 0)
+        with patch.object(codex_cleanup.codex_app_server, "delete_session") as delete:
+            self.assertEqual(codex_cleanup.reconcile_codex_sessions(), 1)
+            self.assertEqual(codex_cleanup.reconcile_codex_sessions(), 0)
         delete.assert_called_once()
         self.assertEqual(delete.call_args.args[1], "retired-session")
         self.assertIsNone(state.thread_session_config(thread_id)["provider_session_id"])
@@ -1556,22 +1480,24 @@ class OrchestratorTests(unittest.TestCase):
         ):
             model, effort = DEFAULT_SESSION.get(runtime, DEFAULT_SESSION["codex"])
             with state.mutation() as cur:
-                cur.execute("INSERT INTO chat_threads (thread_id, archived) VALUES (%s, %s)", (f"thread-{n}", archived))
+                cur.execute("INSERT INTO chat_threads (thread_id, archived, archived_at)"
+                            " VALUES (%s, %s, CASE WHEN %s THEN CURRENT_TIMESTAMP - INTERVAL '8 days' ELSE NULL END)",
+                            (f"thread-{n}", archived, archived))
                 state.save_thread_session(cur, runtime, f"thread-{n}", f"session-{n}", state.utc_now(), model, effort)
         finishing = self.register_live_turn("codex", "thread-76", finished=True)
         with state.mutation() as cur:
             state.finish_thread_run(cur, "thread-76", finishing.run_number)
             state.start_thread_run(cur, "thread-77")
-        self.assertEqual(state.archived_thread_session_ids("codex"), ["thread-71", "thread-76"])
+        self.assertEqual([t[0] for t in state.codex_cleanup_candidates("codex") if t[2]], ["thread-71", "thread-76"])
         # Include a stale snapshot candidate that was unarchived before detach.
-        candidates = state.archived_thread_session_ids
+        candidates = state.codex_cleanup_candidates
         def with_restored(runtime):
-            return candidates(runtime) + (["thread-74"] if runtime == "codex" else [])
+            return candidates(runtime) + ([("thread-74", "session-74", True)] if runtime == "codex" else [])
         with (
-            patch.object(state, "archived_thread_session_ids", side_effect=with_restored),
-            patch.object(admin_threads.codex_app_server, "delete_session") as delete,
+            patch.object(state, "codex_cleanup_candidates", side_effect=with_restored),
+            patch.object(codex_cleanup.codex_app_server, "delete_session") as delete,
         ):
-            self.assertEqual(admin_threads.sweep_archived_codex_sessions(), 3)
+            self.assertEqual(codex_cleanup.reconcile_codex_sessions(), 3)
         self.assertEqual({(call.args[0].runtime_type, call.args[1]) for call in delete.call_args_list}, {
             ("codex", "session-71"), ("codex-2", "session-72"), ("codex-3", "session-73"),
         })
@@ -1596,9 +1522,7 @@ class OrchestratorTests(unittest.TestCase):
                     self.assertEqual(session_id, "old-session")
                     self.assertIsNone(state.thread_session_config(thread_id)["provider_session_id"])
                     self.assertFalse(server.closed)
-                    with self.assertRaises(ApiError) as conflict:
-                        service.send_thread_message(thread_id, {"message": "too soon"}, None, operator_sent_message=True, retry_attempt=0)
-                    self.assertEqual(conflict.exception.status.value, 409)
+                    self.assertNotIn(thread_id, orchestrator.live_thread_ids())
 
                 self.rollout_size.side_effect = [
                     orchestrator.codex_app_server.SESSION_ROLLOUT_MAX_BYTES, 1,
@@ -1609,6 +1533,8 @@ class OrchestratorTests(unittest.TestCase):
                 ):
                     self.send_message(thread_id, "remember the release plan")
                     self.wait_until_idle(thread_id)
+                    deletion.assert_not_called()  # Cleanup is no longer in turn completion.
+                    self.assertEqual(codex_cleanup.reconcile_codex_sessions(), 1)
                     deletion.assert_called_once()
                     self.assertIsNone(state.thread_session_config(thread_id)["provider_session_id"])
                     self.send_message(thread_id, "continue")
@@ -1628,6 +1554,7 @@ class OrchestratorTests(unittest.TestCase):
         ):
             self.send_message("thread-cleanup-error", "a completed task")
             self.wait_until_idle("thread-cleanup-error")
+            self.assertEqual(codex_cleanup.reconcile_codex_sessions(), 0)
         self.assertIsNone(state.thread_session_config("thread-cleanup-error")["provider_session_id"])
         report.assert_called_once()
         self.assertFalse(any(event["event_type"] == "thread.error" for event in thread_events("thread-cleanup-error")))

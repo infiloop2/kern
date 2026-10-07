@@ -488,10 +488,10 @@ export const HOST_INFERENCE_INTEGRATIONS = {
     apiKeyPlaceholder: "sk-...",
     featureSettings: [],
     label: "OpenAI API",
-    summary: "Name agent tasks and review requests against your auto-approval policies.",
+    summary: "Name agent tasks, compare memory rankings, and review tool requests.",
     protections: [
       "The key stays encrypted in host state and is used only by the dedicated kern-host-inference service. Agents and agent-facing tools cannot read it or call this provider.",
-      "Kern uses GPT-6 Luna for task titles, and GPT-6.1 Sol for auto-approval policy reviews.",
+      "Kern uses GPT-6 Luna for task titles and diagnostic memory ranking comparisons, and GPT-6.1 Sol for auto-approval policy reviews.",
     ],
     setupSteps: [
       { title: "Create an API key", description: "Create a project API key at platform.openai.com. This is separate from the ChatGPT account used by Codex." },
@@ -502,12 +502,13 @@ export const HOST_INFERENCE_INTEGRATIONS = {
     capabilities: [
       { name: "Auto-approval", description: "Reviews pending tool requests against policies you save in Approvals. Clear matches are approved automatically; other requests stay pending with an explanation." },
       { name: "Swarm task titles", description: "Names each new on-demand agent task and refreshes its title when ongoing work changes." },
+      { name: "Memory ranking comparison", description: "Runs Luna Decisions alongside Jev and records its proposed memory order in recall diagnostics. Jev continues to control selection; Luna results are for comparison only." },
     ],
     dataSummary: {
       items: [
         {
           title: "What leaves this host",
-          description: "All data in Kern can leave this host for OpenAI when Host AI features use this connection. Task titles use bounded user and assistant messages, peer messages, scheduled requests and approval-outcome summaries. Auto-approval sends your policy and the exact request, including action, account, summary and payload, through the shared credential redactor.",
+          description: "All data in Kern can leave this host for OpenAI when Host AI features use this connection. Task titles use bounded user and assistant messages, peer messages, scheduled requests and approval-outcome summaries. Memory ranking comparisons send the same bounded task context and up to 20 candidate descriptions, without page contents or page IDs. Auto-approval sends your policy and the exact request, including action, account, summary and payload, through the shared credential redactor.",
           links: [
             { label: "OpenAI API data controls", url: "https://platform.openai.com/docs/guides/your-data" },
           ],
@@ -515,7 +516,7 @@ export const HOST_INFERENCE_INTEGRATIONS = {
         {
           title: "Where it can go",
           points: [
-            { label: "Exact API destination", text: "api.openai.com, POST /v1/chat/completions." },
+            { label: "Exact API destination", text: "api.openai.com, POST /v1/chat/completions and POST /v1/decisions." },
           ],
           links: [
             { label: "OpenAI project settings", url: "https://platform.openai.com/settings/organization/data-controls" },
@@ -535,7 +536,7 @@ export const HOST_INFERENCE_INTEGRATIONS = {
       "The provider is not part of the agent network policy and no agent-facing route exposes it.",
     ],
     networkScope: [
-      ["api.openai.com", "POST /v1/chat/completions only, from the host inference service"],
+      ["api.openai.com", "POST /v1/chat/completions and POST /v1/decisions, from the host inference service"],
     ],
   },
   host_typesafe: {

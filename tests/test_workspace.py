@@ -432,7 +432,7 @@ class WorkspaceTests(unittest.TestCase):
         ):
             service.maintain_storage()
 
-        self.assertEqual(chat_backend.mock_calls, [])
+        chat_backend.archive_idle_spawned_agents.assert_called_once_with()
         prune_memory.assert_called_once_with()
         prune_schedules.assert_called_once_with()
         prune_apps.assert_called_once_with()

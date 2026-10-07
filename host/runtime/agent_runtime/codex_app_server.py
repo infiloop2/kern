@@ -1169,10 +1169,9 @@ def run_turn(
                         last_message = pending_message
                         last_message_phase = current_agent_phase
                 server.clear_active_turn()
-                if not last_message:
-                    raise CodexAppServerError(
-                        "Codex turn completed without a final response"
-                    )
+                # Successful turns may intentionally be silent (for example,
+                # after an informational agent message). Provider status, not
+                # the presence of final text, determines runtime success.
                 return thread_id, last_message
             error = turn.get("error") or {}
             if not isinstance(error, dict):
@@ -1332,6 +1331,41 @@ def delete_session(server: CodexAppServer, session_id: str) -> None:
         # still reach cleanup diagnostics and stop an archived sweep's pass.
         if str(exc) != f"no rollout found for thread id {session_id}":
             raise
+
+
+def stored_sessions(server: CodexAppServer) -> list[dict[str, Any]]:
+    """List persisted app-server roots, including archived provider logs.
+
+    Kern creates independent roots with thread/start, never native children.
+    """
+    sessions: dict[str, dict[str, Any]] = {}
+    for archived in (False, True):
+        cursor = None
+        seen_cursors: set[str] = set()
+        for _ in range(200):
+            result = server.call("thread/list", {
+                "limit": 100, "cursor": cursor, "archived": archived,
+                "sourceKinds": ["cli", "vscode", "exec", "appServer", "unknown"], "modelProviders": [],
+                "sortKey": "updated_at", "sortDirection": "asc",
+            }, timeout=10)
+            if not isinstance(result, dict) or not isinstance(result.get("data"), list):
+                raise CodexAppServerError("Codex returned an invalid stored session page")
+            for thread in result["data"]:
+                if not isinstance(thread, dict) or not isinstance(thread.get("id"), str):
+                    raise CodexAppServerError("Codex returned an invalid stored session")
+                UUID(thread["id"])
+                parent = thread.get("parentThreadId")
+                if parent is None:
+                    sessions[thread["id"]] = thread
+            cursor = result.get("nextCursor")
+            if cursor is None:
+                break
+            if not isinstance(cursor, str) or not cursor or cursor in seen_cursors:
+                raise CodexAppServerError("Codex returned an invalid stored session cursor")
+            seen_cursors.add(cursor)
+        else:
+            raise CodexAppServerError("Codex stored session listing exceeded its page limit")
+    return list(sessions.values())
 
 
 def _start_thread(server: CodexAppServer, model: str) -> dict[str, Any]:

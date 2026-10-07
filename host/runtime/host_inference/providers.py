@@ -12,7 +12,7 @@ from functools import partial
 from typing import Any
 
 from host.runtime.core import host_errors, state
-from host.runtime.host_inference import openai, provider_http, typesafe, usage
+from host.runtime.host_inference import decisions, openai, provider_http, typesafe, usage
 
 
 TextAdapter = Callable[..., dict[str, Any]]
@@ -64,6 +64,34 @@ def openai_text_completion(
             exc,
             context={"provider": "openai"},
             kind="provider_failure",
+        )
+        if isinstance(exc, TimeoutError):
+            raise
+        return None
+
+
+def openai_decisions(
+    input: str,
+    questions: list[dict[str, Any]],
+    *, model: str, timeout_seconds: float,
+    adapter: JudgmentAdapter = decisions.evaluate,
+) -> dict[str, Any] | None:
+    """Use the same operator-enabled OpenAI connection for typed decisions."""
+    try:
+        configured = state.enabled_host_inference_provider("openai")
+        if configured is None:
+            raise ProviderDisabledError("OpenAI is disabled")
+        return adapter(
+            api_key=configured["api_key"], model=model, input=input, questions=questions,
+            transport=partial(provider_http.post, timeout=timeout_seconds),
+            usage_recorder=usage.record_openai_decision_response,
+        )
+    except ProviderDisabledError:
+        raise
+    except Exception as exc:
+        host_errors.report_warning(
+            "host_inference.openai_decisions", exc,
+            context={"provider": "openai"}, kind="provider_failure",
         )
         if isinstance(exc, TimeoutError):
             raise

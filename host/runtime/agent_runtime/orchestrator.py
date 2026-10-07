@@ -690,6 +690,20 @@ def live_thread_ids() -> set[str]:
         return {turn.thread_id for turn in _LIVE.values()}
 
 
+def live_provider_session_ids(runtime: str) -> set[str]:
+    """Include startup/finishing sessions that may not have a durable mapping."""
+    with _LIVE_LOCK:
+        return {
+            session_id
+            for turn in _LIVE.values() if turn.runtime_type == runtime
+            for session_id in (
+                turn.provider_session_id,
+                getattr(turn.server, "last_known_session_id", None),
+            )
+            if isinstance(session_id, str) and session_id
+        }
+
+
 def _retryable_phase_error(phase: ExecutionPhase) -> ApiError:
     if phase == ExecutionPhase.STARTING:
         return ApiError(
@@ -1155,8 +1169,7 @@ def _run_turn(turn: _Turn, input_message: str, provider_session_id: str | None) 
                     )
                 turn.provider_session_id = None
             return
-        if _finish_turn(turn, provider_session_id=new_provider_session_id):
-            _rotate_large_codex_session(turn, server)
+        _finish_turn(turn, provider_session_id=new_provider_session_id)
     except Exception as exc:
         # The callback is the primary persistence path. The attribute is only
         # a defensive fallback for an adapter exception at the exact boundary
@@ -1165,36 +1178,6 @@ def _run_turn(turn: _Turn, input_message: str, provider_session_id: str | None) 
         _finish_turn(turn, error_message=str(exc), provider_session_id=last_session_id)
     finally:
         _close_turn(turn, server)
-
-
-def _rotate_large_codex_session(turn: _Turn, server: Any) -> None:
-    """Retire a large session after success, while the live fence is held.
-
-    Detach durably before asking Codex to delete: a timeout or partial deletion
-    must never leave the next firing trying to resume a retired session. There
-    is no retry queue; cleanup failures are host diagnostics, not turn errors.
-    """
-    session_id = turn.provider_session_id
-    if turn.runtime_type not in codex_app_server.CODEX_RUNTIME_TYPES or not session_id:
-        return
-    try:
-        size = codex_app_server.session_rollout_size(server, session_id)
-        if size < codex_app_server.SESSION_ROLLOUT_MAX_BYTES:
-            return
-        with turn.delivery_lock:
-            if turn.phase != ExecutionPhase.FINISHING:
-                return
-            with state.mutation() as cur:
-                state.clear_thread_provider_session(
-                    cur, turn.thread_id, turn.run_number, session_id,
-                )
-            turn.provider_session_id = None
-        codex_app_server.delete_session(server, session_id)
-    except Exception as exc:
-        host_errors.report_unexpected(
-            "agent_runtime.codex_session_rotation", exc,
-            context={"thread_id": turn.thread_id, "runtime": turn.runtime_type},
-        )
 
 
 def stop_thread_turn(thread_id: str) -> bool:

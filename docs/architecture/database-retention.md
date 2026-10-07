@@ -89,11 +89,15 @@ The categories are:
 When adding or renaming a table, update this inventory in the same change.
 
 Provider-file cleanup is separate from PostgreSQL history retention. The admin
-maintenance loop sweeps archived Chats' idle Codex sessions at startup and daily,
-detaching only their provider mapping before supported Codex deletion. Chat
+maintenance loop sweeps Codex sessions at startup and daily. Archived Chats
+retain their provider context for seven days from `chat_threads.archived_at`,
+then detach only their provider mapping before supported Codex deletion. Chat
 records, messages, self-memory, and the clear-context boundary remain, so the
 next message after restoration uses the normal history handoff. See
 [Codex session rotation](agent-provider-lifecycle.md#automatic-codex-session-rotation).
+The same maintenance compares native root session IDs with current/live Kern
+references and deletes old unreferenced Kern provider logs. Kern never edits
+the provider's SQLite databases.
 
 `turn_usage` retains 90 days by last measurement time, pruned by the ordinary
 admin retention loop. The Analytics page queries only seven UTC calendar days.

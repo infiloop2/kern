@@ -47,7 +47,7 @@ class InstagramReadTests(unittest.TestCase):
         self.assertEqual(tool.manifest.connection, "oauth")
         self.assertEqual(
             [spec.id for spec in tool.manifest.actions],
-            ["get_profile", "get_recent_media", "get_reel_insights", "get_publishing_limit", "post_image", "post_carousel", "post_reel"],
+            ["get_profile", "get_recent_media", "get_reel_insights", "get_publishing_limit", "get_comments", "get_comment_replies", "reply_to_comment", "get_conversations", "get_messages", "reply_to_conversation", "post_image", "post_carousel", "post_reel"],
         )
 
     def test_get_profile_maps_fields(self) -> None:
@@ -706,6 +706,8 @@ class InstagramCredentialFlowTests(unittest.TestCase):
         self.assertTrue(start["authorization_url"].startswith("https://www.instagram.com/oauth/authorize?"))
         self.assertIn("instagram_business_content_publish", start["authorization_url"])
         self.assertIn("instagram_business_manage_insights", start["authorization_url"])
+        self.assertIn("instagram_business_manage_comments", start["authorization_url"])
+        self.assertIn("instagram_business_manage_messages", start["authorization_url"])
 
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
             if url == instagram.IG_TOKEN_URL:
@@ -731,7 +733,7 @@ class InstagramCredentialFlowTests(unittest.TestCase):
                 "data": [{
                     "access_token": "short-token",
                     "user_id": 178414,
-                    "permissions": "instagram_business_basic,instagram_business_content_publish,instagram_business_manage_insights",
+                    "permissions": ",".join(instagram.IG_OAUTH_SCOPES),
                 }]
             },
             api=api,
@@ -755,6 +757,8 @@ class InstagramCredentialFlowTests(unittest.TestCase):
                         "instagram_business_content_publish",
                         "instagram_business_manage_insights",
                         "instagram_business_manage_comments",
+                        "instagram_business_manage_messages",
+                        "extra_reported_scope",
                     ],
                 }]
             },
@@ -762,7 +766,7 @@ class InstagramCredentialFlowTests(unittest.TestCase):
         )
         self.assertEqual(
             result["account"]["scopes"],
-            ["instagram_business_basic", "instagram_business_content_publish", "instagram_business_manage_insights", "instagram_business_manage_comments"],
+            [*instagram.IG_OAUTH_SCOPES, "extra_reported_scope"],
         )
         stored = api.credentials.load()
         assert stored is not None
@@ -797,6 +801,16 @@ class InstagramCredentialFlowTests(unittest.TestCase):
                                    "permissions": "instagram_business_basic,instagram_business_content_publish"}, api=api)
         self.assertIn("instagram_business_manage_insights", str(caught.exception))
         self.assertEqual(api.credentials.load(), before)
+
+    def test_new_connections_require_each_interaction_scope_and_preserve_old_grants_on_failure(self) -> None:
+        for scope in (instagram.IG_COMMENTS_SCOPE, instagram.IG_MESSAGES_SCOPE):
+            with self.subTest(scope=scope):
+                api = connected_api()
+                before = api.credentials.load()
+                permissions = [permission for permission in instagram.IG_OAUTH_SCOPES if permission != scope]
+                with self.assertRaisesRegex(RuntimeError, scope):
+                    self.complete_connect({"access_token": "short-token", "permissions": permissions}, api=api)
+                self.assertEqual(api.credentials.load(), before)
 
 
 if __name__ == "__main__":

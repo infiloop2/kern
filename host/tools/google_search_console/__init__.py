@@ -47,6 +47,7 @@ from host.tools.shared.google import (
 from host.tools.shared.inputs import (
     ToolInputValidationError,
     clip_text,
+    decoded_url_component_values,
     guard_url_parameter_string,
     int_field,
     schema,
@@ -70,8 +71,11 @@ SEARCH_CONSOLE_RECONNECT_MESSAGE = (
     "Google Search Console is no longer connected. Please reconnect Search Console."
 )
 MAX_PROPERTIES = 250
-MAX_ANALYTICS_ROWS = 100
-MAX_ANALYTICS_DIMENSIONS = 3
+# Keep interactive responses bounded; pagination remains an explicit caller choice.
+MAX_ANALYTICS_ROWS = 1_000
+MAX_ANALYTICS_START_ROW = 2_147_483_647
+MAX_ANALYTICS_FILTERS = 10
+MAX_FILTER_EXPRESSION_BYTES = 4_096
 MAX_SITEMAPS = 100
 MAX_INSPECTION_ITEMS = 20
 MAX_URL_BYTES = 2_048
@@ -79,8 +83,13 @@ MAX_INT64 = 9_223_372_036_854_775_807
 ANALYTICS_DIMENSIONS = frozenset(
     {"country", "date", "device", "hour", "page", "query", "searchAppearance"}
 )
+MAX_ANALYTICS_DIMENSIONS = len(ANALYTICS_DIMENSIONS)
+FILTER_DIMENSIONS = ANALYTICS_DIMENSIONS - {"date", "hour"}
+FILTER_OPERATORS = frozenset(
+    {"equals", "notEquals", "contains", "notContains", "includingRegex", "excludingRegex"}
+)
 SEARCH_TYPES = frozenset({"discover", "googleNews", "image", "news", "video", "web"})
-AGGREGATION_TYPES = frozenset({"auto", "byPage", "byProperty"})
+AGGREGATION_TYPES = frozenset({"auto", "byPage", "byProperty", "byNewsShowcasePanel"})
 DATA_STATES = frozenset({"all", "final", "hourly_all"})
 READ_PERMISSION_LEVELS = frozenset(
     {"siteOwner", "siteFullUser", "siteRestrictedUser"}
@@ -149,7 +158,7 @@ QUERY_SEARCH_ANALYTICS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
     {
         "message": outputs.text("How many analytics rows were loaded."),
         "site_url": outputs.text("The property the rows belong to."),
-        "response_aggregation_type": outputs.text("How Google aggregated the rows, e.g. byPage or byProperty."),
+        "response_aggregation_type": outputs.text("How Google aggregated the rows, e.g. byPage, byProperty, or byNewsShowcasePanel."),
         "rows": outputs.array_of(
             outputs.obj(
                 {
@@ -157,7 +166,7 @@ QUERY_SEARCH_ANALYTICS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
                     "clicks": outputs.number("Clicks from Google Search, absent when Google omits the metric."),
                     "impressions": outputs.number("Impressions in Google Search, absent when Google omits the metric."),
                     "ctr": outputs.number("Clicks divided by impressions, from 0 to 1."),
-                    "position": outputs.number("Average ranking position, where 1 is the top result."),
+                    "position": outputs.number("Google's average position, where 1 is the top result; absent when omitted, including Discover/Google News."),
                 },
                 ["keys"],
             ),
@@ -286,7 +295,7 @@ MANIFEST = ToolManifest(
                     DataSummaryPoint(
                         label="Reads",
                         text=(
-                            "The selected property, typed date and grouping options, or one guarded URL goes to Google. "
+                            "The selected property, typed analytics options and guarded filter expressions, or one guarded URL goes to Google. "
                             "OAuth tokens authenticate requests but never reach the agent."
                         ),
                     ),
@@ -352,7 +361,7 @@ MANIFEST = ToolManifest(
             ),
             data_policy=(
                 "Sends one property already listed by the connected account plus typed dates, dimensions, result type, "
-                "aggregation, freshness, and pagination values to Google. Runs directly with no approval."
+                "guarded filter expressions, aggregation, freshness, and pagination values to Google. Runs directly with no approval."
             ),
             input_schema=schema(
                 {
@@ -375,7 +384,27 @@ MANIFEST = ToolManifest(
                             "enum": cast(list[JSONValue], sorted(ANALYTICS_DIMENSIONS)),
                         },
                         "maxItems": MAX_ANALYTICS_DIMENSIONS,
-                        "description": "Optional grouping dimensions, in result key order; at most three unique values.",
+                        "description": "Optional unique grouping dimensions, in result key order. searchAppearance must be grouped alone; hour requires hourly_all.",
+                    },
+                    "dimension_filters": {
+                        "type": "array",
+                        "maxItems": MAX_ANALYTICS_FILTERS,
+                        "items": schema(
+                            {
+                                "dimension": {"type": "string", "enum": cast(list[JSONValue], sorted(FILTER_DIMENSIONS))},
+                                "operator": {
+                                    "type": "string",
+                                    "enum": cast(list[JSONValue], sorted(FILTER_OPERATORS)),
+                                    "description": "Defaults to equals. Google applies case-sensitive page/query equality, case-insensitive contains, and RE2 regex semantics.",
+                                },
+                                "expression": {
+                                    "type": "string",
+                                    "description": "Exact expression, up to 4096 UTF-8 bytes; passed unchanged. Country uses 3-letter codes, device uses DESKTOP/MOBILE/TABLET; discover appearance values by grouping searchAppearance alone.",
+                                },
+                            },
+                            ["dimension", "expression"],
+                        ),
+                        "description": "Up to 10 filters combined with AND, even on dimensions not grouped. Empty or omitted means no filters. OR groups are unsupported.",
                     },
                     "search_type": {
                         "type": "string",
@@ -385,7 +414,7 @@ MANIFEST = ToolManifest(
                     "aggregation_type": {
                         "type": "string",
                         "enum": cast(list[JSONValue], sorted(AGGREGATION_TYPES)),
-                        "description": "Aggregation mode; defaults to auto.",
+                        "description": "Defaults to auto. byProperty forbids page grouping/filtering and Discover/Google News. byNewsShowcasePanel requires Discover/Google News, an equals NEWS_SHOWCASE appearance filter, and no page grouping/filtering or other appearance filter.",
                     },
                     "data_state": {
                         "type": "string",
@@ -398,7 +427,7 @@ MANIFEST = ToolManifest(
                     },
                     "start_row": {
                         "type": "string",
-                        "description": "Zero-based result offset from 0 to 25000; defaults to 0.",
+                        "description": f"Zero-based result offset from 0 to {MAX_ANALYTICS_START_ROW}; defaults to 0. Advance explicitly; paging does not guarantee a complete export.",
                     },
                 },
                 ["site_url", "start_date", "end_date"],
@@ -481,12 +510,13 @@ MANIFEST = ToolManifest(
             "site_url": validated_input("Property URL matched against the connected account’s accessible properties."),
             "start_date": validated_input("Calendar date in YYYY-MM-DD form."),
             "end_date": validated_input("Calendar date in YYYY-MM-DD form, on or after start_date."),
-            "dimensions": validated_input("At most three unique choices from the listed dimensions."),
+            "dimensions": validated_input("Unique choices from the listed dimensions, with provider combination checks."),
+            "dimension_filters": guarded_input(allow_longer_text=True),
             "search_type": validated_input("One of the listed choices."),
             "aggregation_type": validated_input("One of the listed choices."),
             "data_state": validated_input("One of the listed choices."),
-            "row_limit": validated_input("Integer from 1 to 100."),
-            "start_row": validated_input("Integer from 0 to 25000."),
+            "row_limit": validated_input(f"Integer from 1 to {MAX_ANALYTICS_ROWS}."),
+            "start_row": validated_input(f"Integer from 0 to {MAX_ANALYTICS_START_ROW}."),
         },
         "list_sitemaps": {
             "site_url": validated_input("Property URL matched against the connected account’s accessible properties."),
@@ -551,6 +581,13 @@ MANIFEST = ToolManifest(
     agent_notes=(
         "Use list_properties before property-scoped actions and pass its site_url back exactly. inspect_url only reports "
         "Google's indexed version and cannot request indexing or test a live page. Use submit_sitemap for Google discovery."
+        " query_search_analytics defaults to 25 rows, caps each call at 1000, and never auto-pages. "
+        "Advance start_row explicitly with the same query to retrieve more available rows; Google's top-row limits "
+        "and omitted query data mean pagination is not a complete export. Filters use AND and Google's original "
+        "case/RE2 semantics; expressions are parameter-guarded. Group searchAppearance alone to discover values, "
+        "then filter one appearance while grouping other dimensions. CTR is a fraction, position is Google's average, "
+        "and page/property aggregation changes metric meaning; do not average row CTR/position blindly. "
+        "Freshness metadata marks incomplete Pacific-Time dates/hours; retain it in comparisons."
     ),
 )
 
@@ -776,7 +813,43 @@ def _site_path(site_url: str) -> str:
     return urllib.parse.quote(site_url, safe="")
 
 
-def _analytics_input(tool_input: JSONObject, access_token: str) -> tuple[str, JSONObject]:
+def _analytics_filters(tool_input: JSONObject, api: HostAPI) -> list[JSONObject]:
+    values = tool_input.get("dimension_filters", [])
+    if not isinstance(values, list) or len(values) > MAX_ANALYTICS_FILTERS:
+        raise ToolInputValidationError(
+            f"Search Console dimension_filters must be an array of at most {MAX_ANALYTICS_FILTERS} filters."
+        )
+    filters: list[JSONObject] = []
+    for value in values:
+        if (
+            not isinstance(value, dict)
+            or not {"dimension", "expression"} <= value.keys()
+            or value.keys() - {"dimension", "operator", "expression"}
+        ):
+            raise ToolInputValidationError(
+                "Search Console filters require dimension and expression, with only an optional operator."
+            )
+        dimension = value["dimension"]
+        operator = value.get("operator", "equals")
+        if not isinstance(dimension, str) or dimension not in FILTER_DIMENSIONS:
+            raise ToolInputValidationError("Search Console filter dimension must be one of the listed choices.")
+        if not isinstance(operator, str) or operator not in FILTER_OPERATORS:
+            raise ToolInputValidationError("Search Console filter operator must be one of the listed choices.")
+        expression = value["expression"]
+        if not isinstance(expression, str) or len(expression.encode("utf-8")) > MAX_FILTER_EXPRESSION_BYTES:
+            raise ToolInputValidationError(
+                f"Search Console filter expression must be a string of at most {MAX_FILTER_EXPRESSION_BYTES} UTF-8 bytes."
+            )
+        # Never trim, case-fold, compile, or rewrite Google's expressions.
+        expression = api.outbound.guard_request_parameter_string(expression, allow_longer_text=True)
+        if dimension == "page":
+            for decoded in decoded_url_component_values(expression, plus=False):
+                api.outbound.guard_request_parameter_string(decoded, allow_longer_text=True)
+        filters.append({"dimension": dimension, "operator": operator, "expression": expression})
+    return filters
+
+
+def _analytics_input(tool_input: JSONObject, access_token: str, api: HostAPI) -> tuple[str, JSONObject]:
     site_url = cast(str, _property(access_token, tool_input.get("site_url"))["site_url"])
     start_date = _parse_date(tool_input.get("start_date"), "start_date")
     end_date = _parse_date(tool_input.get("end_date"), "end_date")
@@ -802,6 +875,12 @@ def _analytics_input(tool_input: JSONObject, access_token: str) -> tuple[str, JS
         raise ToolInputValidationError(
             f"Search Console dimensions support at most {MAX_ANALYTICS_DIMENSIONS} values."
         )
+    if "searchAppearance" in dimensions and len(dimensions) != 1:
+        raise ToolInputValidationError(
+            "Search Console searchAppearance must be grouped alone; use an appearance filter with other dimensions."
+        )
+    filters = _analytics_filters(tool_input, api)
+    filter_dimensions = {cast(str, item["dimension"]) for item in filters}
     data_state = _enum_value(tool_input, "data_state", DATA_STATES, default="final")
     if data_state == "hourly_all" and "hour" not in dimensions:
         raise ToolInputValidationError(
@@ -815,19 +894,37 @@ def _analytics_input(tool_input: JSONObject, access_token: str) -> tuple[str, JS
     aggregation_type = _enum_value(
         tool_input, "aggregation_type", AGGREGATION_TYPES, default="auto"
     )
-    if aggregation_type == "byProperty" and "page" in dimensions:
+    has_page = "page" in dimensions or "page" in filter_dimensions
+    if aggregation_type == "byProperty" and has_page:
         raise ToolInputValidationError(
-            "Search Console aggregation_type byProperty cannot be used with the page dimension."
+            "Search Console aggregation_type byProperty cannot be used with the page dimension or page filters."
         )
-    if search_type in {"discover", "googleNews"} and "query" in dimensions:
+    if search_type in {"discover", "googleNews"} and (
+        "query" in dimensions or "query" in filter_dimensions
+    ):
         raise ToolInputValidationError(
-            "Search Console discover and googleNews search types cannot use the query dimension."
+            "Search Console discover and googleNews search types cannot use the query dimension or query filters."
         )
     if aggregation_type == "byProperty" and search_type in {"discover", "googleNews"}:
         raise ToolInputValidationError(
             "Search Console aggregation_type byProperty is not supported for "
             "discover or googleNews search types."
         )
+    if aggregation_type == "byNewsShowcasePanel":
+        appearance_filters = [item for item in filters if item["dimension"] == "searchAppearance"]
+        if (
+            search_type not in {"discover", "googleNews"}
+            or has_page
+            or not appearance_filters
+            or any(
+                item["operator"] != "equals" or item["expression"] != "NEWS_SHOWCASE"
+                for item in appearance_filters
+            )
+        ):
+            raise ToolInputValidationError(
+                "Search Console byNewsShowcasePanel requires discover or googleNews, an equals NEWS_SHOWCASE "
+                "searchAppearance filter, no other appearance filters, and no page grouping or filters."
+            )
     body: JSONObject = {
         "startDate": start_date,
         "endDate": end_date,
@@ -848,22 +945,24 @@ def _analytics_input(tool_input: JSONObject, access_token: str) -> tuple[str, JS
             provider="Search Console",
             default=0,
             low=0,
-            high=25_000,
+            high=MAX_ANALYTICS_START_ROW,
         ),
     }
     if dimensions:
         body["dimensions"] = dimensions
+    if filters:
+        body["dimensionFilterGroups"] = [{"groupType": "and", "filters": cast(list[JSONValue], filters)}]
     return site_url, body
 
 
-def _analytics_rows(response: JSONObject) -> list[JSONObject]:
+def _analytics_rows(response: JSONObject, row_limit: int) -> list[JSONObject]:
     rows = response.get("rows")
     if rows is None:
         return []
     if not isinstance(rows, list):
         raise RuntimeError("Search Console returned invalid analytics rows.")
     output: list[JSONObject] = []
-    for value in rows[:MAX_ANALYTICS_ROWS]:
+    for value in rows[:row_limit]:
         if not isinstance(value, dict):
             continue
         raw_keys = value.get("keys")
@@ -1046,7 +1145,7 @@ class GoogleSearchConsoleTool:
                     }
                 )
             if action == "query_search_analytics":
-                site_url, body = _analytics_input(tool_input, access_token)
+                site_url, body = _analytics_input(tool_input, access_token, api)
                 response = google_json_request(
                     "POST",
                     f"{SEARCH_CONSOLE_API_BASE_URL}/sites/{_site_path(site_url)}/searchAnalytics/query",
@@ -1055,7 +1154,7 @@ class GoogleSearchConsoleTool:
                     failure_message="Search Console analytics query failed.",
                     invalid_response_message="Search Console returned an invalid analytics response.",
                 )
-                rows = _analytics_rows(response)
+                rows = _analytics_rows(response, cast(int, body["rowLimit"]))
                 result: JSONObject = {
                                         "message": f"Loaded {len(rows)} bounded Search Console analytics row(s).",
                     "site_url": site_url,
