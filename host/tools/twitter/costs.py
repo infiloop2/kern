@@ -41,7 +41,7 @@ def record_response(api: HostAPI, response: JSONObject, kind: str, *, owned: boo
         resource_id = row.get("id") if isinstance(row, dict) else None
         if not isinstance(resource_id, str) or not 1 <= len(resource_id) <= 25 or not resource_id.isascii() or not resource_id.isdecimal():
             continue
-        amount = "0.010" if category == "user" else "0.001" if owned else "0.005"
+        amount = "0.010" if category in {"user", "dm_event"} else "0.001" if owned else "0.005"
         api.costs.record(amount, charge_id=f"read:{app}:{day}:{category}:{resource_id}")
 
 

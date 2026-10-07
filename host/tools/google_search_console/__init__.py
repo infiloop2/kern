@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import date
 import re
+import time
 import urllib.parse
 from typing import Mapping, cast
 
@@ -53,7 +54,7 @@ from host.tools.shared.inputs import (
     schema,
 )
 from host.tools.shared import outputs
-from host.tools.shared.web import UnmappedProviderError
+from host.tools.shared.web import UnmappedProviderError, WebRequestError
 from host.tools.tool import CredentialFlow
 
 
@@ -78,6 +79,10 @@ MAX_ANALYTICS_FILTERS = 10
 MAX_FILTER_EXPRESSION_BYTES = 4_096
 MAX_SITEMAPS = 100
 MAX_INSPECTION_ITEMS = 20
+# Five sequential 30s provider calls, with an overall interactive budget.
+MAX_INSPECTION_URLS = 5
+INSPECTION_BATCH_BUDGET_SECONDS = 180
+INSPECTION_CALL_TIMEOUT_SECONDS = 30
 MAX_URL_BYTES = 2_048
 MAX_INT64 = 9_223_372_036_854_775_807
 ANALYTICS_DIMENSIONS = frozenset(
@@ -279,6 +284,31 @@ INSPECT_URL_OUTPUT_SCHEMA: JSONObject = outputs.obj(
 )
 
 
+BATCH_STATUSES = ("indexed", "not_indexed", "unknown", "error", "unprocessed")
+BATCH_REASONS = ("", "quota", "authorization", "provider_error", "invalid_response", "time_budget")
+INSPECT_URLS_OUTPUT_SCHEMA: JSONObject = outputs.obj(
+    {
+        "message": outputs.text("Inspected-list coverage only, not Google's full Page indexing report."),
+        "site_url": outputs.text("Exact accessible Search Console property."),
+        "counts": outputs.obj({status: outputs.integer("Number of requested URLs with this status.") for status in BATCH_STATUSES}, list(BATCH_STATUSES)),
+        "results": {
+            "type": "array", "minItems": 1, "maxItems": MAX_INSPECTION_URLS,
+            "description": "One row per requested URL, in input order, including failures and unprocessed URLs.",
+            "items": outputs.obj(
+                {
+                    "url": outputs.text("Exact requested URL."),
+                    "status": {"type": "string", "enum": list(BATCH_STATUSES), "description": "PASS means indexed; NEUTRAL/FAIL mean not_indexed; other or absent verdicts mean unknown. API failures are error; URLs not attempted are unprocessed."},
+                    "reason": {"type": "string", "enum": list(BATCH_REASONS), "description": "Why inspection failed or was not attempted; empty for returned inspection evidence."},
+                    "inspection": outputs.nullable(cast(JSONObject, cast(JSONObject, INSPECT_URL_OUTPUT_SCHEMA["properties"])["inspection"]), "Existing normalized indexed-version evidence, null for error/unprocessed URLs."),
+                },
+                ["url", "status", "reason", "inspection"],
+            ),
+        },
+    },
+    ["message", "site_url", "counts", "results"],
+)
+
+
 MANIFEST = ToolManifest(
     tool_id="google_search_console",
     display_name="Google Search Console",
@@ -295,7 +325,7 @@ MANIFEST = ToolManifest(
                     DataSummaryPoint(
                         label="Reads",
                         text=(
-                            "The selected property, typed analytics options and guarded filter expressions, or one guarded URL goes to Google. "
+                            "The selected property, typed analytics options and guarded filter expressions, or an explicit guarded URL/list goes to Google. "
                             "OAuth tokens authenticate requests but never reach the agent."
                         ),
                     ),
@@ -484,6 +514,21 @@ MANIFEST = ToolManifest(
             output_schema=INSPECT_URL_OUTPUT_SCHEMA,
         ),
         ActionSpec(
+            id="inspect_urls",
+            description="Inspect an explicit list of up to five URLs and group Google's indexed-version statuses; inspected-list coverage only.",
+            data_policy="Locally validates and parameter-guards the entire URL list before any provider read, then verifies the exact property against the connected account. Sends one property-list request and one sequential URL Inspection request per attempted URL to fixed Google endpoints. Direct read without approval or provider fee, subject to Google quota; normal Kern runtime costs remain separate. No live-page test, indexing request or sitemap fetch.",
+            cost_description="No Google API fee. Each attempted URL consumes one URL Inspection request; Google currently limits each site to 2,000/day and 600/minute, shared with other inspections.",
+            input_schema=schema(
+                {
+                    "site_url": outputs.text("Exact accessible property from list_properties; no surrounding whitespace."),
+                    "urls": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": MAX_INSPECTION_URLS, "description": "One to five distinct, exact HTTP(S) URLs under site_url. Structural limit 2,048 UTF-8 bytes; standard parameter guard limit 1,024 bytes also applies to each URL and decoded path/query view. No surrounding whitespace or nested values."},
+                    "language_code": outputs.text("Optional issue language, same validated language tag as inspect_url; defaults to en-US."),
+                },
+                ["site_url", "urls"],
+            ),
+            output_schema=INSPECT_URLS_OUTPUT_SCHEMA,
+        ),
+        ActionSpec(
             id="submit_sitemap",
             description="Queue approval to submit one sitemap URL for a listed Search Console property.",
             data_policy=(
@@ -521,6 +566,11 @@ MANIFEST = ToolManifest(
         "list_sitemaps": {
             "site_url": validated_input("Property URL matched against the connected account’s accessible properties."),
         },
+        "inspect_urls": {
+            "site_url": validated_input("Exact property syntax and connected account’s live accessible-property membership."),
+            "urls": guarded_input(),
+            "language_code": validated_input("Two or three language letters, with optional script and region subtags."),
+        },
         "inspect_url": {
             "site_url": validated_input("Property URL matched against the connected account’s accessible properties."),
             "inspection_url": guarded_input(),
@@ -544,6 +594,9 @@ MANIFEST = ToolManifest(
         PARAM_GUARD_PROTECTION,
     ),
     technical_details=(
+        "inspect_urls accepts only site_url, urls and optional language_code. All 1–5 unique exact URLs are checked for property scope and guarded, including nested-decoded paths/queries, before authentication or property reads. Each attempted URL makes one sequential 30-second-timeout Inspection call; the batch uses a 180-second budget and starts no new call with less than 30 seconds remaining. Mapped API failures stop inspections and return every remaining URL as unprocessed, with a reason. Unmapped transport failures fail the whole action through Host diagnostics; no successful partial report is returned. Credential refresh and property-list requests precede inspections; there are no automatic retries or fan-out.",
+        "Batch groups use only indexStatusResult.verdict: PASS is indexed, NEUTRAL/FAIL are not_indexed, and missing/unspecified/PARTIAL/new verdicts are unknown. Errors and unprocessed URLs are separate, never counted as not indexed. Each successful row retains the existing normalized coverage, canonical, crawl, robots and rich-result evidence. Counts cover the submitted list, not all property URLs or Google’s full Page indexing report.",
+        "URL Inspection has no provider fee and shares site quotas of 2,000/day and 600/minute and project quotas of 10,000,000/day and 15,000/minute. Existing OAuth configuration and scopes suffice; no reconnect is needed for this read action. Quota/authorization failures stop the batch. Normal Kern runtime costs are separate.",
         "Property URLs are percent-encoded only after an exact match against Google's live sites.list response. URL-prefix and sc-domain ownership rules are enforced locally before inspection or sitemap proposal.",
         PARAM_GUARD_TECHNICAL_DETAIL,
     ),
@@ -580,7 +633,7 @@ MANIFEST = ToolManifest(
     ),
     agent_notes=(
         "Use list_properties before property-scoped actions and pass its site_url back exactly. inspect_url only reports "
-        "Google's indexed version and cannot request indexing or test a live page. Use submit_sitemap for Google discovery."
+        "Google's indexed version and cannot request indexing or test a live page. inspect_urls groups only the explicit 1–5 URL list, retains unknown/error/unprocessed rows, and never crawls a sitemap or claims full property coverage. Use submit_sitemap for Google discovery."
         " query_search_analytics defaults to 25 rows, caps each call at 1000, and never auto-pages. "
         "Advance start_row explicitly with the same query to retrieve more available rows; Google's top-row limits "
         "and omitted query data mean pagination is not a complete export. Filters use AND and Google's original "
@@ -1114,6 +1167,71 @@ def _inspection_result(response: JSONObject, inspection_url: str) -> JSONObject:
     }
 
 
+def _inspection_batch_input(tool_input: JSONObject, api: HostAPI) -> tuple[str, list[str], str]:
+    if set(tool_input) - {"site_url", "urls", "language_code"}:
+        raise ToolInputValidationError("Search Console inspect_urls contains unsupported fields.")
+    site_url = _property_url(tool_input.get("site_url"))
+    if not site_url or site_url != tool_input.get("site_url"):
+        raise ToolInputValidationError("Search Console site_url must be an exact property URL from list_properties.")
+    language = _language_code(tool_input.get("language_code", "en-US"))
+    raw = tool_input.get("urls")
+    if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_INSPECTION_URLS:
+        raise ToolInputValidationError("Search Console inspect_urls requires one to five URLs.")
+    urls: list[str] = []
+    for value in raw:
+        url = _url_under_property(value, site_url, "urls")
+        if url != value:
+            raise ToolInputValidationError("Search Console URLs must be exact strings without surrounding whitespace.")
+        urls.append(guard_url_parameter_string(url, api))
+    if len(set(urls)) != len(urls):
+        raise ToolInputValidationError("Search Console inspect_urls requires distinct URLs.")
+    return site_url, urls, language
+
+
+def _inspect_urls(access_token: str, site_url: str, urls: list[str], language: str, started: float) -> JSONObject:
+    counts: JSONObject = {status: 0 for status in BATCH_STATUSES}
+    rows: list[JSONValue] = []
+    stop_reason = ""
+    for url in urls:
+        inspection: JSONObject | None = None
+        status = "unprocessed"
+        reason = stop_reason
+        if not reason and time.monotonic() - started > INSPECTION_BATCH_BUDGET_SECONDS - INSPECTION_CALL_TIMEOUT_SECONDS:
+            reason = stop_reason = "time_budget"
+        if not reason:
+            try:
+                response = google_json_request(
+                    "POST", URL_INSPECTION_ENDPOINT, access_token,
+                    body={"inspectionUrl": url, "siteUrl": site_url, "languageCode": language},
+                    failure_message="Search Console URL inspection failed.",
+                    invalid_response_message="Search Console returned an invalid URL inspection response.",
+                )
+            except UnmappedProviderError:
+                # Preserve the host-owned operator diagnostic boundary.
+                raise
+            except (RuntimeError, IntegrationReconnectRequired) as exc:
+                cause = exc.__cause__
+                http_status = cause.status if isinstance(cause, WebRequestError) else 0
+                reason = "authorization" if isinstance(exc, IntegrationReconnectRequired) or http_status in {401, 403} else "quota" if http_status == 429 else "provider_error"
+                status = "error"
+                stop_reason = reason
+            else:
+                try:
+                    inspection = _inspection_result(response, url)
+                except RuntimeError:
+                    status = "error"
+                    reason = stop_reason = "invalid_response"
+                else:
+                    verdict = cast(JSONObject, inspection["index_status"]).get("verdict")
+                    status = "indexed" if verdict == "PASS" else "not_indexed" if verdict in {"NEUTRAL", "FAIL"} else "unknown"
+        counts[status] = cast(int, counts[status]) + 1
+        rows.append({"url": url, "status": status, "reason": reason, "inspection": inspection})
+    return {
+        "message": "Grouped Google's indexed-version statuses for the requested list only; this is not a full Page indexing report.",
+        "site_url": site_url, "counts": counts, "results": rows,
+    }
+
+
 def _submit_sitemap(access_token: str, site_url: str, sitemap_url: str) -> None:
     google_json_request(
         "PUT",
@@ -1135,6 +1253,12 @@ class GoogleSearchConsoleTool:
 
     def execute(self, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:
         try:
+            if action == "inspect_urls":
+                started = time.monotonic()
+                site_url, urls, language = _inspection_batch_input(tool_input, api)
+                access_token = SEARCH_CONSOLE_CREDENTIALS.access_token(api)
+                exact_site = cast(str, _property(access_token, site_url)["site_url"])
+                return ActionExecuted(_inspect_urls(access_token, exact_site, urls, language, started))
             access_token = SEARCH_CONSOLE_CREDENTIALS.access_token(api)
             if action == "list_properties":
                 properties = _properties(access_token)

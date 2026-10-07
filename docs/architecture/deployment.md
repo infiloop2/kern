@@ -54,10 +54,19 @@ offline or cover the GitHub loader's earlier Git installation.
 The speech and embedding model files are cached by their pinned SHA-256 digests.
 Every cache hit is verified before copying to the existing root-disk model path;
 missing or corrupt files are downloaded and verified before atomic publication.
+Playwright's uv package cache and downloaded Chromium/FFmpeg files are also
+saved as a SHA-256-verified archive, keyed by Playwright and uv versions,
+Python ABI, architecture, and OS release. Bootstrap restores them to private
+root-disk staging, installs the Python package offline on a hit, and copies
+the browser files to their normal root-disk runtime path. Missing, corrupt or
+unusable caches are downloaded again. Browser OS dependencies still use apt;
+their completed `.deb` downloads are saved too. No live virtual environment,
+browser profiles or credentials are retained in this cache.
 Runtime services have no access to the durable cache. Cache writes are skipped
 when they would exceed 2 GiB or leave less than 1 GiB free on the admin volume.
 After deployment verification succeeds, bootstrap removes model digests no
-longer requested and archives whose package/version/architecture is not installed.
+longer requested, archives whose package/version/architecture is not installed,
+and browser archives other than the newest one for the current compatibility key.
 Failed deployments retain completed cached files; abandoned cache partials are
 removed on the next bootstrap. Removing this directory only loses download savings.
 

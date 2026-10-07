@@ -86,7 +86,7 @@ STAGE_VIDEO_TOOL = {
     "name": "stage_video",
     "description": (
         "Stream an agent-workspace MP4 or MOV into the private Kern tools service "
-        "for Runway, falAI or OpenRouter generation/enhancement, or approved Zoho Mail attachments, Instagram or X video publishing. Returns a short-lived, "
+        "for Runway, falAI or OpenRouter generation/enhancement, or approved Zoho Mail attachments, WhatsApp media messages (MP4 only, at most 16 MB), Instagram or X video publishing. Returns a short-lived, "
         "tool-scoped video_asset_id; pass it directly to the consuming tool and never "
         "store it as durable app state."
     ),
@@ -100,7 +100,7 @@ STAGE_VIDEO_TOOL = {
             },
             "for_tool": {
                 "type": "string",
-                "enum": ["runway", "instagram", "fal_ai", "openrouter", "twitter", "zoho_mail"],
+                "enum": ["runway", "instagram", "fal_ai", "openrouter", "twitter", "zoho_mail", "whatsapp"],
                 "description": "Destination tool; staged ids cannot cross tools.",
             },
         },
@@ -111,9 +111,9 @@ STAGE_IMAGE_TOOL = {
     "name": "stage_image",
     "description": (
         "Stream an agent-workspace JPEG, PNG, or WebP into the private Kern tools "
-        "service for Runway, falAI, OpenRouter, OpenAI Image Generation, Instagram (JPEG only), or approved Zoho Mail attachments. Returns a short-lived, "
+        "service for Runway, falAI, OpenRouter, OpenAI Image Generation, Instagram (JPEG only), X images (JPEG/PNG/WebP, at most 5 MB each), or approved WhatsApp media messages (JPEG/PNG only, at most 5 MB) or Zoho Mail attachments. Returns a short-lived, "
         "tool-scoped image_asset_id to pass directly to runway_generate_video or "
-        "openai_images_generate_image, openrouter_create_heygen_video, falAI generation/enhancement, Instagram image publishing, or Zoho Mail attachment sending; never store it as durable app state."
+        "openai_images_generate_image, openrouter_create_heygen_video, falAI generation/enhancement, Instagram/X image publishing, WhatsApp send_message, or Zoho Mail attachment sending; never store it as durable app state."
     ),
     "inputSchema": {
         "type": "object",
@@ -125,7 +125,7 @@ STAGE_IMAGE_TOOL = {
             },
             "for_tool": {
                 "type": "string",
-                "enum": ["runway", "openai_images", "instagram", "fal_ai", "openrouter", "zoho_mail"],
+                "enum": ["runway", "openai_images", "instagram", "fal_ai", "openrouter", "twitter", "zoho_mail", "whatsapp"],
                 "description": "Destination tool; staged ids cannot cross tools.",
             },
         },
@@ -464,7 +464,7 @@ def _stage_asset(arguments: dict[str, Any], *, kind: str) -> dict[str, Any]:
     public_path, local_path = _workspace_local_path(path)
     allowed_tools = (
         {"runway", "fal_ai", "openrouter"} if kind == "audio" else
-        {"runway", "instagram", "fal_ai", "openrouter", "twitter", "zoho_mail"} if kind == "video" else {"runway", "openai_images", "instagram", "fal_ai", "openrouter", "zoho_mail"}
+        {"runway", "instagram", "fal_ai", "openrouter", "twitter", "zoho_mail", "whatsapp"} if kind == "video" else {"runway", "openai_images", "instagram", "fal_ai", "openrouter", "twitter", "zoho_mail", "whatsapp"}
     )
     if for_tool not in allowed_tools:
         choices = ", ".join(sorted(allowed_tools))
@@ -480,6 +480,8 @@ def _stage_asset(arguments: dict[str, Any], *, kind: str) -> dict[str, Any]:
     if media_type is None:
         supported = {"video": "MP4 or MOV", "image": "JPEG, PNG, or WebP", "audio": "MP3 or WAV"}[kind]
         raise RuntimeError(f"{action} accepts only {supported} files.")
+    if for_tool == "whatsapp" and media_type not in {"image/jpeg", "image/png", "video/mp4"}:
+        raise RuntimeError("WhatsApp staging accepts JPEG/PNG images or MP4 videos only.")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     try:
         descriptor = os.open(local_path, flags)
@@ -495,6 +497,8 @@ def _stage_asset(arguments: dict[str, Any], *, kind: str) -> dict[str, Any]:
             raise RuntimeError(f"{action} path must be a regular file.")
         minimum = MIN_VIDEO_BYTES if kind == "video" else MIN_IMAGE_BYTES
         maximum = MAX_VIDEO_BYTES if kind == "video" else MAX_IMAGE_BYTES
+        if for_tool == "whatsapp":
+            maximum = 16_000_000 if kind == "video" else 5_000_000
         if not minimum <= info.st_size <= maximum:
             raise RuntimeError(
                 f"{action} file size must be between {minimum} and {maximum} bytes."

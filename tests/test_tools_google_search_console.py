@@ -44,6 +44,7 @@ class GoogleSearchConsoleToolTests(unittest.TestCase):
                 "query_search_analytics",
                 "list_sitemaps",
                 "inspect_url",
+                "inspect_urls",
                 "submit_sitemap",
             ],
         )

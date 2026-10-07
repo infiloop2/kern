@@ -332,11 +332,20 @@ def decide_tool_approval(approval_id: str, decision: str, tool_id: str) -> Any:
 
 def send_tool_media(handler: Any, token: str, *, head: bool = False) -> None:
     """Stream only a live approval capability from the private tools service."""
+    _send_tools_media(handler, f"/operator/tool-media/{token}", head=head)
+
+
+def send_whatsapp_approval_media(handler: Any, approval_id: str, *, head: bool = False) -> None:
+    """Authenticated operator review of the private, exact staged attachment."""
+    _send_tools_media(handler, f"/operator/whatsapp-approval-media/{approval_id}", head=head)
+
+
+def _send_tools_media(handler: Any, operator_path: str, *, head: bool) -> None:
     connection = _ToolsSocketConnection(TOOLS_SOCKET_PATH)
     started = False
     try:
         headers = {"Range": handler.headers["Range"]} if "Range" in handler.headers else {}
-        connection.request("HEAD" if head else "GET", f"/operator/tool-media/{token}", headers=headers)
+        connection.request("HEAD" if head else "GET", operator_path, headers=headers)
         response = connection.getresponse()
         handler.send_response(response.status)
         for key in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):

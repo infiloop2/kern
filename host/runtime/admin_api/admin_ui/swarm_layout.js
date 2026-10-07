@@ -19,6 +19,39 @@ export const tierOf = score => TIERS.find(([min]) => score >= min)[1];
 const LABEL_HALF_WIDTH = 80, LABEL_HEIGHT = 44, ORB_GAP = 8;
 const INNER_RADIUS = 170, SPACING = 104, CELL = 180, MARGIN = 60;
 const GOLDEN_ANGLE = Math.PI * (3 - Math.sqrt(5));
+
+// Greedy weighted modularity: merge pairs whose traffic most exceeds what
+// their total activity predicts. A weak bridge need not merge two busy teams.
+// Links are canonical, undirected agent pairs; operator/host are excluded.
+function communities(nodes, links) {
+  const groups = new Map(nodes.map((node, i) => [i, { members: [i], degree: 0, peers: new Map() }]));
+  let total = 0;
+  for (const { a, b, weight } of links) {
+    const left = groups.get(a.order), right = groups.get(b.order);
+    left.peers.set(b.order, weight); right.peers.set(a.order, weight);
+    left.degree += weight; right.degree += weight; total += 2 * weight;
+  }
+  while (total) {
+    let best = null, gain = 1e-12;
+    for (const [a, left] of groups) for (const [b, weight] of left.peers) {
+      if (a >= b) continue;
+      const delta = weight - left.degree * groups.get(b).degree / total;
+      if (delta > gain) { gain = delta; best = [a, b]; }
+    }
+    if (!best) break;
+    const [a, b] = best, left = groups.get(a), right = groups.get(b);
+    left.members.push(...right.members); left.degree += right.degree;
+    left.peers.delete(b);
+    for (const [peer, weight] of right.peers) {
+      if (peer === a) continue;
+      const combined = (left.peers.get(peer) || 0) + weight;
+      left.peers.set(peer, combined);
+      groups.get(peer).peers.delete(b); groups.get(peer).peers.set(a, combined);
+    }
+    groups.delete(b);
+  }
+  return [...groups.values()].map(group => group.members.sort((a, b) => a - b));
+}
 export function orbRadius(id, score = 0) {
   if (id === "operator") return 46;
   if (id === "kern-host") return 34;
@@ -32,10 +65,9 @@ export function footprint(point) {
 // Uniform buckets keep each collision check local, even for huge catalogs.
 function collisionGrid() {
   const cells = new Map();
-  return {
-    hits: (x, y, r) => {
-      const left = x - LABEL_HALF_WIDTH, right = x + LABEL_HALF_WIDTH;
-      const top = y - r - ORB_GAP, bottom = y + r + LABEL_HEIGHT;
+  const grid = {
+    hits: (x, y, r) => grid.hitsBox(footprint({ x, y, r })),
+    hitsBox: ({ left, right, top, bottom }) => {
       for (let cx = Math.floor(left / CELL); cx <= Math.floor(right / CELL); cx++) {
         for (let cy = Math.floor(top / CELL); cy <= Math.floor(bottom / CELL); cy++) {
           const bucket = cells.get((cx + 32768) * 65536 + cy + 32768);
@@ -45,8 +77,8 @@ function collisionGrid() {
       }
       return false;
     },
-    add: point => {
-      const box = footprint(point);
+    add: point => grid.addBox(footprint(point)),
+    addBox: box => {
       for (let cx = Math.floor(box.left / CELL); cx <= Math.floor(box.right / CELL); cx++) {
         for (let cy = Math.floor(box.top / CELL); cy <= Math.floor(box.bottom / CELL); cy++) {
           const key = (cx + 32768) * 65536 + cy + 32768;
@@ -55,6 +87,37 @@ function collisionGrid() {
       }
     },
   };
+  return grid;
+}
+
+// Reserve the whole community footprint, including the spaces between its
+// members. Otherwise quiet agents can occupy those gaps and hide the grouping.
+function separateCommunities(groups, nodes, positions, fixed) {
+  if (!groups.some(group => group.length > 1)) return;
+  const grid = collisionGrid();
+  for (const point of fixed) grid.add(point);
+  for (const group of groups) {
+    const points = group.map(i => positions.get(nodes[i].id));
+    const boxes = points.map(footprint), padding = group.length > 1 ? 40 : 0;
+    const box = { left: Math.min(...boxes.map(b => b.left)) - padding,
+      right: Math.max(...boxes.map(b => b.right)) + padding,
+      top: Math.min(...boxes.map(b => b.top)) - padding,
+      bottom: Math.max(...boxes.map(b => b.bottom)) + padding };
+    let placed = box, dx = 0, dy = 0;
+    // Prefer the settled location (and previous placement on roster changes).
+    // Deterministic outward search retains the involvement-based centre bias.
+    for (let radius = 80; grid.hitsBox(placed); radius += 80) {
+      const step = Math.min(Math.PI / 6, 120 / radius);
+      for (let k = 0; k * step < Math.PI * 2; k++) {
+        const angle = group[0] * GOLDEN_ANGLE + k * step;
+        dx = radius * Math.cos(angle); dy = radius * Math.sin(angle);
+        placed = { left: box.left + dx, right: box.right + dx, top: box.top + dy, bottom: box.bottom + dy };
+        if (!grid.hitsBox(placed)) break;
+      }
+    }
+    for (const point of points) { point.x += dx; point.y += dy; }
+    grid.addBox(placed);
+  }
 }
 
 // Settle springs offline: the UI renders only the resulting coordinates.
@@ -96,6 +159,20 @@ export function layoutAgents(agents, interactions, metrics = {}, previous = null
   });
   const maxWeight = Math.max(1, ...links.map(link => link.weight));
   for (const link of links) { link.weight /= maxWeight; link.a.peers.add(link.b); link.b.peers.add(link.a); }
+  const groups = communities(nodes, links);
+  const membership = new Int32Array(nodes.length);
+  groups.forEach((group, c) => group.forEach(i => { membership[i] = c; }));
+  // Start teammates together; a short cooled simulation cannot gather agents
+  // from opposite sides of a large catalog. Preserve existing roster anchors.
+  for (const group of groups) {
+    if (group.length < 2) continue;
+    const cx = nodes[group[0]].x, cy = nodes[group[0]].y;
+    group.forEach((i, rank) => {
+      if (nodes[i].anchor) return;
+      const radius = 100 * Math.sqrt(rank), angle = rank * GOLDEN_ANGLE;
+      nodes[i].x = cx + radius * Math.cos(angle); nodes[i].y = cy + radius * Math.sin(angle);
+    });
+  }
   const fixedPoints = [...fixed.values()], count = nodes.length;
   const iterations = Math.max(24, Math.min(60, Math.ceil(40000 / Math.max(1, count))));
   const timeStep = 200 / iterations, cooling = Math.pow(.978, timeStep);
@@ -119,11 +196,10 @@ export function layoutAgents(agents, interactions, metrics = {}, previous = null
   const offsets = [1, rows - 1, rows, rows + 1];
   const endsA = Int32Array.from(links, link => link.a.order), endsB = Int32Array.from(links, link => link.b.order);
   const strengths = Float64Array.from(links, link => (.025 + .22 * link.weight) / Math.sqrt(Math.min(link.a.peers.size, link.b.peers.size)));
-  const peers = nodes.map(point => new Set([...point.peers].map(other => other.order)));
   const repel = (a, b) => {
     const dx = x[a] - x[b], dy = y[a] - y[b], ax = Math.abs(dx), ay = Math.abs(dy);
     if (ax >= 340 || ay >= 260) return;
-    const related = peers[a].size && peers[a].has(b);
+    const related = b < count && membership[a] === membership[b];
     const rx = related ? 170 : 340, ry = related ? radii[a] + radii[b] + LABEL_HEIGHT + ORB_GAP : 260;
     if (ax >= rx || ay >= ry) return;
     const length = ax + ay, force = (1 - Math.max(ax / rx, ay / ry)) * 100;
@@ -146,6 +222,15 @@ export function layoutAgents(agents, interactions, metrics = {}, previous = null
       const distance = Math.sqrt(dx * dx + dy * dy) || 1;
       const force = (distance - 170) / distance * strengths[link];
       fx[a] += dx * force; fy[a] += dy * force; fx[b] -= dx * force; fy[b] -= dy * force;
+    }
+    // Shared collaborators count as a group even without direct leaf-to-leaf
+    // messages. Give the whole community a gentle pull towards its own centre.
+    for (const group of groups) {
+      if (group.length < 2) continue;
+      let cx = 0, cy = 0;
+      for (const i of group) { cx += x[i]; cy += y[i]; }
+      cx /= group.length; cy /= group.length;
+      for (const i of group) { fx[i] += (cx - x[i]) * .04; fy[i] += (cy - y[i]) * .04; }
     }
     // Visit each neighboring bucket pair once. Repulsion stays local even
     // for disconnected catalogs; synthetic senders remain fixed.
@@ -191,6 +276,7 @@ export function layoutAgents(agents, interactions, metrics = {}, previous = null
     }
     positions.set(simulated.id, point); grid.add(point);
   }
+  separateCommunities(groups, nodes, positions, fixedPoints);
   // Symmetric extents keep the operator in the centre of the map.
   let extentX = 0, extentY = 0;
   for (const point of positions.values()) {

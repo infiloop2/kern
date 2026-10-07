@@ -218,6 +218,37 @@ class LimaNamingTests(unittest.TestCase):
 
 
 class LimaSmokeContractTests(unittest.TestCase):
+    def test_stop_start_requires_the_same_ssh_host_key(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            smoke = LimaSmoke(Path(tmp) / "smoke")
+            with patch.object(smoke, "_ssh", return_value="ssh-ed25519 original\n"):
+                smoke._assert_ssh_host_key("ssh-ed25519 original")
+                for expected in ("", "ssh-ed25519 changed"):
+                    with self.subTest(expected=expected), self.assertRaisesRegex(
+                        AssertionError, "changed the VM's SSH host key"
+                    ):
+                        smoke._assert_ssh_host_key(expected)
+
+    def test_upgrade_requires_offline_browser_cache_reuse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            smoke = LimaSmoke(Path(tmp) / "smoke")
+            for output, expected_error in (
+                ("Bootstrap cache: browser hit\n", None),
+                ("Bootstrap cache: browser miss\n", "did not reuse"),
+                ("Bootstrap cache: browser hit\nbrowser package cache unusable\n", "could not install offline"),
+                ("Bootstrap cache: browser hit\nChrome for Testing (playwright chromium v1223) downloaded to /tmp/staging/browsers/chromium-1223\n", "downloaded browser binaries"),
+                ("Bootstrap cache: browser hit\nChromium (playwright build v1194) downloaded to /tmp/staging/browsers/chromium-1194\n", "downloaded browser binaries"),
+                ("Bootstrap cache: browser hit\nFFMPEG playwright build v1011 downloaded to /tmp/staging/browsers/ffmpeg-1011\n", "downloaded browser binaries"),
+            ):
+                with self.subTest(output=output):
+                    proc = subprocess.CompletedProcess(["upgrade"], 0, stdout="{}", stderr=output)
+                    with patch.object(smoke, "_run", return_value=proc):
+                        if expected_error is None:
+                            self.assertEqual(smoke._lifecycle("upgrade"), {})
+                        else:
+                            with self.assertRaisesRegex(AssertionError, expected_error):
+                                smoke._lifecycle("upgrade")
+
     def test_tcp_cleanup_check_accepts_ssh_output_newlines(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             smoke = LimaSmoke(Path(tmp) / "smoke")
@@ -279,6 +310,8 @@ class LimaVmDefinitionTests(unittest.TestCase):
         # The provision script copies only non-secret disk metadata; nothing
         # secret may appear in the definition Lima persists on the host.
         self.assertIn("mode: system", definition)
+        self.assertIn("/etc/cloud/cloud.cfg.d/99-kern-lima-ssh.cfg", definition)
+        self.assertIn("ssh_deletekeys: false", definition)
         # Lima's cidata contract uses a plural count and singular indexed
         # variables: LIMA_CIDATA_DISKS plus LIMA_CIDATA_DISK_<n>_NAME/DEVICE.
         self.assertIn("${LIMA_CIDATA_DISKS:-}", definition)

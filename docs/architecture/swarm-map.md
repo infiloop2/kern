@@ -37,20 +37,31 @@ existing turn's latest measurement date, including its known partial buckets;
 missing measurements are not reconstructed. Details distinguish unavailable,
 partial, and measured zero token counts and show the current score and inputs.
 
-Agents are sorted by score; ties use immutable IDs. Each agent's distance from
-the operator grows strictly with rank (`170 + 104 * sqrt(rank)` px, pushed out
-only when a ring is full), so a more involved agent always orbits closer. Its orb
-also grows with score. Faint dashed rings separate the involvement tiers and are
-labelled Core (score at least 0.5), Active (at least 0.15), Occasional (above 0)
-and Quiet. Angles follow a golden-angle spiral, bent towards the weighted
-circular mean of each agent's linked collaborators using log-scaled, combined
-bidirectional message counts. Operator and host links do not bend angles. Three
-greedy passes place agents and let lower-ranked collaborators pull on earlier
-ones. A uniform collision grid keeps orb and name footprints apart, so placement
-needs no all-pairs physics. Runtime status has no influence on placement.
+Agents are sorted by score, with immutable IDs breaking ties, and orb size grows
+with score. Placement uses a deterministic spring layout with a soft
+involvement-based pull toward the operator. Operator and host remain fixed and
+do not create springs. Bidirectional message counts are combined and log-scaled.
+
+The available agent links also identify communication communities using greedy
+weighted modularity: merge groups when their traffic exceeds the expectation
+from their total activity. This can keep busy teams separate despite occasional
+cross-team messages. It uses no name matching or configured team membership;
+it is a heuristic over the same at-most-500 weekly links, not an org chart.
+Quiet agents remain visible as independent nodes.
+
+On a fresh arrangement, community members start together. Springs and a gentle
+pull toward their community centre keep specialists close even when they only
+message a shared App or CEO. Members of the same community use compact
+repulsion spacing. After settling and resolving label collisions, reserve each
+community's full rectangular footprint with a margin, translating groups as
+needed so unrelated agents cannot occupy gaps between teammates. These bounds
+are not drawn; whitespace separates groups. The operator remains at the map
+centre and all labels remain inside the fitted extents.
 
 Initial load, a changed agent roster, and **Arrange** compute placement.
-Refreshing counts, status, metrics or the set of links preserves positions;
+Existing coordinates seed roster changes; regrouping may move a community to
+keep its reserved area clear. Refreshing counts, status, metrics or the set of
+links preserves positions;
 **Arrange** applies the latest ranking and fits the map. Details always show
 the latest available metrics, which may differ from the last arrangement.
 

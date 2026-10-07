@@ -546,7 +546,7 @@ additionalDisks:
   format: false
 provision:
 - mode: system
-  script: <non-secret disk-name/device metadata handoff only>
+  script: <non-secret disk-name/device handoff and SSH host-key retention>
 ```
 
 The image tracks Canonical's Ubuntu 22.04 stable release channel, the same
@@ -558,6 +558,12 @@ the same guarantees explicitly. Consequently the VM does not inherit Lima's
 default host-home mount and does not automatically forward the admin API or
 an agent-opened preview port. The rendered definition is covered by an exact
 contract test.
+
+Lima assigns a new cloud-init instance ID on each start. The final-stage
+provision script sets `ssh_deletekeys: false` after first-boot key generation,
+so subsequent stop/start operations retain that VM's unique SSH host keys.
+Replacing the root disk still generates fresh keys. SSH clients can keep
+checking their original pins throughout ordinary power operations.
 
 The definition never contains the bootstrap payload, Cloudflare tunnel token,
 deploy key, admin password hash, or any other lifecycle secret: secrets

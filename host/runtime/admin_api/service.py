@@ -463,6 +463,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._handle_login_status()
                 return
             principal = self._authenticate()
+            if (
+                method in {"GET", "HEAD"}
+                and not path.query and not path.fragment
+                and (match := re.fullmatch(r"/v1/tools/whatsapp/approvals/([A-Za-z0-9._:-]{1,128})/media", path.path))
+            ):
+                tools_admin_api.send_whatsapp_approval_media(self, match.group(1), head=method == "HEAD")
+                return
             if method == "POST" and path.path == "/v1/logout":
                 self._handle_logout(principal)
                 return

@@ -198,6 +198,14 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 config_context = browser.new_context(service_workers="block")
                 integration_config_smokes.run(config_context.new_page(), url, log_in, open_home_integration)
                 config_context.close()
+                import seo_tools_smokes
+                for mobile in (False, True):
+                    seo_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    seo_tools_smokes.run(seo_context.new_page(), url, log_in, open_home_integration)
+                    seo_context.close()
                 import analytics_smokes
                 analytics_context = browser.new_context(service_workers="block")
                 analytics_smokes.run(analytics_context.new_page(), url, log_in)
@@ -215,6 +223,8 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 upwork_smoke(upwork_context.new_page(), url)
                 upwork_context.close()
                 approval_smokes.approval_smoke(browser, url)
+                approval_smokes.whatsapp_media_smoke(browser, url)
+                approval_smokes.x_exact_request_smoke(browser, url)
                 import auto_approval_smokes
                 auto_approval_smokes.auto_approval_smoke(browser, url)
                 route_restore = browser.new_context()

@@ -10,24 +10,30 @@ module.
 from __future__ import annotations
 
 from contextlib import contextmanager
+import hashlib
 import json
 import os
 from pathlib import Path
 import select
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
-from typing import Any, Callable, Iterator
+from typing import Any, BinaryIO, Callable, Iterator
 
 from host.runtime.core import host_errors, state
 from host.tools import ToolServiceError
+from host.tools.host_api import AssetMetadata
+from host.tools.shared.media import matches_media_signature
+from host.tools.whatsapp.media import validate_media
 
 
 DEFAULT_SCRIPT = Path(__file__).with_name("gateway.mjs")
 DEFAULT_STATE_DIR = Path("/mnt/kern-admin/tools-state/whatsapp")
 DEFAULT_MODULE_DIR = Path("/usr/local/lib/kern-node/node_modules")
 REQUEST_TIMEOUT_SECONDS = 40
+MEDIA_REQUEST_TIMEOUT_SECONDS = 240
 STARTUP_TIMEOUT_SECONDS = 10
 RESTART_DELAY_SECONDS = 3
 MAX_CREDS_FILE_BYTES = 1024 * 1024
@@ -131,6 +137,9 @@ class WhatsAppGateway:
             if self.state_dir.is_symlink() or not self.state_dir.is_dir():
                 raise WhatsAppGatewayError("WhatsApp gateway storage is unavailable.")
             self.state_dir.chmod(0o700)
+            # A killed tools process cannot run the handoff's finally block.
+            # No request is active while starting a replacement under this lock.
+            self._clear_handoff_files_locked()
         except OSError as exc:
             raise WhatsAppGatewayError("WhatsApp gateway storage is unavailable.") from exc
         try:
@@ -188,6 +197,48 @@ class WhatsAppGateway:
     def start(self) -> None:
         with self._lock:
             self._start_locked()
+
+    def send_media(
+        self, params: dict[str, Any], source: BinaryIO, metadata: AssetMetadata,
+    ) -> dict[str, Any]:
+        """Give the private child a host-created file, never an agent pathname.
+
+        Only one bounded copy can exist while holding the lifecycle lock. Hash
+        and signature checks finish before the send RPC. The child
+        reads its own bounded buffer, so expiry/deletion cannot swap its bytes.
+        """
+        validate_media(metadata.media_type, metadata.size_bytes)
+        with self._lock:
+            if "whatsapp" not in state.enabled_tool_ids():
+                raise WhatsAppGatewayError("WhatsApp is disabled. Enable it under Home > Integrations.")
+            self._start_locked()
+            try:
+                with tempfile.NamedTemporaryFile(prefix="send-", dir=self.state_dir) as output:
+                    hasher = hashlib.sha256()
+                    remaining = metadata.size_bytes
+                    prefix = b""
+                    while remaining:
+                        chunk = source.read(min(1024 * 1024, remaining))
+                        if not chunk or len(chunk) > remaining:
+                            raise WhatsAppGatewayError("WhatsApp media bytes changed after approval.")
+                        output.write(chunk)
+                        hasher.update(chunk)
+                        if len(prefix) < 512:
+                            prefix += chunk[:512 - len(prefix)]
+                        remaining -= len(chunk)
+                    if (source.read(1) or hasher.hexdigest() != metadata.sha256
+                            or not matches_media_signature(prefix, metadata.media_type)):
+                        raise WhatsAppGatewayError("WhatsApp media bytes changed after approval.")
+                    output.flush()
+                    return self.request("send_message", {
+                        **params,
+                        "media": {
+                            "path": output.name, "media_type": metadata.media_type,
+                            "size_bytes": metadata.size_bytes, "sha256": metadata.sha256,
+                        },
+                    }, timeout_seconds=MEDIA_REQUEST_TIMEOUT_SECONDS)
+            except OSError as exc:
+                raise WhatsAppGatewayError("WhatsApp private media handoff failed.") from exc
 
     def _diagnostic_context(
         self,
@@ -390,6 +441,11 @@ class WhatsAppGateway:
                 raise WhatsAppGatewayError(
                     "WhatsApp session data could not be deleted from this host."
                 ) from exc
+        self._clear_handoff_files_locked()
+
+    def _clear_handoff_files_locked(self) -> None:
+        for leftover in self.state_dir.glob("send-*"):
+            leftover.unlink(missing_ok=True)
 
     def disconnect(self) -> dict[str, Any]:
         """Best-effort provider logout plus authoritative host-side deletion.
@@ -402,6 +458,7 @@ class WhatsAppGateway:
             process = self._process
             running = process is not None and process.poll() is None
             if not retained_data and not running:
+                self._clear_handoff_files_locked()
                 return {
                     "status": "disconnected",
                     "connected": False,
@@ -550,3 +607,9 @@ def gateway_request(method: str, params: dict[str, Any] | None = None) -> dict[s
         params,
         lambda: "whatsapp" in state.enabled_tool_ids(),
     )
+
+
+def gateway_send_media(
+    params: dict[str, Any], source: BinaryIO, metadata: AssetMetadata,
+) -> dict[str, Any]:
+    return GATEWAY.send_media(params, source, metadata)

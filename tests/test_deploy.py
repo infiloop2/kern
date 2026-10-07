@@ -1645,7 +1645,7 @@ class DeployUnitTests(unittest.TestCase):
             "cat > /etc/systemd/system/kern-tools.service", 1
         )[1].split("\nUNIT", 1)[0]
         self.assertIn("KillMode=mixed", tools_unit)
-        self.assertIn("TimeoutStopSec=60s", tools_unit)
+        self.assertIn("TimeoutStopSec=300s", tools_unit)
         self.assertIn("RuntimeDirectory=kern-workspace", bootstrap)
         self.assertIn("fastembed==${FASTEMBED_VERSION}", bootstrap)
         self.assertIn("specific_model_path=os.environ[", bootstrap)

@@ -27,6 +27,48 @@ class McpSmokeCatalogTests(unittest.TestCase):
         self.assertEqual(set(STATIC_SHIM_TOOLS), {tool["name"] for tool in mcp_shim._list_tools()})
 
 
+class GitHubWriteForwardingSmokeTests(unittest.TestCase):
+    def _event(self, **overrides):
+        return {
+            "seq": 11, "method": "POST", "host": "api.github.com",
+            "path": "/repos/infiloop2/kern/issues", "query": "",
+            "decision": "allowed", "reason_code": None, **overrides,
+        }
+
+    def test_upstream_rejections_require_the_exact_allowed_audit_event(self):
+        for status in ("401", "403", "429"):
+            with self.subTest(status=status):
+                smoke = AwsSmoke()
+                with patch.object(smoke, "_ssh_code", return_value=status), patch.object(
+                    smoke, "_network_events", side_effect=[[{"seq": 10}], [self._event()]]
+                ) as events:
+                    smoke._check_github_write_forwarding("curl")
+                self.assertEqual(events.call_args.kwargs, {"since": 10})
+
+    def test_proxy_denials_and_missing_or_ambiguous_evidence_still_fail(self):
+        for evidence in (
+            [], [self._event(decision="denied", reason_code="github_repo_not_allowed")],
+            [self._event(method="GET")], [self._event(host="github.com")],
+            [self._event(path="/repos/torvalds/linux/issues")],
+            [self._event(query="unexpected=1")], [self._event(), self._event(seq=12)],
+        ):
+            with self.subTest(evidence=evidence):
+                smoke = AwsSmoke()
+                with patch.object(smoke, "_ssh_code", return_value="403"), patch.object(
+                    smoke, "_network_events", side_effect=[[], evidence]
+                ), self.assertRaisesRegex(AssertionError, "not forwarded"):
+                    smoke._check_github_write_forwarding("curl")
+
+    def test_success_or_transport_failure_is_not_an_unauthenticated_rejection(self):
+        for status in ("201", "000", "502"):
+            with self.subTest(status=status):
+                smoke = AwsSmoke()
+                with patch.object(smoke, "_ssh_code", return_value=status), patch.object(
+                    smoke, "_network_events", side_effect=[[], [self._event()]]
+                ), self.assertRaisesRegex(AssertionError, "unexpected HTTP"):
+                    smoke._check_github_write_forwarding("curl")
+
+
 class ResourceProtectionSmokeTests(unittest.TestCase):
     def test_remote_check_script_is_valid_and_failure_is_not_swallowed(self):
         smoke = AwsSmoke()

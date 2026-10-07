@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
+import { mediaContent } from "./media.mjs";
 
 const stateDir = process.env.KERN_WHATSAPP_STATE_DIR || "/mnt/kern-admin/tools-state/whatsapp";
 const moduleDir = process.env.KERN_HOST_NODE_MODULES || "/usr/local/lib/kern-node/node_modules";
@@ -839,6 +840,11 @@ async function dispatch(method, params) {
       throw new Error("The linked WhatsApp account changed after approval. Queue a new message.");
     }
     const jid = normalizeDirectChat(params.recipient);
+    const text = params.text;
+    if (typeof text !== "string" || [...text].length > 4096 || (!params.media && !text.trim())) {
+      throw new Error("WhatsApp message text is invalid.");
+    }
+    const content = params.media ? mediaContent(params.media, text, stateDir) : { text };
     const phone = jid.split("@")[0];
     let matches;
     try { matches = await activeSocket.onWhatsApp(phone); }
@@ -849,7 +855,7 @@ async function dispatch(method, params) {
       throw new Error("The linked WhatsApp account changed after approval. Queue a new message.");
     }
     let result;
-    try { result = await activeSocket.sendMessage(jid, { text: String(params.text) }); }
+    try { result = await activeSocket.sendMessage(jid, content, params.media ? { mediaUploadTimeoutMs: 180000 } : {}); }
     catch (_error) { throw new Error("WhatsApp send outcome is unknown. Do not retry automatically; check the recipient chat first."); }
     return { message_id: String(result?.key?.id || ""), recipient: jid };
   }

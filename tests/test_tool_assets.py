@@ -526,12 +526,14 @@ class ShimVideoStageTests(unittest.TestCase):
                 self.assertEqual(connection.headers["X-Kern-Tool"], "zoho_mail")
                 tools_mcp_shim._stage_image({"path": "/frame.png", "for_tool": "openrouter"})
                 self.assertEqual(connection.headers["X-Kern-Tool"], "openrouter")
-                with self.assertRaisesRegex(RuntimeError, "fal_ai, instagram, openai_images, openrouter, runway"):
+                tools_mcp_shim._stage_image({"path": "/frame.png", "for_tool": "twitter"})
+                self.assertEqual(connection.headers["X-Kern-Tool"], "twitter")
+                with self.assertRaisesRegex(RuntimeError, "fal_ai, instagram, openai_images, openrouter, runway, twitter"):
                     tools_mcp_shim._stage_image(
                         {"path": "/frame.png", "for_tool": "gmail"}
                     )
         self.assertEqual(result, {"image_asset_id": "opaque-image-id"})
-        self.assertEqual(connection.headers["X-Kern-Tool"], "openrouter")
+        self.assertEqual(connection.headers["X-Kern-Tool"], "twitter")
 
 
 if __name__ == "__main__":

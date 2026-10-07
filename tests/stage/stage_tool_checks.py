@@ -360,6 +360,7 @@ class StageToolChecks:
             "google_calendar": self._check_calendar_live,
             "google_search_console": self._check_search_console_live,
             "fal_ai": self._check_fal_ai_live,
+            "indexnow": self._check_indexnow_proposal,
             "instagram_discovery": self._check_instagram_discovery_live,
             "polymarket": self._check_polymarket_live,
             "reddit": self._check_reddit_live,
@@ -371,6 +372,7 @@ class StageToolChecks:
             "whatsapp": self._check_whatsapp_live,
             "openai_images": self._check_openai_images_live,
             "openrouter": self._check_openrouter_live,
+            "pagespeed_insights": self._check_pagespeed_insights_live,
             "runway": self._check_runway_live,
             "zoho_mail": self._check_zoho_mail_live,
         }.get(tool_id)
@@ -416,6 +418,22 @@ class StageToolChecks:
         suffix = "; publish proposal denied" if tool_id == "linkedin" else ""
         read_count = len(calls) + (1 if tool_id == "ibkr" else 0)
         return f"{read_count} live read(s) completed{suffix}"
+
+    def _check_indexnow_proposal(self) -> str:
+        self._queue_and_deny(
+            "indexnow", "indexnow_submit_urls", {"urls": ["https://example.com/new"]}
+        )
+        return "bounded IndexNow notification proposal queued and denied; no live submission made"
+
+    def _check_pagespeed_insights_live(self) -> str:
+        result = self._successful_tool_call(
+            "pagespeed_insights_analyze_page",
+            {"url": "https://example.com/", "strategy": "mobile"},
+        )
+        scores = result.get("scores")
+        if not isinstance(scores, dict) or "performance" not in scores:
+            raise AssertionError(f"PageSpeed returned no category scores: {result}")
+        return "one bounded mobile Lighthouse audit completed"
 
     def _check_cloudwatch_logs_live(self) -> str:
         from datetime import datetime, timedelta, timezone

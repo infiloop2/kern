@@ -9,14 +9,54 @@ import unittest
 from unittest.mock import patch
 
 from host.runtime.admin_api import service as admin_api, tools_client
+from host.runtime.admin_api import admin_auth
 from host.runtime.core.unix_socket_service import UnixSocketServer
 from host.runtime.tools.api import ToolsServer
 from host.runtime.tools.assets import AssetError, PUBLIC_MEDIA_TTL_SECONDS, ASSET_TTL_SECONDS
 from host.runtime.tools.tools_host import HostAssets
 from host.runtime.tools import tools_host
+from host.tools.whatsapp.media import media_snapshot
 
 
 class PublicToolMediaTests(unittest.TestCase):
+    def test_whatsapp_review_requires_admin_auth_and_streams_only_pending_exact_asset(self):
+        data = b"\x89PNG\r\n\x1a\n" + b"p" * 504
+        metadata = self.tools.asset_store.stage(kind="image", tool_id="whatsapp", filename="frame.png",
+            media_type="image/png", size_bytes=len(data), source=io.BytesIO(data))
+        record = {"action_id": "send_message", "status": "pending", "payload": {"media_asset": media_snapshot(metadata)}}
+        path = "/v1/tools/whatsapp/approvals/approval-1/media"
+        with patch.object(admin_api.state, "tool_approval", return_value=record) as lookup:
+            self.assertEqual(self.request(path)[0], 401)
+            lookup.assert_not_called()
+            token = admin_auth._create_session()
+            cookies = {"Cookie": f"{admin_auth.HOST_SESSION_COOKIE_NAME}={token}"}
+            self.assertEqual(self.request(path, headers=cookies)[0], 403)
+            lookup.assert_not_called()
+            authenticated = {**cookies, "X-Kern-Csrf": "1"}
+            def authenticated_request(path, method="GET", *, headers=None):
+                return self.request(path, method, headers={**authenticated, **(headers or {})})
+            with self.subTest("authenticated preview"):
+                status, headers, body = authenticated_request(path)
+                self.assertEqual((status, body), (200, data))
+                self.assertEqual(headers["Content-Type"], "image/png")
+                self.assertIn("no-store", headers["Cache-Control"])
+                lookup.assert_called_with("approval-1", tool_id="whatsapp")
+                self.assertEqual(authenticated_request(path, "HEAD")[2], b"")
+                self.assertEqual(authenticated_request(path, headers={"Range": "bytes=2-5"})[2], data[2:6])
+                for status in ("denied", "approved", "failed"):
+                    record["status"] = status
+                    self.assertEqual(authenticated_request(path)[0], 404)
+                record["status"] = "pending"
+                record["payload"]["media_asset"]["sha256"] = "0" * 64
+                self.assertEqual(authenticated_request(path)[0], 404)
+                record["payload"]["media_asset"] = media_snapshot(metadata)
+                self.tools.asset_store.delete("whatsapp", metadata.asset_id)
+                self.assertEqual(authenticated_request(path)[0], 404)
+
+    def test_whatsapp_private_review_rejects_agent_peer(self):
+        with patch("host.runtime.tools.api.ToolsRequestHandler._peer_is_admin", return_value=False):
+            self.assertEqual(self.request("/operator/whatsapp-approval-media/approval-1", private=True)[0], 403)
+
     def setUp(self):
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)

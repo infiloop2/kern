@@ -86,7 +86,8 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     page.locator('#swarm-arrange').click()
     rearranged = page.locator('.swarm-card').evaluate_all(
         'nodes => Object.fromEntries(nodes.map(e => [e.dataset.threadId, [parseFloat(e.style.left), parseFloat(e.style.top)]]))')
-    assert distance(rearranged, 'app-30') < distance(rearranged, 'app-1')
+    # Involvement is a soft centre bias, not a strict ordering across groups.
+    assert distance(rearranged, 'app-30') < distance(positions, 'app-30')
     page.unroute('**/v1/swarm/interactions')
     refresh()
     page.locator('#swarm-arrange').click()
@@ -387,6 +388,31 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(page.locator('.kind-spawned .swarm-agent-description').nth(1)).to_have_text('Delegated by Renamed lead')
     expect(page.locator('.kind-spawned .swarm-agent-description').first).to_have_text('Delegated by thread-missing')
     page.locator('#swarm-search').fill('')
+    # Shared-hub teams remain visibly separate after Arrange, with unrelated
+    # agents outside each team's complete label footprint.
+    community_agents = payload['agents'][:42]
+    teams = [[community_agents[i * 3 + t]['thread_id'] for i in range(7)] for t in range(3)]
+    team_edges = [{'sender_thread_id': team[0], 'target_thread_id': id, 'count': 100}
+                  for team in teams for id in team[1:]]
+    team_edges += [{'sender_thread_id': teams[t][0], 'target_thread_id': teams[t + 1][0], 'count': 1}
+                   for t in range(2)]
+    page.route('**/v1/swarm/interactions', lambda route: route.fulfill(json={'interactions': team_edges}))
+    apply_snapshot({**payload, 'agents': community_agents})
+    page.locator('#swarm-arrange').click()
+    expect_cards_inside(44)
+    assert page.evaluate('''teams => {
+      const points = [...document.querySelectorAll('.swarm-card')].map(e => {
+        const x = parseFloat(e.style.left), y = parseFloat(e.style.top), r = parseFloat(e.style.getPropertyValue('--orb')) / 2;
+        return {id: e.dataset.threadId, left: x - 80, right: x + 80, top: y - r - 8, bottom: y + r + 44};
+      });
+      return teams.every(team => {
+        const members = points.filter(p => team.includes(p.id));
+        const left = Math.min(...members.map(p => p.left)), right = Math.max(...members.map(p => p.right));
+        const top = Math.min(...members.map(p => p.top)), bottom = Math.max(...members.map(p => p.bottom));
+        return points.filter(p => !team.includes(p.id)).every(p => p.right <= left || p.left >= right || p.bottom <= top || p.top >= bottom);
+      });
+    }''', teams)
+    page.unroute('**/v1/swarm/interactions')
     page.unroute('**/v1/swarm')
     page.emulate_media(reduced_motion='reduce')
     # Halos, pulses and in-flight layout transitions all stop under reduced motion.

@@ -22,6 +22,7 @@ on:
           - google_calendar
           - google_search_console
           - fal_ai
+          - indexnow
           - ibkr
           - instagram
           - instagram_discovery
@@ -29,6 +30,7 @@ on:
           - google_search
           - openai_images
           - openrouter
+          - pagespeed_insights
           - polymarket
           - reddit
           - reddit_scrapecreators
@@ -217,6 +219,7 @@ jobs:
           KERN_STAGE_CLOUDWATCH_LOGS_AWS_REGION: ${{ secrets.KERN_STAGE_CLOUDWATCH_LOGS_AWS_REGION }}
           KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP: ${{ secrets.KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP }}
           KERN_STAGE_FAL_API_KEY: ${{ secrets.KERN_STAGE_FAL_API_KEY }}
+          KERN_STAGE_INDEXNOW_KEY: ${{ secrets.KERN_STAGE_INDEXNOW_KEY }}
           KERN_STAGE_IBKR_OAUTH_CONSUMER_KEY: ${{ secrets.KERN_STAGE_IBKR_OAUTH_CONSUMER_KEY }}
           KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN: ${{ secrets.KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN }}
           KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN_SECRET: ${{ secrets.KERN_STAGE_IBKR_OAUTH_ACCESS_TOKEN_SECRET }}
@@ -233,6 +236,7 @@ jobs:
           KERN_STAGE_ELEVENLABS_API_KEY: ${{ secrets.KERN_STAGE_ELEVENLABS_API_KEY }}
           KERN_STAGE_OPENAI_API_KEY: ${{ secrets.KERN_STAGE_OPENAI_API_KEY }}
           KERN_STAGE_OPENROUTER_API_KEY: ${{ secrets.KERN_STAGE_OPENROUTER_API_KEY }}
+          KERN_STAGE_PAGESPEED_INSIGHTS_API_KEY: ${{ secrets.KERN_STAGE_PAGESPEED_INSIGHTS_API_KEY }}
           KERN_STAGE_VERCEL_ACCESS_TOKEN: ${{ secrets.KERN_STAGE_VERCEL_ACCESS_TOKEN }}
           KERN_STAGE_TWITTERAPI_IO_API_KEY: ${{ secrets.KERN_STAGE_TWITTERAPI_IO_API_KEY }}
         run: |

@@ -73,7 +73,7 @@ redeploys.
 | `/mnt/kern-admin/proxy-state/github-quarantine/` | proxy only | Bare per-repository Git mirrors and `refs/pending/...` objects for `.github` pushes held for operator approval. At most ten pushes may be pending, and each operator approve/reject deletes its refs and immediately runs `git gc` under the shared quarantine lock. |
 | `/mnt/kern-admin/tools-state/assets/` | tools only | Bounded temporary image/video copies for tool calls. Cleared on tools-service start; expired files are swept hourly. |
 | `/mnt/kern-admin/tools-state/whatsapp/` | tools only, mode 0700 | WhatsApp's fixed private directory for linked-device keys and its bounded text cache. The tool owns the internal format; no storage path is exposed through its manifest or the generic host API. |
-| `/mnt/kern-admin/bootstrap-cache/` | root only | Verified, bounded package/model download cache. Runtime services cannot access it; deleting it only loses download savings. See [deployment](deployment.md). |
+| `/mnt/kern-admin/bootstrap-cache/` | root only | Verified, bounded package/model/browser download cache. Runtime services cannot access it; deleting it only loses download savings. See [deployment](deployment.md). |
 | `/mnt/kern-admin/admin-home/` | admin only | Admin service home directory. |
 
 ## Agent volume

@@ -1,6 +1,6 @@
 // One operator queue. Decisions use the existing authenticated per-source APIs.
 import { refreshAutoApprovals, autoReviewAnnotation } from "./auto_approvals.js";
-import { api } from "./api.js";
+import { api, apiBlob } from "./api.js";
 import { $, esc, badge, formatUnixTime } from "./helpers.js";
 
 let view = "pending";
@@ -12,6 +12,13 @@ let generation = 0;
 let badgeLoading = false;
 let counts = { pending_count: 0, history_count: 0 };
 const keyOf = item => `${item.kind}:${item.id}`;
+const mediaUrls = new Set();
+const detailLoads = new WeakMap();
+function clearMediaUrls() {
+  for (const url of mediaUrls) URL.revokeObjectURL(url);
+  mediaUrls.clear();
+}
+window.addEventListener("pagehide", clearMediaUrls);
 const disabled = () => busy || loading ? " disabled" : "";
 const riskScoreLabels = {
   commits_money_or_obligation: "Commits money or obligation",
@@ -64,6 +71,7 @@ export async function pollApprovalBadge() {
 }
 
 function render() {
+  clearMediaUrls();
   const data = current;
   $("approval-tabs").innerHTML = ["pending", "history", "auto"].map(value => `<button data-action="approval-view" data-view="${value}" aria-pressed="${view === value}"${disabled()}>${value === "auto" ? "Auto-approval" : value === "pending" ? "Pending" : "History"}${value === "auto" ? "" : `<span>${counts[`${value}_count`]}</span>`}</button>`).join("");
   document.querySelector('#panel-approvals [data-action="approval-refresh"]').disabled = busy || loading;
@@ -206,11 +214,13 @@ async function decide(items, decision, confirmBulk = false) {
     outcomes.push({ item, ...outcome });
     $("approval-feedback").textContent = `${outcomes.length} of ${items.length} requests completed.`;
   }
-  // The browser service runs one action at a time. Keep its approvals in order;
+  // Browser and WhatsApp each run one action at a time. Keep their approvals in order;
   // unrelated tools and GitHub decisions can still run independently.
   await Promise.all([
-    ...items.filter(item => item.kind === "tool" && item.tool_id !== "browser").map(run),
-    (async () => { for (const item of items.filter(item => item.kind === "tool" && item.tool_id === "browser")) await run(item); })(),
+    ...items.filter(item => item.kind === "tool" && !["browser", "whatsapp"].includes(item.tool_id)).map(run),
+    ...["browser", "whatsapp"].map(async toolId => {
+      for (const item of items.filter(item => item.kind === "tool" && item.tool_id === toolId)) await run(item);
+    }),
     (async () => { for (const item of items.filter(item => item.kind === "github_push")) await run(item); })(),
   ]);
   busy = false;
@@ -235,18 +245,86 @@ export function decideVisibleApprovals(decision) {
 
 document.addEventListener("toggle", async event => {
   const details = event.target;
-  if (!(details instanceof HTMLDetailsElement) || !details.open || !details.dataset.approvalDetails) return;
+  if (!(details instanceof HTMLDetailsElement) || !details.dataset.approvalDetails) return;
+  if (!details.open) {
+    if (details.dataset.mediaUrl) {
+      URL.revokeObjectURL(details.dataset.mediaUrl);
+      mediaUrls.delete(details.dataset.mediaUrl);
+      delete details.dataset.mediaUrl;
+    }
+    details.querySelector(".approval-media-review")?.remove();
+    detailLoads.delete(details);
+    return;
+  }
   const item = current?.items.find(candidate => keyOf(candidate) === details.dataset.approvalDetails);
-  if (!item || item.kind !== "tool" || details.dataset.loaded) return;
-  details.dataset.loaded = "1";
+  if (!item || item.kind !== "tool" || detailLoads.has(details)) return;
+  const load = {};
+  detailLoads.set(details, load);
+  const isCurrent = () => details.isConnected && details.open && detailLoads.get(details) === load;
   const pre = details.querySelector("pre");
   pre.textContent = "Loading request...";
   try {
     const response = await api("GET", `/v1/tools/${encodeURIComponent(item.tool_id)}/approvals/${encodeURIComponent(item.id)}`);
+    if (!isCurrent()) return;
     pre.textContent = JSON.stringify(response.approval.payload, null, 2);
+    if (item.tool_id === "twitter" && ["post_tweet", "send_dm"].includes(item.action_id)) {
+      const payload = response.approval.payload;
+      const proposal = payload?.proposal;
+      if (proposal && typeof proposal.text === "string") {
+        const review = document.createElement("div");
+        review.className = "approval-media-review approval-x-review";
+        const heading = document.createElement("p");
+        const target = proposal.recipient_user_id ? `user ${proposal.recipient_user_id}`
+          : proposal.dm_conversation_id ? `conversation ${proposal.dm_conversation_id}`
+          : proposal.in_reply_to_tweet_id ? `reply to post ${proposal.in_reply_to_tweet_id}`
+          : proposal.quote_tweet_id ? `quote post ${proposal.quote_tweet_id}` : "standalone post";
+        heading.textContent = `${item.action_id === "send_dm" ? "Direct message" : "Post"} from ${payload.x_account?.label || "X account"} (${payload.x_account?.id || "unknown"}) to ${target}`;
+        const text = document.createElement("pre");
+        text.className = "approval-payload";
+        text.textContent = proposal.text;
+        review.append(heading, text);
+        const assets = Array.isArray(proposal.image_assets) ? proposal.image_assets
+          : proposal.video_asset ? [proposal.video_asset] : [];
+        assets.forEach((asset, index) => {
+          const attachment = document.createElement("p");
+          attachment.className = "approval-payload";
+          attachment.textContent = `Attachment ${index + 1}: ${asset.filename} · ${asset.media_type} · ${asset.size_bytes} bytes · SHA256 ${asset.sha256}`;
+          review.append(attachment);
+        });
+        details.insertBefore(review, pre);
+      }
+    }
+    const media = response.approval.payload?.media_asset;
+    if (item.tool_id === "whatsapp" && item.action_id === "send_message" && item.status === "pending"
+        && ["image/jpeg", "image/png", "video/mp4"].includes(media?.media_type)) {
+      const preview = document.createElement(media.media_type === "video/mp4" ? "video" : "img");
+      preview.className = "approval-media-preview";
+      if (preview instanceof HTMLVideoElement) { preview.controls = true; preview.preload = "metadata"; }
+      else preview.alt = "Approved attachment: " + media.filename;
+      const feedback = document.createElement("p");
+      feedback.className = "muted";
+      feedback.textContent = `${media.filename} · ${media.size_bytes} bytes`;
+      preview.addEventListener("error", () => { feedback.textContent = "Attachment preview unavailable. It may have expired; stage it again before sending."; });
+      const review = document.createElement("div");
+      review.className = "approval-media-review";
+      review.append(preview, feedback);
+      details.append(review);
+      try {
+        const blob = await apiBlob(`/v1/tools/whatsapp/approvals/${encodeURIComponent(item.id)}/media`);
+        // The operator may close the request or refresh while the fetch runs.
+        if (!isCurrent() || !review.isConnected) { review.remove(); return; }
+        const url = URL.createObjectURL(blob);
+        mediaUrls.add(url);
+        details.dataset.mediaUrl = url;
+        preview.src = url;
+      } catch (error) {
+        feedback.textContent = "Attachment preview unavailable. It may have expired; stage it again before sending.";
+      }
+    }
   } catch (error) {
+    if (!isCurrent()) return;
     pre.textContent = `Could not load request: ${error.message}. Close and reopen to retry.`;
-    delete details.dataset.loaded;
+    detailLoads.delete(details);
   }
 }, true);
 
