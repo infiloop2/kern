@@ -133,11 +133,11 @@ class BootstrapProtectionTests(unittest.TestCase):
             self.assertIn(f"systemctl set-property --runtime {unit} MemoryLow={percent}% IOWeight={weight}", apply)
         self.assertIn("systemctl set-property --runtime kern_agent.slice IOWeight=25", apply)
         self.assertNotIn("systemctl restart", apply)
-        self.assertIn("  start_services\n  apply_live_resource_protection\n  verify_deployment", bootstrap)
+        self.assertIn("  bootstrap_phase start_services\n  bootstrap_phase apply_live_resource_protection\n  bootstrap_phase verify_deployment", bootstrap)
 
     def test_boot_and_reconfigure_enable_controller_before_postgres(self):
         bootstrap = render._render_bootstrap()
-        self.assertLess(bootstrap.index("  configure_resource_protection\n"), bootstrap.index("  setup_postgres\n"))
+        self.assertLess(bootstrap.index("  bootstrap_phase configure_resource_protection\n"), bootstrap.index("  bootstrap_phase setup_postgres\n"))
         self.assertIn("systemctl enable kern-io-control.service", bootstrap)
         self.assertIn("systemctl restart kern-io-control.service", bootstrap)
         self.assertIn("RequiresMountsFor=/mnt/kern-admin /mnt/kern-agent", bootstrap)

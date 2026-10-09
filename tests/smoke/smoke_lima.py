@@ -328,6 +328,8 @@ class LimaSmoke(AwsSmoke):
                 raise AssertionError("restored browser package cache could not install offline")
             if re.search(r"downloaded to [^\r\n]*/browsers/(?:chromium|ffmpeg)", proc.stderr):
                 raise AssertionError("root-replacement upgrade downloaded browser binaries again")
+            if "Bootstrap cache: packages hit" not in proc.stderr:
+                raise AssertionError("root-replacement upgrade did not reuse the runtime package cache")
         return result
 
     def _run(

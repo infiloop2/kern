@@ -510,8 +510,12 @@ bootstrap_cache() {
 }
 
 # Base OS packages.
+bootstrap_log() {
+  printf '%s %s\n' "$(date -u +%FT%TZ)" "$1" >&2
+}
+
 install_system_packages() {
-echo "== installing system packages =="
+bootstrap_log "== installing system packages =="
 # First boot races the AMI's apt-daily/apt-daily-upgrade timers: both are
 # persistent, so on a fresh instance they fire within seconds of launch and
 # hold the apt/dpkg locks while downloading the pending security batch, and
@@ -584,7 +588,7 @@ migrate_legacy_app_identities() {
 }
 
 setup_postgres() {
-echo "== setting up admin-state PostgreSQL =="
+bootstrap_log "== setting up admin-state PostgreSQL =="
 PG_BIN="/usr/lib/postgresql/${PG_MAJOR}/bin"
 install -d -o postgres -g postgres -m 700 "$(dirname "$PGDATA_DIR")" "$PGDATA_DIR"
 chown root:root /mnt/kern-admin/postgres
@@ -772,7 +776,7 @@ SQL
 # the effective config, which is staged root-only for the later bootstrap steps
 # (SSH keys, cloudflared) that need it without database access.
 migrate_admin_state_and_write_config() {
-echo "== migrating admin state schema =="
+bootstrap_log "== migrating admin state schema =="
 # The kern-tools role's table grants live in the baseline schema migration
 # (0001_baseline.sql), the same pattern as the kern-proxy grants;
 # bootstrap only provisions the role, its pg_hba line, and database CONNECT
@@ -847,7 +851,7 @@ install_browser() (
   browser_cache_hit=no
   if bootstrap_cache restore-browser "$BROWSER_PLAYWRIGHT_VERSION" "$UV_VERSION" "$browser_downloads"; then
     if uv --cache-dir "$browser_downloads/uv" --offline pip install \
-      --python /usr/local/lib/kern-browser-venv/bin/python --link-mode copy \
+      --python /usr/local/lib/kern-browser-venv/bin/python --link-mode hardlink \
       "playwright==${BROWSER_PLAYWRIGHT_VERSION}"; then
       browser_cache_hit=yes
     else
@@ -860,7 +864,7 @@ install_browser() (
   fi
   if [ "$browser_cache_hit" = no ]; then
     uv --cache-dir "$browser_downloads/uv" pip install \
-      --python /usr/local/lib/kern-browser-venv/bin/python --link-mode copy \
+      --python /usr/local/lib/kern-browser-venv/bin/python --link-mode hardlink \
       "playwright==${BROWSER_PLAYWRIGHT_VERSION}"
   fi
   # Playwright owns its dependency list, but its apt commands must use our
@@ -880,15 +884,51 @@ APT_WRAPPER
   PLAYWRIGHT_BROWSERS_PATH="$browser_downloads/browsers" \
     /usr/local/lib/kern-browser-venv/bin/python -m playwright install chromium --no-shell
   install -d -m 0755 /usr/local/share/kern-browsers
-  cp -a "$browser_downloads/browsers/." /usr/local/share/kern-browsers/
+  # Staging and installations are on root. Reuse those file contents rather
+  # than writing Chromium a second time; deleting staging leaves runtime files
+  # intact. Fall back to copying if a host puts staging on another filesystem.
+  if ! cp -al "$browser_downloads/browsers/." /usr/local/share/kern-browsers/; then
+    cp -a "$browser_downloads/browsers/." /usr/local/share/kern-browsers/
+  fi
   if [ "$browser_cache_hit" = no ]; then
     bootstrap_cache save-browser "$BROWSER_PLAYWRIGHT_VERSION" "$UV_VERSION" "$browser_downloads"
   fi
   chmod -R a+rX /usr/local/lib/kern-browser-venv /usr/local/share/kern-browsers
 )
 
+npm_install() {
+  npm "$@" --prefer-online
+}
+
+python_packages_install() (
+  local interpreter="$1" resolved
+  shift
+  resolved="$(mktemp)"
+  trap 'rm -f -- "$resolved"' EXIT
+  # Refresh resolution metadata separately. Passing --refresh to installation
+  # would also invalidate reusable wheel downloads, defeating this cache.
+  printf '%s\n' "$@" | uv pip compile --refresh --python "$interpreter" \
+    --output-file "$resolved" -
+  uv pip sync --python "$interpreter" "$resolved"
+)
+
 install_agent_clis() {
-echo "== installing Node.js ${NODE_VERSION} =="
+package_downloads="$(mktemp -d)"
+if bootstrap_cache restore-packages "$UV_VERSION" "$package_downloads"; then
+  :
+else
+  restore_status=$?
+  if [ "$restore_status" != 3 ]; then return "$restore_status"; fi
+fi
+mkdir -p "$package_downloads/npm" "$package_downloads/uv"
+# Restored, verified downloads only. All installations are built anew on root.
+export npm_config_cache="$package_downloads/npm"
+export UV_CACHE_DIR="$package_downloads/uv"
+# The temporary download cache and new environments share the root filesystem.
+# Hardlink installs avoid another full copy; removing staging leaves the fresh
+# root-owned installations intact. No runtime retains access to staging.
+export UV_LINK_MODE=hardlink
+bootstrap_log "== installing Node.js ${NODE_VERSION} =="
 arch="$(dpkg --print-architecture)"
 case "$arch" in
   amd64) node_arch=x64 ;;
@@ -899,23 +939,25 @@ curl -fsSLo /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${N
 tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner
 rm -f /tmp/node.tar.xz
 
-echo "== installing host Node dependencies =="
+bootstrap_log "== installing host Node dependencies =="
 install -d -m 755 -o root -g root /usr/local/lib/kern-node
 install -m 0644 -o root -g root \
   /opt/kern-host/host/npm/package.json \
   /opt/kern-host/host/npm/package-lock.json \
   /usr/local/lib/kern-node/
-npm ci --prefix /usr/local/lib/kern-node --omit=dev --no-fund --no-audit --loglevel=error
+npm_install ci --prefix /usr/local/lib/kern-node --omit=dev --no-fund --no-audit --loglevel=error
 chown -R root:root /usr/local/lib/kern-node
 # bootstrap's umask is 077, but kern-tools must be able to traverse and read
 # these root-owned dependencies without being able to modify them.
 chmod -R u=rwX,go=rX /usr/local/lib/kern-node
 
-echo "== installing Codex CLI =="
-npm install -g --no-fund --no-audit --loglevel=error "@openai/codex@${CODEX_CLI_VERSION}"
-echo "== installing Claude Code CLI =="
-npm install -g --no-fund --no-audit --loglevel=error "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}"
-echo "== installing Grok CLI =="
+bootstrap_log "== installing Codex, Claude Code and Grok CLIs =="
+# One npm transaction can fetch these independent packages together, avoiding
+# three serialized installer startups while keeping the existing version pins.
+npm_install install -g --no-fund --no-audit --loglevel=error \
+  "@openai/codex@${CODEX_CLI_VERSION}" \
+  "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+  "@xai-official/grok@${GROK_CLI_VERSION}"
 # The npm package is a Node trampoline plus a brotli-compressed per-platform
 # binary. Left to itself the trampoline decompresses that binary into
 # $GROK_HOME/bin on first run and execs it from there — inside the agent's own
@@ -929,7 +971,6 @@ echo "== installing Grok CLI =="
 # than depending on the agent leaving its own home alone. The trampoline's
 # /usr/local/bin/grok symlink is replaced, so there is exactly one grok on the
 # box and no PATH lookup can reach an agent-writable one.
-npm install -g --no-fund --no-audit --loglevel=error "@xai-official/grok@${GROK_CLI_VERSION}"
 grok_payload="/usr/local/lib/node_modules/@xai-official/grok/node_modules/@xai-official/grok-linux-${node_arch}/bin/grok.br"
 if [ ! -f "$grok_payload" ]; then
   echo "missing Grok binary payload at ${grok_payload}" >&2
@@ -942,7 +983,7 @@ fs.writeFileSync(process.argv[2], zlib.brotliDecompressSync(fs.readFileSync(proc
 ' "$grok_payload" /usr/local/bin/grok
 chown root:root /usr/local/bin/grok
 chmod 0755 /usr/local/bin/grok
-echo "== installing Hermes agent =="
+bootstrap_log "== installing Hermes agent =="
 case "$arch" in
   amd64) uv_arch=x86_64-unknown-linux-gnu ;;
   arm64) uv_arch=aarch64-unknown-linux-gnu ;;
@@ -958,7 +999,7 @@ uv venv --python "${HERMES_PYTHON_VERSION}" /usr/local/lib/hermes-venv
 # The bedrock extra brings the boto3 Converse transport; the mcp extra brings
 # the MCP client SDK, which the managed ~/.hermes/config.yaml needs to spawn
 # the bundled-tools MCP shim (mcp_servers.kern).
-uv pip install --python /usr/local/lib/hermes-venv/bin/python \
+python_packages_install /usr/local/lib/hermes-venv/bin/python \
   "hermes-agent[bedrock,mcp]==${HERMES_AGENT_VERSION}"
 chmod -R a+rX /usr/local/lib/hermes-python /usr/local/lib/hermes-venv
 
@@ -975,7 +1016,7 @@ chmod -R a+rX /usr/local/lib/hermes-python /usr/local/lib/hermes-venv
 # already fetched from keeps the deploy on one trusted, pinned channel and
 # removes huggingface.co from the critical path.
 uv venv --python /usr/bin/python3 /usr/local/lib/kern-embedding-venv
-uv pip install --python /usr/local/lib/kern-embedding-venv/bin/python \
+python_packages_install /usr/local/lib/kern-embedding-venv/bin/python \
   "fastembed==${FASTEMBED_VERSION}"
 install -d -o root -g root -m 0755 /usr/local/share/kern-embedding-models
 install -d -o root -g root -m 0755 "$EMBEDDING_MODEL_DIR"
@@ -1015,7 +1056,7 @@ chmod -R a+rX /usr/local/lib/kern-embedding-venv /usr/local/share/kern-embedding
 # Download the fixed English model during provisioning. The inference service
 # cannot download models or send audio anywhere at runtime.
 uv venv --python /usr/bin/python3 /usr/local/lib/kern-transcription-venv
-uv pip install --python /usr/local/lib/kern-transcription-venv/bin/python \
+python_packages_install /usr/local/lib/kern-transcription-venv/bin/python \
   "faster-whisper==${FASTER_WHISPER_VERSION}"
 install -d -o root -g root -m 0755 /usr/local/share/kern-transcription-models
 install -d -o root -g root -m 0755 "$TRANSCRIPTION_MODEL_DIR"
@@ -1042,6 +1083,9 @@ install_browser
 # npm inherits the script's umask 077, which would leave the CLI root-only;
 # the agent user must be able to run it.
 chmod -R a+rX /usr/local/lib/node_modules
+bootstrap_cache save-packages "$UV_VERSION" "$package_downloads"
+rm -rf -- "$package_downloads"
+unset npm_config_cache UV_CACHE_DIR UV_LINK_MODE
 }
 
 configure_cloudflared() {
@@ -1052,7 +1096,7 @@ print(sum(1 for connection in config['operator_connections'] if connection.get('
 PY
 )"
 if [ "$cloudflare_connection_count" -gt 0 ]; then
-  echo "== installing cloudflared ${CLOUDFLARED_VERSION} =="
+  bootstrap_log "== installing cloudflared ${CLOUDFLARED_VERSION} =="
   case "$arch" in
     amd64) cloudflared_arch=amd64 ;;
     arm64) cloudflared_arch=arm64 ;;
@@ -2068,12 +2112,19 @@ fi
 }
 
 verify_deployment() {
-  echo "== verifying deployed state =="
+  bootstrap_log "== verifying deployed state =="
   local cloudflare_flag=no
   if [ "$cloudflare_connection_count" -gt 0 ]; then
     cloudflare_flag=yes
   fi
   env PYTHONPATH=/opt/kern-host python3 -m host.bootstrap.verify_deploy --cloudflare "$cloudflare_flag"
+}
+
+bootstrap_phase() {
+  local phase="$1" started="$SECONDS"
+  printf 'Bootstrap phase: %s start %s\n' "$phase" "$(date -u +%FT%TZ)" >&2
+  "$phase"
+  printf 'Bootstrap phase: %s complete %s (%ss)\n' "$phase" "$(date -u +%FT%TZ)" "$((SECONDS - started))" >&2
 }
 
 # Provisioning is almost done: capture the non-secret target version, then
@@ -2099,39 +2150,40 @@ chmod 600 /mnt/kern-admin/admin-state/version.json
 }
 
 main() {
-  mount_durable_volumes
-  provision_service_accounts
-  sanitize_durable_paths
-  enforce_version_gate
-  install_runtime_code
-  install_system_packages
-  configure_resource_protection
-  setup_postgres
-  migrate_admin_state_and_write_config
-  configure_operator_ssh
-  install_agent_clis
+  bootstrap_phase mount_durable_volumes
+  bootstrap_phase provision_service_accounts
+  bootstrap_phase sanitize_durable_paths
+  bootstrap_phase enforce_version_gate
+  bootstrap_phase install_runtime_code
+  bootstrap_phase install_system_packages
+  bootstrap_phase configure_resource_protection
+  bootstrap_phase setup_postgres
+  bootstrap_phase migrate_admin_state_and_write_config
+  bootstrap_phase configure_operator_ssh
+  bootstrap_phase install_agent_clis
   # Resume normal Ubuntu security maintenance after the last APT operation.
   systemctl start apt-daily.timer apt-daily-upgrade.timer
   trap - EXIT
-  configure_cloudflared
-  write_codex_policy
-  write_grok_policy
-  harden_base_os
-  setup_proxy_ca
-  install_sudo_helpers
-  apply_durable_ownership
-  install_agent_home_files
-  write_sudoers_policy
-  assert_agent_clis
-  write_firewall
-  install_service_units
-  start_services
-  apply_live_resource_protection
-  verify_deployment
+  bootstrap_phase configure_cloudflared
+  bootstrap_phase write_codex_policy
+  bootstrap_phase write_grok_policy
+  bootstrap_phase harden_base_os
+  bootstrap_phase setup_proxy_ca
+  bootstrap_phase install_sudo_helpers
+  bootstrap_phase apply_durable_ownership
+  bootstrap_phase install_agent_home_files
+  bootstrap_phase write_sudoers_policy
+  bootstrap_phase assert_agent_clis
+  bootstrap_phase write_firewall
+  bootstrap_phase install_service_units
+  bootstrap_phase start_services
+  bootstrap_phase apply_live_resource_protection
+  bootstrap_phase verify_deployment
   # Only a verified deployment may discard obsolete cached downloads.
   bootstrap_cache prune $(printf '%s\n%s\n' "$EMBEDDING_MODEL_SHA256" "$TRANSCRIPTION_MODEL_SHA256" | awk '{print $1}')
   bootstrap_cache prune-browser "$BROWSER_PLAYWRIGHT_VERSION" "$UV_VERSION"
-  finalize_deploy
+  bootstrap_cache prune-packages "$UV_VERSION"
+  bootstrap_phase finalize_deploy
 }
 
 main

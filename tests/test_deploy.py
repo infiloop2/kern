@@ -1840,10 +1840,10 @@ class DeployUnitTests(unittest.TestCase):
         # services start and before staged secrets are dropped.
         self.assertIn("python3 -m host.bootstrap.verify_deploy --cloudflare", bootstrap)
         self.assertLess(
-            bootstrap.index("\n  start_services\n"), bootstrap.index("\n  verify_deployment\n")
+            bootstrap.index("\n  bootstrap_phase start_services\n"), bootstrap.index("\n  bootstrap_phase verify_deployment\n")
         )
         self.assertLess(
-            bootstrap.index("\n  verify_deployment\n"), bootstrap.index("\n  finalize_deploy\n")
+            bootstrap.index("\n  bootstrap_phase verify_deployment\n"), bootstrap.index("\n  bootstrap_phase finalize_deploy\n")
         )
         # The sudoers drop-in is validated at write time, not at first use.
         self.assertIn("visudo -c -q -f /etc/sudoers.d/kern-host", bootstrap)
@@ -2198,8 +2198,8 @@ class DeployUnitTests(unittest.TestCase):
         self.assertIn(skills_directory, bootstrap)
         self.assertIn(skills_link, bootstrap)
         self.assertIn(third_skills_link, bootstrap)
-        self.assertLess(bootstrap.index(skills_link), bootstrap.index("\n  start_services\n"))
-        self.assertLess(bootstrap.index(third_skills_link), bootstrap.index("\n  start_services\n"))
+        self.assertLess(bootstrap.index(skills_link), bootstrap.index("\n  bootstrap_phase start_services\n"))
+        self.assertLess(bootstrap.index(third_skills_link), bootstrap.index("\n  bootstrap_phase start_services\n"))
 
     def test_host_node_dependencies_are_readable_but_not_writable_by_tools(self) -> None:
         bootstrap = render._render_bootstrap()
@@ -2208,7 +2208,7 @@ class DeployUnitTests(unittest.TestCase):
             bootstrap,
         )
         self.assertIn(
-            "npm ci --prefix /usr/local/lib/kern-node --omit=dev",
+            "npm_install ci --prefix /usr/local/lib/kern-node --omit=dev",
             bootstrap,
         )
         self.assertNotIn("WHATSAPP_BAILEYS_VERSION", bootstrap)

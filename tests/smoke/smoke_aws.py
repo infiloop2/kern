@@ -377,6 +377,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
     "instagram_ads": (
         ("list_accounts", {"limit": 1}),
         ("get_account", {"account_id": "1"}),
+        ("diagnose_account", {"account_id": "1", "limit": 1}),
         ("list_identities", {"account_id": "1", "limit": 1}),
         ("list_posts", {"account_id": "1", "page_id": "2", "instagram_user_id": "3", "limit": 1}),
         ("lookup_targeting", {"account_id": "1", "type": "COUNTRY", "query": "United States", "limit": 1}),
@@ -3972,6 +3973,7 @@ PY""", check=True)
         # dependent reads below.
         triggered_actions: set[str] = set()
         public_results: dict[str, dict] = {}
+        denied_proposals: dict[str, set[str]] = {}
         for tool_id, calls in SMOKE_TOOL_CALLS.items():
             for action_id, arguments_template in calls:
                 arguments = {
@@ -3997,6 +3999,7 @@ PY""", check=True)
                         denied = self._api("POST", f"/v1/tools/indexnow/approvals/{approval_id}/deny", {})
                         if denied["approval"]["status"] != "denied":
                             raise AssertionError("IndexNow smoke proposal was not denied")
+                        denied_proposals.setdefault(tool_id, set()).add(approval_id)
                 elif tool_id in ("polymarket", "web_fetch") or direct_without_connection:
                     if response.get("isError") or not isinstance(parsed, dict):
                         raise AssertionError(f"credential-free {name} failed: {response} {parsed}")
@@ -4071,18 +4074,27 @@ PY""", check=True)
         if brave_detail.get("arguments") != {"query": "Kern"}:
             raise AssertionError(f"tool audit detail lost exact arguments: {brave_detail}")
 
-        for tool_id in BUNDLED_TOOLS:
-            pending = self._api("GET", f"/v1/tools/{tool_id}/approvals")["approvals"]
-            if pending:
-                raise AssertionError(f"{tool_id} queued an approval without credentials: {pending}")
+        self._check_credential_free_approvals(denied_proposals)
 
         for tool_id in BUNDLED_TOOLS:
             self._api("POST", f"/v1/tools/{tool_id}/disable", {})
         self._ok(
             "every bundled action discoverable, triggered, and audited with no tool config; configured OAuth starts and "
             "credentialed actions failed closed, all public Polymarket reads completed, local image/video "
-            "uploads worked, non-agent peers were rejected, and no approval was queued"
+            "uploads worked, non-agent peers were rejected, and only the explicitly denied "
+            "managed-key IndexNow proposal was retained"
         )
+
+    def _check_credential_free_approvals(self, denied_proposals: dict[str, set[str]]) -> None:
+        # This endpoint includes terminal history. Only proposals created and
+        # explicitly denied by this smoke may remain; any other record fails.
+        for tool_id in BUNDLED_TOOLS:
+            approvals = self._api("GET", f"/v1/tools/{tool_id}/approvals")["approvals"]
+            expected = denied_proposals.get(tool_id, set())
+            if (len(approvals) != len(expected)
+                    or {row.get("approval_id") for row in approvals} != expected
+                    or any(row.get("status") != "denied" for row in approvals)):
+                raise AssertionError(f"{tool_id} retained unexpected approvals: {approvals}")
 
     def check_all_runtimes_active(self) -> None:
         self._step("all three agent runtimes active together")

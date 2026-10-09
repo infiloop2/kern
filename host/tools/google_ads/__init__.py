@@ -518,6 +518,35 @@ def _single(rows: list[JSONObject], name: str) -> JSONObject:
     return rows[0]
 
 
+def _targeting_details(criterion: JSONObject) -> str:
+    """Project only fixed labels and bounded numbers, never raw provider rows."""
+    def enum(value: JSONValue, allowed: tuple[str, ...]) -> str:
+        if value is None:
+            return "MISSING"
+        return value if isinstance(value, str) and value in allowed else "UNRECOGNIZED"
+
+    # Documented v25 criterion labels; recognizing a label never permits it.
+    kind = enum(criterion.get("type"), ("AD_SCHEDULE", "AGE_RANGE", "APP_PAYMENT_MODEL", "AUDIENCE", "BRAND", "BRAND_LIST",
+        "CARRIER", "COMBINED_AUDIENCE", "CONTENT_LABEL", "CUSTOM_AFFINITY", "CUSTOM_AUDIENCE", "CUSTOM_INTENT", "DEVICE",
+        "GENDER", "INCOME_RANGE", "IP_BLOCK", "KEYWORD", "KEYWORD_THEME", "LANGUAGE", "LIFE_EVENT", "LISTING_GROUP",
+        "LISTING_SCOPE", "LOCAL_SERVICE_ID", "LOCATION", "LOCATION_GROUP", "MOBILE_APPLICATION", "MOBILE_APP_CATEGORY",
+        "MOBILE_DEVICE", "NEGATIVE_KEYWORD_LIST", "OPERATING_SYSTEM_VERSION", "PARENTAL_STATUS", "PLACEMENT", "PLACEMENT_LIST",
+        "PROXIMITY", "RETAIL_FILTER", "RETAIL_FILTER_BUNDLE", "SEARCH_THEME", "TOPIC", "UNKNOWN", "UNSPECIFIED", "USER_INTEREST",
+        "USER_LIST", "VERTICAL_ADS_ITEM_BID", "VERTICAL_ADS_ITEM_GROUP_RULE", "VERTICAL_ADS_ITEM_GROUP_RULE_LIST", "VIDEO_LINEUP",
+        "WEBPAGE", "WEBPAGE_LIST", "YOUTUBE_CHANNEL", "YOUTUBE_VIDEO"))
+    status = enum(criterion.get("status"), ("ENABLED", "PAUSED", "REMOVED", "UNKNOWN", "UNSPECIFIED"))
+    negative = criterion.get("negative", False)
+    excluded = str(negative).lower() if type(negative) is bool else "UNRECOGNIZED"
+    device = criterion.get("device")
+    device_type = enum(device.get("type") if isinstance(device, dict) else None,
+        ("DESKTOP", "MOBILE", "TABLET", "CONNECTED_TV", "OTHER", "UNKNOWN", "UNSPECIFIED"))
+    modifier = criterion.get("bidModifier")
+    bid_modifier = "MISSING" if modifier is None else "UNRECOGNIZED"
+    if type(modifier) in (int, float) and 0 <= cast(float, modifier) <= 10:
+        bid_modifier = format(cast(float, modifier), ".9g")
+    return f"type={kind}, negative={excluded}, status={status}, device={device_type}, bid_modifier={bid_modifier}"
+
+
 def _verify_launch(token: str, values: JSONObject, flight: JSONObject, resources: list[str]) -> JSONObject:
     customer = cast(str, values["customer_id"])
     budget_resource, campaign_resource = resources[:2]
@@ -543,13 +572,14 @@ def _verify_launch(token: str, values: JSONObject, flight: JSONObject, resources
             or _decimal(budget, "amountMicros") != "0" or _bool(budget, "explicitlyShared") or _decimal(budget, "referenceCount") != "1"
             or _string(budget, "deliveryMethod") != "STANDARD"):
         _fail("New campaign total budget differs from approval.")
-    geo_rows = _search(token, customer, "SELECT campaign_criterion.type, campaign_criterion.negative, campaign_criterion.location.geo_target_constant "
+    geo_rows = _search(token, customer, "SELECT campaign_criterion.type, campaign_criterion.negative, campaign_criterion.status, "
+        "campaign_criterion.device.type, campaign_criterion.bid_modifier, campaign_criterion.location.geo_target_constant "
         f"FROM campaign_criterion WHERE campaign.id = {campaign_id} AND campaign_criterion.status != 'REMOVED' LIMIT 11")
     locations: list[str] = []
     for geo_row in geo_rows:
         criterion = _object(geo_row.get("campaignCriterion"), "campaign criterion")
-        if criterion.get("type") != "LOCATION" or _bool(criterion, "negative"):
-            _fail("New campaign has unexpected targeting criteria.")
+        if criterion.get("type") != "LOCATION" or criterion.get("negative", False) is not False:
+            _fail(f"New campaign has unexpected targeting criteria ({_targeting_details(criterion)}). Kern did not enable the campaign.")
         locations.append(_string(_object(criterion.get("location"), "location"), "geoTargetConstant"))
     if sorted(locations) != sorted(f"geoTargetConstants/{identifier}" for identifier in cast(list[str], values["geo_target_ids"])):
         _fail("New campaign locations differ from approval.")

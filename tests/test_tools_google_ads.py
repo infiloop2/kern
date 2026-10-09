@@ -793,6 +793,81 @@ class GoogleAdsTests(unittest.TestCase):
                 self.assertIn(CAMPAIGN_RESOURCE, result.error)
                 self.assertEqual(len(self.mutations), 1)
 
+    def test_unexpected_device_criterion_reports_safe_details_and_stays_paused(self):
+        approval = self.approve()
+        # Model additional provider criteria without assuming this caused the live failure.
+        self.new_geo.extend({"campaignCriterion": {"type": "DEVICE", "status": "ENABLED", "device": {"type": device}, "bidModifier": 1.0}}
+                            for device in ("DESKTOP", "MOBILE", "TABLET"))
+        self.diagnostics.reset_mock()
+        result = self.finish(approval)
+        self.assertIsInstance(result, ActionFailed)
+        details = "type=DEVICE, negative=false, status=ENABLED, device=DESKTOP, bid_modifier=1"
+        self.assertIn(details, result.error)
+        self.assertIn("Kern did not enable the campaign", result.error)
+        self.assertIn(CAMPAIGN_RESOURCE, result.error)
+        self.assertEqual(len(self.mutations), 1)
+        self.assertEqual(self.mutations[0][1]["campaignOperation"]["create"]["status"], "PAUSED")
+        self.diagnostics.assert_called_once()
+        record = self.diagnostics.call_args.args[0]
+        self.assertIn(details, record["summary"])
+        self.assertEqual(record["context"]["phase"], "verifying the new campaign before enabling")
+        query = next(kwargs["body"]["query"] for _, url, kwargs in self.requests
+                     if url.endswith("googleAds:search") and "FROM campaign_criterion" in kwargs["body"]["query"])
+        for field in ("campaign_criterion.status", "campaign_criterion.device.type", "campaign_criterion.bid_modifier"):
+            self.assertIn(field, query)
+        self.assertIn("LIMIT 11", query)
+        self.assertNotIn("campaign_criterion.type =", query)
+
+    def test_negative_and_malformed_location_flags_still_block_activation(self):
+        for negative, label in ((True, "true"), (1, "UNRECOGNIZED"), (None, "UNRECOGNIZED"), ("private-flag", "UNRECOGNIZED")):
+            with self.subTest(negative=negative):
+                self.created = False
+                self.reset_created_state()
+                self.mutations.clear()
+                approval = self.approve()
+                self.new_geo[0]["campaignCriterion"]["negative"] = negative
+                result = self.finish(approval)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn(f"type=LOCATION, negative={label}", result.error)
+                self.assertEqual(len(self.mutations), 1)
+                self.assertNotIn("private-flag", result.error)
+
+    def test_other_documented_criterion_types_are_identified_without_permitting_them(self):
+        for kind in ("CONTENT_LABEL", "IP_BLOCK", "OPERATING_SYSTEM_VERSION", "VERTICAL_ADS_ITEM_GROUP_RULE_LIST"):
+            with self.subTest(kind=kind):
+                self.created = False
+                self.mutations.clear()
+                approval = self.approve()
+                self.new_geo = [{"campaignCriterion": {"type": kind}}]
+                result = self.finish(approval)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn(f"type={kind}", result.error)
+                self.assertEqual(len(self.mutations), 1)
+
+    def test_targeting_diagnostics_omit_raw_rows_unknown_strings_and_unbounded_numbers(self):
+        private = "PRIVATE_SECRET_" + "X" * 5000
+        for kind in (private, {"private": private}, None):
+            with self.subTest(kind=type(kind).__name__):
+                self.created = False
+                self.mutations.clear()
+                approval = self.approve()
+                self.new_geo = [{"campaignCriterion": {"type": kind, "negative": private, "status": private,
+                    "device": {"type": private}, "bidModifier": private, "location": {"geoTargetConstant": private},
+                    "resourceName": private, "unknown": {"access_token": private}}}]
+                self.diagnostics.reset_mock()
+                result = self.finish(approval)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(len(self.mutations), 1)
+                self.diagnostics.assert_called_once()
+                record = self.diagnostics.call_args.args[0]
+                self.assertNotIn("PRIVATE_SECRET", json.dumps(record))
+                self.assertNotIn("PRIVATE_SECRET", result.error)
+                self.assertLess(len(record["summary"].encode()), 512)
+                self.assertIn("bid_modifier=UNRECOGNIZED", record["summary"])
+        for modifier in (True, float("nan"), float("inf"), -1, 11, 10 ** 1000, "1"):
+            with self.subTest(modifier_type=type(modifier).__name__):
+                self.assertIn("bid_modifier=UNRECOGNIZED", ads._targeting_details({"type": "DEVICE", "bidModifier": modifier}))
+
     def test_expired_flight_during_readback_stops_before_enable(self):
         approval = self.approve()
         self.read_hook = lambda: setattr(self.clock, "return_value", datetime(2026, 10, 23, tzinfo=timezone.utc))

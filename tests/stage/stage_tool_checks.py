@@ -430,6 +430,7 @@ class StageToolChecks:
         account_id = accounts[0]["account_id"]
         account = self._successful_tool_call("instagram_ads_get_account", {"account_id": account_id})
         common = {"account_id": account_id, "limit": 1}
+        self._successful_tool_call("instagram_ads_diagnose_account", common)
         identities = self._successful_tool_call("instagram_ads_list_identities", common)["items"]
         self._successful_tool_call("instagram_ads_lookup_targeting", {**common, "type": "COUNTRY", "query": "United States"})
         campaigns = self._successful_tool_call("instagram_ads_list_campaigns", common)["items"]

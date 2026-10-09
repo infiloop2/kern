@@ -27,6 +27,32 @@ class McpSmokeCatalogTests(unittest.TestCase):
         self.assertEqual(set(STATIC_SHIM_TOOLS), {tool["name"] for tool in mcp_shim._list_tools()})
 
 
+class CredentialFreeApprovalSmokeTests(unittest.TestCase):
+    def check(self, rows, expected):
+        smoke = AwsSmoke()
+        def api(method, path):
+            return {"approvals": rows if path == "/v1/tools/indexnow/approvals" else []}
+        with patch.object(smoke, "_api", side_effect=api):
+            smoke._check_credential_free_approvals(expected)
+
+    def test_explicitly_denied_managed_key_proposal_is_valid_terminal_history(self):
+        self.check([{"approval_id": "smoke", "status": "denied"}], {"indexnow": {"smoke"}})
+        self.check([], {})
+
+    def test_unexpected_or_unresolved_proposals_and_missing_history_fail(self):
+        for rows in (
+            [], [{"approval_id": "smoke", "status": "pending"}],
+            [{"approval_id": "smoke", "status": "approved"}],
+            [{"approval_id": "other", "status": "denied"}],
+            [{"approval_id": "smoke", "status": "denied"},
+             {"approval_id": "other", "status": "denied"}],
+        ):
+            with self.subTest(rows=rows), self.assertRaisesRegex(AssertionError, "unexpected approvals"):
+                self.check(rows, {"indexnow": {"smoke"}})
+        with self.assertRaisesRegex(AssertionError, "unexpected approvals"):
+            self.check([{"approval_id": "other", "status": "denied"}], {})
+
+
 class GitHubWriteForwardingSmokeTests(unittest.TestCase):
     def _event(self, **overrides):
         return {

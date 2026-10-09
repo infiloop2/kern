@@ -309,8 +309,11 @@ def _delivery(plan: JSONObject) -> JSONObject:
 
 
 def _campaign_params(plan: JSONObject) -> dict[str, str]:
+    # X defaults to LINE_ITEM. Explicitly setting budget_optimization alongside
+    # a daily campaign cap is rejected by the live API; verify the returned
+    # mode before activation instead of submitting the redundant setter.
     return {**{key: str(plan[key]) for key in s.BUDGETS}, "name": str(plan["name"]),
-            "funding_instrument_id": str(plan["funding_instrument_id"]), "budget_optimization": "LINE_ITEM", "entity_status": "PAUSED"}
+            "funding_instrument_id": str(plan["funding_instrument_id"]), "entity_status": "PAUSED"}
 
 
 def _group_params(plan: JSONObject, campaign_id: str) -> dict[str, str]:
@@ -344,7 +347,7 @@ def _confirm_settings(row: JSONObject, params: dict[str, str]) -> None:
 def _verify_created(bundle: JSONObject, plan: JSONObject, currency: JSONValue, *, group_status: str) -> None:
     campaign, group = cast(JSONObject, bundle["campaign"]), cast(JSONObject, bundle["ad_group"])
     campaign_id = _id(campaign.get("id"), "campaign")
-    _confirm_settings(campaign, _campaign_params(plan))
+    _confirm_settings(campaign, {**_campaign_params(plan), "budget_optimization": "LINE_ITEM"})
     _confirm_settings(group, {**_group_params(plan, campaign_id), "entity_status": group_status})
     if (campaign.get("currency") != currency or group.get("currency") != currency
             or campaign.get("deleted") is not False or group.get("deleted") is not False

@@ -229,11 +229,12 @@ class LimaSmokeContractTests(unittest.TestCase):
                     ):
                         smoke._assert_ssh_host_key(expected)
 
-    def test_upgrade_requires_offline_browser_cache_reuse(self) -> None:
+    def test_upgrade_requires_browser_and_runtime_download_cache_reuse(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             smoke = LimaSmoke(Path(tmp) / "smoke")
             for output, expected_error in (
-                ("Bootstrap cache: browser hit\n", None),
+                ("Bootstrap cache: browser hit\nBootstrap cache: packages hit\n", None),
+                ("Bootstrap cache: browser hit\n", "did not reuse the runtime package cache"),
                 ("Bootstrap cache: browser miss\n", "did not reuse"),
                 ("Bootstrap cache: browser hit\nbrowser package cache unusable\n", "could not install offline"),
                 ("Bootstrap cache: browser hit\nChrome for Testing (playwright chromium v1223) downloaded to /tmp/staging/browsers/chromium-1223\n", "downloaded browser binaries"),

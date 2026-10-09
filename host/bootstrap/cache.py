@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import json
 import os
 import platform
 from pathlib import Path
@@ -28,13 +29,21 @@ MAX_BYTES = 2 * 1024**3
 RESERVE_BYTES = 1024**3
 
 
-def browser_key(version: str, uv_version: str) -> str:
-    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
-        raise ValueError('invalid Playwright version')
+def compatibility_key(uv_version: str) -> str:
     release = platform.freedesktop_os_release()
     identity = '|'.join((uv_version, sys.implementation.cache_tag or '',
                          sysconfig.get_platform(), release['ID'], release['VERSION_ID']))
-    return f'playwright-{version}-{hashlib.sha256(identity.encode()).hexdigest()}'
+    return hashlib.sha256(identity.encode()).hexdigest()
+
+
+def browser_key(version: str, uv_version: str) -> str:
+    if not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+        raise ValueError('invalid Playwright version')
+    return f'playwright-{version}-{compatibility_key(uv_version)}'
+
+
+def packages_key(uv_version: str) -> str:
+    return f'packages-{compatibility_key(uv_version)}'
 
 
 def digest(path: Path) -> str:
@@ -54,33 +63,33 @@ def regular(path: Path) -> bool:
             and not info.st_mode & 0o022 and info.st_nlink == 1)
 
 
-def extract_browser(archive: tarfile.TarFile, destination: Path) -> None:
+def extract_downloads(archive: tarfile.TarFile, destination: Path, names: tuple[str, ...]) -> None:
     """Extract only cache files/internal links, including on older Ubuntu Python."""
     root = destination.resolve()
     for member in archive:
         parts = Path(member.name).parts
-        if not parts or parts[0] not in ('uv', 'browsers') or '..' in parts:
-            raise ValueError('invalid browser cache member')
+        if not parts or parts[0] not in names or '..' in parts:
+            raise ValueError('invalid download cache member')
         target = destination / member.name
         target.resolve().relative_to(root)
         if member.isdir():
             if target.is_symlink():
-                raise ValueError('browser cache directory is a link')
+                raise ValueError('download cache directory is a link')
             target.mkdir(parents=True, exist_ok=True)
             continue
         if target.exists() or target.is_symlink():
-            raise ValueError('duplicate browser cache member')
+            raise ValueError('duplicate download cache member')
         target.parent.mkdir(parents=True, exist_ok=True)
         if member.isfile():
             content = archive.extractfile(member)
             if content is None:
-                raise ValueError('missing browser cache file')
+                raise ValueError('missing download cache file')
             with content, target.open('xb') as output:
                 shutil.copyfileobj(content, output)
             target.chmod((member.mode & 0o755) | 0o600)
         elif member.issym() or member.islnk():
             if os.path.isabs(member.linkname):
-                raise ValueError('absolute browser cache link')
+                raise ValueError('absolute download cache link')
             parent = target.parent if member.issym() else destination
             link = (parent / member.linkname).resolve()
             link.relative_to(root)
@@ -89,15 +98,15 @@ def extract_browser(archive: tarfile.TarFile, destination: Path) -> None:
             elif link.is_file():
                 os.link(link, target)
             else:
-                raise ValueError('missing browser cache hardlink target')
+                raise ValueError('missing download cache hardlink target')
         else:
-            raise ValueError('special browser cache file')
+            raise ValueError('special download cache file')
 
 
 class Cache:
     def __init__(self, root: Path = CACHE_ROOT):
         self.root = root
-        for directory in (root, root / 'apt', root / 'models', root / 'browser'):
+        for directory in (root, root / 'apt', root / 'models', root / 'browser', root / 'packages'):
             directory.mkdir(mode=0o700, exist_ok=True)
             info = directory.lstat()
             if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
@@ -111,12 +120,29 @@ class Cache:
         if regular(destination) and digest(destination) == digest(source):
             return
         size = source.stat().st_size
-        used = sum(p.lstat().st_size for group in ('apt', 'models', 'browser')
-                   for p in (self.root / group).iterdir())
-        if used + size > MAX_BYTES or shutil.disk_usage(self.root).free < size + RESERVE_BYTES:
+        if not self.can_save(size):
             print(f'Bootstrap cache: not saving {source.name}; preserving disk space', flush=True)
             return
         self.copy(source, destination)
+
+    def can_save(self, size: int) -> bool:
+        used = sum(p.lstat().st_size for group in ('apt', 'models', 'browser', 'packages')
+                   for p in (self.root / group).iterdir())
+        return used + size <= MAX_BYTES and shutil.disk_usage(self.root).free >= size + RESERVE_BYTES
+
+    @staticmethod
+    def download_files(source: Path, names: tuple[str, ...]) -> set[str]:
+        # New immutable artifact paths require a new snapshot. Metadata is
+        # revalidated online every time; npm's per-run logs are not downloads.
+        result: set[str] = set()
+        for name in names:
+            for parent, directories, files in os.walk(source / name):
+                if Path(parent) == source / 'npm':
+                    directories[:] = [directory for directory in directories if directory != '_logs']
+                # walk uses scandir's directory-entry types, avoiding a disk
+                # stat for each file in large unpacked uv package archives.
+                result.update(str((Path(parent) / filename).relative_to(source)) for filename in files)
+        return result
 
     @staticmethod
     def copy(source: Path, destination: Path) -> None:
@@ -179,13 +205,13 @@ class Cache:
         finally:
             temporary.unlink(missing_ok=True)
 
-    def restore_browser(self, key: str, target: Path) -> bool:
+    def restore_downloads(self, group: str, key: str, target: Path, names: tuple[str, ...]) -> bool:
         """Restore download caches onto the disposable root disk, never live venvs."""
-        for entry in (self.root / 'browser').glob(f'{key}_*.tar'):
+        for entry in (self.root / group).glob(f'{key}_*.tar'):
             checksum = entry.stem.removeprefix(f'{key}_')
             if (not regular(entry) or not re.fullmatch('[0-9a-f]{64}', checksum)
                     or digest(entry) != checksum):
-                print('Bootstrap cache: discarding corrupt browser archive', flush=True)
+                print(f'Bootstrap cache: discarding corrupt {group} archive', flush=True)
                 entry.unlink()
                 continue
             try:
@@ -193,27 +219,51 @@ class Cache:
                 # the two download caches, devices and escaping symlinks.
                 with tempfile.TemporaryDirectory(dir=target) as staging:
                     with tarfile.open(entry) as archive:
-                        extract_browser(archive, Path(staging))
-                    for name in ('uv', 'browsers'):
+                        extract_downloads(archive, Path(staging), names)
+                    for name in names:
                         source = Path(staging) / name
                         if source.is_symlink() or not source.is_dir():
-                            raise ValueError('incomplete browser cache')
-                    for name in ('uv', 'browsers'):
+                            raise ValueError('incomplete download cache')
+                    for name in names:
                         shutil.move(str(Path(staging) / name), target / name)
             except (ValueError, tarfile.TarError, EOFError):
-                print('Bootstrap cache: discarding invalid browser archive', flush=True)
+                print(f'Bootstrap cache: discarding invalid {group} archive', flush=True)
                 entry.unlink()
                 continue
-            print('Bootstrap cache: browser hit', flush=True)
+            print(f'Bootstrap cache: {group} hit', flush=True)
+            if group == 'packages':
+                (target / '.restored-files.json').write_text(json.dumps(sorted(self.download_files(target, names))))
             return True
-        print('Bootstrap cache: browser miss', flush=True)
+        print(f'Bootstrap cache: {group} miss', flush=True)
         return False
 
-    def save_browser(self, key: str, source: Path) -> None:
+    def save_downloads(self, group: str, key: str, source: Path, names: tuple[str, ...]) -> None:
+        inventory = source / '.restored-files.json'
+        if group == 'packages' and regular(inventory):
+            previous = set(json.loads(inventory.read_text()))
+            if self.download_files(source, names) <= previous:
+                print('Bootstrap cache: packages unchanged; retaining verified snapshot', flush=True)
+                return
+        # Check the budget before reading/copying hundreds of MB into a tar
+        # that save() would discard. Include generous tar/PAX header overhead;
+        # count hardlinked payloads only once, as tarfile does.
+        estimate = 0
+        seen = set()
+        for name in names:
+            for path in (source / name).rglob('*'):
+                estimate += 2048
+                info = path.lstat()
+                identity = (info.st_dev, info.st_ino)
+                if stat.S_ISREG(info.st_mode) and identity not in seen:
+                    estimate += info.st_size
+                    seen.add(identity)
+        if not self.can_save(estimate):
+            print(f'Bootstrap cache: not building {group} archive; preserving disk space', flush=True)
+            return
         # Build the archive on the disposable root volume. Only a complete
         # download is published atomically, under the shared space limits.
         with tempfile.TemporaryDirectory() as staging:
-            archive_path = Path(staging) / 'browser.tar'
+            archive_path = Path(staging) / f'{group}.tar'
             def portable_link(member: tarfile.TarInfo) -> tarfile.TarInfo:
                 # uv indexes use absolute symlinks into archive-v0. Rewrite
                 # internal links so a fresh staging path can reuse the cache.
@@ -223,17 +273,26 @@ class Cache:
                     member.linkname = os.path.relpath(target, (source / member.name).parent)
                 return member
             with tarfile.open(archive_path, 'w') as archive:
-                for name in ('uv', 'browsers'):
+                for name in names:
                     archive.add(source / name, arcname=name, filter=portable_link)
-            self.save(archive_path, self.root / 'browser' / f'{key}_{digest(archive_path)}.tar')
+            self.save(archive_path, self.root / group / f'{key}_{digest(archive_path)}.tar')
 
-    def prune_browser(self, key: str) -> None:
-        matching = [entry for entry in (self.root / 'browser').glob(f'{key}_*.tar')
+    def prune_downloads(self, group: str, key: str) -> None:
+        matching = [entry for entry in (self.root / group).glob(f'{key}_*.tar')
                     if regular(entry)]
         newest = max(matching, key=lambda entry: entry.stat().st_mtime, default=None)
-        for entry in (self.root / 'browser').iterdir():
+        for entry in (self.root / group).iterdir():
             if entry != newest:
                 entry.unlink()
+
+    def restore_browser(self, key: str, target: Path) -> bool:
+        return self.restore_downloads('browser', key, target, ('uv', 'browsers'))
+
+    def save_browser(self, key: str, source: Path) -> None:
+        self.save_downloads('browser', key, source, ('uv', 'browsers'))
+
+    def prune_browser(self, key: str) -> None:
+        self.prune_downloads('browser', key)
 
     def prune(self, model_checksums: set[str]) -> None:
         """Called only after deploy verification; keep installed package versions."""
@@ -259,7 +318,8 @@ class Cache:
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=('restore-debs', 'save-debs', 'model', 'prune',
-                                         'restore-browser', 'save-browser', 'prune-browser'))
+                                         'restore-browser', 'save-browser', 'prune-browser',
+                                         'restore-packages', 'save-packages', 'prune-packages'))
     parser.add_argument('args', nargs='*')
     args = parser.parse_args()
     cache = Cache()
@@ -280,6 +340,15 @@ def main() -> None:
             cache.save_browser(key, Path(args.args[2]))
         else:
             cache.prune_browser(key)
+    elif args.action in ('restore-packages', 'save-packages', 'prune-packages'):
+        key = packages_key(args.args[0])
+        if args.action == 'restore-packages':
+            if not cache.restore_downloads('packages', key, Path(args.args[1]), ('npm', 'uv')):
+                raise SystemExit(3)
+        elif args.action == 'save-packages':
+            cache.save_downloads('packages', key, Path(args.args[1]), ('npm', 'uv'))
+        else:
+            cache.prune_downloads('packages', key)
     else:
         cache.prune(set(args.args))
 

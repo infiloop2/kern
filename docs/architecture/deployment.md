@@ -57,18 +57,39 @@ missing or corrupt files are downloaded and verified before atomic publication.
 Playwright's uv package cache and downloaded Chromium/FFmpeg files are also
 saved as a SHA-256-verified archive, keyed by Playwright and uv versions,
 Python ABI, architecture, and OS release. Bootstrap restores them to private
-root-disk staging, installs the Python package offline on a hit, and copies
-the browser files to their normal root-disk runtime path. Missing, corrupt or
+root-disk staging, installs the Python package offline on a hit, and hardlinks
+the package and browser files to their normal root-disk runtime paths. Removing
+staging leaves those installations intact; if hardlinks are unavailable,
+installation falls back to copying. Missing, corrupt or
 unusable caches are downloaded again. Browser OS dependencies still use apt;
 their completed `.deb` downloads are saved too. No live virtual environment,
 browser profiles or credentials are retained in this cache.
+The host Node dependency and agent CLI npm downloads, plus the Hermes,
+embedding and transcription uv package downloads, use a separate verified
+archive keyed by uv, Python ABI, architecture and OS release. Bootstrap restores
+it to private root-disk staging. npm uses `--prefer-online`; Python requirements
+are resolved with `uv pip compile --refresh` and installed with `uv pip sync`.
+This revalidates resolution metadata while reusing unchanged downloaded
+artifacts; new or changed dependencies are downloaded normally. Online
+resolution failures remain deployment failures. Version pins
+and the host Node lockfile still determine the new installations. Live Node
+modules, Python virtual environments and the Hermes interpreter are rebuilt
+on root, never restored from the download cache. Python installation uses
+hardlinks from private root-disk staging to avoid copying package contents again;
+removing staging leaves the fresh root-owned installations intact. Unchanged
+package artifacts retain their existing verified snapshot, and the space budget
+is checked before constructing any new archive. The first deployment of this
+cache format fills it; later upgrades can reuse it.
 Runtime services have no access to the durable cache. Cache writes are skipped
 when they would exceed 2 GiB or leave less than 1 GiB free on the admin volume.
 After deployment verification succeeds, bootstrap removes model digests no
 longer requested, archives whose package/version/architecture is not installed,
-and browser archives other than the newest one for the current compatibility key.
+and browser/package archives other than the newest one for their current compatibility keys.
 Failed deployments retain completed cached files; abandoned cache partials are
 removed on the next bootstrap. Removing this directory only loses download savings.
+Each major bootstrap phase logs UTC start/completion timestamps and elapsed
+seconds, including in captured Lima output, so provisioning delays can be
+distinguished from lifecycle operations and subsequent smoke checks.
 
 Deploy and reconfigure take operator endpoint arguments
 (`--operator-ssh-public-key` and `--operator-cloudflare-hostname`, the tunnel

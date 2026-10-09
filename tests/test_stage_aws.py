@@ -475,6 +475,7 @@ import tests.stage.stage_aws
         self.assertEqual(launch["media_id"], "400")
         self.assertEqual(launch["objective"], "ENGAGEMENTS")
         self.assertEqual(launch["audience"], {"countries": ["US"]})
+        self.assertIn(unittest.mock.call("instagram_ads_diagnose_account", {"account_id": "100", "limit": 1}), calls.call_args_list)
         self.assertFalse(any(call.args[0] in ("instagram_ads_launch_campaign", "instagram_ads_end_campaign") for call in calls.call_args_list))
 
     def test_browser_stage_reads_status_without_requesting_a_post(self) -> None:

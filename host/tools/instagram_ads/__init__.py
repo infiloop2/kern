@@ -12,6 +12,7 @@ import json
 import re
 import time
 import uuid
+from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import cast
@@ -95,7 +96,7 @@ def _cursor(value: JSONObject) -> str | None:
         return None
     cursors = paging.get("cursors")
     after = cursors.get("after") if isinstance(cursors, dict) else None
-    if not isinstance(after, str) or CURSOR_RE.fullmatch(after) is None:
+    if not isinstance(after, str) or CURSOR_RE.fullmatch(after) is None or "://" in after or after.startswith("//"):
         raise RuntimeError("Meta returned another page without a usable cursor. Completeness cannot be established.")
     return after
 
@@ -107,7 +108,7 @@ def _page(tool_input: JSONObject, api: HostAPI) -> dict[str, str]:
     params = {"limit": str(limit)}
     if "after" in tool_input:
         after = tool_input["after"]
-        if not isinstance(after, str) or CURSOR_RE.fullmatch(after) is None:
+        if not isinstance(after, str) or CURSOR_RE.fullmatch(after) is None or "://" in after or after.startswith("//"):
             raise ToolInputValidationError("after must be an opaque provider cursor, not a URL.")
         api.outbound.guard_request_parameter_string(after, allow_machine_tokens=True)
         params["after"] = after
@@ -328,6 +329,98 @@ def _account_result(value: JSONObject) -> JSONObject:
         "minimum_daily_budget": str(value["min_daily_budget"]) if value.get("min_daily_budget") is not None else None,
         "default_dsa_beneficiary": value.get("default_dsa_beneficiary"), "default_dsa_payor": value.get("default_dsa_payor")})
     return result
+
+
+def _field_state(value: JSONObject, key: str, kind: type) -> str:
+    if key not in value:
+        return "missing"
+    item = value[key]
+    if item is None:
+        return "null"
+    if not isinstance(item, kind) or isinstance(item, list) and any(not isinstance(entry, str) for entry in item):
+        return "invalid"
+    return "present" if item else "empty"
+
+
+def _diagnostic_text(value: JSONObject, key: str) -> str | None:
+    item = value.get(key)
+    return item if isinstance(item, str) else None
+
+
+def _diagnostic_page(row: JSONObject) -> JSONObject:
+    state = _field_state(row, "instagram_business_account", dict)
+    linked = row.get("instagram_business_account")
+    linked = linked if isinstance(linked, dict) else {}
+    type_state = _field_state(linked, "account_type", str)
+    reason = "none"
+    if state not in {"present", "empty"}:
+        reason = "linked_identity_" + state
+    elif type_state != "present":
+        reason = "account_type_" + ("invalid" if type_state == "empty" else type_state)
+    elif linked.get("account_type") not in {"BUSINESS", "MEDIA_CREATOR"}:
+        reason = "account_type_unsupported"
+    elif any(not isinstance(identifier, str) or ID_RE.fullmatch(identifier) is None
+             for identifier in (row.get("id"), linked.get("id"))):
+        reason = "invalid_id"
+    return {"page_id": _diagnostic_text(row, "id"), "page_name": _diagnostic_text(row, "name"),
+            "instagram_user_id": _diagnostic_text(linked, "id"), "username": _diagnostic_text(linked, "username"),
+            "account_type": _diagnostic_text(linked, "account_type"), "linked_identity_state": state,
+            "account_type_state": type_state, "identity_filter_reason": reason}
+
+
+def _diagnostic_params(value: JSONObject, api: HostAPI, cursor: str) -> dict[str, str]:
+    return _page({"limit": value.get("limit", 10), **({"after": value[cursor]} if cursor in value else {})}, api)
+
+
+def _diagnostic_edge(graph: _Graph, path: str, fields: str, params: dict[str, str],
+                     convert: Callable[[JSONObject], JSONObject], stage: str) -> JSONObject:
+    metadata: JSONObject = {"http_status": None, "error_code": None, "error_subcode": None}
+    try:
+        listing = graph.get(path, fields, **params)
+        rows = [convert(row) for row in _rows(listing, maximum=int(params["limit"]))]
+        return {"status": "ok", "items": cast(list[JSONValue], rows), "next_cursor": _cursor(listing), **metadata}
+    except IntegrationReconnectRequired:
+        raise
+    except Exception as exc:
+        report_ads_failure("instagram_ads", "diagnose_account", exc, phase=stage)
+        # Read only typed numeric metadata. Never return exception/provider text.
+        current: BaseException | None = exc
+        seen: set[int] = set()
+        while current is not None and id(current) not in seen and len(seen) < 16:
+            seen.add(id(current))
+            if isinstance(current, (AdsProviderError, WebRequestError)):
+                if metadata["http_status"] is None and current.status:
+                    metadata["http_status"] = current.status
+                try:
+                    body = json.loads(current.body)
+                except (ValueError, UnicodeDecodeError, RecursionError):
+                    body = None
+                error = body.get("error") if isinstance(body, dict) else None
+                if isinstance(error, dict):
+                    for source, target in (("code", "error_code"), ("error_subcode", "error_subcode")):
+                        if metadata[target] is None and type(error.get(source)) is int:
+                            metadata[target] = error[source]
+            current = current.__cause__ or current.__context__
+        return {"status": "failed", "items": [], "next_cursor": None, **metadata}
+
+
+def _diagnose_account(graph: _Graph, value: JSONObject, api: HostAPI, connection: JSONObject) -> JSONObject:
+    account_id = _id(value["account_id"], "account_id")
+    account = _account(graph, account_id)
+    prefix = "/act_" + account_id
+    pages = _diagnostic_edge(graph, prefix + "/promote_pages", "id,name,instagram_business_account{id,username,account_type}",
+                             _diagnostic_params(value, api, "pages_after"), _diagnostic_page, "diagnostic Pages")
+    instagram = _diagnostic_edge(graph, prefix + "/connected_instagram_accounts", "id,username",
+        _diagnostic_params(value, api, "instagram_after"),
+        lambda row: {"instagram_user_id": _diagnostic_text(row, "id"), "username": _diagnostic_text(row, "username")},
+        "diagnostic Instagram accounts")
+    return {"message": "Provider evidence only. Missing tasks or filtered Pages do not prove missing Meta access. "
+            "A failed edge is unavailable, not empty. Each cursor continues only its own edge; no pages are followed automatically. "
+            "No ad creation, provider authorization or delivery was tested; launch guards remain unchanged.",
+            "connection": {"facebook_user_id": connection["id"], "name": connection["label"], "scopes": connection["scopes"]},
+            "account": _account_result(account), "user_tasks_state": _field_state(account, "user_tasks", list),
+            "launch_task_check_passes": bool({"ADVERTISE", "MANAGE"}.intersection(_strings(account.get("user_tasks")))),
+            "pages": pages, "instagram_accounts": instagram}
 
 
 def _identity(graph: _Graph, account_id: str, page_id: str, instagram_id: str) -> JSONObject:
@@ -868,6 +961,9 @@ class InstagramAdsTool:
             # Validate all direct free text before even the account read.
             spec = MANIFEST.action(action)
             if spec is not None and spec.approval == "direct":
+                if action == "diagnose_account":
+                    _diagnostic_params(tool_input, api, "pages_after")
+                    _diagnostic_params(tool_input, api, "instagram_after")
                 if "after" in tool_input or "limit" in tool_input:
                     _page(tool_input, api)
                 if action == "lookup_targeting":
@@ -894,7 +990,9 @@ class InstagramAdsTool:
                     payload={"tool_id": MANIFEST.tool_id, "account_id": account_id, "campaign_id": campaign_id,
                              "campaign_name": campaign.get("name", ""), "connection": connection})
             else:
-                _connection(graph, api)
+                connection = _connection(graph, api)
+                if action == "diagnose_account":
+                    return ActionExecuted(_diagnose_account(graph, tool_input, api, connection))
                 return ActionExecuted(_read(graph, action, tool_input, api))
             return ActionPendingApproval(record.approval_id, record.summary)
         except Exception as exc:
