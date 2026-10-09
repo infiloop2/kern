@@ -48,6 +48,24 @@ class BrowserStorageTests(unittest.TestCase):
         with self.assertRaises(BrowserError):
             self.store.auth(KEY)
 
+    def test_linkedin_identity_constraints_usage_and_shared_capacity(self):
+        owner = "https://www.linkedin.com/in/owner/"
+        data = {**deepcopy(DATA), "provider_identifier": owner,
+                "usage": {"linkedin_send_dm": {"day": "2026-10-08", "count": 50}}}
+        self.store.save_account(KEY, "linkedin", data, AUTH)
+        self.assertEqual(Store().accounts()[KEY], ("linkedin", data))
+        self.assertEqual(Store().auth(KEY), AUTH)
+        for provider, identifier in (("x", owner), ("linkedin", "example"),
+                                     ("linkedin", "https://evil.test/in/owner/"),
+                                     ("linkedin", owner + "?secret=value")):
+            with self.subTest(provider=provider, identifier=identifier), self.assertRaises(Exception):
+                self.store.save_account(KEY, provider, {**data, "provider_identifier": identifier}, AUTH)
+        self.assertEqual(Store().accounts()[KEY], ("linkedin", data))
+        for i in range(1, 5):
+            self.store.save_account("acct_" + f"{i:032x}", "x", DATA, AUTH)
+        with self.assertRaisesRegex(BrowserError, "5 browser accounts"):
+            self.store.save_account("acct_" + "f" * 32, "linkedin", data, AUTH)
+
     def test_shared_budget_rollback_and_replacement_reclaims_old_snapshot(self):
         second = "acct_" + "b" * 32
         self.store.save_account(KEY, "x", DATA, AUTH)

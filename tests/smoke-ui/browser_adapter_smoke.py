@@ -12,6 +12,8 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+
 from host.runtime.browser.browser import Browser
 from host.runtime.browser.chromium import Chromium
 from host.runtime.browser.providers import x
@@ -169,6 +171,97 @@ def check_post_text(page):
     finally:
         page.unroute(route_pattern, changed_editor)
     print("Post preparation passed: Unicode, blank lines, image emoji, slow editor, trusted keys and changed-text rejection.", flush=True)
+
+
+def check_composer_recovery(page):
+    """Real locator/input coverage without using a live account or publishing."""
+    text = "Approved 🎉\n\nexact text"
+    route_pattern = "https://x.com/**"
+    scenarios = ("delayed_ready", "existing_draft", "hidden_dialog", "replaced_editor",
+                 "recover_ready", "always_readonly", "duplicate_dialog", "changed_account", "lost_response")
+    for scenario in scenarios:
+        navigations, submissions = [], []
+        def fixture(route):
+            if route.request.method == "POST":
+                submissions.append(route.request.post_data)
+                if scenario == "lost_response":
+                    route.abort()
+                    return
+                route.fulfill(status=200, content_type="application/json", body=json.dumps({"data": {"create_tweet": {"tweet_results": {"result": {
+                        "rest_id": "123", "core": {"user_results": {"result": {"core": {"screen_name": "example"}}}}
+                    }}}}}))
+                return
+            navigations.append(route.request.url)
+            html = HTML.replace('contenteditable="true" style=', 'role="textbox" contenteditable="true" style=')
+            if scenario in ("delayed_ready", "recover_ready", "always_readonly", "changed_account"):
+                blocked = scenario == "always_readonly" or len(navigations) == 1
+                if blocked:
+                    html = html.replace('contenteditable="true" style=', 'contenteditable="true" aria-readonly="true" style=')
+                if scenario == "delayed_ready":
+                    html += "<script>setTimeout(() => document.querySelector('[role=dialog] [contenteditable]').removeAttribute('aria-readonly'), 100);</script>"
+                if scenario == "changed_account" and len(navigations) == 2:
+                    html = html.replace('href="/example"', 'href="/different"')
+            if scenario == "existing_draft":
+                html = html.replace('150)"></div>', '150)"><div>stale <img alt="🎊"></div><div><br></div></div>')
+            if scenario == "hidden_dialog":
+                html += f'<div role="dialog" hidden>{EDITOR}</div><div role="dialog">Unrelated dialog</div>'
+            if scenario == "duplicate_dialog":
+                html += f'<div role="dialog">{EDITOR}</div>'
+            if scenario == "replaced_editor":
+                html += """<script>
+                    const editor = document.querySelector('[role=dialog] [contenteditable]');
+                    editor.addEventListener('keydown', () => {
+                        editor.replaceWith(editor.cloneNode(true));
+                    }, {once:true});
+                </script>"""
+                # Only replace on the first navigation; recovery starts fresh.
+                if len(navigations) == 2:
+                    html = HTML
+            reader = x_post_tweet.MATCHES_TEXT.replace("return read(editor) === expected;", "return read(editor);")
+            html = html.replace("body:this.parentElement.querySelector('[contenteditable]').textContent",
+                                "body:window.fixtureReadText([this.parentElement.querySelector('[contenteditable]')])")
+            html += f"<script>window.fixtureReadText = {reader};</script>"
+            route.fulfill(status=200, content_type="text/html", body=html)
+        page.route(route_pattern, fixture)
+        started = monotonic()
+        try:
+            with (patch.object(x_post_tweet, "COMPOSER_TIMEOUT_MS", 500),
+                  patch.object(x_post_tweet, "CONFIRMATION_TIMEOUT_MS", 500)):
+                if scenario in ("always_readonly", "duplicate_dialog", "changed_account"):
+                    try:
+                        x_post_tweet.prepare_post(page, "example", text)
+                        raise AssertionError(f"Unsafe {scenario} composer accepted")
+                    except x_post_tweet.PreparationFailed as exc:
+                        expected_step = "verify_account" if scenario == "changed_account" else "wait_for_composer"
+                        assert exc.step == expected_step, str(exc)
+                        assert exc.facts["preparation_attempt"] == 2, exc.facts
+                        assert not submissions
+                        if scenario == "always_readonly":
+                            assert exc.facts["composer_visible"] is True, exc.facts
+                            assert exc.facts["composer_editable"] is False, exc.facts
+                else:
+                    x_post_tweet.prepare_post(page, "example", text)
+                    composer = x_post_tweet.active_composer(page)
+                    editor = composer.get_by_test_id("tweetTextarea_0")
+                    assert page.evaluate(x_post_tweet.MATCHES_TEXT, [editor.element_handle(), text])
+                    assert page.locator('[data-testid="tweetTextarea_0"]').first.text_content() == "", scenario
+                    assert not submissions, scenario
+                    if scenario == "lost_response":
+                        try:
+                            x_post_tweet.submit_prepared_post(page, "example")
+                            raise AssertionError("Unconfirmed post accepted")
+                        except PlaywrightTimeoutError:
+                            pass
+                    else:
+                        assert x_post_tweet.submit_prepared_post(page, "example") == "https://x.com/example/status/123"
+                    assert submissions == [text], (scenario, submissions)
+                expected_navigations = 2 if scenario in (
+                    "recover_ready", "always_readonly", "duplicate_dialog", "changed_account", "replaced_editor") else 1
+                assert len(navigations) == expected_navigations, (scenario, navigations)
+                assert monotonic() - started < 15, scenario
+        finally:
+            page.unroute(route_pattern, fixture)
+    print("Composer fixture passed: readiness, drafts, hidden/duplicate dialogs, replacement, bounded recovery, account change and one submission on confirmation loss.", flush=True)
 
 
 def check_post_resources(playwright):
@@ -406,6 +499,7 @@ def run(playwright):
             browser.page.evaluate("window.onbeforeunload = () => 'Unsaved draft'")
             browser.input({"kind": "home"})
             check_post_text(browser.page)
+            check_composer_recovery(browser.page)
             exact_text = "First line\nCafé 😀 +\tend".ljust(280, "x")
             x_post_tweet.prepare_post(browser.page, "example", exact_text)
             assert browser.page.get_by_role("dialog").get_by_test_id("tweetTextarea_0").inner_text() == exact_text

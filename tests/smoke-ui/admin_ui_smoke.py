@@ -108,7 +108,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scope",
-        choices=("all", "core", "workspaces", "overload", "oauth-poll", "navigation-order", "swarm", "notices"),
+        choices=("all", "core", "workspaces", "overload", "oauth-poll", "navigation-order", "swarm", "notices", "google-ads", "x-ads"),
         default="all",
         help="Smoke only the host UI core, only workspaces, or both.",
     )
@@ -180,6 +180,15 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                         oauth_context.new_page(), url, log_in, open_home_integration, runtime, provider,
                     )
                     oauth_context.close()
+            if scope in {"all", "core", "google-ads"}:
+                import google_ads_smokes
+                for mobile in (False, True):
+                    ads_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    google_ads_smokes.run(ads_context.new_page(), url, log_in, open_home_integration)
+                    ads_context.close()
             if scope in {"all", "core", "swarm"}:
                 import swarm_smokes
                 for mobile in (False, True):
@@ -189,6 +198,15 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                     )
                     swarm_smokes.run(swarm_context.new_page(), url, log_in, mobile=mobile)
                     swarm_context.close()
+            if scope in {"all", "core", "x-ads"}:
+                import x_ads_smokes
+                for mobile in (False, True):
+                    ads_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    x_ads_smokes.run(ads_context.new_page(), url, log_in, open_home_integration)
+                    ads_context.close()
             if scope in {"all", "core"}:
                 import file_preview_smokes
                 files_context = browser.new_context(service_workers="block")
@@ -206,6 +224,14 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                     )
                     seo_tools_smokes.run(seo_context.new_page(), url, log_in, open_home_integration)
                     seo_context.close()
+                import instagram_ads_smokes
+                for mobile in (False, True):
+                    ads_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    instagram_ads_smokes.run(ads_context.new_page(), url, log_in, open_home_integration)
+                    ads_context.close()
                 import analytics_smokes
                 analytics_context = browser.new_context(service_workers="block")
                 analytics_smokes.run(analytics_context.new_page(), url, log_in)
@@ -242,6 +268,8 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 desktop_smoke(desktop_page, url)
                 import browser_adapter_smoke
                 browser_adapter_smoke.run(playwright)
+                import linkedin_adapter_smoke
+                linkedin_adapter_smoke.run(playwright)
                 import browser_smokes
                 browser_context = browser.new_context(viewport={"width": 1280, "height": 900})
                 browser_smokes.run(browser_context.new_page(), url, log_in, open_home_integration)

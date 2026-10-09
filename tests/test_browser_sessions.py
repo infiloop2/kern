@@ -307,7 +307,7 @@ class BrowserSessionsTests(unittest.TestCase):
         with self.assertRaises(BrowserError):
             accounts.dispatch("post_tweet", {**login, **self.body}, agent_action=True)
         with self.assertRaisesRegex(BrowserError, "Unsupported browser provider"):
-            accounts.dispatch("create", {"provider": "linkedin"})
+            accounts.dispatch("create", {"provider": "unsupported"})
         lease = accounts.dispatch("open", login)["lease"]
         accounts.dispatch("cancel", {**login, "lease": lease})
         self.assertEqual(accounts.store.accounts(), {})

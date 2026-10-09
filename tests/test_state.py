@@ -1932,6 +1932,8 @@ class RuntimeDependencyTests(unittest.TestCase):
             (Path("host/runtime/transcription/service.py"), "faster_whisper"),
             (Path("host/runtime/browser/browser.py"), "playwright"),
             (Path("host/runtime/browser/providers/x.py"), "playwright"),
+            (Path("host/runtime/browser/providers/linkedin.py"), "playwright"),
+            (Path("host/runtime/browser/actions/linkedin_dm.py"), "playwright"),
             (Path("host/runtime/browser/actions/x_post_tweet.py"), "playwright"),
         }
         offenders: list[str] = []

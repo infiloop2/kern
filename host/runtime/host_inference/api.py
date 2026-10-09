@@ -24,7 +24,7 @@ MAX_REQUEST_BODY_BYTES = 128 * 1024
 MAX_CONCURRENT_CALLS = 4
 MAX_CONCURRENT_CONNECTIONS = 8
 _CALL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CALLS)
-# Diagnostic comparisons must not consume the four slots used for applied work.
+# Decisions retain a separate slot from Jev and text completion.
 _DECISION_SLOTS = threading.BoundedSemaphore(1)
 
 

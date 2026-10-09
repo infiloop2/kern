@@ -89,16 +89,16 @@ fallback.
 
 Memory recall uses TypeSafe Jev when enabled to score the bounded task query
 and up to 20 candidate descriptions under short local ids. Every recall with
-candidates requests Jev. In parallel, it requests a diagnostic comparison from
-Luna Decisions using the same query and candidate descriptions. OpenAI must be
-enabled and configured; otherwise its adapter is not called. Luna never changes
-memory selection, including when Jev is unavailable. There is no random assignment.
-Decisions has one separate concurrency slot; it cannot consume the existing four
-slots used by Jev and text completion. Extra comparisons fail as busy without queuing.
-Disabled Jev makes no external call and keeps hybrid order. The inference
-service owns enablement checks and reports `provider_disabled` or `timeout` to
-callers without exposing configuration tables or credentials. Page contents
-are never sent to either provider. Unsuccessful Jev reranking retains hybrid order.
+candidates requests Jev and, in parallel, Luna Decisions using the same original
+hybrid candidates. OpenAI must be enabled and configured; otherwise its adapter
+is not called. With both validated successes, recall selects the top-three union
+(shared pages first, then alternating Jev/Luna picks) without refill. One success
+selects that provider's top five; neither success keeps the hybrid top five.
+There is no random assignment. Decisions has one separate concurrency slot;
+it cannot consume the existing four slots used by Jev and text completion.
+Extra calls fail as busy without queuing. The inference service owns enablement
+checks and reports `provider_disabled` or `timeout` to callers without exposing
+configuration tables or credentials. Page contents are never sent to either provider.
 Swarm task titles use the same bounded query text as recall, passed to Luna
 with task-title instructions. See [Memory recall](memory-recall.md) for
 retrieval, reranking, and diagnostics.

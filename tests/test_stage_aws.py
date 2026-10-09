@@ -453,11 +453,54 @@ import tests.stage.stage_aws
             with self.assertRaisesRegex(AssertionError, "invalid accounts"):
                 stage._check_upwork_live()
 
+    def test_instagram_ads_stage_reads_and_denies_proposals_without_activation(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        def read(name, values):
+            if name == "instagram_ads_list_accounts":
+                return {"items": [{"account_id": "100"}]}
+            if name == "instagram_ads_get_account":
+                return {"minimum_daily_budget": "50", "currency_offset": 100}
+            if name == "instagram_ads_list_identities":
+                return {"items": [{"page_id": "200", "instagram_user_id": "300"}]}
+            if name == "instagram_ads_list_posts":
+                return {"items": [{"media_id": "400", "eligible_to_boost": True}]}
+            if name == "instagram_ads_list_campaigns":
+                return {"items": [{"id": "500"}]}
+            return {"items": []}
+        with patch.object(stage, "_successful_tool_call", side_effect=read) as calls, patch.object(stage, "_queue_and_deny") as deny:
+            self.assertIn("no live ads or spend", stage._check_tool_provider("instagram_ads"))
+        self.assertEqual(deny.call_count, 2)
+        self.assertEqual(deny.call_args_list[0].args[1], "instagram_ads_end_campaign")
+        launch = deny.call_args_list[1].args[2]
+        self.assertEqual(launch["media_id"], "400")
+        self.assertEqual(launch["objective"], "ENGAGEMENTS")
+        self.assertEqual(launch["audience"], {"countries": ["US"]})
+        self.assertFalse(any(call.args[0] in ("instagram_ads_launch_campaign", "instagram_ads_end_campaign") for call in calls.call_args_list))
+
     def test_browser_stage_reads_status_without_requesting_a_post(self) -> None:
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
         with patch.object(stage, "_successful_tool_call", return_value={"accounts": [{"state": "connected"}]}) as call:
             self.assertIn("1 saved account", stage._check_tool_provider("browser"))
         call.assert_called_once_with("browser_x_connection_status", {})
+
+    def test_x_ads_stage_discovers_one_account_without_writes(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        responses = [{"accounts": [{"id": "advertiser1"}], "next_cursor": "more"}, {}, {}, {}]
+        with patch.object(stage, "_successful_tool_call", side_effect=responses) as call:
+            self.assertIn("no advertising writes", stage._check_tool_provider("x_ads"))
+        self.assertEqual(call.call_args_list, [
+            unittest.mock.call("x_ads_list_accounts", {"count": 1}),
+            unittest.mock.call("x_ads_get_account", {"account_id": "advertiser1"}),
+            unittest.mock.call("x_ads_list_funding_sources", {"account_id": "advertiser1", "count": 1}),
+            unittest.mock.call("x_ads_list_promotable_users", {"account_id": "advertiser1", "count": 1}),
+        ])
+        with patch.object(stage, "_successful_tool_call", return_value={"accounts": []}) as call:
+            self.assertIn("no advertiser account", stage._check_tool_provider("x_ads"))
+        call.assert_called_once()
+        for response in ({}, {"accounts": [{"id": ""}]}, {"accounts": [{"id": "a"}, {"id": "b"}]}):
+            with patch.object(stage, "_successful_tool_call", return_value=response):
+                with self.assertRaisesRegex(AssertionError, "invalid"):
+                    stage._check_tool_provider("x_ads")
 
     def test_vercel_stage_checks_personal_and_all_team_project_pages(self) -> None:
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
@@ -534,6 +577,13 @@ import tests.stage.stage_aws
             with self.assertRaisesRegex(AssertionError, "rate limit"):
                 stage._check_brave_live()
         self.assertEqual(call.call_count, 1)
+
+    def test_google_ads_stage_is_an_authenticated_read_without_mutations(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        with patch.object(stage, "_successful_tool_call", return_value={"customer_ids": ["1234567890"], "truncated": False}) as call:
+            detail = stage._check_tool_provider("google_ads")
+        call.assert_called_once_with("google_ads_list_accounts", {})
+        self.assertIn("no campaigns changed", detail)
 
     def test_search_console_stage_selects_a_writable_property(self) -> None:
         stage = StageAwsSmoke.__new__(StageAwsSmoke)

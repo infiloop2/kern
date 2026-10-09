@@ -31,7 +31,7 @@ class Connection(http.client.HTTPConnection):
 def request(path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
     conn = Connection()
     try:
-        conn.request("POST", path, json.dumps(body or {}), {"Content-Type": "application/json"})
+        conn.request("POST", path, json.dumps(body or {}, ensure_ascii=False).encode("utf-8"), {"Content-Type": "application/json"})
         response = conn.getresponse()
         raw = response.read(3 * 1024 * 1024 + 1)
         if len(raw) > 3 * 1024 * 1024:
@@ -44,6 +44,6 @@ def request(path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
             raise BrowserError(str(result.get("error", "Browser unavailable.")))
         return result
     except (OSError, ValueError, http.client.HTTPException) as exc:
-        raise BrowserError("Browser service unavailable. Check Host diagnostics. If submitting a post, check X before approving another attempt.") from exc
+        raise BrowserError("Browser service unavailable. Check Host diagnostics. If submitting a post or message, check the website before approving another attempt.") from exc
     finally:
         conn.close()

@@ -22,7 +22,7 @@ for an operator login, a login check, readiness probe, or a coded action.
 
 ```text
 Operator popup → authenticated admin API → /operator/* ┐
-                                                     ├→ kern-browser → Chromium → X
+                                                     ├→ kern-browser → Chromium → X / LinkedIn
 Agent → Tool API → Browser tool → /actions/*           ┘
              ↳ ordinary Host API approvals
 ```
@@ -120,11 +120,12 @@ A saved account is the first-class service object:
 }
 ```
 
-`account_id` is a random Kern identifier. `provider` currently supports only `x`.
+`account_id` is a random Kern identifier. `provider` supports `x` and `linkedin`.
 `provider_identifier` is defined and verified by the provider adapter. For X,
 it is the lowercase handle without `@`, detected from the signed-in profile
-link. Future providers may use another verified identifier; email availability
-is not assumed. We do not currently extract a provider user ID or email. Each account
+link. LinkedIn uses the canonical own-profile URL read from the authenticated navigation
+Me menu. Profile URL renames require a new connection; they never silently replace
+the saved identity. Email availability is not assumed. We do not currently extract a provider user ID or email. Each account
 owns private saved authentication state as an implementation detail; tools never
 receive cookies or storage snapshots.
 
@@ -138,7 +139,7 @@ Saved account states are exactly:
 There is no saved `connecting` or `disconnected` state. New logins are temporary,
 identified by an operator-only `login_id`. Only successful Save creates a saved
 account. Cancel, ten minutes of inactivity, or a service restart discards the
-unfinished login and its browser files. Connect X account also closes existing
+unfinished login and its browser files. Connect account also closes existing
 operator control and discards any unfinished login, including one whose popup
 closed without delivering its cancel request. Saved accounts remain paused and
 retain their snapshots; old login IDs and leases cannot control the new login.
@@ -147,7 +148,7 @@ only one interactive browser can be open at once.
 
 Opening an existing account marks it `needs_attention` before browser control
 is granted. Successful Save or Check login restores `connected` only for the
-same handle. Cancel or lease expiry releases control but leaves the account
+same provider identity. Cancel or lease expiry releases control but leaves the account
 paused. A changed handle cannot silently replace the saved identity; this
 includes renames, which cannot currently be distinguished from switching
 accounts. Connect a new account for a different handle.
@@ -155,7 +156,7 @@ accounts. Connect a new account for a different handle.
 A failed check does not delete data. Open browser lets the operator restore the
 same external account under its existing Kern account ID. Disconnect deletes
 that account's entire directory, including cookies and usage data, and releases
-its slot. Connecting again creates a new account ID, even for the same X account.
+its slot. Connecting again creates a new account ID, even for the same external account.
 Daily limits are scoped to each Kern connection.
 
 ## Admin interface
@@ -172,7 +173,7 @@ All bodies are JSON objects. Below, `account` means `{account_id: string}`;
 | --- | --- | --- |
 | `ready` | `{}` | `{ready: true}` after a temporary Chromium frame probe. |
 | `list` | `{}` | `{accounts: Account[]}`; no temporary logins, usage data, or secrets. |
-| `create` | `{provider: "x"}` | `{login_id}`; replaces existing operator control and allocates a fresh temporary login without creating an account. |
+| `create` | `{provider: "x" | "linkedin"}` | `{login_id}`; replaces existing operator control and allocates a fresh temporary login without creating an account. |
 | `open` | reference | `{site, lease, width, height}`; launches the fixed provider URL and grants operator control. |
 | `frame` | control | `{image, origin}`; JPEG base64 plus current origin, with no-store admin responses. |
 | `input` | control plus input fields below | `{ok: true}`; input refreshes the ten-minute lease. |
@@ -207,7 +208,7 @@ inspect image pixels.
 The popup streams images from hosted Chromium. Clicks and desktop typing go to
 the selected remote field. A compact phone text bar supplies native keyboard
 input. Login challenges remain operator-controlled. There is no editable
-address bar; verification providers may be opened by X in the same remote view.
+address bar; verification providers may be opened by the selected website in the same remote view.
 Downloads, file uploads, and service workers are unsupported. Secure WebSockets
 use Chromium's native implementation through the same HTTPS relay as page traffic.
 Close also dismisses a popup whose Open failed or whose control expired, without
@@ -215,6 +216,73 @@ cancelling another window's browser. Save is enabled only while the popup has
 control; Close during startup waits for Open and releases any acquired control.
 Cancel queues in the service's single worker even while a screenshot is busy,
 then validates its lease and closes the browser when the active operation ends.
+
+## LinkedIn Browser contract
+
+LinkedIn uses the existing private Browser session store, five-account capacity,
+operator controls and peer-UID boundaries. Migration 0089 expands the provider
+and identifier constraints; existing X sessions and counters are preserved.
+The two providers use the existing daily usage columns for their own send action:
+`x_post_tweet` for X, `linkedin_send_dm` for LinkedIn. Neither requires an
+additional role, key, OAuth scope or new service. The separate OAuth LinkedIn
+posting tool is independent and its connections cannot be used for Browser DMs.
+
+Public actions:
+
+| Action | Input | Result |
+| --- | --- | --- |
+| `linkedin_connection_status` | `{}` | Saved LinkedIn accounts; local metadata only. |
+| `linkedin_read_conversation` | `{account_id, recipient_profile_url}` | Up to the latest five messages in chronological order, recipient identity, older-history evidence and read-receipt disclosure. No `limit` or conversation-ID input. |
+| `linkedin_send_dm` | `{account_id, recipient_profile_url, text}` | Ordinary approval request; confirmed execution returns a human-readable receipt. |
+
+Public profile inputs accept only HTTPS `linkedin.com` or `www.linkedin.com`
+`/in/` URLs with a 1–200 ASCII letter/digit/underscore/hyphen slug. Host and slug
+are canonicalized. Ports, credentials, whitespace/control characters, query,
+fragment, encoded paths and unknown input fields are rejected. `account_id`
+must be a saved random `acct_` ID; no free-text outbound parameter guard is needed
+for these closed destination inputs. Text is 1–8,000 characters, non-whitespace,
+with only newline/tab allowed among ASCII controls. Approval is its content
+control; there is no outbound text guard or implicit truncation.
+
+The tools-only routes `linkedin_resolve_recipient`, `linkedin_read_conversation`
+and `linkedin_send_dm` never grant arbitrary browsing. Resolution opens the fixed
+recipient URL and requires one web member key tied to its public identifier in
+bounded bootstrap JSON, safely bounded observed website responses, or the profile's Message
+link. Missing/ambiguous identity blocks the action. Keys are website identities,
+not official OAuth subjects. Resolution runs before approval and again during
+execution; approval binds the exact sender, URL, recipient name/member key and
+text. The live sender and one-to-one header participants are checked before
+sending. Groups, InMail and attachment sending are unsupported.
+
+Reads open the profile's standard Message UI, wait for message/explicit empty
+state and inspect only the latest end. No inbox/history crawl or attachment
+fetch runs. `no_existing_conversation` needs an explicit empty state, not a
+loading timeout. Message text is bounded to 8,000 characters each with clipping
+flags; sender direction can be unknown and timestamps stay as website labels.
+Older-history evidence is `yes` when an extra loaded message is seen, otherwise
+`unknown`; absence of evidence is not complete history. Opening may send read
+receipts, and profile resolution may register a visit. Incoming messages are
+untrusted data. The Browser store keeps no message archive; tool/approval
+results retain their normal host history semantics.
+
+Each approval sends at most once, with a durable count before clicking Send,
+50 attempts per connection per UTC day. Existing drafts are not overwritten.
+Exact composer text is checked, including whitespace and emoji. Confirmation
+requires the website's create-message response with one bounded message URN,
+a new matching message row, and no supported pending/error indicator.
+Response-body evidence requires an uncompressed response with a declared length
+at most one megabyte before materializing bytes; compressed or unknown-length
+responses are not read. Unknown endpoint/receipt shapes or lost responses are terminal unconfirmed
+outcomes; the operator must check LinkedIn before another approval. No retries,
+reconciliation API or send-history ledger are introduced. Unexpected browser
+exceptions are sanitized before diagnostics and IPC; no raw DOM/response is logged.
+
+The adapter's selectors and receipt contract have deterministic Chromium
+fixtures. These are not proof of LinkedIn accepting a saved session or of current
+live-site compatibility. A deployed operator login and approved send/readback
+remain necessary live acceptance checks. Unknown website behavior fails closed;
+Kern does not solve or bypass login challenges. Operator-facing capability,
+privacy and policy details live in the Browser Home > Integrations guide.
 
 ## Tools service interface and approval flow
 
@@ -225,8 +293,8 @@ Only `kern-tools` can call these private routes:
 | `/actions/list` | `{}` | `{accounts: Account[]}`; reads saved metadata without browsing. |
 | `/actions/post_tweet` | `{account_id, provider_identifier, text, in_reply_to_tweet_id?}` | `{status: "posted", url}`; executes the already-approved proposal. |
 
-The agent-facing tool actions are `browser.x_connection_status` and
-`browser.x_post_tweet`. Posting accepts `account_id`, exact `text`, and optional
+The X agent-facing tool actions are `browser.x_connection_status` and
+`browser.x_post_tweet`; status filters out LinkedIn connections. Posting accepts `account_id`, exact `text`, and optional
 numeric `in_reply_to_tweet_id`. The agent does not supply the provider identifier
 or a request ID. Text is nonempty and at most 280 characters. Reply IDs contain 1 to 25 digits.
 Exact-text approval is the content control; approved text is structurally
@@ -262,10 +330,21 @@ without this field. The evidence is never forwarded as posting input.
 Each approval authorizes one attempt. Only a confirmed X response returns
 success and a post URL. All other outcomes return failure and finish the call.
 If submission may have occurred, the failure tells the operator to check X
-before approving another attempt. There is no automatic retry, duplicate-text
-check, idempotency API, uncertain status, reconciliation endpoint or persistent
+before approving another attempt. There is no automatic submission retry,
+duplicate-text check, idempotency API, uncertain status, reconciliation endpoint or persistent
 submission-error pause. A new attempt requires a new tool request and approval;
 separately approved calls may intentionally publish identical content.
+
+Composer preparation has a shared 60-second action budget, with at most one
+recovery pass for composer readiness, clearing, typing or submit-button waits.
+Recovery navigates to the same composer or approved reply target and verifies
+the live account again before typing. Navigation failures, account/target
+mismatches and changed approved text remain terminal. Recovery never clicks
+Post or consumes an attempt; once submission begins it is never repeated.
+The adapter selects exactly one visible dialog containing a visible editor,
+waits for editability, skips clearing only for a confirmed logically empty
+editor, and verifies emptiness before typing. Ambiguous visible composers fail
+closed. The Post button is scoped to that same composer selection.
 
 Preparation failures report the failed step in both the terminal approval
 result and a `browser.x_post_tweet` Host diagnostics warning. Steps distinguish
@@ -274,14 +353,16 @@ composer opening, clearing/typing the text, and waiting for the submit button.
 Diagnostics preserve the original exception type and safe stack, without raw
 Playwright messages, page text, cookies or credentials. Navigation HTTP failures
 include the status. No preparation failure submits or consumes a posting attempt.
-Preparation warnings also include elapsed preparation time and a best-effort
+Preparation warnings also include elapsed preparation and failed-step time,
+attempt number, the first recovery step/type when applicable, and a best-effort
 structural snapshot: approved reply target ID, hostname, known route category,
 article/target/dialog/editor counts, and (for one matching reply control)
-visibility, enabled state and a center-point obstruction check. These are facts
-observed after failure, not proof of its cause. Snapshot errors retain partial
+visibility, enabled state and a center-point obstruction check. A unique visible
+popup editor adds attached/visible/enabled/editable/focused/empty booleans.
+These are facts observed after failure, not proof of its cause. Snapshot errors retain partial
 facts and never replace the original failure. No page text, screenshots, arbitrary
-attributes, paths or query parameters are captured. Target matching and submission
-behavior are unchanged; ambiguous targets still fail closed.
+attributes, paths or query parameters are captured. Target matching is unchanged;
+ambiguous targets still fail closed.
 
 The service applies a common connected-state and operator-control gate to
 account-scoped tool dispatch. Future actions inherit this gate. Each provider file supplies its login URL and identity verification through the

@@ -1,4 +1,13 @@
 """Read the composer's logical text without layout-generated line breaks."""
+from typing import Any
+
+
+def active_composer(page: Any) -> Any:
+    # Ignore unrelated dialogs and the inline home-feed editor. Never choose
+    # the first match: multiple visible composer dialogs must fail closed.
+    return page.get_by_role("dialog").filter(
+        has=page.locator('[data-testid="tweetTextarea_0"]:visible')).filter(visible=True)
+
 
 # X's Draft editor uses block elements, placeholder BRs for empty blocks,
 # inline decorations for links and IMG alt text for emoji. innerText adds an

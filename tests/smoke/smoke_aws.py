@@ -245,7 +245,13 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         *((action, {"url": "https://example.com/"}) for action in ("fetch_page", "fetch_page_file", "head_url")),
         ("download_media", {"url": "https://www.python.org/static/community_logos/python-logo.png"}),
     ),
-    "browser": (("x_connection_status", {}), ("x_post_tweet", {"account_id": "acct_" + "a" * 32, "text": "Kern smoke never submitted"})),
+    "browser": (
+        ("x_connection_status", {}),
+        ("x_post_tweet", {"account_id": "acct_" + "a" * 32, "text": "Kern smoke never submitted"}),
+        ("linkedin_connection_status", {}),
+        ("linkedin_read_conversation", {"account_id": "acct_" + "a" * 32, "recipient_profile_url": "https://www.linkedin.com/in/smoke-recipient/"}),
+        ("linkedin_send_dm", {"account_id": "acct_" + "a" * 32, "recipient_profile_url": "https://www.linkedin.com/in/smoke-recipient/", "text": "Kern smoke never submitted"}),
+    ),
     "whatsapp": (
         ("connection_status", {}),
         ("list_chats", {"limit": 1}),
@@ -289,6 +295,18 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
                 "end_time": "2099-01-01T01:00:00+00:00",
             },
         ),
+    ),
+    "google_ads": (
+        ("list_accounts", {}),
+        ("list_campaigns", {"customer_id": "1234567890", "limit": 1}),
+        ("list_ad_groups", {"customer_id": "1234567890", "campaign_id": "77", "limit": 1}),
+        ("report", {"customer_id": "1234567890", "report_type": "campaigns", "start_date": "2099-01-01", "end_date": "2099-01-02", "limit": 1}),
+        ("launch_campaign", {"customer_id": "1234567890", "name": "Kern smoke", "total_budget_micros": 10000000,
+            "start_time": "2099-01-01T00:00:00Z", "end_time": "2099-01-08T23:59:59Z",
+            "geo_target_ids": [],
+            "keywords": [{"text": "agent host", "match_type": "EXACT"}], "final_url": "https://example.com/",
+            "headlines": ["Kern Smoke", "Test Campaign", "Never Published"], "descriptions": ["Credential-free smoke fixture.", "This campaign is never created by fresh smoke."]}),
+        ("end_campaign", {"customer_id": "1234567890", "campaign_id": "77"}),
     ),
     "google_search_console": (
         ("list_properties", {}),
@@ -354,6 +372,21 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("post_image", {"image_asset_id": "$INSTAGRAM_IMAGE"}),
         ("post_carousel", {"image_asset_ids": ["$INSTAGRAM_IMAGE", "$INSTAGRAM_IMAGE_2"]}),
         ("post_reel", {"video_asset_id": "$INSTAGRAM_VIDEO"}),
+    ),
+    "instagram_ads": (
+        ("list_accounts", {"limit": 1}),
+        ("get_account", {"account_id": "1"}),
+        ("list_identities", {"account_id": "1", "limit": 1}),
+        ("list_posts", {"account_id": "1", "page_id": "2", "instagram_user_id": "3", "limit": 1}),
+        ("lookup_targeting", {"account_id": "1", "type": "COUNTRY", "query": "United States", "limit": 1}),
+        ("list_campaigns", {"account_id": "1", "limit": 1}),
+        ("get_campaign", {"account_id": "1", "campaign_id": "5", "limit": 1}),
+        ("get_performance", {"account_id": "1", "campaign_id": "5", "start_date": "2099-01-01", "end_date": "2099-01-02", "limit": 1}),
+        ("launch_campaign", {"account_id": "1", "page_id": "2", "instagram_user_id": "3", "media_id": "4",
+                             "name": "Kern smoke never launched", "objective": "ENGAGEMENTS", "special_ad_category": "NONE",
+                             "lifetime_budget": "2500", "start_time": "2099-01-01T00:00:00Z", "end_time": "2099-01-03T00:00:00Z",
+                             "audience": {"countries": ["US"]}}),
+        ("end_campaign", {"account_id": "1", "campaign_id": "5"}),
     ),
     "instagram_discovery": (
         ("search_reels", {"query": "Kern", "limit": "1"}),
@@ -451,6 +484,22 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
     ),
     "twitterapi_io": (
         ("search_tweets", {"query": "Kern", "query_type": "Latest"}),
+    ),
+    # Fresh-host checks leave X Ads unconfigured and require every action to
+    # fail closed. These are schema fixtures, never live advertising requests.
+    "x_ads": (
+        ("list_accounts", {"count": 1}),
+        ("get_account", {"account_id": "smoke"}),
+        ("list_funding_sources", {"account_id": "smoke", "count": 1}),
+        ("list_promotable_users", {"account_id": "smoke", "count": 1}),
+        ("list_posts", {"account_id": "smoke", "promotable_user_id": "smoke", "count": 1}),
+        ("lookup_targeting", {"kind": "LOCATION", "query": "United States", "count": 1}),
+        ("list_campaigns", {"account_id": "smoke", "count": 1}),
+        ("get_campaign", {"account_id": "smoke", "campaign_id": "smoke", "count": 1}),
+        ("get_ad_group", {"account_id": "smoke", "line_item_id": "smoke"}),
+        ("get_performance", {"account_id": "smoke", "campaign_id": "smoke", "start_time": "2026-09-01T00:00:00Z", "end_time": "2026-09-02T00:00:00Z"}),
+        ("launch_campaign", {"account_id": "smoke", "funding_instrument_id": "smoke", "promotable_user_id": "smoke", "post_id": "1", "name": "Fresh smoke never creates ads", "daily_budget_amount_local_micro": "10000000", "total_budget_amount_local_micro": "50000000", "start_time": "2030-01-01T00:00:00Z", "end_time": "2030-01-02T00:00:00Z", "targeting": [], "objective": "ENGAGEMENTS", "audience_expansion": "DEFINED"}),
+        ("end_campaign", {"account_id": "smoke", "campaign_id": "smoke"}),
     ),
     "zoho_mail": (
         ("search_messages", {"search_key": "entire:Kern", "limit": "1"}),
@@ -3935,7 +3984,7 @@ PY""", check=True)
                 # Polymarket and Web Fetch need no credential or config. The
                 # three WhatsApp local-state reads are also valid while no
                 # account is linked; only its send must fail closed.
-                direct_without_connection = (tool_id == "whatsapp" and action_id != "send_message") or (tool_id == "browser" and action_id == "x_connection_status")
+                direct_without_connection = (tool_id == "whatsapp" and action_id != "send_message") or (tool_id == "browser" and action_id in {"x_connection_status", "linkedin_connection_status"})
                 if tool_id == "indexnow":
                     if response.get("isError") or not isinstance(parsed, dict):
                         raise AssertionError(f"managed-key {name} failed")

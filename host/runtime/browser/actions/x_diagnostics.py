@@ -4,6 +4,30 @@ from __future__ import annotations
 import json
 from typing import Any
 from urllib.parse import urlsplit
+from host.runtime.browser.actions.x_composer import MATCHES_TEXT
+
+
+COMPOSER_STATE = """() => {
+    const visible = element => {
+        const style = getComputedStyle(element), rect = element.getBoundingClientRect();
+        return style.visibility !== 'hidden' && style.visibility !== 'collapse'
+            && rect.width > 0 && rect.height > 0;
+    };
+    const editors = Array.from(document.querySelectorAll('[role="dialog"] [data-testid="tweetTextarea_0"]'));
+    if (editors.length > 200) return {page_state_scan_truncated: true};
+    const active = editors.filter(editor => visible(editor) && visible(editor.closest('[role="dialog"]')));
+    if (active.length !== 1) return {};
+    const editor = active[0];
+    const enabled = !editor.closest('[aria-disabled="true"]') && !editor.hasAttribute('disabled');
+    return {
+        composer_attached: editor.isConnected,
+        composer_visible: true,
+        composer_enabled: enabled,
+        composer_editable: enabled && editor.isContentEditable && !editor.closest('[aria-readonly="true"]'),
+        composer_focused: document.activeElement === editor,
+        composer_empty: (__MATCHES_TEXT__)([editor, '']),
+    };
+}""".replace("__MATCHES_TEXT__", MATCHES_TEXT)
 
 
 # These scripts return only counts, booleans, bounded numbers and fixed labels.
@@ -27,6 +51,7 @@ PAGE_FACTS = """replyId => {
         login_input_visible: loginInputs.slice(0, 200).some(visible),
         page_state_scan_truncated: dialogs.length > 200 || editors.length > 200 || loginInputs.length > 200,
     };
+    Object.assign(facts, (__COMPOSER_STATE__)());
     if (!replyId) return facts;
     const links = document.querySelectorAll('a[href]');
     const articles = new Set(), timestampArticles = new Set();
@@ -59,7 +84,7 @@ PAGE_FACTS = """replyId => {
     facts.target_id_article_count = articles.size;
     facts.target_id_timestamp_article_count = timestampArticles.size;
     return facts;
-}"""
+}""".replace("__COMPOSER_STATE__", COMPOSER_STATE)
 
 REPLY_FACTS = """replyId => {
     const targets = Array.from(document.querySelectorAll('article[data-testid="tweet"]'))
@@ -112,6 +137,8 @@ _COUNT_FIELDS = frozenset({
     "target_id_extra_path_link_count", "target_id_exact_suffix_link_count",
 })
 _BOOL_FIELDS = frozenset({
+    "composer_attached", "composer_visible", "composer_enabled", "composer_editable",
+    "composer_focused", "composer_empty",
     "login_input_visible", "page_state_scan_truncated", "target_link_scan_truncated",
     "reply_in_viewport", "reply_fully_in_viewport", "reply_center_unobstructed",
 })
@@ -171,6 +198,15 @@ def _evaluate_facts(page: Any, script: str, reply_id: str) -> dict[str, Any]:
 def reply_target(page: Any, reply_id: str) -> Any:
     return page.locator('article[data-testid="tweet"]').filter(
         has=page.locator(f'a[href$="/status/{reply_id}"]'))
+
+
+def composer_state(page: Any) -> dict[str, Any]:
+    # Same bounded evaluation and Python allowlist as failure snapshots. Only
+    # an explicit boolean true permits skipping the clear operation.
+    try:
+        return _evaluate_facts(page, COMPOSER_STATE, "")
+    except Exception:
+        return {"snapshot_incomplete": True}
 
 
 def preparation_facts(page: Any, reply_id: str) -> dict[str, Any]:
