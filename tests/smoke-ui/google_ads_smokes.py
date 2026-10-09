@@ -15,7 +15,12 @@ def run(page, url, log_in, open_home_integration):
     expect(guide).to_contain_text("total budget")
     for key in ("GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"):
         expect(page.locator(f"#tool-config-google_ads-{key}")).to_have_attribute("type", "password")
-    expect(guide.locator(".guide-capability")).to_have_count(6)
+    expect(guide.locator(".guide-capability")).to_have_count(7)
+    locations = guide.locator(".guide-capability").filter(has=page.locator("h4 code", has_text="list_locations"))
+    expect(locations).to_contain_text("219 active countries")
+    locations.locator(".guide-action-contract > summary").click()
+    expect(locations).to_contain_text("country_code")
+    expect(locations).to_contain_text("snapshot_date")
     create = guide.locator(".guide-capability").filter(has=page.locator("h4 code", has_text="launch_campaign"))
     create.locator(".guide-action-contract > summary").click()
     expect(create).to_contain_text("no EU political advertising")

@@ -4,23 +4,63 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import math
+import json
 import re
 import urllib.parse
 import unicodedata
 from typing import NoReturn, cast
 
 from host.tools.google_ads.manifest import ADS_SCOPE, MANIFEST, MAX_MONEY_MICROS, MAX_ROWS
+from host.tools.google_ads.locations import list_locations
 from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ActionResult, ApprovalExecuted, ApprovalResult
-from host.tools.shared.google import GoogleCredentialStore, IntegrationReconnectRequired
+from host.tools.shared.google import GoogleCredentialStore, IntegrationReconnectRequired, google_token_for_revoke_from_payload, revoke_google_token
+from host.tools.shared.ads_diagnostics import MAX_ADS_ERROR_BYTES, AdsProviderError, ads_error_body, ads_failure_context, report_ads_failure
 from host.tools.shared.inputs import ToolInputValidationError, clip_text
 from host.tools.shared.web import WebRequestError, UnmappedProviderError, ProviderWarning, json_request, transport_or_unmapped_provider_error
-from host.tools.tool import CredentialFlow
+from host.tools.tool import CredentialFlow, OAuthCompleteConnectParams, OAuthCompleteConnectResult
 from host.tools.manifest import ToolManifest
 
 API_BASE = "https://googleads.googleapis.com/v25"
-CREDENTIALS = GoogleCredentialStore(
+
+
+class AdsGoogleCredentialStore(GoogleCredentialStore):
+    def complete_connect(self, params: OAuthCompleteConnectParams, api: HostAPI) -> OAuthCompleteConnectResult:
+        self._verify_state(params["state"], api)
+        try:
+            return super().complete_connect(params, api)
+        except ProviderWarning as exc:
+            exc.response_body = ads_error_body(exc.response_body.encode("utf-8")).decode("utf-8")
+            exc.diagnostic_context.update(ads_failure_context("google_ads", "oauth_complete_connect", exc, phase="connection"))
+            raise
+        except KeyError:
+            raise
+        except Exception as exc:
+            report_ads_failure("google_ads", "oauth_complete_connect", exc, phase="connection")
+            raise
+
+    def disconnect(self, api: HostAPI) -> None:
+        try:
+            existing = api.credentials.load()
+            if existing is not None:
+                token = google_token_for_revoke_from_payload(existing["secret"])
+                if token:
+                    outcome = revoke_google_token(token)
+                    if not outcome.get("success"):
+                        status = outcome.get("status")
+                        failure = AdsProviderError("Google token revocation failed; local credentials were disconnected.",
+                                                   "POST OAuth revoke", status=status if type(status) is int else 0)
+                        report_ads_failure("google_ads", "oauth_disconnect", failure, phase="connection")
+            api.credentials.clear()
+        except ProviderWarning:
+            raise
+        except Exception as exc:
+            report_ads_failure("google_ads", "oauth_disconnect", exc, phase="connection")
+            raise
+
+
+CREDENTIALS = AdsGoogleCredentialStore(
     tool_id="google_ads", scopes=("openid", "email", ADS_SCOPE), required_scopes=frozenset({ADS_SCOPE}),
     reconnect_message="Google Ads is disconnected or missing permissions. Reconnect Google Ads in Home > Integrations.",
 )
@@ -147,6 +187,15 @@ def _input(action: str, raw: JSONObject) -> JSONObject:
     if set(raw) - set(properties) or any(key not in raw for key in required):
         _fail("Google Ads input has unknown fields or is missing a required field. Use the action's declared schema.")
     result = dict(raw)
+    if action == "list_locations":
+        query = raw.get("query", "")
+        if not isinstance(query, str) or len(query) > 80 or len(query.encode("utf-8")) > 320 or any(ord(c) < 32 or ord(c) == 127 for c in query):
+            _fail("Location query must be at most 80 characters and 320 UTF-8 bytes, without control characters.")
+        country_code = raw.get("country_code", "")
+        if not isinstance(country_code, str) or country_code and not re.fullmatch(r"[A-Z]{2}", country_code, re.ASCII):
+            _fail("country_code must be empty or two uppercase ASCII letters, such as GB.")
+        return {"query": query.strip(), "country_code": country_code,
+                "limit": _integer(raw.get("limit", 250), "limit", 250)}
     if "customer_id" in raw:
         result["customer_id"] = _id(raw["customer_id"], "customer_id", customer=True)
     if "campaign_id" in raw:
@@ -195,22 +244,37 @@ def _input(action: str, raw: JSONObject) -> JSONObject:
     return result
 
 
-def _request(token: str, suffix: str, *, customer: str = "", body: JSONObject | None = None) -> JSONObject:
+def _request(token: str, suffix: str, *, customer: str = "", body: JSONObject | None = None, stage: str = "") -> JSONObject:
     path = f"customers/{customer}/{suffix}" if customer else f"customers:{suffix}"
     headers = {"authorization": f"Bearer {token}"}
+    operation = f"{'POST' if body is not None else 'GET'} {path}" + (f" ({stage})" if stage else "")
     try:
-        return json_request("POST" if body is not None else "GET", f"{API_BASE}/{path}", headers=headers, body=body,
-                            failure_message="Google Ads request failed.", invalid_response_message="Google Ads returned an invalid response.")
+        result = json_request("POST" if body is not None else "GET", f"{API_BASE}/{path}", headers=headers, body=body,
+                            failure_message="Google Ads request failed.", invalid_response_message="Google Ads returned an invalid response.", max_error_bytes=MAX_ADS_ERROR_BYTES)
     except WebRequestError as exc:
         if exc.status == 401:
-            raise IntegrationReconnectRequired("Google rejected the Ads credentials. Reconnect Google Ads in Home > Integrations.") from exc
-        if exc.status == 403:
-            raise RuntimeError("Google Ads denied access. Check this Cloud project's production API access, Ads scope and account permissions.") from exc
-        if exc.status == 429:
-            raise RuntimeError("Google Ads quota or rate limit reached. Wait for capacity before making another request.") from exc
-        if exc.status == 400:
-            raise RuntimeError("Google Ads rejected the request. Check account eligibility, targeting IDs, ad policies and action inputs in the integration guide.") from exc
-        raise transport_or_unmapped_provider_error("Google Ads", "API request", exc) from None
+            cause = AdsProviderError("Google Ads authentication failed.", operation, status=exc.status, body=exc.body, body_truncated=exc.body_truncated)
+            raise IntegrationReconnectRequired("Google rejected the Ads credentials. Reconnect Google Ads in Home > Integrations.") from cause
+        messages = {
+            403: "Google Ads denied access. Check this Cloud project's production API access, Ads scope and account permissions.",
+            429: "Google Ads quota or rate limit reached. Wait for capacity before making another request.",
+            400: "Google Ads rejected the request. Check account eligibility, targeting IDs, ad policies and action inputs in the integration guide.",
+        }
+        if exc.status in messages:
+            raise AdsProviderError(messages[exc.status], operation, status=exc.status, body=exc.body, body_truncated=exc.body_truncated) from exc
+        warning = transport_or_unmapped_provider_error("Google Ads", operation, exc)
+        if isinstance(warning, ProviderWarning):
+            warning.body_truncated = exc.body_truncated
+            warning.response_body = ads_error_body(exc.body).decode("utf-8", "replace")
+        else:
+            warning = AdsProviderError(str(warning), operation, status=exc.status, body=exc.body, body_truncated=exc.body_truncated)
+        raise warning from exc
+    except RuntimeError as exc:
+        raise AdsProviderError(str(exc), operation) from exc
+    if result.get("error") or result.get("partialFailureError"):
+        raise AdsProviderError("Google Ads returned an error response.", operation,
+                               status=200, body=ads_error_body(json.dumps(result).encode("utf-8")))
+    return result
 
 
 def _object(value: JSONValue, name: str) -> JSONObject:
@@ -227,7 +291,15 @@ def _rows(response: JSONObject) -> list[JSONObject]:
 
 
 def _search(token: str, customer: str, query: str) -> list[JSONObject]:
-    return _rows(_request(token, "googleAds:search", customer=customer, body={"query": query}))
+    # Only a fixed category from an internally constructed query is recorded.
+    source = re.search(r"\bFROM ([a-z_]+)\b", query, re.ASCII)
+    stage = {
+        "customer": "account preflight", "campaign": "campaign read",
+        "ad_group": "ad group read", "campaign_criterion": "campaign targeting read",
+        "ad_group_criterion": "keyword read", "ad_group_ad": "ad creative read",
+        "keyword_view": "keyword report", "search_term_view": "search term report",
+    }.get(source.group(1) if source else "", "Ads query")
+    return _rows(_request(token, "googleAds:search", customer=customer, body={"query": query}, stage=stage))
 
 
 def _direct_accounts(token: str) -> list[str]:
@@ -550,8 +622,11 @@ def _launch(api: HostAPI, values: JSONObject, account: JSONObject, identity: JSO
         message = f"Google Ads launch failed while {phase}; outcome may be uncertain. Confirmed resources: {', '.join(resources) or 'none returned'}. Inspect Google Ads before another proposal."
         if phase == "enabling the verified campaign":
             message += " Google may already have started paid delivery."
-        raise ProviderWarning("Google Ads", phase, message, status=exc.status) from exc
+        warning = ProviderWarning("Google Ads", f"{phase}: {exc.operation}", message, status=exc.status, body=ads_error_body(exc.response_body.encode("utf-8")))
+        warning.diagnostic_context = ads_failure_context("google_ads", "launch_campaign", exc, phase=phase, confirmed=resources)
+        raise warning from exc
     except (IntegrationReconnectRequired, ToolInputValidationError, RuntimeError) as exc:
+        report_ads_failure("google_ads", "launch_campaign", exc, phase=phase, confirmed=resources)
         return ActionFailed(f"Google Ads launch failed while {phase}: {exc} Confirmed resources: {', '.join(resources) or 'none returned'}. Inspect Google Ads before another proposal; an uncertain enable may have started spending.", reconnect_required=isinstance(exc, IntegrationReconnectRequired))
 
 
@@ -582,8 +657,12 @@ class GoogleAdsTool:
         return CREDENTIALS
 
     def execute(self, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:
+        validated = False
         try:
             values = _input(action, tool_input)
+            validated = True
+            if action == "list_locations":
+                return ActionExecuted(list_locations(values))
             token = CREDENTIALS.access_token(api)
             if action == "list_accounts":
                 ids = _direct_accounts(token)
@@ -613,10 +692,15 @@ class GoogleAdsTool:
                 rows = _report(token, values)
             return ActionExecuted({"account": account, "rows": cast(list[JSONValue], rows[:limit]), "truncated": len(rows) > limit})
         except IntegrationReconnectRequired as exc:
+            report_ads_failure("google_ads", action, exc, phase="proposal" if ACTIONS[action].approval == "operator" else "read")
             return ActionFailed(str(exc), reconnect_required=True)
-        except UnmappedProviderError:
+        except UnmappedProviderError as exc:
+            exc.response_body = ads_error_body(exc.response_body.encode("utf-8")).decode("utf-8")
+            exc.diagnostic_context.update(ads_failure_context("google_ads", action, exc, phase="proposal" if ACTIONS[action].approval == "operator" else "read"))
             raise
         except (ToolInputValidationError, RuntimeError) as exc:
+            if validated:
+                report_ads_failure("google_ads", action, exc, phase="proposal" if ACTIONS[action].approval == "operator" else "read")
             return ActionFailed(str(exc))
 
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
@@ -649,16 +733,24 @@ class GoogleAdsTool:
             try:
                 _mutate(token, values, _status_operation(resource, "PAUSED"), resources)
             except ProviderWarning as exc:
-                raise ProviderWarning("Google Ads", "ending campaign", f"Google Ads stop outcome is uncertain for {resource}. Inspect Google Ads before another proposal.", status=exc.status) from exc
+                warning = ProviderWarning("Google Ads", f"ending campaign: {exc.operation}", f"Google Ads stop outcome is uncertain for {resource}. Inspect Google Ads before another proposal.", status=exc.status, body=ads_error_body(exc.response_body.encode("utf-8")))
+                warning.diagnostic_context = ads_failure_context("google_ads", approval.action_id, exc, phase="ending campaign", confirmed=(resource,))
+                raise warning from exc
             except RuntimeError as exc:
+                report_ads_failure("google_ads", approval.action_id, exc, phase="ending campaign", confirmed=(resource,))
                 return ActionFailed(f"Google Ads stop outcome could not be confirmed for {resource}: {exc} Inspect Google Ads before another proposal.")
             return ApprovalExecuted(f"Google Ads campaign set to PAUSED: {resource}. Stopping may take time; past delivery remains billable. Reporting is preserved. Kern offers no resume; Google Ads users can resume there.")
 
         except IntegrationReconnectRequired as exc:
+            report_ads_failure("google_ads", approval.action_id, exc, phase="approval revalidation")
             return ActionFailed(str(exc), reconnect_required=True)
-        except ProviderWarning:
+        except ProviderWarning as exc:
+            exc.response_body = ads_error_body(exc.response_body.encode("utf-8")).decode("utf-8")
+            if "phase" not in exc.diagnostic_context:
+                exc.diagnostic_context.update(ads_failure_context("google_ads", approval.action_id, exc, phase="approval revalidation"))
             raise
         except (ToolInputValidationError, RuntimeError) as exc:
+            report_ads_failure("google_ads", approval.action_id, exc, phase="approval revalidation")
             return ActionFailed(str(exc))
 
 

@@ -303,6 +303,56 @@ def check_post_resources(playwright):
     print("Browser posting skips media before navigation and preserves composer scripts/submission; operator media still loads.", flush=True)
 
 
+def check_reply_preparation(page):
+    """Exercise history links and a transient click obstruction without publishing."""
+    pattern = "https://x.com/i/status/12345"
+    scenarios = ("canonical", "history", "absolute_history", "both_links", "duplicate", "longer_id", "extra_path", "covered")
+    for scenario in scenarios:
+        navigations = []
+        def fixture(route):
+            navigations.append(route.request.url)
+            html = REPLY_HTML
+            if scenario != "canonical":
+                html = html.replace('/someone/status/12345', '/someone/status/12345/history')
+            if scenario == "absolute_history":
+                html = html.replace('/someone/status/12345/history', 'https://x.com/someone/status/12345/history')
+            if scenario == "both_links":
+                html = html.replace('Target</a>', 'Target</a><a href="/someone/status/12345">Canonical</a>')
+            if scenario == "duplicate":
+                html = html.replace('</article></template>', '</article><article data-testid="tweet">'
+                                    '<a href="/someone/status/12345">Duplicate</a></article></template>')
+            if scenario == "longer_id":
+                html = html.replace('/status/12345/history', '/status/123456/history')
+            if scenario == "extra_path":
+                html = html.replace('/status/12345/history', '/status/12345/history/other')
+            if scenario == "covered":
+                html += '''<div id="mask" style="position:fixed;inset:0;background:white"></div>
+<script>setTimeout(() => document.getElementById('mask').remove(), 1000);</script>'''
+            route.fulfill(status=200, content_type="text/html", body=html)
+        page.route(pattern, fixture)
+        try:
+            # Scale the limits for this offline fixture. The mask outlasts the
+            # ordinary step timeout but clears inside the reply-click budget.
+            with (patch.object(x_post_tweet, "COMPOSER_TIMEOUT_MS", 500),
+                  patch.object(x_post_tweet, "REPLY_COMPOSER_TIMEOUT_MS", 2000)):
+                if scenario in ("duplicate", "longer_id", "extra_path"):
+                    try:
+                        x_post_tweet.prepare_post(page, "example", "Approved reply", "12345")
+                        raise AssertionError(f"Unsafe {scenario} target accepted")
+                    except x_post_tweet.PreparationFailed as exc:
+                        assert exc.step == "find_reply_target", str(exc)
+                        assert exc.facts["preparation_attempt"] == 1, exc.facts
+                        assert page.get_by_role("dialog").is_hidden()
+                else:
+                    x_post_tweet.prepare_post(page, "example", "Approved reply", "12345")
+                    editor = page.get_by_role("dialog").get_by_test_id("tweetTextarea_0")
+                    assert page.evaluate(x_post_tweet.MATCHES_TEXT, [editor.element_handle(), "Approved reply"])
+                assert len(navigations) == 1, (scenario, navigations)
+        finally:
+            page.unroute(pattern, fixture)
+    print("Reply preparation passed: canonical/history links, unique article, exact ID/path and transient mask without retry or submission.", flush=True)
+
+
 def check_reply_diagnostics(page):
     # Representative structural states, not a claim to reproduce the live X
     # incident. Diagnostics must distinguish these without returning text.
@@ -318,6 +368,11 @@ def check_reply_diagnostics(page):
           "reply_in_viewport": True, "reply_center_hit_tag": "div"}),
         (article, {"reply_visible": True, "reply_enabled": True, "reply_center_unobstructed": True,
                    "target_id_link_count": 1, "target_id_article_count": 1}),
+        (article.replace('/status/12345', '/status/12345/history'),
+         {"target_count": 1, "target_id_extra_path_link_count": 1, "reply_center_unobstructed": True}),
+        (article + article.replace('/status/12345', '/status/12345/history'), {"target_count": 2}),
+        (article.replace('/status/12345', '/status/123456/history'), {"target_count": 0, "target_id_link_count": 0}),
+        (article.replace('/status/12345', '/status/12345/history/other'), {"target_count": 0}),
         (article + f'<div role="dialog">{EDITOR}</div>', {"dialog_count": 1, "composer_count": 1,
           "visible_dialog_count": 1, "visible_popup_editor_count": 1, "inline_editor_count": 0}),
         (article.replace('/status/12345', '/status/12345?private-query'),
@@ -500,6 +555,7 @@ def run(playwright):
             browser.input({"kind": "home"})
             check_post_text(browser.page)
             check_composer_recovery(browser.page)
+            check_reply_preparation(browser.page)
             exact_text = "First line\nCafé 😀 +\tend".ljust(280, "x")
             x_post_tweet.prepare_post(browser.page, "example", exact_text)
             assert browser.page.get_by_role("dialog").get_by_test_id("tweetTextarea_0").inner_text() == exact_text

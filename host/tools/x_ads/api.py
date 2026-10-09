@@ -13,6 +13,7 @@ from collections.abc import Mapping
 
 from host.tools.host_api import HostAPI
 from host.tools.json_types import JSONObject
+from host.tools.shared.ads_diagnostics import MAX_ADS_ERROR_BYTES, AdsProviderError
 from host.tools.shared.web import WebRequestError, json_request
 
 BASE_URL = "https://ads-api.x.com/12"
@@ -73,7 +74,7 @@ class Client:
         try:
             result = json_request(
                 method, url, headers=headers, form=params if method != "GET" else None,
-                failure_message="X Ads request failed.", invalid_response_message="X Ads returned invalid JSON.",
+                failure_message="X Ads request failed.", invalid_response_message="X Ads returned invalid JSON.", max_error_bytes=MAX_ADS_ERROR_BYTES,
             )
         except WebRequestError as exc:
             messages = {
@@ -83,9 +84,14 @@ class Client:
                 404: "The X Ads entity was not found or is unavailable to this user.",
                 429: "X Ads rate limit reached. Wait before making a new request.",
             }
-            raise RuntimeError(messages.get(exc.status, "X Ads request failed; the provider outcome may be unknown.")) from exc
+            raise AdsProviderError(messages.get(exc.status, "X Ads request failed; the provider outcome may be unknown."),
+                                   f"{method} {path}", status=exc.status, body=exc.body, body_truncated=exc.body_truncated) from exc
+        except RuntimeError as exc:
+            raise AdsProviderError(str(exc), f"{method} {path}") from exc
         if result.get("errors") or result.get("operation_errors"):
-            raise RuntimeError("X Ads rejected the request. Inspect the advertiser account before retrying.")
+            errors = {key: result[key] for key in ("errors", "operation_errors") if result.get(key)}
+            raise AdsProviderError("X Ads rejected the request. Inspect the advertiser account before retrying.",
+                                   f"{method} {path}", status=200, body=json.dumps(errors).encode("utf-8"))
         return result
 
 

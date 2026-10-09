@@ -51,10 +51,12 @@ class WebRequestError(RuntimeError):
     provider-specific statuses (401 reconnect, 429 rate limit) without
     exposing the raw body across the tool boundary."""
 
-    def __init__(self, message: str, *, status: int = 0, body: bytes = b"") -> None:
+    def __init__(self, message: str, *, status: int = 0, body: bytes = b"", operation: str = "", body_truncated: bool = False) -> None:
         super().__init__(message)
         self.status = status
         self.body = body
+        self.operation = operation
+        self.body_truncated = body_truncated
 
 
 class ProviderWarning(RuntimeError):
@@ -83,6 +85,9 @@ class ProviderWarning(RuntimeError):
         self.status = status
         self.response_status = response_status
         self.response_body = body.decode("utf-8", "replace").strip()
+        # Optional tool-selected, bounded operator context. Never action data.
+        self.diagnostic_context: dict[str, str | int | bool] = {}
+        self.body_truncated = False
 
 
 class UnmappedProviderError(ProviderWarning):
@@ -276,13 +281,17 @@ def _request_bytes_and_headers(
     failure_message: str,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     max_bytes: int = MAX_RESPONSE_BYTES,
+    max_error_bytes: int = 4096,
 ) -> tuple[bytes, dict[str, str]]:
     """The one urllib request path behind request_bytes and the json_request
     entry points, also returning the response headers with
     lower-cased names — some providers return created-resource ids only in a
     header (e.g. LinkedIn's x-restli-id). Bodies over ``max_bytes`` fail with
     RESPONSE_TOO_LARGE_MESSAGE rather than being silently truncated; callers
-    that expect large bodies (e.g. base64 image data) pass a bigger cap."""
+    that expect large bodies (e.g. base64 image data) pass a bigger cap. HTTP
+    failures retain at most max_error_bytes and explicitly mark clipping."""
+    if not 0 < max_error_bytes <= MAX_RESPONSE_BYTES:
+        raise ValueError("HTTP error response limit is outside the supported range.")
     if not url.startswith("https://"):
         raise WebRequestError(failure_message)
     request = urllib.request.Request(url, data=data, headers=dict(headers or {}), method=method)
@@ -300,10 +309,10 @@ def _request_bytes_and_headers(
         # HTTPError; it is mapped to failure_message like any other HTTP error.
         body = b""
         try:
-            body = exc.read(4096)
+            body = exc.read(max_error_bytes + 1)
         except Exception:
             pass
-        raise WebRequestError(failure_message, status=exc.code, body=body) from exc
+        raise WebRequestError(failure_message, status=exc.code, body=body[:max_error_bytes], body_truncated=len(body) > max_error_bytes) from exc
     except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as exc:
         # Post-connect failures (socket timeout, IncompleteRead, header
         # validation on hostile values) must not escape as raw exceptions whose
@@ -366,6 +375,7 @@ def json_request(
     invalid_response_message: str,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     max_bytes: int = MAX_RESPONSE_BYTES,
+    max_error_bytes: int = 4096,
 ) -> JSONObject:
     decoded, _ = json_request_with_headers(
         method,
@@ -377,6 +387,7 @@ def json_request(
         invalid_response_message=invalid_response_message,
         timeout=timeout,
         max_bytes=max_bytes,
+        max_error_bytes=max_error_bytes,
     )
     return decoded
 
@@ -392,6 +403,7 @@ def json_request_with_headers(
     invalid_response_message: str,
     timeout: int = DEFAULT_TIMEOUT_SECONDS,
     max_bytes: int = MAX_RESPONSE_BYTES,
+    max_error_bytes: int = 4096,
 ) -> tuple[JSONObject, dict[str, str]]:
     """One JSON-in/JSON-out HTTP call, also returning response headers
     (lower-cased names). ``body`` sends JSON, ``form`` sends URL-encoded form
@@ -414,6 +426,7 @@ def json_request_with_headers(
         failure_message=failure_message,
         timeout=timeout,
         max_bytes=max_bytes,
+        max_error_bytes=max_error_bytes,
     )
     try:
         text = raw.decode("utf-8").strip()

@@ -19,6 +19,7 @@ X_POST_DAILY_LIMIT = 50
 TWEET_ID = re.compile(r"[0-9]{1,25}")
 PREPARATION_TIMEOUT_MS = 60000
 COMPOSER_TIMEOUT_MS = 10000
+REPLY_COMPOSER_TIMEOUT_MS = 20000
 CONFIRMATION_TIMEOUT_MS = 20000
 RECOVERABLE_STEPS = frozenset({"wait_for_composer", "clear_composer", "verify_empty_composer",
                                "type_post_text", "wait_for_submit_enabled"})
@@ -146,7 +147,7 @@ def prepare_post(page: Any, account: str, text: str, reply_id: str = "") -> None
                 target_timeout = begin("find_reply_target")
                 target = reply_target(page, reply_id)
                 expect(target).to_have_count(1, timeout=target_timeout)
-                target.get_by_test_id("reply").click(timeout=begin("open_reply_composer"))
+                target.get_by_test_id("reply").click(timeout=begin("open_reply_composer", REPLY_COMPOSER_TIMEOUT_MS))
             composer = active_composer(page)
             editor = composer.get_by_test_id("tweetTextarea_0").filter(visible=True)
             expect(composer).to_have_count(1, timeout=begin("wait_for_composer"))

@@ -2,13 +2,19 @@
 from __future__ import annotations
 
 import copy
+import io
+import json
+import urllib.error
 import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
 from unittest.mock import patch
 
 from host.tools import google_ads as ads
+from host.runtime.tools.tools_host import _provider_warning_context
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ApprovalExecuted
+from host.tools.shared import web
+from host.tools.shared.google import get_google_userinfo
 from host.tools.shared.web import WebRequestError, UnmappedProviderError, ProviderWarning
 from test_tools import assert_matches_output_schema, connected_google_api, google_userinfo
 
@@ -30,6 +36,7 @@ KEYWORD_RESOURCE = f"customers/{CUSTOMER}/adGroupCriteria/102~304"
 
 class GoogleAdsTests(unittest.TestCase):
     def setUp(self):
+        self.diagnostics = self.enterContext(patch("host.tools.shared.ads_diagnostics.host_errors.emit_record"))
         self.api = connected_google_api("google_ads", frozenset({ads.ADS_SCOPE}))
         self.direct = [CUSTOMER]
         self.account = copy.deepcopy(ACCOUNT)
@@ -132,7 +139,7 @@ class GoogleAdsTests(unittest.TestCase):
         return ads.BUNDLED_TOOL.execute_approved(approval, self.api)
 
     def test_manifest_exposes_only_launch_end_writes_and_separate_oauth(self):
-        self.assertEqual(len(ads.MANIFEST.actions), 6)
+        self.assertEqual(len(ads.MANIFEST.actions), 7)
         self.assertEqual([a.id for a in ads.MANIFEST.actions if a.approval == "operator"], ["launch_campaign", "end_campaign"])
         self.assertEqual(ads.CREDENTIALS.scopes, ("openid", "email", ads.ADS_SCOPE))
         self.assertEqual([c.key for c in ads.MANIFEST.config], ["GOOGLE_OAUTH_CLIENT_ID", "GOOGLE_OAUTH_CLIENT_SECRET"])
@@ -143,6 +150,296 @@ class GoogleAdsTests(unittest.TestCase):
         self.assertEqual(len(launch["required"]), 9)
         self.assertNotIn("geo_target_ids", launch["required"])
         self.assertNotIn("cpc_bid_micros", launch["properties"])
+
+    def test_country_lookup_uses_real_snapshot_without_credentials_or_provider_calls(self):
+        self.api.credentials.clear()
+        with patch.object(ads.CREDENTIALS, "access_token", side_effect=AssertionError("No OAuth for country lookup")):
+            result = self.execute("list_locations", {})
+        self.assertIsInstance(result, ActionExecuted)
+        assert_matches_output_schema(self, ads.MANIFEST, "list_locations", result)
+        snapshot = result.result
+        self.assertEqual(snapshot["snapshot_date"], "2026-08-12")
+        self.assertTrue(snapshot["source_url"].endswith("geotargets-2026-08-12.csv.zip"))
+        self.assertFalse(snapshot["truncated"])
+        rows = snapshot["rows"]
+        self.assertEqual(len(rows), 219)
+        self.assertEqual(len({row["geo_target_id"] for row in rows}), 219)
+        self.assertTrue(all(row["geo_target_id"].isascii() and row["geo_target_id"].isdigit() for row in rows))
+        self.assertTrue(all(row["target_type"] == "Country" and row["status"] == "Active" for row in rows))
+        self.assertEqual([row["name"] for row in rows], sorted([row["name"] for row in rows], key=str.casefold))
+        self.assertEqual(self.requests, [])
+        self.assertEqual(self.api.approvals.records, {})
+
+    def test_country_lookup_filters_names_codes_and_limit_with_unknowns_empty(self):
+        result = self.execute("list_locations", {"query": "  UNITED KINGDOM  ", "country_code": "GB"})
+        self.assertEqual(result.result["rows"], [{"geo_target_id": "2826", "name": "United Kingdom", "country_code": "GB", "target_type": "Country", "status": "Active"}])
+        self.assertEqual(self.execute("list_locations", {"country_code": "US"}).result["rows"][0]["geo_target_id"], "2840")
+        self.assertEqual(self.execute("list_locations", {"query": "No such country"}).result["rows"], [])
+        self.assertEqual(self.execute("list_locations", {"query": "London"}).result["rows"], [])
+        self.assertEqual(self.execute("list_locations", {"query": "United Kingdom", "country_code": "US"}).result["rows"], [])
+        limited = self.execute("list_locations", {"limit": 1})
+        self.assertEqual(len(limited.result["rows"]), 1)
+        self.assertTrue(limited.result["truncated"])
+        self.assertEqual(self.requests, [])
+
+    def test_country_lookup_rejects_invalid_inputs_before_oauth_or_file_read(self):
+        invalid = [{"query": "x" * 81}, {"query": "bad\nquery"}, {"query": None},
+                   {"country_code": "gb"}, {"country_code": "GBR"}, {"country_code": "ＧＢ"},
+                   {"limit": True}, {"limit": 0}, {"limit": 251}, {"limit": "1"},
+                   {"customer_id": CUSTOMER}, {"path": "countries.json"}]
+        with patch.object(ads, "list_locations", side_effect=AssertionError("Must validate before reading snapshot")):
+            for values in invalid:
+                with self.subTest(values=values):
+                    self.assertIsInstance(self.execute("list_locations", values), ActionFailed)
+        self.assertEqual(self.requests, [])
+
+    def test_mapped_launch_and_end_errors_log_phase_resources_and_provider_detail(self):
+        for stage in ("create", "activate", "stop"):
+            with self.subTest(stage=stage):
+                self.created = False
+                self.creation_error = self.activation_error = None
+                self.mutations.clear()
+                approval = self.approve("end_campaign") if stage == "stop" else self.approve()
+                error = WebRequestError("Google Ads request failed.", status=400,
+                    body=b'{"error":{"code":400,"message":"provider-only detail","details":[{"errorCode":{"budgetError":"TOO_LOW"}}]}}')
+                if stage == "create":
+                    self.creation_error = error
+                else:
+                    self.activation_error = error
+                self.diagnostics.reset_mock()
+                result = self.finish(approval)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertNotIn("provider-only detail", result.error)
+                self.diagnostics.assert_called_once()
+                context = self.diagnostics.call_args.args[0]["context"]
+                self.assertEqual(context["http_status"], 400)
+                self.assertIn("provider-only detail", context["provider_response"])
+                self.assertIn("googleAds:mutate", context["operation"])
+                self.assertEqual(len(self.mutations), 2 if stage == "activate" else 1)
+                if stage != "create":
+                    self.assertIn("campaigns/", context["confirmed_resources"])
+
+    def test_unmapped_launch_error_retains_response_at_host_boundary(self):
+        self.activation_error = WebRequestError("Google Ads request failed.", status=500,
+            body=b'{"error":{"code":500,"message":"provider-only detail"},"request":{"secret":"excluded"}}')
+        with self.assertRaises(ProviderWarning) as caught:
+            self.finish(self.approve())
+        self.assertIn("provider-only detail", caught.exception.response_body)
+        self.assertNotIn("excluded", caught.exception.response_body)
+        self.assertNotIn("provider-only detail", str(caught.exception))
+        self.assertEqual(len(self.mutations), 2)
+
+    def test_oauth_exchange_failure_is_diagnosed_without_logging_callback_or_tokens(self):
+        redirect = "https://kern.example/tool-oauth/google_ads/callback"
+        start = ads.CREDENTIALS.start_connect({"redirect_uri": redirect}, self.api)
+        failure = WebRequestError("Google OAuth token exchange failed.", status=400,
+            body=b'{"error":"invalid_grant","error_description":"provider-only detail"}')
+        with patch("host.tools.shared.google.exchange_google_oauth_code", side_effect=failure) as exchange:
+            with self.assertRaises(WebRequestError):
+                ads.CREDENTIALS.complete_connect({"redirect_uri": redirect, "state": start["state"], "code": "private-code"}, self.api)
+        exchange.assert_called_once()
+        self.diagnostics.assert_called_once()
+        context = self.diagnostics.call_args.args[0]["context"]
+        self.assertEqual(context["action_id"], "oauth_complete_connect")
+        self.assertEqual(context["http_status"], 400)
+        self.assertIn("invalid_grant", context["provider_response"])
+        self.assertNotIn("private-code", str(context))
+        self.assertNotIn(redirect, str(context))
+
+    def test_http_200_error_envelopes_do_not_become_successful_reads(self):
+        for key in ("error", "partialFailureError"):
+            with self.subTest(key=key), patch.object(ads, "json_request", return_value={key: {"code": 400, "message": "provider-only detail"}}) as request:
+                self.diagnostics.reset_mock()
+                result = self.execute("list_accounts", {})
+                self.assertIsInstance(result, ActionFailed)
+                self.assertNotIn("provider-only detail", result.error)
+                request.assert_called_once()
+                self.diagnostics.assert_called_once()
+                context = self.diagnostics.call_args.args[0]["context"]
+                self.assertEqual(context["http_status"], 200)
+                self.assertIn("provider-only detail", context["provider_response"])
+
+    def test_oauth_disconnect_exception_is_diagnosed_without_retry(self):
+        failure = RuntimeError("Google token revocation failed.")
+        with patch.object(ads, "revoke_google_token", side_effect=failure) as revoke:
+            with self.assertRaises(RuntimeError):
+                ads.CREDENTIALS.disconnect(self.api)
+        revoke.assert_called_once()
+        self.diagnostics.assert_called_once()
+        self.assertEqual(self.diagnostics.call_args.args[0]["context"]["action_id"], "oauth_disconnect")
+        self.assertIsNotNone(self.api.credentials.load())
+
+    def test_oauth_disconnect_logs_rejected_revocation_and_still_clears_local_credentials(self):
+        with patch.object(ads, "revoke_google_token", return_value={"success": False, "failure_type": "http", "status": 400}) as revoke:
+            ads.CREDENTIALS.disconnect(self.api)
+        revoke.assert_called_once()
+        self.diagnostics.assert_called_once()
+        context = self.diagnostics.call_args.args[0]["context"]
+        self.assertEqual(context["action_id"], "oauth_disconnect")
+        self.assertEqual(context["http_status"], 400)
+        self.assertEqual(context["operation"], "POST OAuth revoke")
+        self.assertIsNone(self.api.credentials.load())
+
+    def test_google_nested_permission_evidence_survives_long_message_and_reconnect_chain(self):
+        for status, category, code, reason in ((401, "authenticationError", "NOT_ADS_USER", "ACCESS_TOKEN_SCOPE_INSUFFICIENT"), (403, "authorizationError", "USER_PERMISSION_DENIED", "SERVICE_DISABLED")):
+            with self.subTest(status=status):
+                body = json.dumps({"error": {"code": status, "status": "UNAUTHENTICATED" if status == 401 else "PERMISSION_DENIED", "message": "long provider message " * 1000, "details": [
+                    {"@type": "type.googleapis.com/google.ads.googleads.v25.errors.GoogleAdsFailure", "errors": [{"errorCode": {category: code}, "trigger": {"stringValue": "private query"}}], "requestId": "correlation-123"},
+                    {"@type": "type.googleapis.com/google.rpc.ErrorInfo", "reason": reason, "metadata": {"private": "excluded"}},
+                ]}}).encode()
+                original = self.request
+                def fail_preflight(method, url, **kwargs):
+                    if "FROM customer LIMIT" in (kwargs.get("body") or {}).get("query", ""):
+                        raise WebRequestError("Google Ads request failed.", status=status, body=body)
+                    return original(method, url, **kwargs)
+                self.diagnostics.reset_mock()
+                with patch.object(ads, "json_request", side_effect=fail_preflight):
+                    result = self.execute("list_campaigns", {"customer_id": CUSTOMER})
+                self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(result.reconnect_required, status == 401)
+                self.diagnostics.assert_called_once()
+                record = self.diagnostics.call_args.args[0]
+                context = record["context"]
+                self.assertEqual(context["http_status"], status)
+                self.assertIn("account preflight", context["operation"])
+                self.assertEqual(context["google_error_codes"], f"{category}:{code}")
+                self.assertEqual(context["google_error_reasons"], reason)
+                self.assertEqual(context["google_request_id"], "correlation-123")
+                self.assertTrue(context["provider_response_truncated"])
+                self.assertLessEqual(len(json.dumps(context).encode()), 4096)
+                self.assertNotIn("private query", str(context))
+                self.assertNotIn("long provider message", result.error)
+                self.assertNotIn("USER_PERMISSION_DENIED", result.error)
+
+    def test_campaign_query_diagnostic_is_distinct_from_account_preflight(self):
+        original = self.request
+        def fail_campaign(method, url, **kwargs):
+            query = (kwargs.get("body") or {}).get("query", "")
+            if "FROM campaign " in query:
+                raise WebRequestError("Google Ads request failed.", status=403, body=b'{"error":{"status":"PERMISSION_DENIED"}}')
+            return original(method, url, **kwargs)
+        with patch.object(ads, "json_request", side_effect=fail_campaign):
+            result = self.execute("list_campaigns", {"customer_id": CUSTOMER})
+        self.assertIsInstance(result, ActionFailed)
+        self.diagnostics.assert_called_once()
+        context = self.diagnostics.call_args.args[0]["context"]
+        self.assertIn("campaign read", context["operation"])
+        self.assertNotIn("SELECT", str(context))
+        self.assertNotIn("account preflight", context["operation"])
+
+    def test_unmapped_google_response_uses_chunked_context_at_host_boundary(self):
+        body = json.dumps({"error": {"status": "INTERNAL", "message": "provider-only detail " * 400}}).encode()
+        with patch.object(ads, "json_request", side_effect=WebRequestError("Google Ads request failed.", status=500, body=body)) as request:
+            with self.assertRaises(UnmappedProviderError) as caught:
+                self.execute("list_accounts", {})
+        request.assert_called_once()
+        self.diagnostics.assert_not_called()
+        context = _provider_warning_context("google_ads", "list_accounts", caught.exception)
+        from host.runtime.core import host_errors
+        host_errors.report_warning("tools.provider_request", caught.exception, context=context, kind="provider_failure")
+        self.diagnostics.assert_called_once()
+        recorded = self.diagnostics.call_args.args[0]["context"]
+        self.assertTrue(recorded["provider_response_truncated"])
+        self.assertIn("provider_response_4", recorded)
+        self.assertGreater(sum(len(v.encode()) for k, v in recorded.items() if k == "provider_response" or k.startswith("provider_response_") and isinstance(v, str)), 512)
+        self.assertNotIn("provider-only detail", str(caught.exception))
+
+    def test_google_oauth_requests_retain_exchange_and_userinfo_operations(self):
+        self.identity.side_effect = get_google_userinfo
+        redirect = "https://kern.example/tool-oauth/google_ads/callback"
+        for stage, responses in (
+            ("POST OAuth token exchange", [WebRequestError("Google OAuth exchange failed.", status=400, body=b'{"error":"invalid_grant"}')]),
+            ("GET OAuth user-info lookup", [{"access_token": "private-token", "scope": ads.ADS_SCOPE}, WebRequestError("Google OAuth user-info failed.", status=403, body=b'{"error":{"status":"PERMISSION_DENIED"}}')]),
+        ):
+            with self.subTest(stage=stage):
+                start = ads.CREDENTIALS.start_connect({"redirect_uri": redirect}, self.api)
+                self.diagnostics.reset_mock()
+                with patch("host.tools.shared.google.json_request", side_effect=responses) as request:
+                    with self.assertRaises(RuntimeError):
+                        ads.CREDENTIALS.complete_connect({"redirect_uri": redirect, "state": start["state"], "code": "private-code"}, self.api)
+                self.assertEqual(request.call_count, len(responses))
+                self.diagnostics.assert_called_once()
+                context = self.diagnostics.call_args.args[0]["context"]
+                self.assertEqual(context["operation"], stage)
+                self.assertNotIn("private-token", str(context))
+                self.assertNotIn("private-code", str(context))
+
+    def test_oauth_warning_response_is_sanitized_before_reaching_host(self):
+        from host.runtime.tools.api import OperatorError, _report_operator_provider_warning
+        redirect = "https://kern.example/tool-oauth/google_ads/callback"
+        bodies = [b'<html>https://google.example/oauth?client_secret=private-secret</html>', b'{"unexpected": "private-secret"}', b'{"error": {"message": "Authorization: Bearer private-secret"}}']
+        for body in bodies:
+            with self.subTest(body=body):
+                start = ads.CREDENTIALS.start_connect({"redirect_uri": redirect}, self.api)
+                source = ProviderWarning("Google", "POST OAuth token exchange", "Google OAuth failed.", status=500, body=body)
+                source.diagnostic_context = {"extra_detail": "additional context"}
+                with patch("host.tools.shared.google.GoogleCredentialStore.complete_connect", side_effect=source):
+                    with self.assertRaises(ProviderWarning) as caught:
+                        ads.CREDENTIALS.complete_connect({"redirect_uri": redirect, "state": start["state"], "code": "private-code"}, self.api)
+                exc = caught.exception
+                self.assertNotIn("private-secret", exc.response_body)
+                context = _provider_warning_context("google_ads", "oauth_complete_connect", exc)
+                self.assertEqual(context["extra_detail"], "additional context")
+                self.assertNotIn("private-secret", json.dumps(context))
+                self.diagnostics.reset_mock()
+                with self.assertRaises(OperatorError):
+                    _report_operator_provider_warning("google_ads", "oauth_complete_connect", exc)
+                self.diagnostics.assert_called_once()
+                self.assertNotIn("private-secret", json.dumps(self.diagnostics.call_args.args[0]))
+
+    def test_google_oauth_server_failure_retains_bounded_details_in_diagnostics(self):
+        redirect = "https://kern.example/tool-oauth/google_ads/callback"
+        start = ads.CREDENTIALS.start_connect({"redirect_uri": redirect}, self.api)
+        body = json.dumps({"error": "server_error", "error_description": "provider-only detail " * 300}).encode()
+        with patch("host.tools.shared.google.json_request", side_effect=WebRequestError("Google OAuth exchange failed.", status=500, body=body)) as request:
+            with self.assertRaises(RuntimeError):
+                ads.CREDENTIALS.complete_connect({"redirect_uri": redirect, "state": start["state"], "code": "private-code"}, self.api)
+        request.assert_called_once()
+        self.diagnostics.assert_called_once()
+        context = self.diagnostics.call_args.args[0]["context"]
+        self.assertEqual(context["operation"], "POST OAuth token exchange")
+        self.assertEqual(context["http_status"], 500)
+        self.assertTrue(context["provider_response_truncated"])
+        self.assertIn("provider_response_4", context)
+        self.assertNotIn("private-code", str(context))
+
+    def test_initial_bulk_mutate_rejection_retains_typed_codes_location_and_request_id(self):
+        error_body = json.dumps({"error": {
+            "code": 400, "status": "INVALID_ARGUMENT", "message": "provider-only detail " * 500, "details": [{
+                "@type": "type.googleapis.com/google.ads.googleads.v25.errors.GoogleAdsFailure", "requestId": "bulk-correlation-123",
+                "errors": [{"errorCode": {"budgetError": "INVALID_BUDGET_AMOUNT"}, "message": "Rejected bulk field", "trigger": {"stringValue": "private request value"}, "location": {"fieldPathElements": [
+                    {"fieldName": "mutate_operations", "index": 0}, {"fieldName": "campaign_budget_operation"}, {"fieldName": "create"}, {"fieldName": "total_amount_micros"},
+                ]}}],
+            }],
+        }}).encode()
+        self.assertGreater(len(error_body), 4096)
+        approval = self.approve()
+        self.diagnostics.reset_mock()
+        fixture = self.request
+        def route(method, url, **kwargs):
+            if url.endswith("googleAds:mutate"):
+                self.mutations.append(kwargs.get("body"))
+                return web.json_request(method, url, **kwargs)
+            return fixture(method, url, **kwargs)
+        response = urllib.error.HTTPError("https://google.example/mutate", 400, "Bad Request", {}, io.BytesIO(error_body))
+        with patch.object(ads, "json_request", side_effect=route), patch.object(web._OPENER, "open", side_effect=response) as opening:
+            result = self.finish(approval)
+        opening.assert_called_once()
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("none returned", result.error)
+        self.assertEqual(len(self.mutations), 1)
+        self.diagnostics.assert_called_once()
+        context = self.diagnostics.call_args.args[0]["context"]
+        self.assertEqual(context["http_status"], 400)
+        self.assertEqual(context["phase"], "creating the paused campaign")
+        self.assertIn("googleAds:mutate", context["operation"])
+        self.assertIn("provider-only detail", context["provider_response"])
+        self.assertEqual(context["google_error_codes"], "budgetError:INVALID_BUDGET_AMOUNT")
+        self.assertEqual(context["google_request_id"], "bulk-correlation-123")
+        self.assertEqual(context["google_error_paths"], "mutate_operations[0].campaign_budget_operation.create.total_amount_micros")
+        self.assertFalse(context["google_error_paths_truncated"])
+        self.assertTrue(context["provider_response_truncated"])
+        self.assertNotIn("private request value", str(context))
 
     def test_direct_accounts_are_ids_only_and_capped(self):
         self.direct = [str(1000000000 + i) for i in range(51)]

@@ -174,15 +174,93 @@ class MetaFixture:
 
 class InstagramAdsTests(unittest.TestCase):
     def setUp(self):
+        self.diagnostics = self.enterContext(patch("host.tools.shared.ads_diagnostics.host_errors.emit_record"))
         self.api = connected_api()
         self.meta = MetaFixture()
         self.enterContext(patch.object(ads, 'json_request', self.meta))
+
+    def test_local_launch_semantics_do_not_emit_provider_failure(self):
+        value = launch_input()
+        value["lifetime_budget"] = "0"
+        result = ads.BUNDLED_TOOL.execute("launch_campaign", value, self.api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("lifetime_budget", result.error)
+        self.assertEqual(self.meta.calls, [])
+        self.diagnostics.assert_not_called()
+
+    def test_local_report_dates_are_validated_before_provider_reads_and_diagnostics(self):
+        cases = (("bad", "2026-01-02"), ("2026-02-30", "2026-03-01"), ("2026-01-02", "2026-01-01"), ("2026-01-01", "2026-05-01"))
+        for start, end in cases:
+            with self.subTest(start=start, end=end):
+                result = ads.BUNDLED_TOOL.execute("get_performance", {"account_id": ACCOUNT, "campaign_id": CAMPAIGN, "start_date": start, "end_date": end}, self.api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(self.meta.calls, [])
+                self.diagnostics.assert_not_called()
 
     def queue(self, value=None):
         result = ads.BUNDLED_TOOL.execute('launch_campaign', value or launch_input(), self.api)
         self.assertIsInstance(result, ActionPendingApproval, result)
         self.assertFalse(self.meta.writes)
         return self.api.approvals.approve(result.approval_id)
+
+    def test_http_json_and_reconnect_errors_have_operator_only_diagnostics(self):
+        for status, code in ((400, 100), (400, 190), (403, 200), (429, 4), (500, 2), (200, 100), (200, 190)):
+            with self.subTest(status=status, code=code):
+                self.api = connected_api()
+                error = {'error': {'code': code, 'message': 'provider-only detail'}}
+                def reject(*args, **kwargs):
+                    if status == 200:
+                        return error
+                    raise WebRequestError('Meta Marketing API request failed.', status=status, body=json.dumps(error).encode())
+                self.diagnostics.reset_mock()
+                with patch.object(ads, 'json_request', side_effect=reject) as request:
+                    result = ads.BUNDLED_TOOL.execute('list_accounts', {}, self.api)
+                request.assert_called_once()
+                self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(result.reconnect_required, code == 190)
+                self.assertNotIn('provider-only detail', result.error)
+                self.diagnostics.assert_called_once()
+                context = self.diagnostics.call_args.args[0]['context']
+                self.assertEqual(context['http_status'], status)
+                self.assertEqual(context['operation'], 'GET /me')
+                self.assertIn('provider-only detail', context['provider_response'])
+
+    def test_end_failure_logs_exact_phase_and_keeps_uncertain_result(self):
+        pending = ads.BUNDLED_TOOL.execute('end_campaign', {'account_id': ACCOUNT, 'campaign_id': CAMPAIGN}, self.api)
+        approval = self.api.approvals.approve(pending.approval_id)
+        def reject(method, url, **kwargs):
+            if method == 'POST':
+                raise WebRequestError('Meta Marketing API request failed.', status=400,
+                    body=b'{"error":{"code":100,"message":"provider-only detail"}}')
+            return self.meta(method, url, **kwargs)
+        self.diagnostics.reset_mock()
+        with patch.object(ads, 'json_request', reject):
+            result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn('pause is unconfirmed', result.error)
+        self.assertNotIn('provider-only detail', result.error)
+        self.diagnostics.assert_called_once()
+        context = self.diagnostics.call_args.args[0]['context']
+        self.assertEqual(context['phase'], 'ending campaign')
+        self.assertIn(CAMPAIGN, context['confirmed_resources'])
+        self.assertIn('provider-only detail', context['provider_response'])
+
+    def test_oauth_exchange_failure_records_only_provider_error(self):
+        redirect = 'https://kern.example/tool-oauth/instagram_ads/callback'
+        start = ads.CREDENTIALS.start_connect({'redirect_uri': redirect}, self.api)
+        with patch.object(ads, 'json_request', side_effect=WebRequestError('Meta OAuth exchange failed.', status=400,
+                body=b'{"error":{"code":100,"message":"provider-only detail"}}')) as exchange:
+            with self.assertRaises(RuntimeError) as caught:
+                ads.CREDENTIALS.complete_connect({'redirect_uri': redirect, 'state': start['state'], 'code': 'private-code'}, self.api)
+        exchange.assert_called_once()
+        self.diagnostics.assert_called_once()
+        context = self.diagnostics.call_args.args[0]['context']
+        self.assertEqual(context['action_id'], 'oauth_complete_connect')
+        self.assertEqual(context['operation'], 'GET oauth/access_token')
+        self.assertIn('provider-only detail', context['provider_response'])
+        self.assertNotIn('provider-only detail', str(caught.exception))
+        for private in ('private-code', redirect, 'meta-secret', 'meta-token'):
+            self.assertNotIn(private, str(context))
 
     def test_real_host_approval_accepts_bounded_summaries_and_preserves_long_names(self):
         def insert(tool_id, action_id, summary, payload, created_at, **kwargs):
@@ -397,7 +475,13 @@ class InstagramAdsTests(unittest.TestCase):
                         if path == ('/act_100/ads' if phase == 'paused' else '/' + ADSET):
                             self.meta.resources[resource].pop(field)
                     self.meta.write_hook = hook
+                    self.diagnostics.reset_mock()
                     result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+                    self.diagnostics.assert_called_once()
+                    context = self.diagnostics.call_args.args[0]['context']
+                    self.assertNotIn('http_status', context)
+                    self.assertIn(CAMPAIGN, context['confirmed_resources'])
+                    self.assertIn(context['phase'], result.error)
                     self.assertIsInstance(result, ActionFailed, result)
                     self.assertEqual(len(self.meta.writes), 4 if phase == 'paused' else 6)
                     self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'PAUSED')

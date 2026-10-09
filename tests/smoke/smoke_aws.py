@@ -297,6 +297,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ),
     ),
     "google_ads": (
+        ("list_locations", {"country_code": "GB", "limit": 1}),
         ("list_accounts", {}),
         ("list_campaigns", {"customer_id": "1234567890", "limit": 1}),
         ("list_ad_groups", {"customer_id": "1234567890", "campaign_id": "77", "limit": 1}),
@@ -3983,8 +3984,9 @@ PY""", check=True)
                 response, parsed = shim_bundled_call(tool_id, action_id, arguments)
                 # Polymarket and Web Fetch need no credential or config. The
                 # three WhatsApp local-state reads are also valid while no
-                # account is linked; only its send must fail closed.
-                direct_without_connection = (tool_id == "whatsapp" and action_id != "send_message") or (tool_id == "browser" and action_id in {"x_connection_status", "linkedin_connection_status"})
+                # account is linked; only its send must fail closed. Google Ads
+                # country lookup also reads bundled public data without OAuth.
+                direct_without_connection = (tool_id == "whatsapp" and action_id != "send_message") or (tool_id == "browser" and action_id in {"x_connection_status", "linkedin_connection_status"}) or (tool_id == "google_ads" and action_id == "list_locations")
                 if tool_id == "indexnow":
                     if response.get("isError") or not isinstance(parsed, dict):
                         raise AssertionError(f"managed-key {name} failed")

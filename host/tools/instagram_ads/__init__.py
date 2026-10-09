@@ -22,6 +22,7 @@ from host.tools.manifest import ToolManifest
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ActionResult, ApprovalExecuted, ApprovalResult
 from host.tools.shared.inputs import ToolInputValidationError
+from host.tools.shared.ads_diagnostics import MAX_ADS_ERROR_BYTES, AdsProviderError, ads_error_body, report_ads_failure
 from host.tools.shared.oauth2 import OAuth2CredentialStore, IntegrationReconnectRequired, access_token_is_fresh, clear_if_still_loaded, now, signed_state, verify_state
 from host.tools.shared.web import WebRequestError, encode_query, json_request, known_provider_transport_error
 from host.tools.tool import CredentialFlow, OAuthStartConnectParams, OAuthStartConnectResult, OAuthCompleteConnectParams, OAuthCompleteConnectResult
@@ -178,20 +179,31 @@ class _Graph:
             result = json_request(method, GRAPH + path + ("?" + encode_query(fields) if method == "GET" else ""),
                 headers={"Authorization": "Bearer " + self.token}, form=fields if method == "POST" else None,
                 failure_message="Meta Marketing API request failed.", invalid_response_message="Meta returned an unclear response.",
-                timeout=min(15, remaining))
+                timeout=min(15, remaining), max_error_bytes=MAX_ADS_ERROR_BYTES)
         except WebRequestError as exc:
+            cause = AdsProviderError("Meta Marketing API request failed.", f"{method} {path}", status=exc.status, body=exc.body, body_truncated=exc.body_truncated)
             try:
                 body = json.loads(exc.body)
             except (ValueError, UnicodeDecodeError):
                 body = None
             error = body.get("error") if isinstance(body, dict) else None
-            self._check_auth_error(error)
+            try:
+                self._check_auth_error(error)
+            except IntegrationReconnectRequired as auth_error:
+                raise auth_error from cause
             if isinstance(error, dict) and type(error.get("code")) is int:
-                raise RuntimeError(_api_error_message(error)) from exc
-            raise
-        self._check_auth_error(result.get("error"))
+                raise AdsProviderError(_api_error_message(error), f"{method} {path}", status=exc.status, body=exc.body, body_truncated=exc.body_truncated) from exc
+            raise exc from cause
+        except RuntimeError as exc:
+            raise AdsProviderError(str(exc), f"{method} {path}") from exc
         if result.get("error"):
-            raise RuntimeError(_api_error_message(result["error"]))
+            cause = AdsProviderError(_api_error_message(result["error"]), f"{method} {path}", status=200,
+                                     body=ads_error_body(_json(result).encode("utf-8")))
+            try:
+                self._check_auth_error(result["error"])
+            except IntegrationReconnectRequired as auth_error:
+                raise auth_error from cause
+            raise cause
         return result
 
     def get(self, path: str, fields: str = "", **params: str) -> JSONObject:
@@ -220,14 +232,32 @@ class MetaCredentialStore(OAuth2CredentialStore):
         }), "state": state}
 
     def complete_connect(self, params: OAuthCompleteConnectParams, api: HostAPI) -> OAuthCompleteConnectResult:
+        verify_state(params["state"], secret=api.config["INSTAGRAM_ADS_APP_SECRET"], tool_id=MANIFEST.tool_id)
+        try:
+            return self._complete_connect(params, api)
+        except Exception as exc:
+            report_ads_failure("instagram_ads", "oauth_complete_connect", exc, phase="connection")
+            raise
+
+    def _complete_connect(self, params: OAuthCompleteConnectParams, api: HostAPI) -> OAuthCompleteConnectResult:
         state = verify_state(params["state"], secret=api.config["INSTAGRAM_ADS_APP_SECRET"], tool_id=MANIFEST.tool_id)
         if state.get("redirect_uri") != params["redirect_uri"]:
             raise RuntimeError("Instagram Ads OAuth callback changed.")
         common = {"client_id": api.config["INSTAGRAM_ADS_APP_ID"], "client_secret": api.config["INSTAGRAM_ADS_APP_SECRET"]}
         def exchange(fields: dict[str, str]) -> JSONObject:
-            return json_request("GET", GRAPH + "/oauth/access_token?" + encode_query({**common, **fields}),
-                failure_message="Meta OAuth exchange failed. Check app credentials, callback and code.",
-                invalid_response_message="Meta OAuth returned an invalid token response.")
+            try:
+                result = json_request("GET", GRAPH + "/oauth/access_token?" + encode_query({**common, **fields}),
+                    failure_message="Meta OAuth exchange failed. Check app credentials, callback and code.",
+                    invalid_response_message="Meta OAuth returned an invalid token response.", max_error_bytes=MAX_ADS_ERROR_BYTES)
+            except WebRequestError as exc:
+                raise AdsProviderError("Meta OAuth exchange failed. Check app credentials, callback and code.",
+                                       "GET oauth/access_token", status=exc.status, body=exc.body, body_truncated=exc.body_truncated) from exc
+            except RuntimeError as exc:
+                raise AdsProviderError(str(exc), "GET oauth/access_token") from exc
+            if result.get("error"):
+                raise AdsProviderError(_api_error_message(result["error"]), "GET oauth/access_token", status=200,
+                                       body=ads_error_body(_json(result).encode("utf-8")))
+            return result
         short = exchange({"code": params["code"], "redirect_uri": params["redirect_uri"]})
         token = _text(short.get("access_token"), "Meta access token", 16384)
         long = exchange({"grant_type": "fb_exchange_token", "fb_exchange_token": token})
@@ -643,7 +673,9 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
     return ad
 
 
-def _failure(exc: Exception) -> ActionFailed:
+def _failure(exc: Exception, *, action: str, phase: str, confirmed: tuple[str, ...] = (), diagnose: bool = True) -> ActionFailed:
+    if diagnose:
+        report_ads_failure("instagram_ads", action, exc, phase=phase, confirmed=confirmed)
     if isinstance(exc, IntegrationReconnectRequired):
         return ActionFailed(str(exc), reconnect_required=True)
     if isinstance(exc, ToolInputValidationError):
@@ -722,7 +754,7 @@ def _launch(graph: _Graph, proposal: JSONObject, api: HostAPI) -> ApprovalResult
             f"Parent effective status: {campaign.get('effective_status', 'unavailable')}. "
             "Provider review may delay delivery and later release it within the approved flight. Configured ACTIVE does not prove accepted review, impressions or spend. Inspect get_campaign/get_performance or Ads Manager.")
     except Exception as exc:
-        mapped = _failure(exc)
+        mapped = _failure(exc, action="launch_campaign", phase=stage, confirmed=tuple(f"{key} {value}" for key, value in ids.items()))
         return ActionFailed(f"Instagram Ads stopped at {stage}. Confirmed ids: {_json(cast(JSONObject, ids))}. "
             f"{mapped.error} This stage may have an unconfirmed outcome. Inspect Ads Manager before another launch. "
             "No automatic retry, cleanup or resume was attempted.", reconnect_required=mapped.reconnect_required)
@@ -731,6 +763,18 @@ def _launch(graph: _Graph, proposal: JSONObject, api: HostAPI) -> ApprovalResult
 def _campaign_result(value: JSONObject) -> JSONObject:
     return {**{key: str(value.get(key) or "") for key in ("id", "account_id", "name", "objective", "status", "effective_status")},
             "configuration_json": _json(value)}
+
+
+def _report_dates(value: JSONObject) -> tuple[date, date]:
+    if any(not isinstance(value[key], str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", str(value[key])) is None for key in ("start_date", "end_date")):
+        raise ToolInputValidationError("Report dates must be YYYY-MM-DD.")
+    try:
+        start, end = date.fromisoformat(str(value["start_date"])), date.fromisoformat(str(value["end_date"]))
+    except ValueError as exc:
+        raise ToolInputValidationError("Report dates must be YYYY-MM-DD.") from exc
+    if end < start or (end - start).days >= 90:
+        raise ToolInputValidationError("Report range must be 1-90 inclusive days.")
+    return start, end
 
 
 def _read(graph: _Graph, action: str, value: JSONObject, api: HostAPI) -> JSONObject:
@@ -791,14 +835,7 @@ def _read(graph: _Graph, action: str, value: JSONObject, api: HostAPI) -> JSONOb
         return {"campaign": _campaign_result(campaign), "adsets": cast(list[JSONValue], rows), "next_cursor": _cursor(listing)}
     elif action == "get_performance":
         _campaign(graph, account_id, _id(value["campaign_id"], "campaign_id"))
-        if any(not isinstance(value[key], str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", str(value[key])) is None for key in ("start_date", "end_date")):
-            raise ToolInputValidationError("Report dates must be YYYY-MM-DD.")
-        try:
-            start, end = date.fromisoformat(str(value["start_date"])), date.fromisoformat(str(value["end_date"]))
-        except ValueError as exc:
-            raise ToolInputValidationError("Report dates must be YYYY-MM-DD.") from exc
-        if end < start or (end - start).days >= 90:
-            raise ToolInputValidationError("Report range must be 1-90 inclusive days.")
+        start, end = _report_dates(value)
         listing = graph.get("/" + str(value["campaign_id"]) + "/insights", "date_start,date_stop,account_currency,spend,impressions,reach,clicks,inline_link_clicks,actions,video_thruplay_watched_actions",
             time_range=_json({"since": start.isoformat(), "until": end.isoformat()}), time_increment="1", **params)
         rows = []
@@ -825,6 +862,7 @@ class InstagramAdsTool:
         return CREDENTIALS
 
     def execute(self, action: str, tool_input: JSONObject, api: HostAPI) -> ActionResult:
+        validated = False
         try:
             _validate(action, tool_input)
             # Validate all direct free text before even the account read.
@@ -835,6 +873,11 @@ class InstagramAdsTool:
                 if action == "lookup_targeting":
                     query = _text(tool_input["query"], "query", 100)
                     api.outbound.guard_request_parameter_string(query)
+            if action == "launch_campaign":
+                _launch_input(tool_input)
+            elif action == "get_performance":
+                _report_dates(tool_input)
+            validated = True
             token = CREDENTIALS.access_token(api)
             graph = _Graph(token, api.config["INSTAGRAM_ADS_APP_SECRET"], api=api)
             if action == "launch_campaign":
@@ -855,7 +898,7 @@ class InstagramAdsTool:
                 return ActionExecuted(_read(graph, action, tool_input, api))
             return ActionPendingApproval(record.approval_id, record.summary)
         except Exception as exc:
-            return _failure(exc)
+            return _failure(exc, action=action, phase="proposal" if action in {"launch_campaign", "end_campaign"} else "read", diagnose=validated)
 
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
         try:
@@ -887,11 +930,11 @@ class InstagramAdsTool:
                 if campaign.get("status") != "PAUSED":
                     raise RuntimeError("Meta did not report the parent configured PAUSED.")
             except Exception as exc:
-                mapped = _failure(exc)
+                mapped = _failure(exc, action=approval.action_id, phase="ending campaign", confirmed=(f"campaign {campaign_id}",))
                 return ActionFailed(f"Campaign {campaign_id} pause is unconfirmed. {mapped.error} Inspect Ads Manager; do not assume delivery stopped or retry this approval.", reconnect_required=mapped.reconnect_required)
             return ApprovalExecuted(f"Campaign {campaign_id} in account {account_id} is configured PAUSED; effective status {campaign.get('effective_status', 'unavailable')}. History/reports retained. Stopping may be delayed, past delivery remains billable and Ads Manager can resume it.")
         except Exception as exc:
-            return _failure(exc)
+            return _failure(exc, action=approval.action_id, phase="approval revalidation")
 
 
 BUNDLED_TOOL = InstagramAdsTool()
