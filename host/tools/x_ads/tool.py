@@ -14,6 +14,7 @@ from typing import cast
 from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ActionResult, ApprovalExecuted, ApprovalResult
+from host.tools.shared.ads_diagnostics import report_ads_failure
 from host.tools.shared.inputs import clip_text, int_field
 from host.tools.x_ads.api import Client, complete_list, object_data, page_data
 from host.tools.x_ads.manifest import LAUNCH, LAUNCH_REQUIRED, MANIFEST, METRICS, OBJECTIVES
@@ -376,11 +377,16 @@ def _approval(api: HostAPI, client: Client, action: str, summary: str, payload: 
     return ActionPendingApproval(record.approval_id, record.summary)
 
 
-def _performance(client: Client, account_id: str, values: JSONObject) -> JSONObject:
+def _performance_window(values: JSONObject) -> tuple[str, datetime, datetime]:
     campaign_id = _id(values.get("campaign_id"), "campaign")
     start, end = _time(values.get("start_time"), "start_time"), _time(values.get("end_time"), "end_time")
     if start.minute or start.second or end.minute or end.second or not 0 < (end - start).total_seconds() <= 7 * 86400:
         raise ValueError("Performance needs a whole-hour UTC window greater than zero and at most seven days.")
+    return campaign_id, start, end
+
+
+def _performance(client: Client, account_id: str, values: JSONObject) -> JSONObject:
+    campaign_id, start, end = _performance_window(values)
     campaign = _entity(client, f"/accounts/{account_id}/campaigns/{campaign_id}", campaign_id)
     placement_metrics: list[JSONObject] = []
     for placement in ("ALL_ON_TWITTER", "SPOTLIGHT", "TREND"):
@@ -453,21 +459,33 @@ class XAdsTool:
         properties = cast(JSONObject, spec.input_schema["properties"])
         if not set(tool_input) <= set(properties):
             return ActionFailed("X Ads input contains unknown fields.")
+        read_parameters: tuple[dict[str, str], int] = ({}, 0)
+        try:
+            if action == "launch_campaign":
+                _launch_plan(tool_input)
+            else:
+                for key in ("account_id", "campaign_id", "promotable_user_id", "line_item_id"):
+                    if key in properties:
+                        _id(tool_input.get(key), key)
+                if spec.approval == "direct":
+                    read_parameters = self._read_parameters(action, tool_input, api)
+                if action == "get_performance":
+                    _performance_window(tool_input)
+        except ValueError as exc:
+            return ActionFailed(str(exc))
         try:
             client = Client(api)
             if spec.approval == "operator":
                 return self._propose(client, action, tool_input, api)
-            return ActionExecuted(self._read(client, action, tool_input, api))
+            return ActionExecuted(self._read(client, action, tool_input, read_parameters))
         except (ValueError, RuntimeError) as exc:
+            report_ads_failure("x_ads", action, exc, phase="proposal" if spec.approval == "operator" else "read")
             return ActionFailed(str(exc))
 
-    def _read(self, client: Client, action: str, values: JSONObject, api: HostAPI) -> JSONObject:
+    def _read_parameters(self, action: str, values: JSONObject, api: HostAPI) -> tuple[dict[str, str], int]:
         spec = MANIFEST.action(action)
         assert spec is not None
         params, count = _page(values, api) if "count" in cast(JSONObject, spec.input_schema["properties"]) else ({}, 0)
-        if action == "list_accounts":
-            rows, cursor = page_data(client.request("GET", "/accounts", params), limit=count)
-            return {"accounts": [s.account(row) for row in rows], "next_cursor": cursor}
         if action == "lookup_targeting":
             kind = values.get("kind")
             if not isinstance(kind, str) or kind not in LOOKUPS:
@@ -484,6 +502,15 @@ class XAdsTool:
                     params["country_code"] = str(values["country_code"])
             elif "location_type" in values or "country_code" in values:
                 raise ValueError("Location options are only valid for LOCATION lookups.")
+        return params, count
+
+    def _read(self, client: Client, action: str, values: JSONObject, parameters: tuple[dict[str, str], int]) -> JSONObject:
+        params, count = parameters
+        if action == "list_accounts":
+            rows, cursor = page_data(client.request("GET", "/accounts", params), limit=count)
+            return {"accounts": [s.account(row) for row in rows], "next_cursor": cursor}
+        if action == "lookup_targeting":
+            kind = str(values["kind"])
             rows, cursor = page_data(client.request("GET", "/targeting_criteria/" + LOOKUPS[kind], params), limit=count)
             return {"options": [{"name": s.text(row, "name"), "type": s.text(row, "targeting_type"), "value": s.text(row, "targeting_value"), "country_code": s.text(row, "country_code"), "location_type": s.text(row, "location_type")} for row in rows], "next_cursor": cursor}
         account_id = _id(values.get("account_id"), "account")
@@ -606,8 +633,12 @@ class XAdsTool:
             writes.entity("PUT", prefix + "/campaigns/" + campaign_id, {"entity_status": "PAUSED"}, "end campaign", expected_id=campaign_id)
             return ApprovalExecuted(f"Ended delivery for X Ads campaign {campaign_id} by pausing its parent. Campaign/reporting retained; no Kern resume or permanent deletion. X Ads Manager can resume it. Stopping may take time; past delivery can still be billed.")
         except (ValueError, RuntimeError) as exc:
+            report_ads_failure("x_ads", approval.action_id, exc, phase=writes.attempted if writes and writes.attempted else "approval revalidation",
+                               confirmed=writes.confirmed if writes else ())
             return writes.failure(str(exc)) if writes is not None else ActionFailed(str(exc))
-        except (KeyError, TypeError):
+        except (KeyError, TypeError) as exc:
+            report_ads_failure("x_ads", approval.action_id, exc, phase=writes.attempted if writes and writes.attempted else "approval revalidation",
+                               confirmed=writes.confirmed if writes else ())
             return writes.failure("The stored X Ads approval is incomplete. Request a new approval.") if writes is not None else ActionFailed("The stored X Ads approval is incomplete.")
 
     def _create(self, writes: Writes, plan: JSONObject, funding: JSONObject) -> JSONObject:

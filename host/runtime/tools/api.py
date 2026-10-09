@@ -519,6 +519,7 @@ def _report_operator_provider_warning(tool_id: str, action_id: str, exc: Provide
     }
     if exc.response_body:
         context["provider_response"] = exc.response_body
+    context.update(exc.diagnostic_context)
     host_errors.report_warning(
         "tools.operator_provider_request",
         exc,
@@ -795,6 +796,7 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
             }
             if exc.response_body:
                 context["provider_response"] = exc.response_body
+            context.update(exc.diagnostic_context)
             host_errors.report_warning(
                 "tools.streaming_provider_request",
                 exc,

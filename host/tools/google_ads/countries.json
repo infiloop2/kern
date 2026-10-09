@@ -1,0 +1,1543 @@
+{
+  "snapshot_date": "2026-08-12",
+  "source_url": "https://developers.google.com/static/google-ads/api/data/geo/geotargets-2026-08-12.csv.zip",
+  "source_zip_sha256": "d4a62971cb283e405a07d537a0af400816ff5a36283e60376a51c7657f3d1e89",
+  "attribution": "Google Ads API geo targets, Google. Extracted Active Country rows; all other target types and statuses omitted.",
+  "source_documentation": "https://developers.google.com/google-ads/api/data/geotargets",
+  "license_url": "https://creativecommons.org/licenses/by/4.0/",
+  "rows": [
+    {
+      "geo_target_id": "2004",
+      "name": "Afghanistan",
+      "country_code": "AF",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2008",
+      "name": "Albania",
+      "country_code": "AL",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2012",
+      "name": "Algeria",
+      "country_code": "DZ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2016",
+      "name": "American Samoa",
+      "country_code": "AS",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2020",
+      "name": "Andorra",
+      "country_code": "AD",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2024",
+      "name": "Angola",
+      "country_code": "AO",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2010",
+      "name": "Antarctica",
+      "country_code": "AQ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2028",
+      "name": "Antigua and Barbuda",
+      "country_code": "AG",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2032",
+      "name": "Argentina",
+      "country_code": "AR",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2051",
+      "name": "Armenia",
+      "country_code": "AM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2036",
+      "name": "Australia",
+      "country_code": "AU",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2040",
+      "name": "Austria",
+      "country_code": "AT",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2031",
+      "name": "Azerbaijan",
+      "country_code": "AZ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2048",
+      "name": "Bahrain",
+      "country_code": "BH",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2050",
+      "name": "Bangladesh",
+      "country_code": "BD",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2052",
+      "name": "Barbados",
+      "country_code": "BB",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2112",
+      "name": "Belarus",
+      "country_code": "BY",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2056",
+      "name": "Belgium",
+      "country_code": "BE",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2084",
+      "name": "Belize",
+      "country_code": "BZ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2204",
+      "name": "Benin",
+      "country_code": "BJ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2064",
+      "name": "Bhutan",
+      "country_code": "BT",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2068",
+      "name": "Bolivia",
+      "country_code": "BO",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2070",
+      "name": "Bosnia and Herzegovina",
+      "country_code": "BA",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2072",
+      "name": "Botswana",
+      "country_code": "BW",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2076",
+      "name": "Brazil",
+      "country_code": "BR",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2096",
+      "name": "Brunei",
+      "country_code": "BN",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2100",
+      "name": "Bulgaria",
+      "country_code": "BG",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2854",
+      "name": "Burkina Faso",
+      "country_code": "BF",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2108",
+      "name": "Burundi",
+      "country_code": "BI",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2132",
+      "name": "Cabo Verde",
+      "country_code": "CV",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2116",
+      "name": "Cambodia",
+      "country_code": "KH",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2120",
+      "name": "Cameroon",
+      "country_code": "CM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2124",
+      "name": "Canada",
+      "country_code": "CA",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2535",
+      "name": "Caribbean Netherlands",
+      "country_code": "BQ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2140",
+      "name": "Central African Republic",
+      "country_code": "CF",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2148",
+      "name": "Chad",
+      "country_code": "TD",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2152",
+      "name": "Chile",
+      "country_code": "CL",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2156",
+      "name": "China",
+      "country_code": "CN",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2162",
+      "name": "Christmas Island",
+      "country_code": "CX",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2166",
+      "name": "Cocos (Keeling) Islands",
+      "country_code": "CC",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2170",
+      "name": "Colombia",
+      "country_code": "CO",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2174",
+      "name": "Comoros",
+      "country_code": "KM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2184",
+      "name": "Cook Islands",
+      "country_code": "CK",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2188",
+      "name": "Costa Rica",
+      "country_code": "CR",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2384",
+      "name": "Cote d'Ivoire",
+      "country_code": "CI",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2191",
+      "name": "Croatia",
+      "country_code": "HR",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2531",
+      "name": "Curacao",
+      "country_code": "CW",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2196",
+      "name": "Cyprus",
+      "country_code": "CY",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2203",
+      "name": "Czechia",
+      "country_code": "CZ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2180",
+      "name": "Democratic Republic of the Congo",
+      "country_code": "CD",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2208",
+      "name": "Denmark",
+      "country_code": "DK",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2262",
+      "name": "Djibouti",
+      "country_code": "DJ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2212",
+      "name": "Dominica",
+      "country_code": "DM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2214",
+      "name": "Dominican Republic",
+      "country_code": "DO",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2218",
+      "name": "Ecuador",
+      "country_code": "EC",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2818",
+      "name": "Egypt",
+      "country_code": "EG",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2222",
+      "name": "El Salvador",
+      "country_code": "SV",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2226",
+      "name": "Equatorial Guinea",
+      "country_code": "GQ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2232",
+      "name": "Eritrea",
+      "country_code": "ER",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2233",
+      "name": "Estonia",
+      "country_code": "EE",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2748",
+      "name": "Eswatini",
+      "country_code": "SZ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2231",
+      "name": "Ethiopia",
+      "country_code": "ET",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2242",
+      "name": "Fiji",
+      "country_code": "FJ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2246",
+      "name": "Finland",
+      "country_code": "FI",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2250",
+      "name": "France",
+      "country_code": "FR",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2258",
+      "name": "French Polynesia",
+      "country_code": "PF",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2260",
+      "name": "French Southern and Antarctic Lands",
+      "country_code": "TF",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2266",
+      "name": "Gabon",
+      "country_code": "GA",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2268",
+      "name": "Georgia",
+      "country_code": "GE",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2276",
+      "name": "Germany",
+      "country_code": "DE",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2288",
+      "name": "Ghana",
+      "country_code": "GH",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2300",
+      "name": "Greece",
+      "country_code": "GR",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2308",
+      "name": "Grenada",
+      "country_code": "GD",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2316",
+      "name": "Guam",
+      "country_code": "GU",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2320",
+      "name": "Guatemala",
+      "country_code": "GT",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2831",
+      "name": "Guernsey",
+      "country_code": "GG",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2324",
+      "name": "Guinea",
+      "country_code": "GN",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2624",
+      "name": "Guinea-Bissau",
+      "country_code": "GW",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2328",
+      "name": "Guyana",
+      "country_code": "GY",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2332",
+      "name": "Haiti",
+      "country_code": "HT",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2334",
+      "name": "Heard Island and McDonald Islands",
+      "country_code": "HM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2340",
+      "name": "Honduras",
+      "country_code": "HN",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2348",
+      "name": "Hungary",
+      "country_code": "HU",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2352",
+      "name": "Iceland",
+      "country_code": "IS",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2356",
+      "name": "India",
+      "country_code": "IN",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2360",
+      "name": "Indonesia",
+      "country_code": "ID",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2368",
+      "name": "Iraq",
+      "country_code": "IQ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2372",
+      "name": "Ireland",
+      "country_code": "IE",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2833",
+      "name": "Isle of Man",
+      "country_code": "IM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2376",
+      "name": "Israel",
+      "country_code": "IL",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2380",
+      "name": "Italy",
+      "country_code": "IT",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2388",
+      "name": "Jamaica",
+      "country_code": "JM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2392",
+      "name": "Japan",
+      "country_code": "JP",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2832",
+      "name": "Jersey",
+      "country_code": "JE",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2400",
+      "name": "Jordan",
+      "country_code": "JO",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2398",
+      "name": "Kazakhstan",
+      "country_code": "KZ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2404",
+      "name": "Kenya",
+      "country_code": "KE",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2296",
+      "name": "Kiribati",
+      "country_code": "KI",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2414",
+      "name": "Kuwait",
+      "country_code": "KW",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2417",
+      "name": "Kyrgyzstan",
+      "country_code": "KG",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2418",
+      "name": "Laos",
+      "country_code": "LA",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2428",
+      "name": "Latvia",
+      "country_code": "LV",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2422",
+      "name": "Lebanon",
+      "country_code": "LB",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2426",
+      "name": "Lesotho",
+      "country_code": "LS",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2430",
+      "name": "Liberia",
+      "country_code": "LR",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2434",
+      "name": "Libya",
+      "country_code": "LY",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2438",
+      "name": "Liechtenstein",
+      "country_code": "LI",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2440",
+      "name": "Lithuania",
+      "country_code": "LT",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2442",
+      "name": "Luxembourg",
+      "country_code": "LU",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2450",
+      "name": "Madagascar",
+      "country_code": "MG",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2454",
+      "name": "Malawi",
+      "country_code": "MW",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2458",
+      "name": "Malaysia",
+      "country_code": "MY",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2462",
+      "name": "Maldives",
+      "country_code": "MV",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2466",
+      "name": "Mali",
+      "country_code": "ML",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2470",
+      "name": "Malta",
+      "country_code": "MT",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2584",
+      "name": "Marshall Islands",
+      "country_code": "MH",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2478",
+      "name": "Mauritania",
+      "country_code": "MR",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2480",
+      "name": "Mauritius",
+      "country_code": "MU",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2484",
+      "name": "Mexico",
+      "country_code": "MX",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2583",
+      "name": "Micronesia",
+      "country_code": "FM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2498",
+      "name": "Moldova",
+      "country_code": "MD",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2492",
+      "name": "Monaco",
+      "country_code": "MC",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2496",
+      "name": "Mongolia",
+      "country_code": "MN",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2499",
+      "name": "Montenegro",
+      "country_code": "ME",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2504",
+      "name": "Morocco",
+      "country_code": "MA",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2508",
+      "name": "Mozambique",
+      "country_code": "MZ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2104",
+      "name": "Myanmar (Burma)",
+      "country_code": "MM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2516",
+      "name": "Namibia",
+      "country_code": "NA",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2520",
+      "name": "Nauru",
+      "country_code": "NR",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2524",
+      "name": "Nepal",
+      "country_code": "NP",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2528",
+      "name": "Netherlands",
+      "country_code": "NL",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2540",
+      "name": "New Caledonia",
+      "country_code": "NC",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2554",
+      "name": "New Zealand",
+      "country_code": "NZ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2558",
+      "name": "Nicaragua",
+      "country_code": "NI",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2562",
+      "name": "Niger",
+      "country_code": "NE",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2566",
+      "name": "Nigeria",
+      "country_code": "NG",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2570",
+      "name": "Niue",
+      "country_code": "NU",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2574",
+      "name": "Norfolk Island",
+      "country_code": "NF",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2807",
+      "name": "North Macedonia",
+      "country_code": "MK",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2580",
+      "name": "Northern Mariana Islands",
+      "country_code": "MP",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2578",
+      "name": "Norway",
+      "country_code": "NO",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2512",
+      "name": "Oman",
+      "country_code": "OM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2586",
+      "name": "Pakistan",
+      "country_code": "PK",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2585",
+      "name": "Palau",
+      "country_code": "PW",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2591",
+      "name": "Panama",
+      "country_code": "PA",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2598",
+      "name": "Papua New Guinea",
+      "country_code": "PG",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2600",
+      "name": "Paraguay",
+      "country_code": "PY",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2604",
+      "name": "Peru",
+      "country_code": "PE",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2608",
+      "name": "Philippines",
+      "country_code": "PH",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2612",
+      "name": "Pitcairn Islands",
+      "country_code": "PN",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2616",
+      "name": "Poland",
+      "country_code": "PL",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2620",
+      "name": "Portugal",
+      "country_code": "PT",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2634",
+      "name": "Qatar",
+      "country_code": "QA",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2178",
+      "name": "Republic of the Congo",
+      "country_code": "CG",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2642",
+      "name": "Romania",
+      "country_code": "RO",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2643",
+      "name": "Russia",
+      "country_code": "RU",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2646",
+      "name": "Rwanda",
+      "country_code": "RW",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2652",
+      "name": "Saint Barthelemy",
+      "country_code": "BL",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2654",
+      "name": "Saint Helena, Ascension and Tristan da Cunha",
+      "country_code": "SH",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2659",
+      "name": "Saint Kitts and Nevis",
+      "country_code": "KN",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2662",
+      "name": "Saint Lucia",
+      "country_code": "LC",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2663",
+      "name": "Saint Martin",
+      "country_code": "MF",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2666",
+      "name": "Saint Pierre and Miquelon",
+      "country_code": "PM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2670",
+      "name": "Saint Vincent and the Grenadines",
+      "country_code": "VC",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2882",
+      "name": "Samoa",
+      "country_code": "WS",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2674",
+      "name": "San Marino",
+      "country_code": "SM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2678",
+      "name": "Sao Tome and Principe",
+      "country_code": "ST",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2682",
+      "name": "Saudi Arabia",
+      "country_code": "SA",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2686",
+      "name": "Senegal",
+      "country_code": "SN",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2688",
+      "name": "Serbia",
+      "country_code": "RS",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2690",
+      "name": "Seychelles",
+      "country_code": "SC",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2694",
+      "name": "Sierra Leone",
+      "country_code": "SL",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2702",
+      "name": "Singapore",
+      "country_code": "SG",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2534",
+      "name": "Sint Maarten",
+      "country_code": "SX",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2703",
+      "name": "Slovakia",
+      "country_code": "SK",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2705",
+      "name": "Slovenia",
+      "country_code": "SI",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2090",
+      "name": "Solomon Islands",
+      "country_code": "SB",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2706",
+      "name": "Somalia",
+      "country_code": "SO",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2710",
+      "name": "South Africa",
+      "country_code": "ZA",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2239",
+      "name": "South Georgia and the South Sandwich Islands",
+      "country_code": "GS",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2410",
+      "name": "South Korea",
+      "country_code": "KR",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2728",
+      "name": "South Sudan",
+      "country_code": "SS",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2724",
+      "name": "Spain",
+      "country_code": "ES",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2144",
+      "name": "Sri Lanka",
+      "country_code": "LK",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2736",
+      "name": "Sudan",
+      "country_code": "SD",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2740",
+      "name": "Suriname",
+      "country_code": "SR",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2752",
+      "name": "Sweden",
+      "country_code": "SE",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2756",
+      "name": "Switzerland",
+      "country_code": "CH",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2760",
+      "name": "Syria",
+      "country_code": "SY",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2762",
+      "name": "Tajikistan",
+      "country_code": "TJ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2834",
+      "name": "Tanzania",
+      "country_code": "TZ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2764",
+      "name": "Thailand",
+      "country_code": "TH",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2044",
+      "name": "The Bahamas",
+      "country_code": "BS",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2270",
+      "name": "The Gambia",
+      "country_code": "GM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2626",
+      "name": "Timor-Leste",
+      "country_code": "TL",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2768",
+      "name": "Togo",
+      "country_code": "TG",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2772",
+      "name": "Tokelau",
+      "country_code": "TK",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2776",
+      "name": "Tonga",
+      "country_code": "TO",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2780",
+      "name": "Trinidad and Tobago",
+      "country_code": "TT",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2788",
+      "name": "Tunisia",
+      "country_code": "TN",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2792",
+      "name": "Turkiye",
+      "country_code": "TR",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2795",
+      "name": "Turkmenistan",
+      "country_code": "TM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2798",
+      "name": "Tuvalu",
+      "country_code": "TV",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2800",
+      "name": "Uganda",
+      "country_code": "UG",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2804",
+      "name": "Ukraine",
+      "country_code": "UA",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2784",
+      "name": "United Arab Emirates",
+      "country_code": "AE",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2826",
+      "name": "United Kingdom",
+      "country_code": "GB",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2840",
+      "name": "United States",
+      "country_code": "US",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2581",
+      "name": "United States Minor Outlying Islands",
+      "country_code": "UM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2858",
+      "name": "Uruguay",
+      "country_code": "UY",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2860",
+      "name": "Uzbekistan",
+      "country_code": "UZ",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2548",
+      "name": "Vanuatu",
+      "country_code": "VU",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2336",
+      "name": "Vatican City",
+      "country_code": "VA",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2862",
+      "name": "Venezuela",
+      "country_code": "VE",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2704",
+      "name": "Vietnam",
+      "country_code": "VN",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2876",
+      "name": "Wallis and Futuna",
+      "country_code": "WF",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2887",
+      "name": "Yemen",
+      "country_code": "YE",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2894",
+      "name": "Zambia",
+      "country_code": "ZM",
+      "target_type": "Country",
+      "status": "Active"
+    },
+    {
+      "geo_target_id": "2716",
+      "name": "Zimbabwe",
+      "country_code": "ZW",
+      "target_type": "Country",
+      "status": "Active"
+    }
+  ]
+}

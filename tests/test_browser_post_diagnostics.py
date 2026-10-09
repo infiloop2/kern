@@ -85,6 +85,29 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
         target.get_by_test_id.return_value.click.side_effect = TimeoutError("private-live-token")
         self.assert_failed_step("open_reply_composer", {**self.body, "in_reply_to_tweet_id": "12345"})
 
+    def test_reply_click_gets_twenty_seconds_within_shared_preparation_deadline(self):
+        target = self.page.locator.return_value.filter.return_value
+        clock = [0.0]
+        for elapsed, expected_timeout in ((0.0, 20000), (55.0, 5000)):
+            with self.subTest(elapsed=elapsed):
+                clock[0] = 0.0
+                def advance(*args, **kwargs):
+                    clock[0] = elapsed
+                self.expect.return_value.to_have_count.side_effect = advance
+                with patch.object(posts.time, "monotonic", side_effect=lambda: clock[0]):
+                    posts.prepare_post(self.page, "example", self.body["text"], "12345")
+                self.assertEqual(target.get_by_test_id.return_value.click.call_args.kwargs["timeout"], expected_timeout)
+        self.assertEqual(self.page.goto.call_count, 2)  # One navigation per independent preparation.
+        self.submit.assert_not_called()
+
+    def test_reply_click_timeout_is_terminal_without_submission_or_retry(self):
+        target = self.page.locator.return_value.filter.return_value
+        target.get_by_test_id.return_value.click.side_effect = TimeoutError("private-live-token")
+        self.assert_failed_step("open_reply_composer", {**self.body, "in_reply_to_tweet_id": "12345"})
+        self.page.goto.assert_called_once()
+        target.get_by_test_id.return_value.click.assert_called_once()
+        self.assertEqual(self.emit.call_args.args[0]["context"]["preparation_attempt"], 1)
+
     def test_clear_type_and_disabled_submit_failures_are_distinct(self):
         editor = self.page.get_by_role.return_value.get_by_test_id.return_value
         for method, step in (("fill", "clear_composer"), ("press_sequentially", "type_post_text")):

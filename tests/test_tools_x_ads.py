@@ -144,6 +144,7 @@ class AdsProvider:
 
 class XAdsTest(unittest.TestCase):
     def setUp(self):
+        self.diagnostics = self.enterContext(patch("host.tools.shared.ads_diagnostics.host_errors.emit_record"))
         self.api = host_api()
         self.provider = AdsProvider()
         self.enterContext(patch.object(transport, "json_request", side_effect=lambda *a, **kw: self.provider.json_request(*a, **kw)))
@@ -164,6 +165,26 @@ class XAdsTest(unittest.TestCase):
 
     def approve(self, record):
         return x_ads.BUNDLED_TOOL.execute_approved(record, self.api)
+
+    def test_http_and_json_errors_have_one_diagnostic_without_leaking_to_result(self):
+        for status in (0, 400, 401, 403, 404, 429, 500):
+            with self.subTest(status=status), patch.object(transport, "json_request", side_effect=WebRequestError(
+                    "X Ads request failed.", status=status, body=b'{"errors":[{"code":"BAD_PARAMETER","message":"provider-only detail"}]}')) as request:
+                self.diagnostics.reset_mock()
+                result = self.execute("list_accounts", {})
+                self.assertIsInstance(result, ActionFailed)
+                self.assertNotIn("provider-only detail", result.error)
+                request.assert_called_once()
+                self.diagnostics.assert_called_once()
+                context = self.diagnostics.call_args.args[0]["context"]
+                self.assertEqual(context["http_status"], status)
+                self.assertEqual(context["operation"], "GET /accounts")
+                self.assertIn("provider-only detail", context["provider_response"])
+        with patch.object(transport, "json_request", return_value={"operation_errors": [{"code": "BAD", "message": "provider-only detail"}]}):
+            self.diagnostics.reset_mock()
+            result = self.execute("list_accounts", {})
+            self.assertNotIn("provider-only detail", result.error)
+            self.assertEqual(self.diagnostics.call_args.args[0]["context"]["http_status"], 200)
 
     def test_every_read_matches_closed_output_schema(self):
         requests = {
@@ -344,6 +365,32 @@ class XAdsTest(unittest.TestCase):
                 self.assertIsInstance(self.approve(approval), ActionFailed)
                 self.assertEqual(self.provider.writes, [])
 
+    def test_local_launch_validation_does_not_emit_provider_failure(self):
+        for values in (plan(daily_budget_amount_local_micro="60000000"), plan(start_time="2020-01-01T00:00:00Z", end_time="2020-01-02T00:00:00Z")):
+            with self.subTest(values=values):
+                self.provider.calls.clear()
+                self.diagnostics.reset_mock()
+                result = self.execute("launch_campaign", values)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(self.provider.calls, [])
+                self.diagnostics.assert_not_called()
+
+    def test_local_read_validation_does_not_emit_provider_failure(self):
+        cases = (
+            ("lookup_targeting", {"kind": "LOCATION", "query": "United States", "country_code": "us"}),
+            ("lookup_targeting", {"kind": "LANGUAGE", "query": "English", "country_code": "US"}),
+            ("list_accounts", {"count": 0}),
+            ("get_performance", {"account_id": ACCOUNT_ID, "campaign_id": "camp1", "start_time": "2026-01-01T00:30:00Z", "end_time": "2026-01-01T01:30:00Z"}),
+        )
+        for action, values in cases:
+            with self.subTest(action=action, values=values):
+                self.provider.calls.clear()
+                self.diagnostics.reset_mock()
+                result = self.execute(action, values)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(self.provider.calls, [])
+                self.diagnostics.assert_not_called()
+
     def test_flight_expires_while_approval_pending_without_creating(self):
         approval = self.propose("launch_campaign", plan())
         class Later(datetime):
@@ -389,7 +436,12 @@ class XAdsTest(unittest.TestCase):
                         self.provider.fail_after = failure
                     else:
                         self.provider.fail = failure
+                    self.diagnostics.reset_mock()
                     result = self.approve(approval)
+                    self.diagnostics.assert_called_once()
+                    context = self.diagnostics.call_args.args[0]["context"]
+                    self.assertEqual(context["action_id"], "launch_campaign")
+                    self.assertIn(context["phase"], result.error)
                     self.assertIsInstance(result, ActionFailed)
                     self.assertIn("Last attempted step:", result.error)
                     self.assertIn("last request may have succeeded", result.error)

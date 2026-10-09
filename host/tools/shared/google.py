@@ -178,6 +178,7 @@ def _post_google_oauth_form(
     invalid_response_message: str,
     invalid_grant_is_special: bool,
 ) -> dict[str, object]:
+    operation = "POST OAuth token refresh" if form.get("grant_type") == "refresh_token" else "POST OAuth token exchange"
     try:
         decoded = json_request(
             "POST",
@@ -187,6 +188,7 @@ def _post_google_oauth_form(
             invalid_response_message=invalid_response_message,
         )
     except WebRequestError as exc:
+        exc.operation = operation
         if invalid_grant_is_special and is_google_invalid_grant_payload(exc.body):
             raise GoogleOAuthInvalidGrantError("Google OAuth refresh token is invalid.") from exc
         if exc.status in {400, 401, 403}:
@@ -198,7 +200,7 @@ def _post_google_oauth_form(
         known = known_provider_transport_error(exc)
         if known:
             raise RuntimeError(known) from exc
-        raise unmapped_provider_error("Google", "OAuth", exc) from None
+        raise unmapped_provider_error("Google", operation, exc) from exc
     return cast(dict[str, object], decoded)
 
 
@@ -261,6 +263,7 @@ def get_google_userinfo(
             invalid_response_message=invalid_response_message,
         )
     except WebRequestError as exc:
+        exc.operation = "GET OAuth user-info lookup"
         if exc.status == 401:
             # Same treatment as google_json_request: a rejected cached token
             # must surface the reconnect flow, and refresh_identity runs
@@ -275,7 +278,7 @@ def get_google_userinfo(
         known = known_provider_transport_error(exc)
         if known:
             raise RuntimeError(known) from exc
-        raise unmapped_provider_error("Google", "profile lookup", exc) from None
+        raise unmapped_provider_error("Google", "GET OAuth user-info lookup", exc) from exc
     return cast(dict[str, object], decoded)
 
 

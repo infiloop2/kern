@@ -626,7 +626,10 @@ EXEMPT_FIELDS = {
     ("zoho_mail", "send_email", "reply_to"): TYPED,
     ("zoho_mail", "send_email", "attachment_asset_ids"): "tool-scoped staged ids; verified metadata and bytes are bound to operator approval",
 
-    # Ads reads carry only typed fixed-query inputs; all writes bind exact approval.
+    # Country filters stay local; API reads are typed and writes bind exact approval.
+    ("google_ads", "list_locations", "query"): "local-only bounded country-name filter; never included in an outbound request",
+    ("google_ads", "list_locations", "country_code"): TYPED,
+    ("google_ads", "list_locations", "limit"): TYPED,
     ("google_ads", "list_campaigns", "customer_id"): TYPED,
     ("google_ads", "list_campaigns", "limit"): TYPED,
     ("google_ads", "list_ad_groups", "customer_id"): TYPED,

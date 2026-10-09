@@ -592,6 +592,7 @@ def _provider_warning_context(
     }
     if exc.response_body:
         context["provider_response"] = exc.response_body
+    context.update(exc.diagnostic_context)
     return context
 
 

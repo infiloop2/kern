@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 import unittest
+import urllib.error
 from typing import Any
 from unittest.mock import patch
 
@@ -46,6 +47,19 @@ def _serving(body: bytes) -> object:
 
 
 class WebResponseCapTests(unittest.TestCase):
+    def test_json_http_error_body_limit_is_explicit_and_overridable(self) -> None:
+        body = b'{"error": {"message": "' + b"x" * 10000 + b'"}}'
+        for limit, truncated in ((4096, True), (256 * 1024, False), (100, True)):
+            with self.subTest(limit=limit):
+                response = urllib.error.HTTPError("https://api.example.com/x", 400, "Bad Request", {}, io.BytesIO(body))
+                with patch.object(web._OPENER, "open", side_effect=response) as opening, self.assertRaises(WebRequestError) as caught:
+                    kwargs = {} if limit == 4096 else {"max_error_bytes": limit}
+                    web.json_request("POST", "https://api.example.com/x", body={}, failure_message="failed", invalid_response_message="invalid", **kwargs)
+                opening.assert_called_once()
+                self.assertEqual(caught.exception.status, 400)
+                self.assertEqual(caught.exception.body, body[:limit])
+                self.assertEqual(caught.exception.body_truncated, truncated)
+
     def test_unmapped_provider_error_does_not_retain_provider_body(self) -> None:
         source = WebRequestError(
             "failed",

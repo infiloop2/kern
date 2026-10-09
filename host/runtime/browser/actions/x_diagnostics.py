@@ -88,7 +88,7 @@ PAGE_FACTS = """replyId => {
 
 REPLY_FACTS = """replyId => {
     const targets = Array.from(document.querySelectorAll('article[data-testid="tweet"]'))
-        .filter(article => article.querySelector('a[href$="/status/' + replyId + '"]'));
+        .filter(article => article.querySelector('a[href$="/status/' + replyId + '"], a[href$="/status/' + replyId + '/history"]'));
     if (targets.length !== 1) return {};
     const replies = targets[0].querySelectorAll('[data-testid="reply"]');
     if (replies.length !== 1) return {};
@@ -196,8 +196,10 @@ def _evaluate_facts(page: Any, script: str, reply_id: str) -> dict[str, Any]:
 
 
 def reply_target(page: Any, reply_id: str) -> Any:
+    # Edited posts can link their timestamp to history. Keep the ID and both
+    # allowed endings exact; preparation still requires one unique article.
     return page.locator('article[data-testid="tweet"]').filter(
-        has=page.locator(f'a[href$="/status/{reply_id}"]'))
+        has=page.locator(f'a[href$="/status/{reply_id}"], a[href$="/status/{reply_id}/history"]'))
 
 
 def composer_state(page: Any) -> dict[str, Any]:
