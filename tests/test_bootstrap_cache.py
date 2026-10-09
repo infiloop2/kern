@@ -179,6 +179,108 @@ class BootstrapCacheTests(unittest.TestCase):
         self.assertEqual(script.count('bootstrap_cache save-debs'), 4)
         self.assertEqual(script.count('bootstrap_cache model "$_digest"'), 2)
         self.assertLess(main.index('verify_deployment'), main.index('bootstrap_cache prune-browser'))
+        self.assertLess(main.index('verify_deployment'), main.index('bootstrap_cache prune-packages'))
+
+    def test_package_downloads_survive_root_replacement_without_live_installs(self):
+        source = self.browser_downloads()
+        (source / 'browsers').rename(source / 'npm')
+        key = cache.packages_key('0.9.26')
+        self.cache.save_downloads('packages', key, source, ('npm', 'uv'))
+        shutil.rmtree(source)
+        restored = self.directory / 'new-root'
+        restored.mkdir()
+        self.assertTrue(cache.Cache(self.root).restore_downloads('packages', key, restored, ('npm', 'uv')))
+        self.assertEqual((restored / 'uv' / 'absolute-link').read_bytes(), b'Python package')
+        self.assertEqual((restored / 'npm' / 'chromium' / 'chrome').read_bytes(), b'browser binary')
+        self.assertEqual(set(p.name for p in restored.iterdir()), {'npm', 'uv', '.restored-files.json'})
+        self.assertEqual((self.root / 'packages').stat().st_mode & 0o777, 0o700)
+
+    def test_corrupt_package_archive_is_a_miss_and_preserves_browser_cache(self):
+        source = self.browser_downloads()
+        self.cache.save_browser('browser', source)
+        browser_archives = list((self.root / 'browser').iterdir())
+        (source / 'browsers').rename(source / 'npm')
+        self.cache.save_downloads('packages', 'packages', source, ('npm', 'uv'))
+        archive = next((self.root / 'packages').iterdir())
+        archive.write_bytes(b'corrupt')
+        restored = self.directory / 'new-root'
+        restored.mkdir()
+        self.assertFalse(self.cache.restore_downloads('packages', 'packages', restored, ('npm', 'uv')))
+        self.assertFalse(archive.exists())
+        self.assertEqual(list((self.root / 'browser').iterdir()), browser_archives)
+
+    def test_package_archive_space_limit_and_pruning_preserve_other_downloads(self):
+        source = self.browser_downloads()
+        (source / 'browsers').rename(source / 'npm')
+        self.cache.save_downloads('packages', 'old', source, ('npm', 'uv'))
+        old = next((self.root / 'packages').iterdir())
+        with patch.object(cache, 'MAX_BYTES', old.stat().st_size):
+            self.cache.save_downloads('packages', 'new', source, ('npm', 'uv'))
+        self.assertEqual(list((self.root / 'packages').iterdir()), [old])
+        self.cache.save_downloads('packages', 'new', source, ('npm', 'uv'))
+        self.cached.write_bytes(self.content)
+        self.cache.prune_downloads('packages', 'new')
+        self.assertFalse(old.exists())
+        self.assertTrue(self.cached.exists())
+        self.assertEqual(len(list((self.root / 'packages').iterdir())), 1)
+
+    def test_unchanged_package_downloads_do_not_rebuild_large_snapshot(self):
+        source = self.browser_downloads()
+        (source / 'browsers').rename(source / 'npm')
+        self.cache.save_downloads('packages', 'key', source, ('npm', 'uv'))
+        restored = self.directory / 'new-root'
+        restored.mkdir()
+        self.assertTrue(self.cache.restore_downloads('packages', 'key', restored, ('npm', 'uv')))
+        (restored / 'npm' / '_logs').mkdir()
+        (restored / 'npm' / '_logs' / 'new.log').write_text('installer log')
+        with patch.object(cache.tarfile, 'open', side_effect=AssertionError('rebuilt unchanged snapshot')):
+            self.cache.save_downloads('packages', 'key', restored, ('npm', 'uv'))
+        (restored / 'uv' / 'new-package').write_bytes(b'new package')
+        with patch.object(self.cache, 'save') as save:
+            self.cache.save_downloads('packages', 'key', restored, ('npm', 'uv'))
+        save.assert_called_once()
+
+    def test_download_archive_budget_is_checked_before_building(self):
+        source = self.browser_downloads()
+        (source / 'browsers').rename(source / 'npm')
+        with patch.object(cache, 'MAX_BYTES', 1), patch.object(cache.tarfile, 'open', side_effect=AssertionError('built oversized archive')):
+            self.cache.save_downloads('packages', 'key', source, ('npm', 'uv'))
+        self.assertEqual(list((self.root / 'packages').iterdir()), [])
+
+    def test_download_inventory_excludes_logs_and_does_not_follow_directory_links(self):
+        source = self.browser_downloads()
+        (source / 'browsers').rename(source / 'npm')
+        (source / 'npm' / '_logs').mkdir()
+        (source / 'npm' / '_logs' / 'run.log').write_text('installer log')
+        files = self.cache.download_files(source, ('npm', 'uv'))
+        self.assertIn('npm/chromium/chrome', files)
+        self.assertIn('uv/wheel-link', files)
+        self.assertIn('uv/archive/wheel', files)
+        self.assertNotIn('npm/_logs/run.log', files)
+        self.assertNotIn('uv/wheels/index/package/version/wheel', files)
+
+    def test_package_install_refreshes_metadata_and_propagates_network_failure(self):
+        script = render._render_bootstrap()
+        helpers = 'npm_install() {' + script.split('npm_install() {', 1)[1].split('install_agent_clis() {', 1)[0]
+        fake = "npm() { echo npm \"$@\"; return \"$FAKE_STATUS\"; }\nuv() { echo uv \"$@\"; return \"$FAKE_STATUS\"; }\n"
+        for command, option in (('npm_install install package@1', '--prefer-online'),
+                                ('python_packages_install /fixture/python package==1', '--refresh')):
+            for status in (0, 7):
+                with self.subTest(command=command, status=status):
+                    result = subprocess.run(['bash', '-c', f'set -eu\nFAKE_STATUS={status}\n' + helpers + fake + command], capture_output=True, text=True)
+                    self.assertEqual(result.returncode, status, result.stderr)
+                    self.assertIn(option, result.stdout)
+                    self.assertNotIn('--offline', result.stdout)
+
+    def test_phase_timing_does_not_swallow_bootstrap_failure(self):
+        script = render._render_bootstrap()
+        helper = 'bootstrap_phase() {' + script.split('bootstrap_phase() {', 1)[1].split('main() {', 1)[0]
+        for status in (0, 7):
+            result = subprocess.run(['bash', '-c', f'set -eu\n{helper}\nphase() {{ return {status}; }}\nbootstrap_phase phase\necho continued'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, status)
+            self.assertIn('phase start ', result.stderr)
+            self.assertEqual('phase complete ' in result.stderr, status == 0)
+            self.assertEqual('continued' in result.stdout, status == 0)
 
     def browser_downloads(self):
         source = self.directory / 'downloads'
@@ -216,6 +318,30 @@ class BootstrapCacheTests(unittest.TestCase):
         archive = next((self.root / 'browser').iterdir())
         self.assertEqual(archive.stat().st_mode & 0o777, 0o600)
         self.assertEqual(set(restored.iterdir()), {restored / 'uv', restored / 'browsers'})
+
+    def test_browser_root_install_survives_staging_removal_with_copy_fallback(self):
+        script = render._render_bootstrap()
+        copy = script.split('  install -d -m 0755 /usr/local/share/kern-browsers\n', 1)[1].split('  if [ "$browser_cache_hit"', 1)[0]
+        copy = copy.replace('/usr/local/share/kern-browsers/', '"$browser_installed"/')
+        for fallback in (False, True):
+            with self.subTest(fallback=fallback), tempfile.TemporaryDirectory(dir=self.directory) as directory:
+                root = Path(directory)
+                downloads = root / 'staging'
+                (downloads / 'browsers' / 'chromium').mkdir(parents=True)
+                binary = downloads / 'browsers' / 'chromium' / 'chrome'
+                binary.write_bytes(b'new root browser')
+                binary.chmod(0o755)
+                inode = binary.stat().st_ino
+                installed = root / 'installed'
+                installed.mkdir()
+                wrapper = 'cp() { if [ "$1" = -al ]; then return 1; fi; /usr/bin/cp "$@"; }\n' if fallback else ''
+                subprocess.run(['bash', '-c', 'set -eu\n' + wrapper + copy], check=True,
+                               env={**os.environ, 'browser_downloads': str(downloads), 'browser_installed': str(installed)})
+                shutil.rmtree(downloads)
+                runtime = installed / 'chromium' / 'chrome'
+                self.assertEqual(runtime.read_bytes(), b'new root browser')
+                self.assertEqual(runtime.stat().st_mode & 0o777, 0o755)
+                self.assertEqual(runtime.stat().st_ino == inode, not fallback)
 
     def test_corrupt_browser_archive_is_a_miss_without_partial_restoration(self):
         self.cache.save_browser('current', self.browser_downloads())

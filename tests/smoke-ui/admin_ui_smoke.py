@@ -108,7 +108,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scope",
-        choices=("all", "core", "workspaces", "overload", "oauth-poll", "navigation-order", "swarm", "notices", "google-ads", "x-ads"),
+        choices=("all", "core", "workspaces", "overload", "oauth-poll", "navigation-order", "swarm", "notices", "google-ads", "x-ads", "instagram-ads"),
         default="all",
         help="Smoke only the host UI core, only workspaces, or both.",
     )
@@ -207,6 +207,15 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                     )
                     x_ads_smokes.run(ads_context.new_page(), url, log_in, open_home_integration)
                     ads_context.close()
+            if scope in {"all", "core", "instagram-ads"}:
+                import instagram_ads_smokes
+                for mobile in (False, True):
+                    ads_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    instagram_ads_smokes.run(ads_context.new_page(), url, log_in, open_home_integration)
+                    ads_context.close()
             if scope in {"all", "core"}:
                 import file_preview_smokes
                 files_context = browser.new_context(service_workers="block")
@@ -224,14 +233,6 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                     )
                     seo_tools_smokes.run(seo_context.new_page(), url, log_in, open_home_integration)
                     seo_context.close()
-                import instagram_ads_smokes
-                for mobile in (False, True):
-                    ads_context = browser.new_context(
-                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
-                        is_mobile=mobile, has_touch=mobile, service_workers="block",
-                    )
-                    instagram_ads_smokes.run(ads_context.new_page(), url, log_in, open_home_integration)
-                    ads_context.close()
                 import analytics_smokes
                 analytics_context = browser.new_context(service_workers="block")
                 analytics_smokes.run(analytics_context.new_page(), url, log_in)

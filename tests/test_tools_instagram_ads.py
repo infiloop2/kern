@@ -203,6 +203,156 @@ class InstagramAdsTests(unittest.TestCase):
         self.assertFalse(self.meta.writes)
         return self.api.approvals.approve(result.approval_id)
 
+    def diagnose(self, **value):
+        result = ads.BUNDLED_TOOL.execute('diagnose_account', {'account_id': ACCOUNT, **value}, self.api)
+        self.assertIsInstance(result, ActionExecuted, result)
+        assert_matches_output_schema(self, ads.MANIFEST, 'diagnose_account', result)
+        self.assertFalse(self.meta.writes)
+        self.assertTrue(all(call[0] == 'GET' for call in self.meta.calls))
+        return result.result
+
+    def test_diagnostic_preserves_task_shape_and_existing_launch_guard(self):
+        cases = [('missing', None), ('null', None), ('empty', []), ('invalid', 'MANAGE'),
+                 ('invalid', ['MANAGE', 1]), ('present', ['ANALYZE']), ('present', ['ADVERTISE'])]
+        for state, tasks in cases:
+            with self.subTest(state=state, tasks=tasks):
+                self.meta.account.pop('user_tasks', None)
+                if state != 'missing':
+                    self.meta.account['user_tasks'] = tasks
+                result = self.diagnose()
+                self.assertEqual(result['user_tasks_state'], state)
+                passes = bool({'ADVERTISE', 'MANAGE'}.intersection(ads._strings(tasks)))
+                self.assertEqual(result['launch_task_check_passes'], passes)
+                self.assertEqual(result['account']['user_tasks'], ads._strings(tasks))
+                self.assertEqual(result['connection']['facebook_user_id'], '900')
+                self.assertEqual(result['connection']['scopes'], sorted(ads.SCOPES))
+                launch = ads.BUNDLED_TOOL.execute('launch_campaign', launch_input(), self.api)
+                self.assertIsInstance(launch, ActionPendingApproval if passes else ActionFailed)
+                self.assertFalse(self.meta.writes)
+                self.assertNotIn('fingerprint', json.dumps(result))
+                self.assertNotIn('billing-id', json.dumps(result))
+
+    def test_diagnostic_unfiltered_pages_explain_identity_filtering(self):
+        cases = [('linked_identity_missing', {}), ('linked_identity_null', {'instagram_business_account': None}),
+                 ('linked_identity_invalid', {'instagram_business_account': []}),
+                 ('account_type_missing', {'instagram_business_account': {'id': INSTAGRAM}}),
+                 ('account_type_null', {'instagram_business_account': {'account_type': None}}),
+                 ('account_type_invalid', {'instagram_business_account': {'account_type': 1}}),
+                 ('account_type_invalid', {'instagram_business_account': {'account_type': ''}}),
+                 ('account_type_unsupported', {'instagram_business_account': {'account_type': 'PERSONAL'}}),
+                 ('invalid_id', {'instagram_business_account': {'account_type': 'BUSINESS', 'id': 'bad'}}),
+                 ('none', self.meta.page)]
+        rows = [{'id': PAGE, 'name': 'Page', **row} for _, row in cases]
+        def response(method, url, **kwargs):
+            if '/promote_pages?' in url:
+                return {'data': deepcopy(rows)}
+            return self.meta(method, url, **kwargs)
+        with patch.object(ads, 'json_request', response):
+            result = self.diagnose()
+        self.assertEqual([row['identity_filter_reason'] for row in result['pages']['items']], [reason for reason, _ in cases])
+        self.assertEqual(result['pages']['items'][0]['linked_identity_state'], 'missing')
+        self.assertEqual(result['pages']['items'][3]['account_type_state'], 'missing')
+        self.assertEqual(result['instagram_accounts']['items'][0]['instagram_user_id'], INSTAGRAM)
+
+    def test_diagnostic_empty_pages_are_distinct_from_filtered_pages(self):
+        self.meta.page.pop('instagram_business_account')
+        filtered = self.diagnose()
+        normal = ads.BUNDLED_TOOL.execute('list_identities', {'account_id': ACCOUNT}, self.api)
+        self.assertEqual(normal.result['items'], [])
+        self.assertEqual(len(filtered['pages']['items']), 1)
+        def response(method, url, **kwargs):
+            if '/promote_pages?' in url:
+                return {'data': []}
+            return self.meta(method, url, **kwargs)
+        with patch.object(ads, 'json_request', response):
+            empty = self.diagnose()
+        self.assertEqual(empty['pages']['status'], 'ok')
+        self.assertEqual(empty['pages']['items'], [])
+
+    def test_diagnostic_edge_errors_are_numeric_partial_and_never_retried(self):
+        for edge in ('promote_pages', 'connected_instagram_accounts'):
+            for envelope in (True, False):
+                with self.subTest(edge=edge, envelope=envelope):
+                    rejected = []
+                    def response(method, url, **kwargs):
+                        if '/' + edge + '?' in url:
+                            rejected.append(url)
+                            body = {'error': {'code': 100, 'error_subcode': 33, 'message': 'meta-token secret URL'},
+                                    'data': [{'access_token': 'secret'}]}
+                            if envelope:
+                                return body
+                            raise WebRequestError('secret transport text', status=400, body=json.dumps(body).encode())
+                        return self.meta(method, url, **kwargs)
+                    self.diagnostics.reset_mock()
+                    with patch.object(ads, 'json_request', response):
+                        result = self.diagnose()
+                    failed_key = 'pages' if edge == 'promote_pages' else 'instagram_accounts'
+                    failed = result[failed_key]
+                    self.assertEqual(failed, {'status': 'failed', 'items': [], 'next_cursor': None,
+                                              'http_status': 200 if envelope else 400, 'error_code': 100, 'error_subcode': 33})
+                    self.assertEqual(result['instagram_accounts' if failed_key == 'pages' else 'pages']['status'], 'ok')
+                    self.assertEqual(len(rejected), 1)
+                    self.assertNotIn('secret', json.dumps(result))
+                    self.assertNotIn('meta-token', json.dumps(result))
+                    self.diagnostics.assert_called_once()
+
+    def test_diagnostic_malformed_and_oversized_edges_are_unavailable(self):
+        for listing in ({}, {'data': [None]}, {'data': [{}] * 21},
+                        {'data': [], 'paging': {'next': 'https://provider.example/?token=secret'}}):
+            with self.subTest(listing=listing):
+                def response(method, url, **kwargs):
+                    if '/promote_pages?' in url:
+                        return listing
+                    return self.meta(method, url, **kwargs)
+                with patch.object(ads, 'json_request', response):
+                    result = self.diagnose()
+                self.assertEqual(result['pages']['status'], 'failed')
+                self.assertEqual(result['instagram_accounts']['status'], 'ok')
+                self.assertIsNone(result['pages']['error_code'])
+
+    def test_diagnostic_cursors_are_independent_and_guarded_before_reads(self):
+        self.meta.page_cursor = 'next_cursor'
+        result = self.diagnose(limit=1, pages_after='page_cursor', instagram_after='ig_cursor')
+        calls = {path: fields for method, path, fields, _ in self.meta.calls}
+        self.assertEqual(calls['/act_100/promote_pages']['after'], 'page_cursor')
+        self.assertEqual(calls['/act_100/connected_instagram_accounts']['after'], 'ig_cursor')
+        self.assertEqual(calls['/act_100/promote_pages']['limit'], '1')
+        self.assertEqual(result['pages']['next_cursor'], 'next_cursor')
+        self.assertEqual(result['instagram_accounts']['next_cursor'], 'next_cursor')
+        self.meta.calls.clear()
+        self.diagnose(pages_after='page_cursor')
+        calls = {path: fields for method, path, fields, _ in self.meta.calls}
+        self.assertEqual(len(self.meta.calls), 5)
+        self.assertNotIn('after', calls['/act_100/connected_instagram_accounts'])
+        for cursor in ('pages_after', 'instagram_after'):
+            self.meta.calls.clear()
+            with patch.object(self.api.outbound, 'guard_request_parameter_string', side_effect=RuntimeError('guard denied')) as guard:
+                denied = ads.BUNDLED_TOOL.execute('diagnose_account', {'account_id': ACCOUNT, cursor: 'cursor'}, self.api)
+            self.assertIsInstance(denied, ActionFailed)
+            guard.assert_called_once_with('cursor', allow_machine_tokens=True)
+            self.assertEqual(self.meta.calls, [])
+            for bad in ('https://example.com/', '', 1):
+                denied = ads.BUNDLED_TOOL.execute('diagnose_account', {'account_id': ACCOUNT, cursor: bad}, self.api)
+                self.assertIsInstance(denied, ActionFailed)
+                self.assertEqual(self.meta.calls, [])
+        for value in ({'limit': 21}, {'limit': True}, {'after': 'cursor'}, {'account_id': 'act_100'}, {'path': '/me'}):
+            denied = ads.BUNDLED_TOOL.execute('diagnose_account', {'account_id': ACCOUNT, **value}, self.api)
+            self.assertIsInstance(denied, ActionFailed)
+            self.assertEqual(self.meta.calls, [])
+
+    def test_diagnostic_auth_revocation_aborts_instead_of_partial_success(self):
+        def response(method, url, **kwargs):
+            if '/promote_pages?' in url:
+                return {'error': {'code': 190, 'message': 'private'}}
+            return self.meta(method, url, **kwargs)
+        with patch.object(ads, 'json_request', response):
+            result = ads.BUNDLED_TOOL.execute('diagnose_account', {'account_id': ACCOUNT}, self.api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertTrue(result.reconnect_required)
+        self.assertIsNone(self.api.credentials.record)
+        self.assertFalse(any('/connected_instagram_accounts' in call[1] for call in self.meta.calls))
+        self.assertFalse(self.meta.writes)
+
     def test_http_json_and_reconnect_errors_have_operator_only_diagnostics(self):
         for status, code in ((400, 100), (400, 190), (403, 200), (429, 4), (500, 2), (200, 100), (200, 190)):
             with self.subTest(status=status, code=code):
@@ -386,7 +536,7 @@ class InstagramAdsTests(unittest.TestCase):
 
     def test_removed_saved_audience_action_and_input_fail_before_provider_reads(self):
         self.assertIsNone(ads.MANIFEST.action('list_audiences'))
-        self.assertEqual(len(ads.MANIFEST.actions), 10)
+        self.assertEqual(len(ads.MANIFEST.actions), 11)
         schema = ads.MANIFEST.action('launch_campaign').input_schema
         self.assertEqual(len(schema['properties']), 12)
         self.assertEqual(set(schema['properties']['audience']['properties']),
@@ -1053,6 +1203,7 @@ class InstagramAdsTests(unittest.TestCase):
         approval = self.queue()
         self.assertIsInstance(ads.BUNDLED_TOOL.execute_approved(approval, self.api), ApprovalExecuted)
         inputs = {'list_accounts': {}, 'get_account': {'account_id': ACCOUNT},
+                  'diagnose_account': {'account_id': ACCOUNT},
                   'list_identities': {'account_id': ACCOUNT},
                   'list_posts': {'account_id': ACCOUNT, 'page_id': PAGE, 'instagram_user_id': INSTAGRAM},
                   'lookup_targeting': {'account_id': ACCOUNT, 'type': 'INTEREST', 'query': 'video'},
@@ -1126,6 +1277,7 @@ class InstagramAdsTests(unittest.TestCase):
     def test_direct_reads_recheck_remotely_revoked_scopes_before_account_data(self):
         values = {
             'list_accounts': {}, 'get_account': {'account_id': ACCOUNT},
+            'diagnose_account': {'account_id': ACCOUNT},
             'list_identities': {'account_id': ACCOUNT},
             'list_posts': {'account_id': ACCOUNT, 'page_id': PAGE, 'instagram_user_id': INSTAGRAM},
             'lookup_targeting': {'account_id': ACCOUNT, 'type': 'INTEREST', 'query': 'Music'},
@@ -1135,7 +1287,7 @@ class InstagramAdsTests(unittest.TestCase):
                                 'start_date': '2026-01-01', 'end_date': '2026-01-02'},
         }
         self.assertEqual(set(values), {spec.id for spec in ads.MANIFEST.actions if spec.approval == 'direct'})
-        self.assertEqual(len(values), 8)
+        self.assertEqual(len(values), 9)
         for action, value in values.items():
             with self.subTest(action=action):
                 self.api, self.meta = connected_api(), MetaFixture()

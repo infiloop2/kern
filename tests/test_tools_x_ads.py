@@ -116,7 +116,9 @@ class AdsProvider:
             for key, value in params.items():
                 row[key] = value.split(",") if key == "placements" else value == "true" if key == "standard_delivery" else int(value) if key.endswith("_local_micro") else value
             if path.endswith("/campaigns"):
-                self.campaign = {**row, "id": "camp1", "currency": "USD", "deleted": False}
+                if "budget_optimization" in params and "daily_budget_amount_local_micro" in params:
+                    raise WebRequestError("X Ads request failed.", status=400, body=b'{"errors":[{"code":"INVALID","message":"Please remove your daily campaign budget before turning on campaign budget optimization","attribute":"budget_optimization"}]}')
+                self.campaign = {"budget_optimization": "LINE_ITEM", **row, "id": "camp1", "currency": "USD", "deleted": False}
                 return {"data": self.campaign}
             if path.endswith("/line_items"):
                 self.group = {**row, "id": "group1", "currency": "USD", "pay_by": {"ENGAGEMENTS": "ENGAGEMENT", "REACH": "IMPRESSION", "WEBSITE_CLICKS": "IMPRESSION", "VIDEO_VIEWS": "VIEW"}[row["objective"]], "deleted": False}
@@ -220,6 +222,8 @@ class XAdsTest(unittest.TestCase):
             self.assertEqual(row["entity_status"], "ACTIVE")
             self.assertEqual(row["daily_budget_amount_local_micro"], 10000000)
             self.assertEqual(row["total_budget_amount_local_micro"], 50000000)
+        self.assertNotIn("budget_optimization", self.provider.writes[0][2])
+        self.assertEqual(self.provider.campaign["budget_optimization"], "LINE_ITEM")
         self.assertFalse(any("bid_amount_local_micro" in params or "pay_by" in params for _, _, params in self.provider.writes))
 
     def test_all_four_objectives_use_auto_and_internal_goal_billing_mapping(self):
@@ -469,7 +473,7 @@ class XAdsTest(unittest.TestCase):
         self.assertEqual(self.provider.campaign["entity_status"], "PAUSED")
 
     def test_configured_drift_and_hidden_caps_before_each_activation_fail_closed(self):
-        mutations = [lambda p: p.targets[0].update(targeting_value="3b77caf94bfc81fe"), lambda p: p.group.update(audience_expansion="BROAD"), lambda p: p.group.update(frequency_cap=5, duration_in_days=7), lambda p: p.group.update(frequency_cap=1), lambda p: p.group.update(duration_in_days=1), lambda p: p.campaign.update(total_budget_amount_local_micro=60000000), lambda p: p.group.update(start_time="2026-01-01T00:00:00Z"), lambda p: p.group.update(unknown_config="changed"), lambda p: p.promoted[0].update(approval_status="REJECTED"), lambda p: p.post.update(full_text="edited during execution"), lambda p: p.access.update(user_id="123"), lambda p: p.access.update(permissions=["ANALYST"]), lambda p: p.funding.update(able_to_fund=False)]
+        mutations = [lambda p: p.campaign.update(budget_optimization="CAMPAIGN"), lambda p: p.targets[0].update(targeting_value="3b77caf94bfc81fe"), lambda p: p.group.update(audience_expansion="BROAD"), lambda p: p.group.update(frequency_cap=5, duration_in_days=7), lambda p: p.group.update(frequency_cap=1), lambda p: p.group.update(duration_in_days=1), lambda p: p.campaign.update(total_budget_amount_local_micro=60000000), lambda p: p.group.update(start_time="2026-01-01T00:00:00Z"), lambda p: p.group.update(unknown_config="changed"), lambda p: p.promoted[0].update(approval_status="REJECTED"), lambda p: p.post.update(full_text="edited during execution"), lambda p: p.access.update(user_id="123"), lambda p: p.access.update(permissions=["ANALYST"]), lambda p: p.funding.update(able_to_fund=False)]
         for after_child in (False, True):
             for mutate in mutations:
                 with self.subTest(after_child=after_child, mutate=mutate):

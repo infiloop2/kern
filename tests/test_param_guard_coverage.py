@@ -36,6 +36,8 @@ GUARDED_FIELDS = {
         "list_campaigns", "get_campaign", "get_performance",
     )),
     ("instagram_ads", "lookup_targeting", "query"),
+    ("instagram_ads", "diagnose_account", "pages_after"),
+    ("instagram_ads", "diagnose_account", "instagram_after"),
     ("x_ads", "list_accounts", "cursor"),
     ("x_ads", "list_funding_sources", "cursor"),
     ("x_ads", "list_promotable_users", "cursor"),
@@ -174,6 +176,7 @@ EXEMPT_FIELDS = {
     **{("instagram_ads", action, field): TYPED for action, fields in (
         ("list_accounts", ("limit",)),
         ("get_account", ("account_id",)),
+        ("diagnose_account", ("account_id", "limit")),
         ("list_identities", ("account_id", "limit")),
         ("list_posts", ("account_id", "page_id", "instagram_user_id", "limit")),
         ("lookup_targeting", ("account_id", "type", "limit")),
