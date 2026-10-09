@@ -294,6 +294,44 @@ document.addEventListener("toggle", async event => {
         details.insertBefore(review, pre);
       }
     }
+    if (item.tool_id === "google_ads" && response.approval.payload?.input) {
+      const payload = response.approval.payload;
+      const input = payload.input;
+      const account = payload.account || {};
+      const target = payload.current_target || {};
+      const currency = account.currency_code || "account currency";
+      const money = value => {
+        const digits = String(value).padStart(7, "0");
+        const fraction = digits.slice(-6).replace(/0+$/, "");
+        return `${digits.slice(0, -6)}${fraction ? `.${fraction}` : ""} ${currency}`;
+      };
+      const lines = [
+        `Google account: ${payload.google_account?.email || "unknown"}`,
+        `Ads account: ${account.name || input.customer_id} (${input.customer_id}), ${currency}`,
+      ];
+      if (payload.action === "launch_campaign") {
+        lines.push(`New campaign: ${input.name}`, "Objective: Website clicks, automatic Maximize Clicks bidding", "Billing: Cost per click, no maximum CPC specified");
+        lines.push(`Total campaign budget: ${money(input.total_budget_micros)}`);
+        lines.push(`Flight (UTC): ${input.start_time} to ${input.end_time}`);
+        if (payload.flight) lines.push(`Flight (${payload.flight.time_zone}): ${payload.flight.start_date_time} to ${payload.flight.end_date_time}`);
+        const locations = input.geo_target_ids || [];
+        lines.push(locations.length ? `Location IDs (presence targeting): ${locations.join(", ")}` : "Worldwide, no location restriction");
+        lines.push("Contains EU political advertising: No (fixed for this integration)");
+        lines.push("Keywords:", ...input.keywords.map(keyword => `${keyword.match_type}: ${keyword.text}`));
+        lines.push(`Landing page: ${input.final_url}`, "Headlines:", ...input.headlines, "Descriptions:", ...input.descriptions);
+        lines.push("One approval creates, verifies and enables a new campaign. Delivery can begin within this flight during or after Google review without another Kern approval. Total budget covers the flight; there is no daily cap. Configured ENABLED does not confirm approval or delivery.");
+      } else if (payload.action === "end_campaign") {
+        if (target.campaign) lines.push(`Campaign: ${target.campaign.name} (${target.campaign.campaign_id}), currently ${target.campaign.status}`);
+        lines.push("End campaign: Set PAUSED to stop delivery and preserve reporting. Kern offers no resume; Google Ads users can resume there. Stopping may take time and past delivery remains billable.");
+      }
+      const review = document.createElement("div");
+      review.className = "approval-media-review approval-google-ads-review";
+      const text = document.createElement("pre");
+      text.className = "approval-payload";
+      text.textContent = lines.join("\n");
+      review.append(text);
+      details.insertBefore(review, pre);
+    }
     const media = response.approval.payload?.media_asset;
     if (item.tool_id === "whatsapp" && item.action_id === "send_message" && item.status === "pending"
         && ["image/jpeg", "image/png", "video/mp4"].includes(media?.media_type)) {

@@ -40,6 +40,20 @@ class MemoryMonitorTests(unittest.TestCase):
         self.assertEqual(self.deliver.call_args.args[0], [('pr-guidance', 1, 'When publishing a PR')])
         self.assertIn('pr-guidance', self.monitor.turns[self.key].known)
 
+    def test_six_relevant_pages_plus_self_keep_midturn_limit_and_dedupe(self):
+        self.search.return_value = {'pages': [{**page('self'), 'scope': 'self'},
+            *[page(f'guide-{i}') for i in range(6)]]}
+        self.ready()
+        self.monitor.check_once()
+        self.assertEqual([p[0] for p in self.deliver.call_args.args[0]],
+                         ['guide-0', 'guide-1', 'guide-2'])
+        self.redirect()
+        self.monitor.next_check = 0
+        self.monitor.check_once()
+        self.assertEqual([p[0] for p in self.deliver.call_args.args[0]],
+                         ['guide-3', 'guide-4', 'guide-5'])
+        self.assertNotIn('self', self.monitor.turns[self.key].known)
+
     def test_threshold_and_global_rate_bound(self):
         self.monitor.observe(self.key, 'one')
         self.assertFalse(self.monitor.check_once())

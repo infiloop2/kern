@@ -4,11 +4,18 @@ import { browserConnectionPanel, refreshBrowserConnection } from "./browser_conn
 let popup = null;
 let connecting = false;
 export function browserPanel(enabled) {
-  return `${browserConnectionPanel()}<div class="detail-card"><div class="detail-card-head"><h3>X connections</h3><button data-browser="refresh">Refresh</button></div>
-    <p class="muted">Sign in to X in a private browser popup. Save up to 5 separate accounts on this host.</p>
+  return `${browserConnectionPanel()}<div class="detail-card"><div class="detail-card-head"><h3>Browser connections</h3><button data-browser="refresh">Refresh</button></div>
+    <p class="muted">Sign in to X or LinkedIn in a private browser popup. Save up to 5 separate accounts across both providers on this host.</p>
     <div id="browser-sessions">Choose Refresh to load saved accounts.</div>
-    <form id="browser-connect-form" class="browser-connect"><button type="submit" class="primary" data-enabled="${enabled}" ${enabled ? "" : "disabled"}>Connect X account</button></form>
+    <form id="browser-connect-form" class="browser-connect"><label class="field"><span class="field-label">Website</span><select id="browser-provider" name="provider"><option value="x">X</option><option value="linkedin">LinkedIn</option></select></label><button type="submit" class="primary" data-enabled="${enabled}" ${enabled ? "" : "disabled"}>Connect X account</button></form>
     <p id="browser-settings-message" role="status"></p></div>`;
+}
+function accountLabel(account) {
+  if (account.provider === "linkedin") {
+    try { return `LinkedIn · ${new URL(account.provider_identifier).pathname.split("/")[2]}`; }
+    catch { return "LinkedIn account"; }
+  }
+  return account.provider_identifier ? `@${account.provider_identifier}` : "X account";
 }
 function message(value) { const el = document.getElementById("browser-settings-message"); if (el) el.textContent = value; }
 export async function refreshBrowserSessions() {
@@ -20,9 +27,9 @@ export async function refreshBrowserSessions() {
     const connect = document.querySelector('#browser-connect-form button');
     if (connect) connect.disabled = connect.dataset.enabled !== "true" || accounts.length >= 5;
     node.innerHTML = accounts.map(account => `<section class="browser-session" data-account="${esc(account.account_id)}">
-      <div><strong>${esc(account.provider_identifier ? `@${account.provider_identifier}` : "X account")}</strong><p>${esc(account.state === "connected" ? "Login verified" : "Login needs attention; agent actions paused")}${account.checked_at ? ` · Last checked ${esc(new Date(account.checked_at).toLocaleString())}` : ""}</p></div>
+      <div><strong>${esc(accountLabel(account))}</strong><p>${esc(account.state === "connected" ? "Login verified" : "Login needs attention; agent actions paused")}${account.checked_at ? ` · Last checked ${esc(new Date(account.checked_at).toLocaleString())}` : ""}</p></div>
       <div class="browser-buttons"><button data-browser="open">Open browser</button>${account.provider_identifier ? '<button data-browser="check">Check login</button>' : ""}<button data-browser="disconnect" class="danger ghost">Disconnect</button></div>
-    </section>`).join("") || '<p class="muted">No saved X accounts yet.</p>';
+    </section>`).join("") || '<p class="muted">No saved accounts yet.</p>';
   } catch (error) { message(error.message); }
 }
 function openPopup(accountId) {
@@ -38,10 +45,11 @@ document.addEventListener("submit", async event => {
   // Reserve the popup in the trusted click before awaiting network work.
   const nextPopup = window.open("about:blank", "kern-browser", "popup,width=1160,height=950");
   popup = nextPopup;
-  if (!nextPopup) { message("Allow popups for Kern, then choose Connect X account again."); return; }
+  if (!nextPopup) { message("Allow popups for Kern, then choose Connect account again."); return; }
   connecting = true;
+  const provider = document.getElementById("browser-provider").value;
   try {
-    const login = await api("POST", "/v1/browser/create", {provider: "x"});
+    const login = await api("POST", "/v1/browser/create", {provider});
     if (!nextPopup.closed) nextPopup.location.href = `/browser.html?login=${encodeURIComponent(login.login_id)}`;
     await refreshBrowserSessions();
   } catch (error) { nextPopup.close(); message(error.message); }
@@ -57,14 +65,20 @@ document.addEventListener("click", async event => {
   try {
     if (operation === "refresh") { await refreshBrowserSessions(); return; }
     if (operation === "disconnect") {
-      if (!window.confirm("Disconnect this X account and delete its saved login and usage data?")) return;
+      if (!window.confirm("Disconnect this account and delete its saved login and usage data?")) return;
       await api("POST", "/v1/browser/disconnect", {account_id});
     } else if (operation === "check") {
       const state = await api("POST", "/v1/browser/check", {account_id});
-      message(state.state === "connected" ? `Login verified for @${state.provider_identifier}.` : "Login needs attention. Open the browser to sign in again.");
+      message(state.state === "connected" ? `Login verified for ${accountLabel(state)}.` : "Login needs attention. Open the browser to sign in again.");
     }
     await refreshBrowserSessions();
   } catch (error) { message(error.message); }
   finally { button.disabled = false; }
 });
 window.addEventListener("message", event => { if (event.origin === location.origin && event.source === popup && event.data?.type === "kern-browser-saved") refreshBrowserSessions(); });
+
+document.addEventListener("change", event => {
+  if (event.target.id !== "browser-provider") return;
+  const button = document.querySelector('#browser-connect-form button');
+  if (button) button.textContent = event.target.value === "linkedin" ? "Connect LinkedIn account" : "Connect X account";
+});

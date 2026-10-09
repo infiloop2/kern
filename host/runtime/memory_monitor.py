@@ -136,8 +136,8 @@ class Monitor:
         except Exception as exc:
             self._failure(exc)
 
-        # Only on-demand titles use Luna. Recall never depends on its provider,
-        # response or availability; initial and mid-turn titles share a prompt.
+        # Title generation is independent of recall ranking; initial and
+        # mid-turn titles share a prompt.
         try:
             if context.update_task is not None and still_current():
                 task = state.swarm_task_context(*key)

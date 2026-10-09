@@ -292,7 +292,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
                 {"thread_id": "thread-8", "message": "Browser screenshot workflow"}
             )
 
-        self.assertEqual(len(recalled["pages"]), memory.MAX_RECALLED_PAGES)
+        self.assertEqual(len(recalled["pages"]), memory.FALLBACK_PAGE_LIMIT + 1)
         self.assertEqual(recalled["pages"][0]["page_id"], "thread-7")
         self.assertEqual(recalled["pages"][0]["scope"], "self")
         self.assertTrue(

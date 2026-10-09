@@ -17,7 +17,7 @@ from host.runtime.core import host_errors, host_metrics
 from host.runtime.core.unix_socket_service import UnixSocketRequestHandler, UnixSocketServer
 
 OPERATOR_OPERATIONS = {"network_get", "network_save", "network_test", "ready", "list", "create", "check", "open", "frame", "input", "save", "cancel", "disconnect"}
-TOOL_OPERATIONS = {"list", "post_tweet"}
+TOOL_OPERATIONS = {"list", "post_tweet", "linkedin_resolve_recipient", "linkedin_read_conversation", "linkedin_send_dm"}
 
 
 def authorized(uid: int, path: str) -> str | None:
@@ -74,8 +74,8 @@ class Handler(UnixSocketRequestHandler):
             message = "Browser operation failed. Reopen the browser or check Host diagnostics."
             if operation in {"network_get", "network_save", "network_test"}:
                 message = "Browser connection failed. Check credentials or provider balance, then test again."
-            if operation == "post_tweet":
-                message += " Check X before approving another attempt."
+            if operation in {"post_tweet", "linkedin_send_dm"}:
+                message += " Check the website before approving another attempt."
             self._send_json(503, {"error": message})
         finally:
             if acquired:

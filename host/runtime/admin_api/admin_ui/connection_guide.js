@@ -36,6 +36,7 @@ const INTEGRATION_LOGOS = {
   "tool:brave_search": `<svg viewBox="0 0 32 32"><path fill="none" stroke="currentColor" stroke-width="2.2" d="m16 3 10 4.2-1 14.2L16 28l-9-6.6L6 7.2 16 3Z"/><path fill="currentColor" d="M11 8.8h7c4 0 5.2 5 2.1 6.5 3.8 1.3 2.5 7.7-2 7.7H11V8.8Zm4 3v2.4h2.7c1.6 0 1.6-2.4 0-2.4H15Zm0 5.2v3h3c1.9 0 1.9-3 0-3h-3Z"/></svg>`,
   "tool:gmail": `<svg viewBox="0 0 32 32"><path class="gmail-blue" d="M4 10v15h5V14.3Z"/><path class="gmail-red" d="M4 10 8 7l8 6.2L24 7l4 3v15h-5V14.2L16 20 9 14.3V25H4Z"/><path class="gmail-yellow" d="m24 7 4 3-5 4.2V8Z"/><path class="gmail-green" d="M23 14.2 28 10v15h-5Z"/></svg>`,
   "tool:google_calendar": `<svg viewBox="0 0 32 32"><path class="calendar-blue" d="M6 5h20v22H6z"/><path class="calendar-green" d="M6 5h14v7H6z"/><path class="calendar-yellow" d="M6 12h7v15H6z"/><path class="calendar-red" d="M20 5h6v7h-6z"/><path fill="#fff" d="M13 14h6.3c3.1 0 4.7 1.6 4.7 3.7 0 1.5-.9 2.7-2.3 3.1v.1c1.7.3 2.7 1.5 2.7 3.2 0 .5-.1 1-.2 1.4H20c.2-.4.3-.8.3-1.3 0-1.3-.9-2.1-2.5-2.1h-1.5v-2.7h1.4c1.4 0 2.2-.7 2.2-1.8 0-1-.8-1.7-2.1-1.7H13V14Z"/></svg>`,
+  "tool:google_ads": `<svg viewBox="0 0 32 32"><path fill="#4285f4" d="M18 4a5 5 0 0 1 6.8 1.8l7 12.2a5 5 0 0 1-8.6 5l-7-12.2A5 5 0 0 1 18 4Z"/><path fill="#fbbc04" d="M18 4a5 5 0 0 1 1.8 6.8l-7 12.2a5 5 0 0 1-8.6-5l7-12.2A5 5 0 0 1 18 4Z"/><circle fill="#34a853" cx="8.5" cy="20.5" r="5"/></svg>`,
   "tool:google_search_console": `<svg viewBox="0 0 32 32"><path fill="#4285f4" d="M5 5h5v22H5z"/><path fill="#34a853" d="M12 17h5v10h-5z"/><path fill="#fbbc04" d="M19 12h5v15h-5z"/><path fill="#ea4335" d="M26 8h2v19h-2z"/><path fill="none" stroke="#4285f4" stroke-width="2.4" stroke-linecap="round" d="m8 15 6-5 5 3 7-8"/></svg>`,
   "tool:fal_ai": `<svg viewBox="0 0 32 32"><path fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round" d="M5 7h22v18H5z"/><path fill="currentColor" d="m13 11 9 5-9 5V11Z"/><path d="M8 4v3m16-3v3M8 25v3m16-3v3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>`,
   "tool:indexnow": `<span class="integration-logo-word integration-logo-word-indexnow">IN</span>`,
@@ -60,6 +61,8 @@ const INTEGRATION_LOGOS = {
 // The bundled OpenAI image tool carries the same brand mark as the managed
 // OpenAI network integration: one definition, two guide ids.
 INTEGRATION_LOGOS["tool:openai_images"] = INTEGRATION_LOGOS.openai;
+INTEGRATION_LOGOS["tool:instagram_ads"] = INTEGRATION_LOGOS["tool:instagram"];
+INTEGRATION_LOGOS["tool:x_ads"] = INTEGRATION_LOGOS["tool:twitter"];
 INTEGRATION_LOGOS.host_openai = INTEGRATION_LOGOS.openai;
 INTEGRATION_LOGOS.host_typesafe = `<span class="integration-logo-word">Jev</span>`;
 

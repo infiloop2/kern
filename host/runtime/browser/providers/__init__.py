@@ -4,7 +4,7 @@ Add a provider module with these members, then register it here. Identifiers
 are provider-defined strings: X verifies a handle, another provider may differ.
 """
 from typing import Any, Protocol
-from host.runtime.browser.providers import x
+from host.runtime.browser.providers import x, linkedin
 
 
 class Provider(Protocol):
@@ -15,4 +15,4 @@ class Provider(Protocol):
     def validate_identifier(self, value: object) -> str: ...
 
 
-PROVIDERS: dict[str, Provider] = {"x": x}
+PROVIDERS: dict[str, Provider] = {"x": x, "linkedin": linkedin}

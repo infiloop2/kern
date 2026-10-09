@@ -20,11 +20,13 @@ on:
           - elevenlabs
           - gmail
           - google_calendar
+          - google_ads
           - google_search_console
           - fal_ai
           - indexnow
           - ibkr
           - instagram
+          - instagram_ads
           - instagram_discovery
           - linkedin
           - google_search
@@ -38,6 +40,7 @@ on:
           - twitter
           - upwork
           - web_fetch
+          - x_ads
           - whatsapp
           - vercel_analytics
           - twitterapi_io
@@ -238,6 +241,10 @@ jobs:
           KERN_STAGE_PAGESPEED_INSIGHTS_API_KEY: ${{ secrets.KERN_STAGE_PAGESPEED_INSIGHTS_API_KEY }}
           KERN_STAGE_VERCEL_ACCESS_TOKEN: ${{ secrets.KERN_STAGE_VERCEL_ACCESS_TOKEN }}
           KERN_STAGE_TWITTERAPI_IO_API_KEY: ${{ secrets.KERN_STAGE_TWITTERAPI_IO_API_KEY }}
+          KERN_STAGE_X_ADS_CONSUMER_KEY: ${{ secrets.KERN_STAGE_X_ADS_CONSUMER_KEY }}
+          KERN_STAGE_X_ADS_CONSUMER_SECRET: ${{ secrets.KERN_STAGE_X_ADS_CONSUMER_SECRET }}
+          KERN_STAGE_X_ADS_ACCESS_TOKEN: ${{ secrets.KERN_STAGE_X_ADS_ACCESS_TOKEN }}
+          KERN_STAGE_X_ADS_ACCESS_TOKEN_SECRET: ${{ secrets.KERN_STAGE_X_ADS_ACCESS_TOKEN_SECRET }}
         run: |
           set -euo pipefail
           python3 tests/stage/stage_aws.py \

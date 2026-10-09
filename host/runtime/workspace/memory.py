@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 from http import HTTPStatus
+from itertools import zip_longest
 import json
 import re
 import secrets
@@ -19,7 +20,10 @@ from typing import Any
 from urllib.parse import unquote
 
 from host.memory_recall import bound_query
-from host.memory_recall_rules import CANDIDATE_LIMIT, MAX_QUERY_BYTES, RELEVANT_PAGE_LIMIT, RECALL_RERANK_TIMEOUT_SECONDS
+from host.memory_recall_rules import (
+    CANDIDATE_LIMIT, FALLBACK_PAGE_LIMIT, MAX_QUERY_BYTES, PROVIDER_PAGE_LIMIT,
+    RELEVANT_PAGE_LIMIT, RECALL_RERANK_TIMEOUT_SECONDS,
+)
 from host.runtime.core import db, host_errors, pgclient, state
 from host.runtime.embeddings import client as embedding_client
 from host.runtime.host_inference import HostInferenceError, openai_decisions, typesafe_jev_judgment as judge
@@ -282,25 +286,55 @@ def recall_pages(body: Any) -> dict[str, Any]:
 def _rerank_recall(
     candidates: list[dict[str, Any]], *, query: str, details: list[str],
 ) -> None:
-    """Run both rankings, apply Jev, and record the Luna comparison."""
+    """Select the top-three union, a successful provider's five, or hybrid five."""
     if not candidates:
         details.append("Rerank skipped: no candidates.")
         return
 
-    # Give both providers the same hybrid search order; apply only Jev's result.
+    # Both ranking functions copy the same original hybrid search order.
     hybrid_candidates = list(candidates)
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="recall-luna") as executor:
         luna_future = executor.submit(_luna_recall_ranking, hybrid_candidates, query=query)
         jev_ranked_candidates, jev_diagnostic = _jev_recall_ranking(hybrid_candidates, query=query)
-        _, luna_diagnostic = luna_future.result()
+        luna_ranked_candidates, luna_diagnostic = luna_future.result()
 
-    candidates[:] = jev_ranked_candidates
-    luna_diagnostic.update(api="decisions", applied=False)
-    luna_diagnostic["would_select"] = luna_diagnostic.pop("selection")
-    for candidate in luna_diagnostic["candidates"]:
-        candidate["would_rank"] = candidate.pop("final_rank")
-    for label, diagnostic in (("Rerank: ", jev_diagnostic), ("Rerank shadow: ", luna_diagnostic)):
-        details.append(label + json.dumps(diagnostic, ensure_ascii=False, separators=(",", ":")))
+    jev_success = jev_diagnostic["outcome"] == "success"
+    luna_success = luna_diagnostic["outcome"] == "success"
+    if jev_success and luna_success:
+        strategy = "top_three_union"
+        jev_top = jev_ranked_candidates[:PROVIDER_PAGE_LIMIT]
+        luna_top = luna_ranked_candidates[:PROVIDER_PAGE_LIMIT]
+        shared = {page["page_id"] for page in jev_top} & {page["page_id"] for page in luna_top}
+        selected = [page for page in jev_top if page["page_id"] in shared]
+        remaining = [[page for page in ranking if page["page_id"] not in shared]
+                     for ranking in (jev_top, luna_top)]
+        selected.extend(page for pair in zip_longest(*remaining) for page in pair if page is not None)
+    else:
+        if jev_success:
+            strategy, ranking = "jev", jev_ranked_candidates
+        elif luna_success:
+            strategy, ranking = "luna", luna_ranked_candidates
+        else:
+            strategy, ranking = "hybrid", hybrid_candidates
+        selected = ranking[:FALLBACK_PAGE_LIMIT]
+    # Page loading may filter revisions/deletions, but cannot refill outside this set.
+    candidates[:] = selected
+    jev_diagnostic["applied"] = jev_success
+    luna_diagnostic.update(api="decisions", applied=luna_success)
+    # Store candidate identity/retrieval evidence once, beside both provider proposals.
+    evidence = [
+        {"id": f"q{index}", "page_id": page["page_id"], "revision": page.get("revision"),
+         "hybrid_rank": index + 1, "hybrid_score": page.get("memory_relevance_score"),
+         "jev": jev, "luna": luna}
+        for index, (page, jev, luna) in enumerate(zip(
+            hybrid_candidates, jev_diagnostic.pop("candidates"), luna_diagnostic.pop("candidates")))
+    ]
+    details.append("Rerank: " + json.dumps({
+        "version": 7, "strategy": strategy,
+        "providers": {"jev": jev_diagnostic, "luna": luna_diagnostic},
+        "selection": [page["page_id"] for page in selected],
+        "candidates": evidence,
+    }, ensure_ascii=False, separators=(",", ":")))
 
 
 def _jev_recall_ranking(
@@ -327,7 +361,7 @@ def _jev_recall_ranking(
 
     return _recall_ranking(
         hybrid_candidates, query=query, fetch_scores=fetch_scores,
-        provider="typesafe", model="jev-latest", version=5,
+        provider="typesafe", model="jev-latest",
     )
 
 
@@ -363,19 +397,19 @@ def _luna_recall_ranking(
 
     return _recall_ranking(
         hybrid_candidates, query=query, fetch_scores=fetch_scores,
-        provider="openai", model="gpt-6-luna", version=1,
+        provider="openai", model="gpt-6-luna",
     )
 
 
 def _recall_ranking(
     hybrid_candidates: list[dict[str, Any]], *, query: str,
     fetch_scores: Callable[[dict[str, Any], str], dict[str, Any] | None],
-    provider: str, model: str, version: int,
+    provider: str, model: str,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """Validate complete scores, preserve fallback order, and build diagnostic evidence."""
     started = time.monotonic()
     diagnostic: dict[str, Any] = {
-        "version": version, "provider": provider, "model": model,
+        "provider": provider, "model": model,
         "outcome": "provider_unavailable", "timeout_seconds": RECALL_RERANK_TIMEOUT_SECONDS,
     }
     ranked_candidates = list(hybrid_candidates)
@@ -435,12 +469,9 @@ def _recall_ranking(
         }
         ranks = {page["page_id"]: index for index, page in enumerate(ranked_candidates, start=1)}
         diagnostic["candidates"] = [
-            {"id": f"q{index}", "page_id": page["page_id"], "revision": page.get("revision"),
-             "hybrid_rank": index + 1, "hybrid_score": page.get("memory_relevance_score"),
-             "score": scores.get(page["page_id"]), "final_rank": ranks[page["page_id"]]}
-            for index, page in enumerate(hybrid_candidates)
+            {"score": scores.get(page["page_id"]), "rank": ranks[page["page_id"]]}
+            for page in hybrid_candidates
         ]
-        diagnostic["selection"] = [page["page_id"] for page in ranked_candidates[:RECALL_RELEVANT_LIMIT]]
     return ranked_candidates, diagnostic
 
 

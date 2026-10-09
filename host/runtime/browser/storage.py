@@ -57,7 +57,7 @@ class Store:
             cur.execute("SELECT account_id, provider, provider_identifier, state, checked_at, usage_day::text, usage_count"
                         " FROM browser_accounts ORDER BY account_id")
             return {row[0]: (row[1], {"provider_identifier": row[2], "state": row[3], "checked_at": row[4],
-                                     "usage": {"x_post_tweet": {"day": row[5], "count": row[6]}} if row[5] else {}})
+                                     "usage": {("x_post_tweet" if row[1] == "x" else "linkedin_send_dm"): {"day": row[5], "count": row[6]}} if row[5] else {}})
                     for row in cur.fetchall()}
 
     def auth(self, account_id: str) -> dict[str, Any]:
@@ -113,7 +113,7 @@ class Store:
             serialized = buffer.getvalue().decode("ascii")
             buffer.close()
         ciphertext = None
-        usage = data["usage"].get("x_post_tweet")
+        usage = data["usage"].get("x_post_tweet" if provider == "x" else "linkedin_send_dm")
         with db.transaction() as cur:
             # Serialize capacity checks and writes, including deletion.
             cur.execute("LOCK TABLE browser_accounts IN EXCLUSIVE MODE")

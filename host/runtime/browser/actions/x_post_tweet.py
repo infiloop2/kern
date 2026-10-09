@@ -8,8 +8,8 @@ from typing import Any, TYPE_CHECKING
 from urllib.parse import urlsplit
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser.providers import x
-from host.runtime.browser.actions.x_composer import MATCHES_TEXT
-from host.runtime.browser.actions.x_diagnostics import preparation_facts, reply_target
+from host.runtime.browser.actions.x_composer import MATCHES_TEXT, active_composer
+from host.runtime.browser.actions.x_diagnostics import composer_state, preparation_facts, reply_target
 from host.runtime.core import host_errors
 
 if TYPE_CHECKING:
@@ -17,6 +17,11 @@ if TYPE_CHECKING:
 
 X_POST_DAILY_LIMIT = 50
 TWEET_ID = re.compile(r"[0-9]{1,25}")
+PREPARATION_TIMEOUT_MS = 60000
+COMPOSER_TIMEOUT_MS = 10000
+CONFIRMATION_TIMEOUT_MS = 20000
+RECOVERABLE_STEPS = frozenset({"wait_for_composer", "clear_composer", "verify_empty_composer",
+                               "type_post_text", "wait_for_submit_enabled"})
 
 
 class PostRejected(BrowserError):
@@ -109,42 +114,81 @@ def execute(profile: Profile, body: dict[str, Any]) -> dict[str, Any]:
 
 def prepare_post(page: Any, account: str, text: str, reply_id: str = "") -> None:
     from playwright.sync_api import expect, TimeoutError as PlaywrightTimeoutError  # type: ignore[import-not-found]
-    step = "navigate_to_target" if reply_id else "navigate_to_composer"
     started = time.monotonic()
-    try:
-        response = page.goto(f"https://x.com/i/status/{reply_id}" if reply_id else "https://x.com/compose/post", wait_until="domcontentloaded")
-        if response is not None and response.status >= 400:
-            raise BrowserError(f"X returned HTTP {response.status} while opening the post page")
-        step = "verify_account"
-        if x.verify_account(page) != account:
-            raise BrowserError("The signed-in account changed. Reconnect in Browser settings.")
-        if reply_id:
-            step = "find_reply_target"
-            target = reply_target(page, reply_id)
-            expect(target).to_have_count(1, timeout=10000)
-            step = "open_reply_composer"
-            target.get_by_test_id("reply").click()
-        step = "clear_composer"
-        composer = page.get_by_role("dialog")
-        editor = composer.get_by_test_id("tweetTextarea_0")
-        editor.fill("")
-        step = "type_post_text"
-        # Keep normal keyboard/input handlers without spending 14 seconds of
-        # the deadline on artificial delays for a 280-character post.
-        editor.press_sequentially(text, delay=0, timeout=60000)
-        step = "wait_for_submit_enabled"
-        expect(composer.get_by_test_id("tweetButton")).to_be_enabled(timeout=10000)
-        step = "verify_post_text"
-        # Compare logical editor content exactly, including blank lines and
-        # image emoji, after the editor's input handlers have run.
+    deadline = started + PREPARATION_TIMEOUT_MS / 1000
+    step = ""
+    step_started = started
+    recovery_step = ""
+    recovery_failure_type = ""
+
+    def timeout(limit: int) -> int:
+        remaining = int((deadline - time.monotonic()) * 1000)
+        if remaining <= 0:
+            raise PlaywrightTimeoutError("Preparation deadline exceeded")
+        return min(limit, remaining)
+
+    def begin(name: str, limit: int = COMPOSER_TIMEOUT_MS) -> int:
+        nonlocal step, step_started
+        step, step_started = name, time.monotonic()
+        return timeout(limit)
+
+    for attempt in (1, 2):
         try:
-            page.wait_for_function(MATCHES_TEXT, arg=[editor.element_handle(), text], timeout=10000)
-        except PlaywrightTimeoutError:
-            raise BrowserError("The composer text did not exactly match the approved post, including emoji and line breaks.") from None
-    except Exception as exc:
-        elapsed_ms = round((time.monotonic() - started) * 1000)
-        facts = {"preparation_elapsed_ms": elapsed_ms, **preparation_facts(page, reply_id)}
-        raise PreparationFailed(step, exc, facts).with_traceback(exc.__traceback__) from None
+            navigation_timeout = begin("navigate_to_target" if reply_id else "navigate_to_composer", 20000)
+            response = page.goto(f"https://x.com/i/status/{reply_id}" if reply_id else "https://x.com/compose/post",
+                                 wait_until="domcontentloaded", timeout=navigation_timeout)
+            if response is not None and response.status >= 400:
+                raise BrowserError(f"X returned HTTP {response.status} while opening the post page")
+            account_timeout = begin("verify_account")
+            if x.verify_account(page, timeout=account_timeout) != account:
+                raise BrowserError("The signed-in account changed. Reconnect in Browser settings.")
+            if reply_id:
+                target_timeout = begin("find_reply_target")
+                target = reply_target(page, reply_id)
+                expect(target).to_have_count(1, timeout=target_timeout)
+                target.get_by_test_id("reply").click(timeout=begin("open_reply_composer"))
+            composer = active_composer(page)
+            editor = composer.get_by_test_id("tweetTextarea_0").filter(visible=True)
+            expect(composer).to_have_count(1, timeout=begin("wait_for_composer"))
+            expect(editor).to_have_count(1, timeout=timeout(COMPOSER_TIMEOUT_MS))
+            expect(editor).to_be_visible(timeout=timeout(COMPOSER_TIMEOUT_MS))
+            expect(editor).to_be_editable(timeout=timeout(COMPOSER_TIMEOUT_MS))
+            begin("clear_composer")
+            if composer_state(page).get("composer_empty") is not True:
+                editor.fill("", timeout=timeout(COMPOSER_TIMEOUT_MS))
+            # Empty Draft wrappers and image emoji need the same logical-text
+            # comparison as approved copy; textContent is not sufficient.
+            empty_timeout = begin("verify_empty_composer")
+            page.wait_for_function(MATCHES_TEXT, arg=[editor.element_handle(timeout=timeout(COMPOSER_TIMEOUT_MS)), ""],
+                                   timeout=min(empty_timeout, timeout(COMPOSER_TIMEOUT_MS)))
+            # Preserve trusted keyboard/input handlers without artificial delay.
+            editor.press_sequentially(text, delay=0, timeout=begin("type_post_text", 60000))
+            expect(composer.get_by_test_id("tweetButton")).to_be_enabled(timeout=begin("wait_for_submit_enabled"))
+            text_timeout = begin("verify_post_text")
+            try:
+                page.wait_for_function(MATCHES_TEXT,
+                    arg=[editor.element_handle(timeout=timeout(COMPOSER_TIMEOUT_MS)), text],
+                    timeout=min(text_timeout, timeout(COMPOSER_TIMEOUT_MS)))
+            except PlaywrightTimeoutError:
+                raise BrowserError("The composer text did not exactly match the approved post, including emoji and line breaks.") from None
+            timeout(COMPOSER_TIMEOUT_MS)  # Preparation must finish within the shared budget.
+            return
+        except Exception as exc:
+            # Only transient composer waits qualify, before any submit or usage
+            # increment. Navigation, account/target mismatch, changed text and
+            # submission errors are terminal. Never force a click or pick first.
+            if (attempt == 1 and step in RECOVERABLE_STEPS
+                    and isinstance(exc, (PlaywrightTimeoutError, AssertionError))
+                    and time.monotonic() < deadline):
+                recovery_step, recovery_failure_type = step, type(exc).__name__
+                continue
+            now = time.monotonic()
+            facts = {"preparation_elapsed_ms": round((now - started) * 1000),
+                     "step_elapsed_ms": round((now - step_started) * 1000),
+                     "preparation_attempt": attempt, **preparation_facts(page, reply_id)}
+            if recovery_step:
+                facts.update(recovery_step=recovery_step, recovery_failure_type=recovery_failure_type)
+            raise PreparationFailed(step, exc, facts).with_traceback(exc.__traceback__) from None
 
 
 def submit_prepared_post(page: Any, account: str, reply_id: str = "") -> str:
@@ -153,9 +197,9 @@ def submit_prepared_post(page: Any, account: str, reply_id: str = "") -> str:
     with page.expect_response(
         lambda response: response.request.method == "POST"
         and urlsplit(response.url).hostname in {"x.com", "api.x.com"}
-        and urlsplit(response.url).path.endswith("/CreateTweet"), timeout=20000,
+        and urlsplit(response.url).path.endswith("/CreateTweet"), timeout=CONFIRMATION_TIMEOUT_MS,
     ) as pending:
-        page.get_by_role("dialog").get_by_test_id("tweetButton").click(timeout=5000)
+        active_composer(page).get_by_test_id("tweetButton").click(timeout=5000)
     response = pending.value
     if response.status != 200:
         raise BrowserError(f"X returned HTTP {response.status} instead of confirming the submission.")

@@ -786,7 +786,7 @@ class ConcreteProviderTests(unittest.TestCase):
 
 
 class HostInferenceBoundaryTests(unittest.TestCase):
-    def test_shadow_decision_keeps_all_four_jev_slots_available(self) -> None:
+    def test_luna_decision_keeps_all_four_jev_slots_available(self) -> None:
         shadow_started = threading.Event()
         jev_started = threading.Barrier(api.MAX_CONCURRENT_CALLS + 1)
         release = threading.Event()

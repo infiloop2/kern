@@ -16,10 +16,10 @@ def validate_identifier(value: object) -> str:
     return value.lower()
 
 
-def verify_account(page: Any) -> str:
+def verify_account(page: Any, *, timeout: int = 10000) -> str:
     from playwright.sync_api import TimeoutError as PlaywrightTimeoutError  # type: ignore[import-not-found]
     try:
-        href = page.get_by_test_id("AppTabBar_Profile_Link").get_attribute("href", timeout=10000) or ""
+        href = page.get_by_test_id("AppTabBar_Profile_Link").get_attribute("href", timeout=timeout) or ""
     except PlaywrightTimeoutError:
         raise BrowserError("X sign-in could not be confirmed. Open the browser to check the account.") from None
     handle = href.removeprefix("/")

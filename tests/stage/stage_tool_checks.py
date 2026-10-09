@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 import json
 import os
 import shlex
@@ -358,15 +359,18 @@ class StageToolChecks:
             "elevenlabs": self._check_elevenlabs_live,
             "gmail": self._check_gmail_live,
             "google_calendar": self._check_calendar_live,
+            "google_ads": self._check_google_ads_live,
             "google_search_console": self._check_search_console_live,
             "fal_ai": self._check_fal_ai_live,
             "indexnow": self._check_indexnow_proposal,
+            "instagram_ads": self._check_instagram_ads_live,
             "instagram_discovery": self._check_instagram_discovery_live,
             "polymarket": self._check_polymarket_live,
             "reddit": self._check_reddit_live,
             "reddit_scrapecreators": self._check_reddit_scrapecreators_live,
             "twitter": self._check_twitter_live,
             "twitterapi_io": self._check_twitterapi_io_live,
+            "x_ads": self._check_x_ads_live,
             "upwork": self._check_upwork_live,
             "vercel_analytics": self._check_vercel_analytics_live,
             "whatsapp": self._check_whatsapp_live,
@@ -418,6 +422,43 @@ class StageToolChecks:
         suffix = "; publish proposal denied" if tool_id == "linkedin" else ""
         read_count = len(calls) + (1 if tool_id == "ibkr" else 0)
         return f"{read_count} live read(s) completed{suffix}"
+
+    def _check_instagram_ads_live(self) -> str:
+        accounts = self._successful_tool_call("instagram_ads_list_accounts", {"limit": 1})["items"]
+        if not accounts:
+            raise CredentialUnavailable("Instagram Ads stage needs an accessible advertiser with billing configured.")
+        account_id = accounts[0]["account_id"]
+        account = self._successful_tool_call("instagram_ads_get_account", {"account_id": account_id})
+        common = {"account_id": account_id, "limit": 1}
+        identities = self._successful_tool_call("instagram_ads_list_identities", common)["items"]
+        self._successful_tool_call("instagram_ads_lookup_targeting", {**common, "type": "COUNTRY", "query": "United States"})
+        campaigns = self._successful_tool_call("instagram_ads_list_campaigns", common)["items"]
+        if campaigns:
+            campaign_id = campaigns[0]["id"]
+            self._successful_tool_call("instagram_ads_get_campaign", {**common, "campaign_id": campaign_id})
+            today = datetime.now(timezone.utc).date().isoformat()
+            self._successful_tool_call("instagram_ads_get_performance", {**common, "campaign_id": campaign_id,
+                                                                      "start_date": today, "end_date": today})
+            self._queue_and_deny("instagram_ads", "instagram_ads_end_campaign",
+                                 {"account_id": account_id, "campaign_id": campaign_id})
+        if not identities:
+            raise CredentialUnavailable("Instagram Ads stage needs a real Page-linked professional identity.")
+        identity = identities[0]
+        ids = {"account_id": account_id, "page_id": identity["page_id"], "instagram_user_id": identity["instagram_user_id"]}
+        posts = self._successful_tool_call("instagram_ads_list_posts", {**ids, "limit": 20})["items"]
+        reel = next((row for row in posts if row["eligible_to_boost"] is True), None)
+        if reel is None:
+            raise CredentialUnavailable("Instagram Ads stage needs an owned Reel reporting boost eligibility in its first media page.")
+        start = (datetime.now(timezone.utc) + timedelta(days=2)).replace(microsecond=0)
+        minimum = int(account["minimum_daily_budget"] or "0")
+        budget = str(max(minimum * 20, (account["currency_offset"] or 100) * 100))
+        self._queue_and_deny("instagram_ads", "instagram_ads_launch_campaign", {
+            **ids, "media_id": reel["media_id"], "name": "Kern stage proposal denied",
+            "objective": "ENGAGEMENTS", "special_ad_category": "NONE", "lifetime_budget": budget,
+            "start_time": start.isoformat(), "end_time": (start + timedelta(days=2)).isoformat(),
+            "audience": {"countries": ["US"]},
+        })
+        return "bounded advertiser/identity/Reel/targeting/audience/campaign reads; launch and available pause proposals denied; no live ads or spend"
 
     def _check_indexnow_proposal(self) -> str:
         first = self._successful_tool_call("indexnow_get_verification_file", {})
@@ -690,6 +731,13 @@ class StageToolChecks:
             raise AssertionError(f"approved calendar delete did not execute: {cleanup_decision}")
         return "event read plus approval round trip created and deleted one event"
 
+    def _check_google_ads_live(self) -> str:
+        result = self._successful_tool_call("google_ads_list_accounts", {})
+        if not isinstance(result.get("customer_ids"), list):
+            raise AssertionError("Google Ads returned no customer_ids list.")
+        # OAuth stage probes never create, enable or mutate advertising.
+        return "authenticated account ID read completed; no campaigns changed"
+
     def _check_search_console_live(self) -> str:
         properties_result = self._successful_tool_call(
             "google_search_console_list_properties", {}
@@ -921,6 +969,23 @@ class StageToolChecks:
                 if not any(marker in str(exc) for marker in unavailable):
                     raise
         raise AssertionError(f"No usable Vercel Web Analytics project found after checking {checked} discovered project(s); check tracking and token scope")
+
+    def _check_x_ads_live(self) -> str:
+        """Verify configured Ads access with bounded discovery reads only."""
+        result = self._successful_tool_call("x_ads_list_accounts", {"count": 1})
+        accounts = result.get("accounts")
+        if not isinstance(accounts, list) or len(accounts) > 1:
+            raise AssertionError("X Ads returned an invalid bounded account page")
+        if not accounts:
+            return "Ads API authenticated; no advertiser account returned; no advertising writes"
+        account = accounts[0]
+        if not isinstance(account, dict) or not isinstance(account.get("id"), str) or not account["id"]:
+            raise AssertionError("X Ads returned an invalid advertiser id")
+        account_id = account["id"]
+        self._successful_tool_call("x_ads_get_account", {"account_id": account_id})
+        self._successful_tool_call("x_ads_list_funding_sources", {"account_id": account_id, "count": 1})
+        self._successful_tool_call("x_ads_list_promotable_users", {"account_id": account_id, "count": 1})
+        return "one advertiser's identity, permissions, funding and promotable users read; no advertising writes"
 
     def _check_twitterapi_io_live(self) -> str:
         result = self._successful_tool_call(
