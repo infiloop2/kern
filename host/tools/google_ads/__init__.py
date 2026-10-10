@@ -23,6 +23,7 @@ from host.tools.tool import CredentialFlow, OAuthCompleteConnectParams, OAuthCom
 from host.tools.manifest import ToolManifest
 
 API_BASE = "https://googleads.googleapis.com/v25"
+DEFAULT_DEVICES = ("DESKTOP", "MOBILE", "TABLET", "CONNECTED_TV", "OTHER")
 
 
 class AdsGoogleCredentialStore(GoogleCredentialStore):
@@ -539,7 +540,7 @@ def _targeting_details(criterion: JSONObject) -> str:
     excluded = str(negative).lower() if type(negative) is bool else "UNRECOGNIZED"
     device = criterion.get("device")
     device_type = enum(device.get("type") if isinstance(device, dict) else None,
-        ("DESKTOP", "MOBILE", "TABLET", "CONNECTED_TV", "OTHER", "UNKNOWN", "UNSPECIFIED"))
+        (*DEFAULT_DEVICES, "UNKNOWN", "UNSPECIFIED"))
     modifier = criterion.get("bidModifier")
     bid_modifier = "MISSING" if modifier is None else "UNRECOGNIZED"
     if type(modifier) in (int, float) and 0 <= cast(float, modifier) <= 10:
@@ -574,10 +575,24 @@ def _verify_launch(token: str, values: JSONObject, flight: JSONObject, resources
         _fail("New campaign total budget differs from approval.")
     geo_rows = _search(token, customer, "SELECT campaign_criterion.type, campaign_criterion.negative, campaign_criterion.status, "
         "campaign_criterion.device.type, campaign_criterion.bid_modifier, campaign_criterion.location.geo_target_constant "
-        f"FROM campaign_criterion WHERE campaign.id = {campaign_id} AND campaign_criterion.status != 'REMOVED' LIMIT 11")
+        f"FROM campaign_criterion WHERE campaign.id = {campaign_id} AND campaign_criterion.status != 'REMOVED' LIMIT 16")
+    # Ten approved locations plus five device defaults; the extra row detects truncation.
+    if len(geo_rows) > 15:
+        _fail("New campaign targeting could not be completely verified. Kern did not enable the campaign.")
     locations: list[str] = []
+    devices: set[str] = set()
     for geo_row in geo_rows:
         criterion = _object(geo_row.get("campaignCriterion"), "campaign criterion")
+        if criterion.get("type") == "DEVICE" and criterion.get("negative", False) is False and criterion.get("status") == "ENABLED":
+            device = criterion.get("device")
+            device_type = device.get("type") if isinstance(device, dict) else None
+            modifier = criterion.get("bidModifier")
+            # Google returns an absent optional bid modifier for device defaults.
+            # Explicit zero opts out; only absence or an explicit neutral 1 is accepted.
+            neutral = "bidModifier" not in criterion or type(modifier) in (int, float) and modifier == 1
+            if isinstance(device_type, str) and device_type in DEFAULT_DEVICES and device_type not in devices and neutral:
+                devices.add(device_type)
+                continue
         if criterion.get("type") != "LOCATION" or criterion.get("negative", False) is not False:
             _fail(f"New campaign has unexpected targeting criteria ({_targeting_details(criterion)}). Kern did not enable the campaign.")
         locations.append(_string(_object(criterion.get("location"), "location"), "geoTargetConstant"))

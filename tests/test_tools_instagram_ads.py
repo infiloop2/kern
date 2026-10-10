@@ -53,6 +53,7 @@ class MetaFixture:
                         'funding_source': 'billing-id', 'min_daily_budget': '50'}
         self.page = {'id': PAGE, 'name': 'Real Page', 'instagram_business_account': {
             'id': INSTAGRAM, 'username': 'owned_profile', 'account_type': 'BUSINESS'}}
+        self.user_pages = [{**deepcopy(self.page), 'tasks': ['ADVERTISE']}]
         self.media = {'id': MEDIA, 'owner': {'id': INSTAGRAM}, 'caption': 'The exact original caption',
                       'media_type': 'VIDEO', 'media_product_type': 'REELS',
                       'media_url': 'https://cdninstagram.com/source.mp4?signature=first',
@@ -125,6 +126,8 @@ class MetaFixture:
             return deepcopy(self.account)
         if path == '/me/adaccounts':
             result = {'data': [deepcopy(self.account)]}
+        elif path == '/me/accounts':
+            result = {'data': deepcopy(self.user_pages)}
         elif path.endswith('/promote_pages'):
             result = {'data': [deepcopy(self.page)]}
         elif path.endswith('/connected_instagram_accounts'):
@@ -270,7 +273,8 @@ class InstagramAdsTests(unittest.TestCase):
         self.assertEqual(empty['pages']['items'], [])
 
     def test_diagnostic_edge_errors_are_numeric_partial_and_never_retried(self):
-        for edge in ('promote_pages', 'connected_instagram_accounts'):
+        edges = {'promote_pages': 'pages', 'connected_instagram_accounts': 'instagram_accounts', 'me/accounts': 'user_pages'}
+        for edge, failed_key in edges.items():
             for envelope in (True, False):
                 with self.subTest(edge=edge, envelope=envelope):
                     rejected = []
@@ -286,11 +290,12 @@ class InstagramAdsTests(unittest.TestCase):
                     self.diagnostics.reset_mock()
                     with patch.object(ads, 'json_request', response):
                         result = self.diagnose()
-                    failed_key = 'pages' if edge == 'promote_pages' else 'instagram_accounts'
                     failed = result[failed_key]
                     self.assertEqual(failed, {'status': 'failed', 'items': [], 'next_cursor': None,
                                               'http_status': 200 if envelope else 400, 'error_code': 100, 'error_subcode': 33})
-                    self.assertEqual(result['instagram_accounts' if failed_key == 'pages' else 'pages']['status'], 'ok')
+                    for key in edges.values():
+                        if key != failed_key:
+                            self.assertEqual(result[key]['status'], 'ok')
                     self.assertEqual(len(rejected), 1)
                     self.assertNotIn('secret', json.dumps(result))
                     self.assertNotIn('meta-token', json.dumps(result))
@@ -312,19 +317,23 @@ class InstagramAdsTests(unittest.TestCase):
 
     def test_diagnostic_cursors_are_independent_and_guarded_before_reads(self):
         self.meta.page_cursor = 'next_cursor'
-        result = self.diagnose(limit=1, pages_after='page_cursor', instagram_after='ig_cursor')
+        result = self.diagnose(limit=1, pages_after='page_cursor', instagram_after='ig_cursor', user_pages_after='user_cursor')
         calls = {path: fields for method, path, fields, _ in self.meta.calls}
         self.assertEqual(calls['/act_100/promote_pages']['after'], 'page_cursor')
         self.assertEqual(calls['/act_100/connected_instagram_accounts']['after'], 'ig_cursor')
+        self.assertEqual(calls['/me/accounts']['after'], 'user_cursor')
+        self.assertEqual(calls['/me/accounts']['limit'], '1')
         self.assertEqual(calls['/act_100/promote_pages']['limit'], '1')
         self.assertEqual(result['pages']['next_cursor'], 'next_cursor')
         self.assertEqual(result['instagram_accounts']['next_cursor'], 'next_cursor')
+        self.assertEqual(result['user_pages']['next_cursor'], 'next_cursor')
         self.meta.calls.clear()
         self.diagnose(pages_after='page_cursor')
         calls = {path: fields for method, path, fields, _ in self.meta.calls}
-        self.assertEqual(len(self.meta.calls), 5)
+        self.assertEqual(len(self.meta.calls), 6)
         self.assertNotIn('after', calls['/act_100/connected_instagram_accounts'])
-        for cursor in ('pages_after', 'instagram_after'):
+        self.assertNotIn('after', calls['/me/accounts'])
+        for cursor in ('pages_after', 'instagram_after', 'user_pages_after'):
             self.meta.calls.clear()
             with patch.object(self.api.outbound, 'guard_request_parameter_string', side_effect=RuntimeError('guard denied')) as guard:
                 denied = ads.BUNDLED_TOOL.execute('diagnose_account', {'account_id': ACCOUNT, cursor: 'cursor'}, self.api)
@@ -339,6 +348,69 @@ class InstagramAdsTests(unittest.TestCase):
             denied = ads.BUNDLED_TOOL.execute('diagnose_account', {'account_id': ACCOUNT, **value}, self.api)
             self.assertIsInstance(denied, ActionFailed)
             self.assertEqual(self.meta.calls, [])
+
+    def test_user_pages_expose_access_difference_without_authorizing_launch(self):
+        self.meta.user_pages[0]['access_token'] = 'unrequested-page-token'
+        self.meta.user_pages[0]['email'] = 'unrequested@example.com'
+        def response(method, url, **kwargs):
+            if '/promote_pages?' in url:
+                return {'data': []}
+            return self.meta(method, url, **kwargs)
+        with patch.object(ads, 'json_request', response):
+            result = self.diagnose()
+            normal = ads.BUNDLED_TOOL.execute('list_identities', {'account_id': ACCOUNT}, self.api)
+            launch = ads.BUNDLED_TOOL.execute('launch_campaign', launch_input(), self.api)
+        self.assertEqual(result['pages']['items'], [])
+        row = result['user_pages']['items'][0]
+        self.assertEqual(row['page_id'], PAGE)
+        self.assertEqual(row['instagram_user_id'], INSTAGRAM)
+        self.assertEqual(row['tasks'], ['ADVERTISE'])
+        self.assertEqual(row['tasks_state'], 'present')
+        self.assertEqual(normal.result['items'], [])
+        self.assertIsInstance(launch, ActionFailed)
+        self.assertIn('Page advertising access', launch.error)
+        self.assertFalse(self.meta.writes)
+        self.assertNotIn('unrequested', json.dumps(result))
+        fields = next(params['fields'] for _, path, params, _ in self.meta.calls if path == '/me/accounts')
+        self.assertEqual(fields, 'id,name,tasks,instagram_business_account{id,username,account_type}')
+
+    def test_user_page_tasks_preserve_missing_null_empty_and_invalid_shape(self):
+        for state, value in (('missing', None), ('null', None), ('empty', []), ('invalid', 'ADVERTISE'),
+                             ('invalid', ['ADVERTISE', 1]), ('present', ['PROFILE_PLUS_ADVERTISE'])):
+            with self.subTest(state=state):
+                row = self.meta.user_pages[0]
+                row.pop('tasks', None)
+                if state != 'missing':
+                    row['tasks'] = value
+                result = self.diagnose()['user_pages']['items'][0]
+                self.assertEqual(result['tasks_state'], state)
+                self.assertEqual(result['tasks'], ads._strings(value))
+
+    def test_user_pages_malformed_or_oversized_response_is_unavailable(self):
+        for listing in ({}, {'data': [None]}, {'data': [{}] * 21},
+                        {'data': [], 'paging': {'next': 'https://provider.example/?token=secret'}}):
+            with self.subTest(listing=listing):
+                def response(method, url, **kwargs):
+                    if '/me/accounts?' in url:
+                        return listing
+                    return self.meta(method, url, **kwargs)
+                with patch.object(ads, 'json_request', response):
+                    result = self.diagnose()
+                self.assertEqual(result['user_pages']['status'], 'failed')
+                self.assertEqual(result['pages']['status'], 'ok')
+                self.assertEqual(result['instagram_accounts']['status'], 'ok')
+
+    def test_user_pages_auth_revocation_aborts_and_clears_connection(self):
+        def response(method, url, **kwargs):
+            if '/me/accounts?' in url:
+                return {'error': {'code': 190, 'message': 'private'}}
+            return self.meta(method, url, **kwargs)
+        with patch.object(ads, 'json_request', response):
+            result = ads.BUNDLED_TOOL.execute('diagnose_account', {'account_id': ACCOUNT}, self.api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertTrue(result.reconnect_required)
+        self.assertIsNone(self.api.credentials.record)
+        self.assertFalse(self.meta.writes)
 
     def test_diagnostic_auth_revocation_aborts_instead_of_partial_success(self):
         def response(method, url, **kwargs):

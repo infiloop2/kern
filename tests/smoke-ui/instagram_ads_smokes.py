@@ -24,9 +24,9 @@ def run(page, url, log_in, open_home_integration):
     expect(guide).to_contain_text('Missing fields alone do not prove missing Meta permissions')
     diagnostic = guide.locator('.guide-capability').filter(has=page.locator('h4 code', has_text='diagnose_account'))
     diagnostic.locator('.guide-action-contract > summary').click()
-    expect(diagnostic.locator('.guide-action-contract > summary')).to_contain_text('4 inputs')
+    expect(diagnostic.locator('.guide-action-contract > summary')).to_contain_text('5 inputs')
     expect(diagnostic).to_contain_text('runs directly')
-    for field in ('pages_after', 'instagram_after', 'user_tasks_state', 'launch_task_check_passes', 'instagram_accounts', 'error_code'):
+    for field in ('pages_after', 'instagram_after', 'user_pages_after', 'user_pages', 'user_tasks_state', 'launch_task_check_passes', 'instagram_accounts', 'error_code'):
         expect(diagnostic).to_contain_text(field)
     expect(page.locator('#tool-config-instagram_ads-INSTAGRAM_ADS_APP_SECRET')).to_have_attribute('type', 'password')
     capability = guide.locator('.guide-capability').filter(has=page.locator('h4 code', has_text='launch_campaign'))

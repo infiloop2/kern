@@ -303,23 +303,24 @@ def _delivery(plan: JSONObject) -> JSONObject:
     goal, pay_by, billing = OBJECTIVES[str(plan["objective"])]
     return {"objective": plan["objective"], "goal": goal, "expected_pay_by": pay_by,
             "cost_basis": billing, "bid_strategy": "AUTO", "standard_delivery": True,
+            "budget_scope": "CAMPAIGN", "pacing_scope": "CAMPAIGN",
             "placements": ["TWITTER_TIMELINE"], "audience_expansion": plan.get("audience_expansion"),
             "expansion_description": str(plan.get("audience_expansion", "No expansion")), "geographic_scope": _geography(plan),
             "provider_review": "Configure ACTIVE once. If X review is PENDING, delivery is blocked until X accepts the post, then may start within the approved flight without another Kern write or approval. Rejected or unknown review states stop this launch."}
 
 
 def _campaign_params(plan: JSONObject) -> dict[str, str]:
-    # X defaults to LINE_ITEM. Explicitly setting budget_optimization alongside
-    # a daily campaign cap is rejected by the live API; verify the returned
-    # mode before activation instead of submitting the redundant setter.
+    # Live X creates CAMPAIGN budget optimization when these campaign caps are
+    # supplied. Do not submit the redundant mode setter or duplicate budgets
+    # on the child. Verify CAMPAIGN, caps and pacing before creating the child.
     return {**{key: str(plan[key]) for key in s.BUDGETS}, "name": str(plan["name"]),
-            "funding_instrument_id": str(plan["funding_instrument_id"]), "entity_status": "PAUSED"}
+            "funding_instrument_id": str(plan["funding_instrument_id"]), "standard_delivery": "true", "entity_status": "PAUSED"}
 
 
 def _group_params(plan: JSONObject, campaign_id: str) -> dict[str, str]:
-    result = {**{key: str(plan[key]) for key in s.BUDGETS}, "campaign_id": campaign_id, "name": str(plan["name"]),
+    result = {"campaign_id": campaign_id, "name": str(plan["name"]),
         "objective": str(plan["objective"]), "product_type": "PROMOTED_TWEETS", "placements": "TWITTER_TIMELINE",
-        "bid_strategy": "AUTO", "goal": OBJECTIVES[str(plan["objective"])][0], "standard_delivery": "true", "entity_status": "PAUSED",
+        "bid_strategy": "AUTO", "goal": OBJECTIVES[str(plan["objective"])][0], "entity_status": "PAUSED",
         "start_time": str(plan["start_time"]), "end_time": str(plan["end_time"])}
     if "audience_expansion" in plan:
         result["audience_expansion"] = str(plan["audience_expansion"])
@@ -341,19 +342,25 @@ def _confirm_settings(row: JSONObject, params: dict[str, str]) -> None:
         else:
             matches = actual == value
         if not matches:
-            raise RuntimeError("X Ads did not confirm the exact requested settings.")
+            raise RuntimeError(f"X Ads did not confirm the requested {key} setting.")
+
+
+def _confirm_campaign(campaign: JSONObject, plan: JSONObject, currency: JSONValue) -> None:
+    _confirm_settings(campaign, {**_campaign_params(plan), "budget_optimization": "CAMPAIGN"})
+    if campaign.get("currency") != currency or campaign.get("deleted") is not False:
+        raise RuntimeError("X Ads did not confirm the campaign's funding currency or live state.")
 
 
 def _verify_created(bundle: JSONObject, plan: JSONObject, currency: JSONValue, *, group_status: str) -> None:
     campaign, group = cast(JSONObject, bundle["campaign"]), cast(JSONObject, bundle["ad_group"])
     campaign_id = _id(campaign.get("id"), "campaign")
-    _confirm_settings(campaign, {**_campaign_params(plan), "budget_optimization": "LINE_ITEM"})
+    _confirm_campaign(campaign, plan, currency)
     _confirm_settings(group, {**_group_params(plan, campaign_id), "entity_status": group_status})
-    if (campaign.get("currency") != currency or group.get("currency") != currency
-            or campaign.get("deleted") is not False or group.get("deleted") is not False
+    if (group.get("currency") != currency or group.get("deleted") is not False
             or group.get("pay_by") != OBJECTIVES[str(plan["objective"])][1]
             or group.get("audience_expansion") != plan.get("audience_expansion")
             or group.get("automatic_tweet_promotion") or group.get("creative_source") not in (None, "MANUAL")
+            or any(group.get(key) is not None for key in (*s.BUDGETS, "standard_delivery"))
             or any(row.get(key) is not None for row in (campaign, group) for key in ("frequency_cap", "duration_in_days"))):
         raise ValueError("X Ads returned delivery or billing settings outside the approved launch terms.")
     rows = cast(list[JSONObject], bundle["targeting"])
@@ -558,7 +565,7 @@ class XAdsTool:
             references, funding = _references(client, plan)
             billing = OBJECTIVES[str(plan["objective"])][2]
             summary = (f"Launch NEW X Ads {plan['objective']} with AUTO bids. {_geography(plan)}. "
-                f"Account {plan['account_id']}; {funding['currency']} daily {_units(plan[s.BUDGETS[0]])}, total {_units(plan[s.BUDGETS[1]])}. "
+                f"Account {plan['account_id']}; {funding['currency']} campaign daily {_units(plan[s.BUDGETS[0]])}, total {_units(plan[s.BUDGETS[1]])}. "
                 f"{plan['start_time']} to {plan['end_time']}. Post {plan['post_id']}; expansion {plan.get('audience_expansion', 'none')}. "
                 f"Can spend now/at start or after X approves pending review, without another Kern approval; billed by {billing}. View exact request.")
             return _approval(api, client, action, summary, {"plan": plan, "plan_sha256": _digest(plan),
@@ -648,8 +655,7 @@ class XAdsTool:
         prefix = f"/accounts/{plan['account_id']}"
         campaign = writes.entity("POST", prefix + "/campaigns", _campaign_params(plan), "create campaign")
         campaign_id = str(campaign["id"])
-        if campaign.get("currency") != funding["currency"]:
-            raise RuntimeError("X Ads did not confirm the campaign's funding currency.")
+        _confirm_campaign(campaign, plan, funding["currency"])
         group = writes.entity("POST", prefix + "/line_items", _group_params(plan, campaign_id), "create ad group")
         group_id = str(group["id"])
         if group.get("currency") != funding["currency"] or group.get("pay_by") != OBJECTIVES[str(plan["objective"])][1]:

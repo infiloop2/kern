@@ -48,7 +48,7 @@ FUNDING_FLAGS = ("able_to_fund", "deleted", "cancelled")
 FUNDING_SCHEMA = shape(texts=FUNDING_TEXTS, amounts=FUNDING_AMOUNTS, flags=FUNDING_FLAGS)
 CAMPAIGN_TEXTS = ("id", "name", "currency", "funding_instrument_id", "entity_status", "budget_optimization", "updated_at")
 BUDGETS = ("daily_budget_amount_local_micro", "total_budget_amount_local_micro")
-CAMPAIGN_SCHEMA = shape(texts=CAMPAIGN_TEXTS, amounts=BUDGETS, flags=("deleted",))
+CAMPAIGN_SCHEMA = shape(texts=CAMPAIGN_TEXTS, amounts=BUDGETS, flags=("deleted", "standard_delivery"))
 GROUP_TEXTS = ("id", "campaign_id", "name", "currency", "entity_status", "objective", "product_type", "bid_strategy", "goal", "pay_by", "audience_expansion", "start_time", "end_time", "updated_at")
 GROUP_AMOUNTS = (*BUDGETS, "bid_amount_local_micro")
 GROUP_SCHEMA = shape(texts=GROUP_TEXTS, amounts=GROUP_AMOUNTS, flags=("deleted", "standard_delivery"), extra={
@@ -80,7 +80,7 @@ def funding(row: JSONObject) -> JSONObject:
 
 
 def campaign(row: JSONObject) -> JSONObject:
-    return view(row, texts=CAMPAIGN_TEXTS, amounts=BUDGETS, flags=("deleted",))
+    return view(row, texts=CAMPAIGN_TEXTS, amounts=BUDGETS, flags=("deleted", "standard_delivery"))
 
 
 def group(row: JSONObject) -> JSONObject:

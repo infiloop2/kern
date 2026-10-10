@@ -118,10 +118,16 @@ class AdsProvider:
             if path.endswith("/campaigns"):
                 if "budget_optimization" in params and "daily_budget_amount_local_micro" in params:
                     raise WebRequestError("X Ads request failed.", status=400, body=b'{"errors":[{"code":"INVALID","message":"Please remove your daily campaign budget before turning on campaign budget optimization","attribute":"budget_optimization"}]}')
-                self.campaign = {"budget_optimization": "LINE_ITEM", **row, "id": "camp1", "currency": "USD", "deleted": False}
+                self.campaign = {"budget_optimization": "CAMPAIGN", **row, "id": "camp1", "currency": "USD", "deleted": False}
                 return {"data": self.campaign}
             if path.endswith("/line_items"):
-                self.group = {**row, "id": "group1", "currency": "USD", "pay_by": {"ENGAGEMENTS": "ENGAGEMENT", "REACH": "IMPRESSION", "WEBSITE_CLICKS": "IMPRESSION", "VIDEO_VIEWS": "VIEW"}[row["objective"]], "deleted": False}
+                if self.campaign["budget_optimization"] == "CAMPAIGN" and any(key in params for key in tool.s.BUDGETS):
+                    errors = [{"code": "INVALID", "message": "You can’t set an ad group total budget when campaign budget optimization is on.", "attribute": "total_budget_amount_local_micro"},
+                              {"code": "INVALID", "message": "You can’t set an ad group daily budget when campaign budget optimization is on.", "attribute": ""}]
+                    raise WebRequestError("X Ads request failed.", status=400, body=json.dumps({"errors": errors}).encode())
+                if self.campaign["budget_optimization"] == "CAMPAIGN" and "standard_delivery" in params:
+                    raise WebRequestError("X Ads request failed.", status=400, body=b'{"errors":[{"code":"INVALID","attribute":"standard_delivery"}]}')
+                self.group = {"daily_budget_amount_local_micro": None, "total_budget_amount_local_micro": None, "standard_delivery": None, **row, "id": "group1", "currency": "USD", "pay_by": {"ENGAGEMENTS": "ENGAGEMENT", "REACH": "IMPRESSION", "WEBSITE_CLICKS": "IMPRESSION", "VIDEO_VIEWS": "VIEW"}[row["objective"]], "deleted": False}
                 return {"data": self.group}
             if path.endswith("/campaigns/camp1"):
                 self.campaign.update(row)
@@ -203,9 +209,21 @@ class XAdsTest(unittest.TestCase):
                 assert_matches_output_schema(self, MANIFEST, action, self.execute(action, values))
         self.assertEqual(self.provider.writes, [])
 
+    def test_campaign_reads_expose_authoritative_pacing_in_closed_schema(self):
+        for pacing in (True, False, None):
+            self.provider.campaign.update(budget_optimization="CAMPAIGN", standard_delivery=pacing)
+            for action, values in (("list_campaigns", {"account_id": ACCOUNT_ID}),
+                                   ("get_campaign", {"account_id": ACCOUNT_ID, "campaign_id": "camp1"})):
+                with self.subTest(pacing=pacing, action=action):
+                    result = self.execute(action, values)
+                    assert_matches_output_schema(self, MANIFEST, action, result)
+                    campaign = result.result["campaigns"][0] if action == "list_campaigns" else result.result["campaign"]
+                    self.assertIs(campaign["standard_delivery"], pacing)
+        self.assertEqual(self.provider.writes, [])
+
     def test_one_launch_approval_creates_verifies_and_activates_new_campaign(self):
         approval = self.propose("launch_campaign", plan())
-        self.assertIn("USD daily 10", approval.summary)
+        self.assertIn("USD campaign daily 10", approval.summary)
         self.assertEqual(approval.payload["plan"]["targeting"], plan()["targeting"])
         self.assertEqual(approval.payload["references"]["post"]["text"], "Build with Kern")
         self.assertEqual(approval.payload["delivery"]["objective"], "ENGAGEMENTS")
@@ -218,13 +236,88 @@ class XAdsTest(unittest.TestCase):
         self.assertEqual([params["entity_status"] for _, path, params in self.provider.writes if "entity_status" in params], ["PAUSED", "PAUSED", "ACTIVE", "ACTIVE"])
         self.assertTrue(self.provider.writes[-2][1].endswith("/line_items/group1"))
         self.assertTrue(self.provider.writes[-1][1].endswith("/campaigns/camp1"))
-        for row in (self.provider.campaign, self.provider.group):
-            self.assertEqual(row["entity_status"], "ACTIVE")
-            self.assertEqual(row["daily_budget_amount_local_micro"], 10000000)
-            self.assertEqual(row["total_budget_amount_local_micro"], 50000000)
+        self.assertEqual(approval.payload["delivery"]["budget_scope"], "CAMPAIGN")
+        self.assertEqual(approval.payload["delivery"]["pacing_scope"], "CAMPAIGN")
+        self.assertEqual(self.provider.campaign["entity_status"], "ACTIVE")
+        self.assertEqual(self.provider.group["entity_status"], "ACTIVE")
+        self.assertEqual(self.provider.campaign["daily_budget_amount_local_micro"], 10000000)
+        self.assertEqual(self.provider.campaign["total_budget_amount_local_micro"], 50000000)
+        self.assertIs(self.provider.campaign["standard_delivery"], True)
+        for key in (*tool.s.BUDGETS, "standard_delivery"):
+            self.assertNotIn(key, self.provider.writes[1][2])
+            self.assertIsNone(self.provider.group[key])
         self.assertNotIn("budget_optimization", self.provider.writes[0][2])
-        self.assertEqual(self.provider.campaign["budget_optimization"], "LINE_ITEM")
+        self.assertEqual(self.provider.campaign["budget_optimization"], "CAMPAIGN")
         self.assertFalse(any("bid_amount_local_micro" in params or "pay_by" in params for _, _, params in self.provider.writes))
+
+    def test_one_pound_launch_keeps_caps_on_campaign_with_uncapped_child(self):
+        self.provider.funding["currency"] = "GBP"
+        original = self.provider._respond
+        def gbp_response(method, path, params):
+            response = original(method, path, params)
+            if method == "POST" and path.endswith(("/campaigns", "/line_items")):
+                response["data"]["currency"] = "GBP"
+            return response
+        self.provider._respond = gbp_response
+        approval = self.propose("launch_campaign", plan(daily_budget_amount_local_micro="1000000", total_budget_amount_local_micro="1000000", targeting=[]))
+        self.assertIsInstance(self.approve(approval), ApprovalExecuted)
+        self.assertEqual(self.provider.campaign["daily_budget_amount_local_micro"], 1000000)
+        self.assertEqual(self.provider.campaign["total_budget_amount_local_micro"], 1000000)
+        self.assertIsNone(self.provider.group["daily_budget_amount_local_micro"])
+        self.assertIsNone(self.provider.group["total_budget_amount_local_micro"])
+        self.assertEqual(self.provider.group["start_time"], START)
+        self.assertEqual(self.provider.group["end_time"], END)
+
+    def test_wrong_initial_campaign_mode_caps_or_pacing_stops_before_child_write(self):
+        for changes in ({"budget_optimization": "LINE_ITEM"}, {"budget_optimization": None},
+                        {"daily_budget_amount_local_micro": None}, {"daily_budget_amount_local_micro": 11000000},
+                        {"total_budget_amount_local_micro": None}, {"total_budget_amount_local_micro": 60000000},
+                        {"standard_delivery": None}, {"standard_delivery": False}):
+            with self.subTest(changes=changes):
+                self.provider = AdsProvider()
+                approval = self.propose("launch_campaign", plan())
+                original = self.provider._respond
+                def changed_response(method, path, params):
+                    response = original(method, path, params)
+                    if method == "POST" and path.endswith("/campaigns"):
+                        response["data"].update(changes)
+                    return response
+                self.provider._respond = changed_response
+                result = self.approve(approval)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("create campaign camp1", result.error)
+                self.assertEqual(len(self.provider.writes), 1)
+                self.assertEqual(self.provider.campaign["entity_status"], "PAUSED")
+
+    def test_old_budget_scope_approval_requires_new_approval_before_writes(self):
+        approval = self.propose("launch_campaign", plan())
+        del approval.payload["delivery"]["budget_scope"]
+        del approval.payload["delivery"]["pacing_scope"]
+        self.assertIsInstance(self.approve(approval), ActionFailed)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_live_duplicate_budget_error_retains_paused_campaign_and_diagnostic_once(self):
+        approval = self.propose("launch_campaign", plan())
+        original = tool._group_params
+        def old_group_params(values, campaign_id):
+            return {**original(values, campaign_id), **{key: str(values[key]) for key in tool.s.BUDGETS}}
+        with patch.object(tool, "_group_params", side_effect=old_group_params):
+            result = self.approve(approval)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("create ad group", result.error)
+        self.assertIn("create campaign camp1", result.error)
+        self.assertNotIn("You can’t", result.error)
+        self.assertEqual(len(self.provider.writes), 2)
+        self.assertEqual(self.provider.campaign["entity_status"], "PAUSED")
+        self.assertIsNone(self.provider.group)
+        self.diagnostics.assert_called_once()
+        context = self.diagnostics.call_args.args[0]["context"]
+        self.assertEqual(context["phase"], "create ad group")
+        self.assertEqual(context["http_status"], 400)
+        self.assertEqual(context["operation"], "/".join(("POST /accounts", ACCOUNT_ID, "line_items")))
+        errors = json.loads(context["provider_response"])["errors"]
+        self.assertEqual([row["attribute"] for row in errors], ["total_budget_amount_local_micro", ""])
+        self.assertTrue(all(row["code"] == "INVALID" for row in errors))
 
     def test_all_four_objectives_use_auto_and_internal_goal_billing_mapping(self):
         pairs = {"ENGAGEMENTS": ("ENGAGEMENT", "ENGAGEMENT"), "REACH": ("MAX_REACH", "IMPRESSION"), "WEBSITE_CLICKS": ("LINK_CLICKS", "IMPRESSION"), "VIDEO_VIEWS": ("VIDEO_VIEW", "VIEW")}
@@ -473,7 +566,7 @@ class XAdsTest(unittest.TestCase):
         self.assertEqual(self.provider.campaign["entity_status"], "PAUSED")
 
     def test_configured_drift_and_hidden_caps_before_each_activation_fail_closed(self):
-        mutations = [lambda p: p.campaign.update(budget_optimization="CAMPAIGN"), lambda p: p.targets[0].update(targeting_value="3b77caf94bfc81fe"), lambda p: p.group.update(audience_expansion="BROAD"), lambda p: p.group.update(frequency_cap=5, duration_in_days=7), lambda p: p.group.update(frequency_cap=1), lambda p: p.group.update(duration_in_days=1), lambda p: p.campaign.update(total_budget_amount_local_micro=60000000), lambda p: p.group.update(start_time="2026-01-01T00:00:00Z"), lambda p: p.group.update(unknown_config="changed"), lambda p: p.promoted[0].update(approval_status="REJECTED"), lambda p: p.post.update(full_text="edited during execution"), lambda p: p.access.update(user_id="123"), lambda p: p.access.update(permissions=["ANALYST"]), lambda p: p.funding.update(able_to_fund=False)]
+        mutations = [lambda p: p.campaign.update(budget_optimization="LINE_ITEM"), lambda p: p.campaign.update(standard_delivery=False), lambda p: p.campaign.update(daily_budget_amount_local_micro=None), lambda p: p.group.update(daily_budget_amount_local_micro=10000000), lambda p: p.group.update(total_budget_amount_local_micro=50000000), lambda p: p.group.update(standard_delivery=True), lambda p: p.targets[0].update(targeting_value="3b77caf94bfc81fe"), lambda p: p.group.update(audience_expansion="BROAD"), lambda p: p.group.update(frequency_cap=5, duration_in_days=7), lambda p: p.group.update(frequency_cap=1), lambda p: p.group.update(duration_in_days=1), lambda p: p.campaign.update(total_budget_amount_local_micro=60000000), lambda p: p.group.update(start_time="2026-01-01T00:00:00Z"), lambda p: p.group.update(unknown_config="changed"), lambda p: p.promoted[0].update(approval_status="REJECTED"), lambda p: p.post.update(full_text="edited during execution"), lambda p: p.access.update(user_id="123"), lambda p: p.access.update(permissions=["ANALYST"]), lambda p: p.funding.update(able_to_fund=False)]
         for after_child in (False, True):
             for mutate in mutations:
                 with self.subTest(after_child=after_child, mutate=mutate):
