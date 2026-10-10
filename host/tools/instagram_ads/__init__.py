@@ -372,6 +372,11 @@ def _diagnostic_params(value: JSONObject, api: HostAPI, cursor: str) -> dict[str
     return _page({"limit": value.get("limit", 10), **({"after": value[cursor]} if cursor in value else {})}, api)
 
 
+def _diagnostic_user_page(row: JSONObject) -> JSONObject:
+    return {**_diagnostic_page(row), "tasks": cast(list[JSONValue], _strings(row.get("tasks"))),
+            "tasks_state": _field_state(row, "tasks", list)}
+
+
 def _diagnostic_edge(graph: _Graph, path: str, fields: str, params: dict[str, str],
                      convert: Callable[[JSONObject], JSONObject], stage: str) -> JSONObject:
     metadata: JSONObject = {"http_status": None, "error_code": None, "error_subcode": None}
@@ -414,13 +419,17 @@ def _diagnose_account(graph: _Graph, value: JSONObject, api: HostAPI, connection
         _diagnostic_params(value, api, "instagram_after"),
         lambda row: {"instagram_user_id": _diagnostic_text(row, "id"), "username": _diagnostic_text(row, "username")},
         "diagnostic Instagram accounts")
+    user_pages = _diagnostic_edge(graph, "/me/accounts", "id,name,tasks,instagram_business_account{id,username,account_type}",
+        _diagnostic_params(value, api, "user_pages_after"), _diagnostic_user_page, "diagnostic user Pages")
     return {"message": "Provider evidence only. Missing tasks or filtered Pages do not prove missing Meta access. "
+            "pages comes from the advertiser's promote_pages; user_pages comes from the Facebook user's accounts edge. "
+            "User Page visibility and Page tasks do not establish access through the selected advertiser. "
             "A failed edge is unavailable, not empty. Each cursor continues only its own edge; no pages are followed automatically. "
             "No ad creation, provider authorization or delivery was tested; launch guards remain unchanged.",
             "connection": {"facebook_user_id": connection["id"], "name": connection["label"], "scopes": connection["scopes"]},
             "account": _account_result(account), "user_tasks_state": _field_state(account, "user_tasks", list),
             "launch_task_check_passes": bool({"ADVERTISE", "MANAGE"}.intersection(_strings(account.get("user_tasks")))),
-            "pages": pages, "instagram_accounts": instagram}
+            "pages": pages, "instagram_accounts": instagram, "user_pages": user_pages}
 
 
 def _identity(graph: _Graph, account_id: str, page_id: str, instagram_id: str) -> JSONObject:
@@ -964,6 +973,7 @@ class InstagramAdsTool:
                 if action == "diagnose_account":
                     _diagnostic_params(tool_input, api, "pages_after")
                     _diagnostic_params(tool_input, api, "instagram_after")
+                    _diagnostic_params(tool_input, api, "user_pages_after")
                 if "after" in tool_input or "limit" in tool_input:
                     _page(tool_input, api)
                 if action == "lookup_targeting":

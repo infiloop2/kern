@@ -38,6 +38,7 @@ GUARDED_FIELDS = {
     ("instagram_ads", "lookup_targeting", "query"),
     ("instagram_ads", "diagnose_account", "pages_after"),
     ("instagram_ads", "diagnose_account", "instagram_after"),
+    ("instagram_ads", "diagnose_account", "user_pages_after"),
     ("x_ads", "list_accounts", "cursor"),
     ("x_ads", "list_funding_sources", "cursor"),
     ("x_ads", "list_promotable_users", "cursor"),

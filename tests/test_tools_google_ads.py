@@ -793,15 +793,88 @@ class GoogleAdsTests(unittest.TestCase):
                 self.assertIn(CAMPAIGN_RESOURCE, result.error)
                 self.assertEqual(len(self.mutations), 1)
 
-    def test_unexpected_device_criterion_reports_safe_details_and_stays_paused(self):
+    def test_provider_device_defaults_allow_activation_without_device_writes(self):
+        # The live failing row omitted bidModifier. Also accept explicitly neutral values.
+        self.new_geo.extend([
+            {"campaignCriterion": {"type": "DEVICE", "negative": False, "status": "ENABLED", "device": {"type": "DESKTOP"}}},
+            {"campaignCriterion": {"type": "DEVICE", "status": "ENABLED", "device": {"type": "MOBILE"}, "bidModifier": 1}},
+            {"campaignCriterion": {"type": "DEVICE", "status": "ENABLED", "device": {"type": "TABLET"}, "bidModifier": 1.0}},
+            {"campaignCriterion": {"type": "DEVICE", "status": "ENABLED", "device": {"type": "CONNECTED_TV"}}},
+            {"campaignCriterion": {"type": "DEVICE", "status": "ENABLED", "device": {"type": "OTHER"}}},
+        ])
+        self.assertIsInstance(self.finish(self.approve()), ApprovalExecuted)
+        self.assertEqual(len(self.mutations), 2)
+        criteria = [op["campaignCriterionOperation"]["create"] for op in self.mutations[0] if "campaignCriterionOperation" in op]
+        self.assertEqual(len(criteria), 1)
+        self.assertIn("location", criteria[0])
+        self.assertEqual(self.mutations[1][0]["campaignOperation"]["update"]["status"], "ENABLED")
+
+    def test_device_exclusions_changes_and_malformed_defaults_block_activation(self):
+        cases = [{"bidModifier": modifier} for modifier in (0, 0.0, 0.5, 1.2, True, False, None, "1", float("nan"), float("inf"))]
+        cases.extend({"negative": negative} for negative in (True, 1, None, "false"))
+        cases.extend({"status": status} for status in ("PAUSED", "UNKNOWN", None))
+        cases.extend({"device": device} for device in ({"type": "UNKNOWN"}, {"type": "UNSPECIFIED"}, {"type": "FUTURE_DEVICE"}, {"type": []}, {}, None))
+        for changes in cases:
+            with self.subTest(changes=changes):
+                self.created = False
+                self.reset_created_state()
+                self.mutations.clear()
+                criterion = {"type": "DEVICE", "status": "ENABLED", "device": {"type": "DESKTOP"}, **changes}
+                self.new_geo.append({"campaignCriterion": criterion})
+                result = self.finish(self.approve())
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("unexpected targeting criteria", result.error)
+                self.assertEqual(len(self.mutations), 1)
+
+    def test_duplicate_device_defaults_block_activation(self):
+        row = {"campaignCriterion": {"type": "DEVICE", "status": "ENABLED", "device": {"type": "DESKTOP"}}}
+        self.new_geo.extend([row, copy.deepcopy(row)])
+        self.assertIsInstance(self.finish(self.approve()), ActionFailed)
+        self.assertEqual(len(self.mutations), 1)
+
+    def test_maximum_locations_and_all_device_defaults_are_completely_verified(self):
+        locations = [str(2300 + index) for index in range(10)]
+        self.new_geo = [{"campaignCriterion": {"type": "LOCATION", "location": {"geoTargetConstant": f"geoTargetConstants/{location}"}}} for location in locations]
+        self.new_geo.extend({"campaignCriterion": {"type": "DEVICE", "status": "ENABLED", "device": {"type": device}}}
+                            for device in ("DESKTOP", "MOBILE", "TABLET", "CONNECTED_TV", "OTHER"))
+        self.new_keywords[0]["adGroupCriterion"]["resourceName"] = f"customers/{CUSTOMER}/adGroupCriteria/102~313"
+        self.assertIsInstance(self.finish(self.approve(values={**CREATE, "geo_target_ids": locations})), ApprovalExecuted)
+        self.assertEqual(len(self.mutations), 2)
+
+    def test_targeting_truncation_sentinel_blocks_activation(self):
+        # Even apparently harmless rows cannot establish a complete read at the limit.
+        self.new_geo *= 16
+        result = self.finish(self.approve())
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("could not be completely verified", result.error)
+        self.assertEqual(len(self.mutations), 1)
+
+    def test_device_defaults_do_not_hide_location_drift_or_change_worldwide_targeting(self):
+        device = {"campaignCriterion": {"type": "DEVICE", "status": "ENABLED", "device": {"type": "DESKTOP"}}}
+        for locations in ([], ["2826"], ["2356", "2356"]):
+            with self.subTest(locations=locations):
+                self.created = False
+                self.reset_created_state()
+                self.mutations.clear()
+                self.new_geo = [copy.deepcopy(device)] + [{"campaignCriterion": {"type": "LOCATION", "location": {"geoTargetConstant": f"geoTargetConstants/{location}"}}} for location in locations]
+                self.assertIsInstance(self.finish(self.approve()), ActionFailed)
+                self.assertEqual(len(self.mutations), 1)
+        self.created = False
+        self.reset_created_state()
+        self.mutations.clear()
+        self.new_geo = [device]
+        self.new_keywords[0]["adGroupCriterion"]["resourceName"] = f"customers/{CUSTOMER}/adGroupCriteria/102~303"
+        self.assertIsInstance(self.finish(self.approve(values={**CREATE, "geo_target_ids": []})), ApprovalExecuted)
+        self.assertEqual(len(self.mutations), 2)
+
+    def test_changed_device_modifier_reports_safe_details_and_stays_paused(self):
         approval = self.approve()
-        # Model additional provider criteria without assuming this caused the live failure.
-        self.new_geo.extend({"campaignCriterion": {"type": "DEVICE", "status": "ENABLED", "device": {"type": device}, "bidModifier": 1.0}}
+        self.new_geo.extend({"campaignCriterion": {"type": "DEVICE", "status": "ENABLED", "device": {"type": device}, "bidModifier": 1.2}}
                             for device in ("DESKTOP", "MOBILE", "TABLET"))
         self.diagnostics.reset_mock()
         result = self.finish(approval)
         self.assertIsInstance(result, ActionFailed)
-        details = "type=DEVICE, negative=false, status=ENABLED, device=DESKTOP, bid_modifier=1"
+        details = "type=DEVICE, negative=false, status=ENABLED, device=DESKTOP, bid_modifier=1.2"
         self.assertIn(details, result.error)
         self.assertIn("Kern did not enable the campaign", result.error)
         self.assertIn(CAMPAIGN_RESOURCE, result.error)
@@ -815,7 +888,7 @@ class GoogleAdsTests(unittest.TestCase):
                      if url.endswith("googleAds:search") and "FROM campaign_criterion" in kwargs["body"]["query"])
         for field in ("campaign_criterion.status", "campaign_criterion.device.type", "campaign_criterion.bid_modifier"):
             self.assertIn(field, query)
-        self.assertIn("LIMIT 11", query)
+        self.assertIn("LIMIT 16", query)
         self.assertNotIn("campaign_criterion.type =", query)
 
     def test_negative_and_malformed_location_flags_still_block_activation(self):
