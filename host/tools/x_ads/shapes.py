@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.shared import outputs as out
 
@@ -48,10 +50,17 @@ FUNDING_FLAGS = ("able_to_fund", "deleted", "cancelled")
 FUNDING_SCHEMA = shape(texts=FUNDING_TEXTS, amounts=FUNDING_AMOUNTS, flags=FUNDING_FLAGS)
 CAMPAIGN_TEXTS = ("id", "name", "currency", "funding_instrument_id", "entity_status", "budget_optimization", "updated_at")
 BUDGETS = ("daily_budget_amount_local_micro", "total_budget_amount_local_micro")
-CAMPAIGN_SCHEMA = shape(texts=CAMPAIGN_TEXTS, amounts=BUDGETS, flags=("deleted", "standard_delivery"))
+SERVING_SCHEMA: JSONObject = {
+    "effective_status": out.nullable({"type": "string"}, "X's effective status code, at most 64 characters; null if omitted. Eligibility is not proof of delivery."),
+    "servable": out.nullable({"type": "boolean"}, "X's serving eligibility, null if unavailable. True does not prove impressions or spend."),
+    "reasons_not_servable": out.nullable({"type": "array", "items": out.text("X reason code, at most 64 characters."), "maxItems": 32}, "Up to 32 X reason codes. Null means unavailable; [] means X returned no reasons, not proof of delivery."),
+    "reasons_not_servable_truncated": {"type": "boolean", "description": "True when X returned more than 32 reasons."},
+}
+CAMPAIGN_SCHEMA = shape(texts=CAMPAIGN_TEXTS, amounts=BUDGETS, flags=("deleted", "standard_delivery"), extra=SERVING_SCHEMA)
 GROUP_TEXTS = ("id", "campaign_id", "name", "currency", "entity_status", "objective", "product_type", "bid_strategy", "goal", "pay_by", "audience_expansion", "start_time", "end_time", "updated_at")
 GROUP_AMOUNTS = (*BUDGETS, "bid_amount_local_micro")
 GROUP_SCHEMA = shape(texts=GROUP_TEXTS, amounts=GROUP_AMOUNTS, flags=("deleted", "standard_delivery"), extra={
+    **SERVING_SCHEMA,
     "placements": out.array_of(out.text("Placement enum."), "Placement list from X."),
 })
 PROMOTABLE_TEXTS = ("id", "user_id", "promotable_user_type")
@@ -80,13 +89,30 @@ def funding(row: JSONObject) -> JSONObject:
 
 
 def campaign(row: JSONObject) -> JSONObject:
-    return view(row, texts=CAMPAIGN_TEXTS, amounts=BUDGETS, flags=("deleted", "standard_delivery"))
+    return {**view(row, texts=CAMPAIGN_TEXTS, amounts=BUDGETS, flags=("deleted", "standard_delivery")), **serving(row)}
 
 
 def group(row: JSONObject) -> JSONObject:
     result = view(row, texts=GROUP_TEXTS, amounts=GROUP_AMOUNTS, flags=("deleted", "standard_delivery"))
     result["placements"] = strings(row, "placements")
+    result.update(serving(row))
     return result
+
+
+def serving(row: JSONObject) -> JSONObject:
+    """Expose bounded provider eligibility without inferring actual delivery."""
+    status, eligible, reasons = (row.get(key) for key in ("effective_status", "servable", "reasons_not_servable"))
+    def code(value: JSONValue) -> bool:
+        return isinstance(value, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", value, re.ASCII) is not None
+    if status is not None and not code(status):
+        raise RuntimeError("X Ads returned malformed effective_status.")
+    if eligible is not None and not isinstance(eligible, bool):
+        raise RuntimeError("X Ads returned malformed servable.")
+    if reasons is not None and (not isinstance(reasons, list) or any(not code(item) for item in reasons)):
+        raise RuntimeError("X Ads returned malformed reasons_not_servable.")
+    return {"effective_status": status, "servable": eligible,
+            "reasons_not_servable": reasons[:32] if isinstance(reasons, list) else None,
+            "reasons_not_servable_truncated": isinstance(reasons, list) and len(reasons) > 32}
 
 
 def target(row: JSONObject) -> JSONObject:

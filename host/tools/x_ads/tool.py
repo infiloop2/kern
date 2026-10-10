@@ -505,6 +505,24 @@ def _performance_window(values: JSONObject) -> tuple[str, datetime, datetime]:
     return campaign_id, start, end
 
 
+def _metric_value(raw: JSONObject, key: str, placement: str) -> JSONValue:
+    series = raw.get(key)
+    if series is None:
+        return None
+    if not isinstance(series, list) or len(series) != 1:
+        raise RuntimeError(f"X Ads returned malformed TOTAL metric {key} for {placement}: expected a one-value series or null.")
+    value = series[0]
+    if value is None:
+        return None
+    if key == "billed_charge_local_micro":
+        amount = s.money({key: value}, key)
+        if amount is not None:
+            return amount
+    elif isinstance(value, (int, float)) and not isinstance(value, bool) and (not isinstance(value, float) or math.isfinite(value)) and value >= 0:
+        return value
+    raise RuntimeError(f"X Ads returned an invalid TOTAL metric {key} for {placement}.")
+
+
 def _performance(client: Client, account_id: str, values: JSONObject) -> JSONObject:
     campaign_id, start, end = _performance_window(values)
     campaign = _entity(client, f"/accounts/{account_id}/campaigns/{campaign_id}", campaign_id)
@@ -527,12 +545,7 @@ def _performance(client: Client, account_id: str, values: JSONObject) -> JSONObj
             raw = candidate
         metrics: JSONObject = {}
         for key in (*METRICS, "billed_charge_local_micro"):
-            series = raw.get(key)
-            value = series[0] if isinstance(series, list) and len(series) == 1 else None
-            if key == "billed_charge_local_micro":
-                metrics[key] = s.money({key: value}, key)
-            else:
-                metrics[key] = value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) and value >= 0 else None
+            metrics[key] = _metric_value(raw, key, placement)
         placement_metrics.append({"placement": placement, "metrics": metrics})
     totals: JSONObject = {}
     for key in (*METRICS, "billed_charge_local_micro"):
@@ -541,6 +554,8 @@ def _performance(client: Client, account_id: str, values: JSONObject) -> JSONObj
             totals[key] = str(sum(int(str(value)) for value in reported)) if reported else None
         else:
             totals[key] = sum(cast(int | float, value) for value in reported) if reported else None
+            if isinstance(totals[key], float) and not math.isfinite(cast(float, totals[key])):
+                raise RuntimeError(f"X Ads returned an invalid aggregate metric {key}.")
     return {"campaign_id": campaign_id, "currency": s.text(campaign, "currency"), "start_time": values["start_time"], "end_time": values["end_time"], "metrics": totals, "placement_metrics": cast(list[JSONValue], placement_metrics)}
 
 
@@ -686,7 +701,8 @@ class XAdsTool:
         campaign = _entity(client, f"/accounts/{account_id}/campaigns/{campaign_id}", campaign_id)
         return _approval(api, client, action, f"End X Ads '{clip_text(s.text(campaign, 'name'), 70)}' ({campaign_id}) in {clip_text(s.text(account, 'name'), 60)} ({account_id}): pause parent delivery and retain reporting. No Kern resume or permanent deletion. X Ads Manager can resume; stopping may take time. Past spend remains billable.",
             {"account_id": account_id, "campaign_id": campaign_id, "account": s.account(account), "user_id": access["user_id"],
-             "campaign": s.campaign(campaign), "operation": "PAUSE_PARENT_DELIVERY_RETAIN_REPORTING"})
+             "campaign": s.view(campaign, texts=s.CAMPAIGN_TEXTS, amounts=s.BUDGETS, flags=("deleted", "standard_delivery")),
+             "operation": "PAUSE_PARENT_DELIVERY_RETAIN_REPORTING"})
 
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
         if approval.action_id not in ("launch_campaign", "end_campaign"):
