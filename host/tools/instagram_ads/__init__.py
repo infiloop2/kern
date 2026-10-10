@@ -148,6 +148,11 @@ def _api_error_message(error: JSONValue) -> str:
     details = [f"{key}={error[key]}" for key in ("code", "error_subcode")
                if isinstance(error, dict) and type(error.get(key)) is int]
     label = " (" + ", ".join(details) + ")" if details else ""
+    if (isinstance(error, dict) and type(error.get("code")) is int and error["code"] == 100
+            and type(error.get("error_subcode")) is int and error["error_subcode"] == 1885183):
+        return (f"Meta rejected the request{label}. Meta reports an app in Development mode for the ad creative's post. "
+                "Check that the configured Instagram Ads app is public/Live in Meta's App Dashboard, and check any separate source-post publishing app. The error does not identify the app by name or id. "
+                "Inspect confirmed resources in Ads Manager before requesting a new launch approval. No automatic retry or resume.")
     return (f"Meta rejected the request{label}. Inspect Meta Ads Manager for advertiser access, eligibility "
             "and required regional beneficiary/payer declarations. External verification does not guarantee "
             "required per-request declarations are supplied by this integration.")
@@ -494,8 +499,11 @@ def _ids(value: object, label: str) -> list[str]:
 
 def _time(value: object, label: str) -> datetime:
     text = _text(value, label, 35)
+    # Graph returns basic numeric offsets (+0100); Python 3.10's ISO parser
+    # accepts only the equivalent extended offset (+01:00).
+    normalized = re.sub(r"([+-][0-9]{2})([0-9]{2})$", r"\1:\2", text)
     try:
-        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ToolInputValidationError(label + " must be an ISO 8601 timestamp with timezone.") from exc
     if parsed.tzinfo is None or "T" not in text or parsed.microsecond:
@@ -629,6 +637,7 @@ def _prepare(graph: _Graph, tool_input: JSONObject, api: HostAPI) -> JSONObject:
         "funding_source_sha256": hashlib.sha256(str(account["funding_source"]).encode()).hexdigest(),
         "identity": identity, "source_reel": _post_result(media, str(identity["instagram_user_id"])),
         "audience": audience, "provider_objective": objective, "optimization_goal": optimization,
+        "optimization_sub_event": "POST_INTERACTION" if value["objective"] == "ENGAGEMENTS" else None,
         "destination_type": destination_type, "destination": destination, "call_to_action": cta,
         "dsa": dsa,
         "billing_event": "IMPRESSIONS", "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
@@ -716,13 +725,15 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
         raise RuntimeError("Ad-set public DSA names were not approved for this geography.")
     if not _matches(expected_adset, adset) or str(adset.get("daily_budget") or "0") != "0":
         raise RuntimeError("Ad-set budget, ownership, outcome, targeting or status differs from approval.")
-    if any(_time(adset.get(key), key) != _time(value[key], key) for key in ("start_time", "end_time")):
+    if any(_time(adset.get(key), "ad-set " + key) != _time(value[key], key) for key in ("start_time", "end_time")):
         raise RuntimeError("Ad-set flight differs from approval.")
     if adset.get("is_budget_schedule_enabled") is not False:
         raise RuntimeError("Meta did not confirm budget scheduling disabled before activation.")
     if any(adset.get(key) for key in ("adset_schedule", "frequency_control_specs", "bid_constraints")) or adset.get("pacing_type") not in (None, [], ["standard"]):
         raise RuntimeError("Provider added unapproved scheduling, pacing, frequency or bid constraints.")
-    if adset.get("optimization_sub_event") not in (None, "NONE"):
+    sub_event = proposal["optimization_sub_event"]
+    if ((sub_event is not None and adset.get("optimization_sub_event") != sub_event)
+            or (sub_event is None and adset.get("optimization_sub_event") not in (None, "NONE"))):
         raise RuntimeError("Provider added an optimization sub-event outside approval.")
     for key in ("bid_amount", "daily_min_spend_target", "lifetime_min_spend_target", "daily_spend_cap", "lifetime_spend_cap"):
         # The documented cap-removal sentinel means no cap, just like zero.
@@ -732,15 +743,28 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
     targeting = _object(adset.get("targeting"), "targeting")
     if not _matches(expected_adset["targeting"], targeting, exact_keys=True):
         raise RuntimeError("Provider targeting contains unapproved fields or values.")
+    if "promoted_object" in expected_adset:
+        promoted = _object(adset.get("promoted_object"), "promoted object")
+        if (set(promoted) - {"page_id", "smart_pse_enabled"}
+                or ("smart_pse_enabled" in promoted and promoted["smart_pse_enabled"] is not False)):
+            raise RuntimeError("Provider promoted object contains unapproved fields or settings.")
     creative = graph.get("/" + ids["creative_id"], CREATIVE_FIELDS)
-    if not _matches({"id": ids["creative_id"], "name": value["name"], "account_id": value["account_id"], "object_id": value["page_id"],
+    # Meta generates a label and omits object_id for existing Instagram posts.
+    # Exact account/IG/source IDs are required; Page linkage and media ownership
+    # are independently revalidated before creation and parent activation.
+    if not _matches({"id": ids["creative_id"], "account_id": value["account_id"],
                      "instagram_user_id": value["instagram_user_id"], "source_instagram_media_id": value["media_id"]}, creative) or creative.get("asset_feed_spec"):
         raise RuntimeError("Creative source Reel or advertising identity differs from approval.")
+    if "object_id" in creative and creative["object_id"] != value["page_id"]:
+        raise RuntimeError("Creative Page identity differs from approval.")
     if _has_enhancement(creative.get("degrees_of_freedom_spec")):
         raise RuntimeError("Provider enabled a creative enhancement outside the approved original Reel.")
-    if "destination_spec" not in creative:
+    # The observed ON_POST engagement creative omits this unset field. Other
+    # outcomes still require its readback; returned extra configuration is never
+    # accepted, and every returned CTA/URL/story override is checked below.
+    if "destination_spec" not in creative and value["objective"] != "ENGAGEMENTS":
         raise RuntimeError("Meta did not return the requested destination configuration. It cannot be verified before activation.")
-    if creative["destination_spec"] is not None and creative["destination_spec"] != {}:
+    if "destination_spec" in creative and creative["destination_spec"] is not None and creative["destination_spec"] != {}:
         raise RuntimeError("Creative has additional destination configuration or optimization outside approval.")
     if any(creative.get(key) and creative[key] != proposal["destination"] for key in ("link_url", "object_url")):
         raise RuntimeError("Creative contains a top-level destination outside approval.")
@@ -749,18 +773,22 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
     cta = proposal["call_to_action"]
     returned_ctas = [creative["call_to_action"]] if creative.get("call_to_action") is not None else []
     story = creative.get("object_story_spec")
+    if story is not None and not isinstance(story, dict):
+        raise RuntimeError("Meta returned malformed creative story configuration.")
     if isinstance(story, dict):
         for key in ("page_id", "instagram_user_id"):
             if key in story and story[key] != value[key]:
                 raise RuntimeError("Creative story overrides the approved advertising identity.")
         for key in ("link_data", "video_data"):
             data = story.get(key)
+            if data is not None and not isinstance(data, dict):
+                raise RuntimeError("Meta returned malformed creative story data.")
             if isinstance(data, dict):
                 if "message" in data and data["message"] != _object(proposal["source_reel"], "source Reel")["caption"]:
                     raise RuntimeError("Creative text overrides the approved original Reel.")
                 if data.get("call_to_action") is not None:
                     returned_ctas.append(data["call_to_action"])
-                if cta is not None and data.get("link") is not None and data["link"] != proposal["destination"]:
+                if data.get("link") is not None and data["link"] != proposal["destination"]:
                     raise RuntimeError("Creative story contains an unapproved destination.")
     if (cta is not None and (not returned_ctas or any(not _matches(cta, actual, exact_keys=True) for actual in returned_ctas))) or (cta is None and any(returned_ctas)):
         raise RuntimeError("Provider did not confirm the exact approved CTA and destination.")
@@ -821,6 +849,8 @@ def _launch(graph: _Graph, proposal: JSONObject, api: HostAPI) -> ApprovalResult
             "destination_type": proposal["destination_type"], "targeting": _object(proposal["audience"], "audience")["targeting"]}
         if value["objective"] in {"PROFILE_VISITS", "ENGAGEMENTS"}:
             adset["promoted_object"] = {"page_id": value["page_id"]}
+        if proposal["optimization_sub_event"] is not None:
+            adset["optimization_sub_event"] = proposal["optimization_sub_event"]
         adset.update(_object(proposal["dsa"], "resolved DSA defaults"))
         result = graph.post(prefix + "/adsets", adset)
         ids["adset_id"] = _id(result.get("id"), "created ad-set id")
@@ -939,11 +969,14 @@ def _read(graph: _Graph, action: str, value: JSONObject, api: HostAPI) -> JSONOb
         listing = graph.get("/" + str(value["campaign_id"]) + "/adsets", ADSET_FIELDS + ",ads.limit(10){" + AD_FIELDS + "}", **params)
         rows = []
         for row in _rows(listing, maximum=int(params["limit"])):
-            ads = _object(row.get("ads"), "ad-set ads page")
+            # Meta can omit the expanded edge on a partial campaign. Preserve
+            # unavailable ads as null, rather than claiming an empty inventory.
+            ads = _object(row["ads"], "ad-set ads page") if row.get("ads") is not None else None
             configuration = {key: item for key, item in row.items() if key != "ads"}
             rows.append({**{key: str(row.get(key) or "") for key in ("id", "name", "status", "effective_status")},
                 "configuration_json": _json(configuration), "ads": [{**{key: str(ad.get(key) or "") for key in ("id", "name", "status", "effective_status")},
-                    "configuration_json": _json(ad)} for ad in _rows(ads, maximum=10)], "ads_next_cursor": _cursor(ads)})
+                    "configuration_json": _json(ad)} for ad in _rows(ads, maximum=10)] if ads is not None else None,
+                "ads_next_cursor": _cursor(ads) if ads is not None else None})
         return {"campaign": _campaign_result(campaign), "adsets": cast(list[JSONValue], rows), "next_cursor": _cursor(listing)}
     elif action == "get_performance":
         _campaign(graph, account_id, _id(value["campaign_id"], "campaign_id"))

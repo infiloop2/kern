@@ -1,0 +1,336 @@
+{
+  "campaign": {
+    "account_id": "100",
+    "buying_type": "AUCTION",
+    "effective_status": "PAUSED",
+    "id": "500",
+    "is_adset_budget_sharing_enabled": false,
+    "name": "Approved Reel",
+    "objective": "OUTCOME_ENGAGEMENT",
+    "special_ad_categories": [],
+    "status": "PAUSED"
+  },
+  "adset": {
+    "account_id": "100",
+    "bid_strategy": "LOWEST_COST_WITHOUT_CAP",
+    "billing_event": "IMPRESSIONS",
+    "campaign_id": "500",
+    "daily_budget": "0",
+    "destination_type": "ON_POST",
+    "effective_status": "PAUSED",
+    "end_time": "2026-10-11T22:30:00+0100",
+    "id": "600",
+    "is_budget_schedule_enabled": false,
+    "is_dynamic_creative": false,
+    "lifetime_budget": "100",
+    "name": "Approved Reel",
+    "optimization_goal": "POST_ENGAGEMENT",
+    "optimization_sub_event": "POST_INTERACTION",
+    "pacing_type": [
+      "standard"
+    ],
+    "promoted_object": {
+      "page_id": "200",
+      "smart_pse_enabled": false
+    },
+    "start_time": "2026-10-10T22:30:00+0100",
+    "status": "PAUSED",
+    "targeting": {
+      "age_max": 65,
+      "age_min": 18,
+      "age_range": [
+        18,
+        65
+      ],
+      "geo_locations": {
+        "countries": [
+          "IN"
+        ],
+        "location_types": [
+          "home",
+          "recent"
+        ]
+      },
+      "instagram_positions": [
+        "reels"
+      ],
+      "publisher_platforms": [
+        "instagram"
+      ],
+      "targeting_automation": {
+        "advantage_audience": 1
+      }
+    }
+  },
+  "ad": {
+    "account_id": "100",
+    "adset_id": "600",
+    "campaign_id": "500",
+    "creative": {
+      "account_id": "100",
+      "body": "He promised her savings to his family. He just never asked her. 💍\n\nBina Pooche · Part 1\nA Hinglish short drama. Her money. Her decision. Follow for more.\n\n#hinglish #shortdrama #microdrama #relationshipdrama #indiandrama",
+      "degrees_of_freedom_spec": {
+        "creative_features_spec": {
+          "adapt_to_placement": {
+            "enroll_status": "OPT_OUT"
+          },
+          "add_text_overlay": {
+            "enroll_status": "OPT_OUT"
+          },
+          "ads_with_benefits": {
+            "enroll_status": "OPT_OUT"
+          },
+          "advantage_plus_creative": {
+            "enroll_status": "OPT_OUT"
+          },
+          "app_highlights": {
+            "enroll_status": "OPT_OUT"
+          },
+          "audio": {
+            "enroll_status": "OPT_OUT"
+          },
+          "auto_promotion_tag": {
+            "enroll_status": "OPT_OUT"
+          },
+          "biz_ai": {
+            "enroll_status": "OPT_OUT"
+          },
+          "carousel_to_video": {
+            "enroll_status": "OPT_OUT"
+          },
+          "catalog_feed_tag": {
+            "enroll_status": "OPT_OUT"
+          },
+          "creative_stickers": {
+            "enroll_status": "OPT_OUT"
+          },
+          "customize_product_recommendation": {
+            "enroll_status": "OPT_OUT"
+          },
+          "cv_transformation": {
+            "enroll_status": "OPT_OUT"
+          },
+          "description_automation": {
+            "enroll_status": "OPT_OUT"
+          },
+          "dha_optimization": {
+            "enroll_status": "OPT_OUT"
+          },
+          "dynamic_cta_text": {
+            "enroll_status": "OPT_OUT"
+          },
+          "dynamic_partner_content": {
+            "enroll_status": "OPT_OUT"
+          },
+          "enable_ncs_testimonials": {
+            "enroll_status": "OPT_OUT"
+          },
+          "enhance_cta": {
+            "enroll_status": "OPT_OUT"
+          },
+          "fb_feed_tag": {
+            "enroll_status": "OPT_OUT"
+          },
+          "fb_reels_tag": {
+            "enroll_status": "OPT_OUT"
+          },
+          "fb_story_tag": {
+            "enroll_status": "OPT_OUT"
+          },
+          "feed_caption_optimization": {
+            "enroll_status": "OPT_OUT"
+          },
+          "generate_cta": {
+            "enroll_status": "OPT_OUT"
+          },
+          "hide_price": {
+            "enroll_status": "OPT_OUT"
+          },
+          "hyperlink_formatting": {
+            "enroll_status": "OPT_OUT"
+          },
+          "ig_feed_tag": {
+            "enroll_status": "OPT_OUT"
+          },
+          "ig_glados_feed": {
+            "enroll_status": "OPT_OUT"
+          },
+          "ig_reels_tag": {
+            "enroll_status": "OPT_OUT"
+          },
+          "ig_stream_tag": {
+            "enroll_status": "OPT_OUT"
+          },
+          "ig_video_native_subtitle": {
+            "enroll_status": "OPT_OUT"
+          },
+          "image_animation": {
+            "enroll_status": "OPT_OUT"
+          },
+          "image_auto_crop": {
+            "enroll_status": "OPT_OUT"
+          },
+          "image_background_gen": {
+            "enroll_status": "OPT_OUT"
+          },
+          "image_banner": {
+            "enroll_status": "OPT_OUT"
+          },
+          "image_brightness_and_contrast": {
+            "enroll_status": "OPT_OUT"
+          },
+          "image_end_card": {
+            "enroll_status": "OPT_OUT"
+          },
+          "image_enhancement": {
+            "enroll_status": "OPT_OUT"
+          },
+          "image_templates": {
+            "enroll_status": "OPT_OUT"
+          },
+          "image_text_translation": {
+            "enroll_status": "OPT_OUT"
+          },
+          "image_touchups": {
+            "enroll_status": "OPT_OUT"
+          },
+          "image_uncrop": {
+            "enroll_status": "OPT_OUT"
+          },
+          "inline_comment": {
+            "enroll_status": "OPT_OUT"
+          },
+          "local_store_extension": {
+            "enroll_status": "OPT_OUT"
+          },
+          "media_liquidity_animated_image": {
+            "enroll_status": "OPT_OUT"
+          },
+          "media_order": {
+            "enroll_status": "OPT_OUT"
+          },
+          "media_type_automation": {
+            "enroll_status": "OPT_OUT"
+          },
+          "multi_creative_post_carousel": {
+            "enroll_status": "OPT_OUT"
+          },
+          "multi_photo_to_video": {
+            "enroll_status": "OPT_OUT"
+          },
+          "music_generation": {
+            "enroll_status": "OPT_OUT"
+          },
+          "pac_genai_recomposition": {
+            "enroll_status": "OPT_OUT"
+          },
+          "pac_recomposition": {
+            "enroll_status": "OPT_OUT"
+          },
+          "pac_relaxation": {
+            "enroll_status": "OPT_OUT"
+          },
+          "product_browsing": {
+            "enroll_status": "OPT_OUT"
+          },
+          "product_extensions": {
+            "enroll_status": "OPT_OUT"
+          },
+          "product_metadata_automation": {
+            "enroll_status": "OPT_OUT"
+          },
+          "product_tags": {
+            "enroll_status": "OPT_OUT"
+          },
+          "profile_card": {
+            "enroll_status": "OPT_OUT"
+          },
+          "profile_extension": {
+            "enroll_status": "OPT_OUT"
+          },
+          "replace_media_text": {
+            "enroll_status": "OPT_OUT"
+          },
+          "reveal_details_over_time": {
+            "enroll_status": "OPT_OUT"
+          },
+          "show_destination_blurbs": {
+            "enroll_status": "OPT_OUT"
+          },
+          "show_summary": {
+            "enroll_status": "OPT_OUT"
+          },
+          "site_extensions": {
+            "enroll_status": "OPT_OUT"
+          },
+          "standard_enhancements_catalog": {
+            "enroll_status": "OPT_OUT"
+          },
+          "text_extraction_for_headline": {
+            "enroll_status": "OPT_OUT"
+          },
+          "text_extraction_for_tap_target": {
+            "enroll_status": "OPT_OUT"
+          },
+          "text_formatting_optimization": {
+            "enroll_status": "OPT_OUT"
+          },
+          "text_generation": {
+            "enroll_status": "OPT_OUT"
+          },
+          "text_optimizations": {
+            "enroll_status": "OPT_OUT"
+          },
+          "text_overlay_translation": {
+            "enroll_status": "OPT_OUT"
+          },
+          "text_translation": {
+            "enroll_status": "OPT_OUT"
+          },
+          "translate_voiceover": {
+            "enroll_status": "OPT_OUT"
+          },
+          "video_auto_crop": {
+            "enroll_status": "OPT_OUT"
+          },
+          "video_filtering": {
+            "enroll_status": "OPT_OUT"
+          },
+          "video_highlight": {
+            "enroll_status": "OPT_OUT"
+          },
+          "video_highlights": {
+            "enroll_status": "OPT_OUT"
+          },
+          "video_to_image": {
+            "enroll_status": "OPT_OUT"
+          },
+          "video_uncrop": {
+            "enroll_status": "OPT_OUT"
+          },
+          "video_uncrop_9x16_to_9x18": {
+            "enroll_status": "OPT_OUT"
+          },
+          "video_voiceover": {
+            "enroll_status": "OPT_OUT"
+          },
+          "wa_mm_image_filtering": {
+            "enroll_status": "OPT_OUT"
+          },
+          "wa_mm_text_truncation_length": {
+            "enroll_status": "OPT_OUT"
+          }
+        }
+      },
+      "id": "700",
+      "instagram_user_id": "300",
+      "name": "Approved Reel 2026-10-10-0123456789abcdef0123456789abcdef",
+      "source_instagram_media_id": "400"
+    },
+    "effective_status": "PENDING_REVIEW",
+    "id": "800",
+    "name": "Approved Reel",
+    "status": "PAUSED"
+  },
+  "source_caption": "He promised her savings to his family. He just never asked her. 💍\n\nBina Pooche · Part 1\nA Hinglish short drama. Her money. Her decision. Follow for more.\n\n#hinglish #shortdrama #microdrama #relationshipdrama #indiandrama"
+}

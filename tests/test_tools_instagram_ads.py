@@ -5,6 +5,8 @@ from datetime import datetime, timedelta, timezone
 import hashlib
 import hmac
 import json
+from pathlib import Path
+import re
 import unittest
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
@@ -147,7 +149,7 @@ class MetaFixture:
             elif fields['location_types'] == '["country_group"]':
                 result = {'data': [{'key': 'worldwide', 'name': 'Worldwide', 'type': 'country_group'}]}
             else:
-                result = {'data': [{'key': code, 'name': code, 'type': 'country'} for code in ('US', 'DE', 'JP', 'BH', 'GF')[:int(fields['limit'])]]}
+                result = {'data': [{'key': code, 'name': code, 'type': 'country'} for code in ('US', 'DE', 'JP', 'BH', 'GF', 'IN')[:int(fields['limit'])]]}
         elif path.endswith('/minimum_budgets'):
             return {'data': [{'currency': self.account['currency'], 'min_daily_budget_imp': self.minimum}]}
         elif path == '/act_' + ACCOUNT + '/campaigns':
@@ -527,6 +529,47 @@ class InstagramAdsTests(unittest.TestCase):
                 self.assertEqual(context['operation'], 'GET /me')
                 self.assertIn('provider-only detail', context['provider_response'])
 
+    def test_development_mode_creative_rejection_is_actionable_sanitized_and_terminal(self):
+        for status in (400, 200):
+            with self.subTest(status=status):
+                self.api, self.meta = connected_api(), MetaFixture()
+                error = {'error': {'code': 100, 'error_subcode': 1885183,
+                    'message': 'raw meta-token provider text', 'error_user_msg': 'private caption'}}
+                def response(method, url, **kwargs):
+                    if method == 'POST' and urlsplit(url).path.endswith('/adcreatives'):
+                        if status == 200:
+                            return error
+                        raise WebRequestError('provider-only detail', status=status, body=json.dumps(error).encode())
+                    return self.meta(method, url, **kwargs)
+                with patch.object(ads, 'json_request', response):
+                    approval = self.queue()
+                    result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn('creative creation', result.error)
+                self.assertIn('publishing app', result.error)
+                self.assertIn('public/Live', result.error)
+                self.assertIn('configured Instagram Ads app', result.error)
+                self.assertIn('does not identify the app by name or id', result.error)
+                self.assertNotIn('The app that created the source post is in Development mode', result.error)
+                self.assertNotIn('regional beneficiary', result.error)
+                self.assertNotIn('meta-token', result.error)
+                self.assertNotIn('private caption', result.error)
+                self.assertIn(CAMPAIGN, result.error)
+                self.assertIn(ADSET, result.error)
+                self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'PAUSED')
+                self.assertEqual(self.meta.resources[ADSET]['status'], 'PAUSED')
+                self.assertEqual([path for path, _ in self.meta.writes], ['/act_100/campaigns', '/act_100/adsets'])
+                self.assertNotIn(CREATIVE, self.meta.resources)
+
+    def test_development_mode_guidance_requires_exact_numeric_provider_codes(self):
+        for error in ({'code': 100, 'error_subcode': 1}, {'code': 200, 'error_subcode': 1885183},
+                      {'code': '100', 'error_subcode': 1885183}, {'code': 100, 'error_subcode': '1885183'},
+                      {'code': 100, 'message': 'Development mode private caption'}):
+            with self.subTest(error=error):
+                message = ads._api_error_message(error)
+                self.assertNotIn('publishing app', message)
+                self.assertNotIn('private caption', message)
+
     def test_end_failure_logs_exact_phase_and_keeps_uncertain_result(self):
         pending = ads.BUNDLED_TOOL.execute('end_campaign', {'account_id': ACCOUNT, 'campaign_id': CAMPAIGN}, self.api)
         approval = self.api.approvals.approve(pending.approval_id)
@@ -615,6 +658,8 @@ class InstagramAdsTests(unittest.TestCase):
                 self.assertEqual((campaign['objective'], adset['optimization_goal'], adset['destination_type']), expected)
                 self.assertEqual(adset['billing_event'], 'IMPRESSIONS')
                 self.assertEqual(adset['bid_strategy'], 'LOWEST_COST_WITHOUT_CAP')
+                self.assertEqual(proposal['optimization_sub_event'], 'POST_INTERACTION' if objective == 'ENGAGEMENTS' else None)
+                self.assertEqual(adset.get('optimization_sub_event'), proposal['optimization_sub_event'])
                 if objective in ('PROFILE_VISITS', 'ENGAGEMENTS'):
                     self.assertEqual(adset['promoted_object'], {'page_id': PAGE})
                 self.assertEqual(adset['targeting']['publisher_platforms'], ['instagram'])
@@ -636,6 +681,118 @@ class InstagramAdsTests(unittest.TestCase):
                 else:
                     self.assertNotIn('call_to_action', creative)
                 self.assertEqual(self.api.costs.calls, [])
+
+    def live_engagement_approval(self, mutate=None, phase='paused'):
+        # Sanitized GET get_campaign result from the failed live $1 launch.
+        # Only IDs/name are anonymized; omitted fields and provider values stay.
+        fixture = json.loads((Path(__file__).parent / 'fixtures/instagram_ads/engagement_readback.json').read_text())
+        self.meta.account['timezone_name'] = 'Europe/London'
+        self.meta.minimum = 100
+        self.meta.media['caption'] = fixture['source_caption']
+        value = launch_input()
+        value.update(lifetime_budget='100', start_time='2026-10-10T21:30:00Z', end_time='2026-10-11T21:30:00Z',
+                     audience={'countries': ['IN'], 'advantage_plus': True})
+        approval = self.queue(value)
+        def hook(path, fields):
+            if path == '/act_100/ads':
+                self.meta.resources.update({CAMPAIGN: deepcopy(fixture['campaign']), ADSET: deepcopy(fixture['adset']),
+                    CREATIVE: deepcopy(fixture['ad']['creative']), AD: deepcopy(fixture['ad'])})
+            if mutate and path == ('/act_100/ads' if phase == 'paused' else '/600'):
+                mutate(self.meta.resources)
+        self.meta.write_hook = hook
+        return approval
+
+    def test_observed_engagement_readback_passes_both_barriers_on_python310_parser(self):
+        with patch.object(ads, 'datetime', wraps=datetime) as clock:
+            clock.now.return_value = datetime(2026, 10, 10, 19, tzinfo=timezone.utc)
+            def python310_parse(text):
+                if re.search(r'[+-][0-9]{4}$', text):
+                    raise ValueError('Python 3.10 rejects basic timezone offsets')
+                return datetime.fromisoformat(text)
+            clock.fromisoformat.side_effect = python310_parse
+            approval = self.live_engagement_approval()
+            result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+        self.assertIsInstance(result, ApprovalExecuted, result)
+        self.assertEqual([path for path, _ in self.meta.writes],
+                         ['/act_100/campaigns', '/act_100/adsets', '/act_100/adcreatives', '/act_100/ads', '/800', '/600', '/500'])
+        for resource in (ADSET, CREATIVE):
+            self.assertEqual(sum(method == 'GET' and path == '/' + resource for method, path, _, _ in self.meta.calls), 2)
+        self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'ACTIVE')
+        self.assertNotIn('object_id', self.meta.resources[CREATIVE])
+        self.assertNotIn('destination_spec', self.meta.resources[CREATIVE])
+        self.assertNotEqual(self.meta.resources[CREATIVE]['name'], approval.payload['proposal']['input']['name'])
+
+    def test_observed_engagement_shape_still_rejects_delivery_and_creative_drift(self):
+        changes = {
+            'start': lambda rows: rows[ADSET].update(start_time='2026-10-10T22:31:00+0100'),
+            'end': lambda rows: rows[ADSET].update(end_time='2026-10-11T22:31:00+0100'),
+            'budget': lambda rows: rows[ADSET].update(lifetime_budget='101'),
+            'geography': lambda rows: rows[ADSET]['targeting']['geo_locations'].update(countries=['US']),
+            'age_range': lambda rows: rows[ADSET]['targeting'].update(age_range=[65, 18]),
+            'targeting': lambda rows: rows[ADSET]['targeting'].update(genders=[1]),
+            'page': lambda rows: rows[ADSET]['promoted_object'].update(page_id='999'),
+            'promoted_extra': lambda rows: rows[ADSET]['promoted_object'].update(pixel_id='999'),
+            'smart_pse': lambda rows: rows[ADSET]['promoted_object'].update(smart_pse_enabled=True),
+            'null_smart_pse': lambda rows: rows[ADSET]['promoted_object'].update(smart_pse_enabled=None),
+            'subevent': lambda rows: rows[ADSET].update(optimization_sub_event='NONE'),
+            'missing_subevent': lambda rows: rows[ADSET].pop('optimization_sub_event'),
+            'scheduling': lambda rows: rows[ADSET].update(is_budget_schedule_enabled=None),
+            'source': lambda rows: rows[CREATIVE].update(source_instagram_media_id='999'),
+            'missing_source': lambda rows: rows[CREATIVE].pop('source_instagram_media_id'),
+            'identity': lambda rows: rows[CREATIVE].update(instagram_user_id='999'),
+            'account': lambda rows: rows[CREATIVE].update(account_id='999'),
+            'object_id': lambda rows: rows[CREATIVE].update(object_id='999'),
+            'null_object_id': lambda rows: rows[CREATIVE].update(object_id=None),
+            'caption': lambda rows: rows[CREATIVE].update(body='Changed caption'),
+            'escaped_caption': lambda rows: rows[CREATIVE].update(body=rows[CREATIVE]['body'].replace('\n', r'\n')),
+            'destination': lambda rows: rows[CREATIVE].update(destination_spec={'website': {'url': 'https://unapproved.example/'}}),
+            'malformed_destination': lambda rows: rows[CREATIVE].update(destination_spec=False),
+            'cta': lambda rows: rows[CREATIVE].update(call_to_action={'type': 'LEARN_MORE', 'value': {'link': 'https://unapproved.example/'}}),
+            'story_link': lambda rows: rows[CREATIVE].update(object_story_spec={'link_data': {'link': 'https://unapproved.example/'}}),
+            'malformed_story': lambda rows: rows[CREATIVE].update(object_story_spec=[]),
+            'malformed_story_data': lambda rows: rows[CREATIVE].update(object_story_spec={'video_data': []}),
+            'enhancement': lambda rows: rows[CREATIVE]['degrees_of_freedom_spec']['creative_features_spec']['text_generation'].update(enroll_status='OPT_IN'),
+        }
+        for phase in ('paused', 'active_children'):
+            for field, mutate in changes.items():
+                self.api, self.meta = connected_api(), MetaFixture()
+                with self.subTest(phase=phase, field=field), patch.object(ads, 'json_request', self.meta), \
+                     patch.object(ads, 'datetime', wraps=datetime) as clock:
+                    clock.now.return_value = datetime(2026, 10, 10, 19, tzinfo=timezone.utc)
+                    approval = self.live_engagement_approval(mutate, phase)
+                    result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+                    self.assertIsInstance(result, ActionFailed, result)
+                    self.assertEqual(len(self.meta.writes), 4 if phase == 'paused' else 6)
+                    self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'PAUSED')
+                    self.assertFalse(any(path == '/500' for path, _ in self.meta.writes))
+
+    def test_flight_offsets_compare_instants_without_accepting_invalid_times(self):
+        expected = datetime(2026, 10, 10, 21, 30, tzinfo=timezone.utc)
+        for text in ('2026-10-10T22:30:00+0100', '2026-10-10T22:30:00+01:00', '2026-10-10T17:30:00-0400', '2026-10-10T21:30:00Z'):
+            self.assertEqual(ads._time(text, 'start_time'), expected)
+        for text in ('2026-10-10T21:30:00', '2026-10-10 21:30:00+0000', '2026-10-10T21:30:00.1+0000',
+                     '2026-10-10T21:30:00+2500', '2026-02-30T21:30:00+0000'):
+            with self.subTest(text=text), self.assertRaises(ads.ToolInputValidationError):
+                ads._time(text, 'start_time')
+
+    def test_engagement_defaults_do_not_relax_other_outcomes(self):
+        for objective in ('WEBSITE_CLICKS', 'PROFILE_VISITS', 'VIDEO_VIEWS'):
+            for phase in ('paused', 'active_children'):
+                for field in ('optimization_sub_event', 'destination_spec'):
+                    self.api, self.meta = connected_api(), MetaFixture()
+                    with self.subTest(objective=objective, phase=phase, field=field), patch.object(ads, 'json_request', self.meta):
+                        approval = self.queue(launch_input(objective))
+                        def hook(path, fields):
+                            if path == ('/act_100/ads' if phase == 'paused' else '/600'):
+                                if field == 'optimization_sub_event':
+                                    self.meta.resources[ADSET][field] = 'POST_INTERACTION'
+                                else:
+                                    self.meta.resources[CREATIVE].pop(field)
+                        self.meta.write_hook = hook
+                        result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+                        self.assertIsInstance(result, ActionFailed, result)
+                        self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'PAUSED')
+                        self.assertFalse(any(path == '/500' for path, _ in self.meta.writes))
 
     def test_no_write_on_ownership_access_or_eligibility_failure(self):
         mutations = (
@@ -1070,7 +1227,7 @@ class InstagramAdsTests(unittest.TestCase):
                     self.assertFalse(any(path == '/500' for path, _ in self.meta.writes))
 
     def test_documented_empty_and_removed_delivery_controls_remain_usable(self):
-        approval = self.queue()
+        approval = self.queue(launch_input('VIDEO_VIEWS'))
         def hook(path, fields):
             if path == '/act_100/ads':
                 self.meta.resources[ADSET].update(adset_schedule=[], pacing_type=['standard'],
@@ -1351,6 +1508,57 @@ class InstagramAdsTests(unittest.TestCase):
         self.assertIsInstance(result, ActionFailed)
         self.assertIn('pause is unconfirmed', result.error)
         self.assertEqual(len(self.meta.writes), 1)
+
+    def test_campaign_details_preserve_unavailable_ads_and_partial_resources(self):
+        for state in ('missing', 'null', 'empty', 'populated'):
+            with self.subTest(state=state):
+                self.meta.resources[CAMPAIGN]['status'] = 'PAUSED'
+                row = {'id': ADSET, 'name': 'Partial ad set', 'status': 'PAUSED',
+                       'effective_status': 'PAUSED', 'lifetime_budget': '100'}
+                if state != 'missing':
+                    row['ads'] = None if state == 'null' else {'data': []}
+                if state == 'populated':
+                    row['ads'] = {'data': [{'id': AD, 'status': 'PAUSED', 'creative': {'id': CREATIVE}}],
+                                  'paging': {'next': 'https://graph.facebook.com/next', 'cursors': {'after': 'child-cursor'}}}
+                calls = []
+                def response(method, url, **kwargs):
+                    calls.append((method, urlsplit(url).path))
+                    if urlsplit(url).path.endswith('/' + CAMPAIGN + '/adsets'):
+                        return {'data': [row], 'paging': {'next': 'https://graph.facebook.com/next',
+                                                        'cursors': {'after': 'adset-cursor'}}}
+                    return self.meta(method, url, **kwargs)
+                with patch.object(ads, 'json_request', response):
+                    result = ads.BUNDLED_TOOL.execute('get_campaign', {'account_id': ACCOUNT, 'campaign_id': CAMPAIGN}, self.api)
+                self.assertIsInstance(result, ActionExecuted, result)
+                assert_matches_output_schema(self, ads.MANIFEST, 'get_campaign', result)
+                self.assertEqual(result.result['campaign']['status'], 'PAUSED')
+                adset = result.result['adsets'][0]
+                self.assertEqual(adset['id'], ADSET)
+                self.assertEqual(adset['status'], 'PAUSED')
+                self.assertEqual(json.loads(adset['configuration_json'])['lifetime_budget'], '100')
+                if state in ('missing', 'null'):
+                    self.assertIsNone(adset['ads'])
+                elif state == 'empty':
+                    self.assertEqual(adset['ads'], [])
+                else:
+                    self.assertEqual(adset['ads'][0]['id'], AD)
+                self.assertEqual(adset['ads_next_cursor'], 'child-cursor' if state == 'populated' else None)
+                self.assertEqual(result.result['next_cursor'], 'adset-cursor')
+                self.assertEqual(len(calls), 5)
+                self.assertTrue(all(method == 'GET' for method, _ in calls))
+                self.assertFalse(self.meta.writes)
+
+    def test_campaign_details_do_not_hide_malformed_or_oversized_ads_edges(self):
+        for edge in ('invalid', {}, {'data': None}, {'data': [None]}, {'data': [{}] * 11}):
+            with self.subTest(edge=edge):
+                def response(method, url, **kwargs):
+                    if urlsplit(url).path.endswith('/' + CAMPAIGN + '/adsets'):
+                        return {'data': [{'id': ADSET, 'ads': edge}]}
+                    return self.meta(method, url, **kwargs)
+                with patch.object(ads, 'json_request', response):
+                    result = ads.BUNDLED_TOOL.execute('get_campaign', {'account_id': ACCOUNT, 'campaign_id': CAMPAIGN}, self.api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertFalse(self.meta.writes)
 
     def test_every_read_matches_closed_result_schema_and_missing_metrics_are_null(self):
         approval = self.queue()

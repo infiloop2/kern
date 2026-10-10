@@ -984,6 +984,23 @@ class XAdsTest(unittest.TestCase):
         self.assertEqual(len(self.provider.writes), 1)
         self.assertFalse(any(path.endswith("/line_items") for _, path, _ in self.provider.calls))
 
+    def test_end_ignores_auxiliary_serving_fields_at_proposal_and_execution(self):
+        for fields in ({"effective_status": "unexpected provider text"}, {"servable": "false"},
+                       {"reasons_not_servable": [None]}, {"reasons_not_servable": {"unexpected": "shape"}}):
+            with self.subTest(fields=fields):
+                self.provider = AdsProvider()
+                self.provider.campaign.update(entity_status="ACTIVE", **fields)
+                approval = self.propose("end_campaign", {"account_id": ACCOUNT_ID, "campaign_id": "camp1"})
+                for key in ("effective_status", "servable", "reasons_not_servable"):
+                    self.assertNotIn(key, approval.payload["campaign"])
+                self.provider.campaign.update(effective_status="another unexpected status", servable=0,
+                                              reasons_not_servable="malformed after approval")
+                result = self.approve(approval)
+                self.assertIsInstance(result, ApprovalExecuted)
+                self.assertEqual(self.provider.campaign["entity_status"], "PAUSED")
+                self.assertEqual(len(self.provider.writes), 1)
+                self.assertEqual(self.provider.writes[0][2], {"entity_status": "PAUSED"})
+
     def test_end_rechecks_role_user_campaign_account_and_credentials(self):
         for change in (lambda p: p.access.update(permissions=["ANALYST"]), lambda p: p.access.update(user_id="123"), lambda p: p.campaign.update(id="another1"), lambda p: p.account.update(deleted=True)):
             self.provider = AdsProvider()
@@ -1054,6 +1071,108 @@ class XAdsTest(unittest.TestCase):
         self.assertIsNone(result.result["metrics"]["url_clicks"])
         self.assertEqual(self.provider.calls[-1][2]["granularity"], "TOTAL")
         self.assertEqual(self.api.costs.calls, [])
+
+    def test_serving_fields_survive_campaign_and_group_read_projections(self):
+        fields = {"effective_status": "PAUSED", "servable": False, "reasons_not_servable": ["PAUSED_BY_ADVERTISER", "INCOMPLETE"]}
+        self.provider.campaign.update(fields)
+        self.provider.group.update(fields)
+        for action, values in (("list_campaigns", {"account_id": ACCOUNT_ID}),
+                               ("get_campaign", {"account_id": ACCOUNT_ID, "campaign_id": "camp1"}),
+                               ("get_ad_group", {"account_id": ACCOUNT_ID, "line_item_id": "group1"})):
+            with self.subTest(action=action):
+                result = self.execute(action, values)
+                assert_matches_output_schema(self, MANIFEST, action, result)
+                rows = result.result.get("campaigns", result.result.get("ad_groups", [result.result.get("ad_group")]))
+                if action == "get_campaign":
+                    rows = [result.result["campaign"], *rows]
+                for row in rows:
+                    for key, value in fields.items():
+                        self.assertEqual(row[key], value)
+                    self.assertFalse(row["reasons_not_servable_truncated"])
+        self.assertEqual(self.provider.writes, [])
+
+    def test_serving_fields_preserve_unknown_empty_and_bounded_codes(self):
+        for fields, expected in (({}, {"effective_status": None, "servable": None, "reasons_not_servable": None}),
+                                 ({"effective_status": None, "servable": None, "reasons_not_servable": None}, {"effective_status": None, "servable": None, "reasons_not_servable": None}),
+                                 ({"effective_status": "RUNNING", "servable": True, "reasons_not_servable": []}, {"effective_status": "RUNNING", "servable": True, "reasons_not_servable": []})):
+            with self.subTest(fields=fields):
+                self.provider.campaign = {key: value for key, value in self.provider.campaign.items() if key not in expected}
+                self.provider.campaign.update(fields)
+                result = self.execute("get_campaign", {"account_id": ACCOUNT_ID, "campaign_id": "camp1"})
+                assert_matches_output_schema(self, MANIFEST, "get_campaign", result)
+                for key, value in expected.items():
+                    self.assertEqual(result.result["campaign"][key], value)
+                self.assertFalse(result.result["campaign"]["reasons_not_servable_truncated"])
+        self.provider.campaign["reasons_not_servable"] = ["FUTURE_REASON_" + str(index) for index in range(33)]
+        result = self.execute("get_campaign", {"account_id": ACCOUNT_ID, "campaign_id": "camp1"})
+        assert_matches_output_schema(self, MANIFEST, "get_campaign", result)
+        self.assertEqual(len(result.result["campaign"]["reasons_not_servable"]), 32)
+        self.assertTrue(result.result["campaign"]["reasons_not_servable_truncated"])
+
+    def test_malformed_serving_fields_fail_without_echoing_values(self):
+        for key, value in (("servable", 0), ("servable", "false"), ("effective_status", "secret@example.com"),
+                           ("effective_status", "A" * 65), ("reasons_not_servable", "SECRET_TOKEN"),
+                           ("reasons_not_servable", [None]), ("reasons_not_servable", ["secret@example.com"])):
+            with self.subTest(key=key, value=value):
+                self.provider = AdsProvider()
+                self.diagnostics.reset_mock()
+                self.provider.group[key] = value
+                result = self.execute("get_ad_group", {"account_id": ACCOUNT_ID, "line_item_id": "group1"})
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn(key, result.error)
+                self.assertNotIn("secret@example.com", result.error)
+                self.assertNotIn("SECRET_TOKEN", result.error)
+                self.diagnostics.assert_called_once()
+                self.assertEqual(self.provider.writes, [])
+
+    def test_malformed_performance_values_fail_once_with_metric_and_placement(self):
+        invalid = ([1, 2], [], 1, "secret@example.com", [True], [-1], ["secret@example.com"], [float("inf")], [float("nan")], [{}])
+        for placement in ("ALL_ON_TWITTER", "SPOTLIGHT", "TREND"):
+            for key in ("impressions", "billed_charge_local_micro"):
+                for value in invalid:
+                    with self.subTest(placement=placement, key=key, value=value):
+                        self.provider = AdsProvider()
+                        self.diagnostics.reset_mock()
+                        metrics = self.provider.metrics if placement == "ALL_ON_TWITTER" else self.provider.metrics_by_placement[placement]
+                        metrics[key] = value
+                        result = self.execute("get_performance", {"account_id": ACCOUNT_ID, "campaign_id": "camp1", "start_time": "2026-09-01T00:00:00Z", "end_time": "2026-09-02T00:00:00Z"})
+                        self.assertIsInstance(result, ActionFailed)
+                        self.assertIn(key, result.error)
+                        self.assertIn(placement, result.error)
+                        self.assertNotIn("secret@example.com", result.error)
+                        self.diagnostics.assert_called_once()
+                        stats = [call for call in self.provider.calls if call[1].startswith("/stats/")]
+                        self.assertEqual(len(stats), ("ALL_ON_TWITTER", "SPOTLIGHT", "TREND").index(placement) + 1)
+                        self.assertEqual(self.provider.writes, [])
+
+    def test_performance_distinguishes_null_from_reported_zero(self):
+        for unavailable in (None, [None]):
+            self.provider.metrics = {"impressions": [0], "engagements": unavailable, "billed_charge_local_micro": [0]}
+            result = self.execute("get_performance", {"account_id": ACCOUNT_ID, "campaign_id": "camp1", "start_time": "2026-09-01T00:00:00Z", "end_time": "2026-09-02T00:00:00Z"})
+            assert_matches_output_schema(self, MANIFEST, "get_performance", result)
+            self.assertEqual(result.result["metrics"]["impressions"], 0)
+            self.assertEqual(result.result["metrics"]["billed_charge_local_micro"], "0")
+            self.assertIsNone(result.result["metrics"]["engagements"])
+
+    def test_empty_analytics_rows_are_missing_and_nonfinite_totals_fail(self):
+        original = self.provider._respond
+        def empty_stats(method, path, params):
+            if path.startswith("/stats/"):
+                return {"data": []}
+            return original(method, path, params)
+        self.provider._respond = empty_stats
+        values = {"account_id": ACCOUNT_ID, "campaign_id": "camp1", "start_time": "2026-09-01T00:00:00Z", "end_time": "2026-09-02T00:00:00Z"}
+        result = self.execute("get_performance", values)
+        assert_matches_output_schema(self, MANIFEST, "get_performance", result)
+        self.assertTrue(all(value is None for value in result.result["metrics"].values()))
+        self.provider._respond = original
+        self.provider.metrics["impressions"] = [1e308]
+        self.provider.metrics_by_placement["SPOTLIGHT"]["impressions"] = [1e308]
+        self.diagnostics.reset_mock()
+        result = self.execute("get_performance", values)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("aggregate metric impressions", result.error)
+        self.diagnostics.assert_called_once()
 
     def test_performance_aggregates_all_placements_and_returns_breakdown(self):
         self.provider.metrics_by_placement = {"SPOTLIGHT": {"impressions": [25], "engagements": [3], "billed_charge_local_micro": [2500000]}, "TREND": {"impressions": [15], "engagements": [2], "billed_charge_local_micro": [750000]}}
