@@ -52,7 +52,7 @@ class MetaFixture:
                         'account_status': 1, 'disable_reason': 0, 'user_tasks': ['ADVERTISE'],
                         'funding_source': 'billing-id', 'min_daily_budget': '50'}
         self.page = {'id': PAGE, 'name': 'Real Page', 'tasks': ['ADVERTISE'], 'instagram_business_account': {
-            'id': INSTAGRAM, 'username': 'owned_profile', 'account_type': 'BUSINESS'}}
+            'id': INSTAGRAM, 'username': 'owned_profile'}}
         self.user_pages = [self.page]
         self.media = {'id': MEDIA, 'owner': {'id': INSTAGRAM}, 'caption': 'The exact original caption',
                       'media_type': 'VIDEO', 'media_product_type': 'REELS',
@@ -75,6 +75,8 @@ class MetaFixture:
         assert parsed.scheme == 'https' and parsed.netloc == 'graph.facebook.com'
         path = parsed.path.removeprefix('/v25.0')
         fields = {key: rows[0] for key, rows in parse_qs(parsed.query, keep_blank_values=True).items()}
+        if method == 'GET':
+            assert 'account_type' not in fields.get('fields', ''), 'Facebook Login IGUser has no account_type field'
         if method == 'POST':
             fields = kwargs['form']
         self.calls.append((method, path, deepcopy(fields), deepcopy(kwargs)))
@@ -238,12 +240,9 @@ class InstagramAdsTests(unittest.TestCase):
     def test_diagnostic_unfiltered_pages_explain_identity_filtering(self):
         cases = [('linked_identity_missing', {}), ('linked_identity_null', {'instagram_business_account': None}),
                  ('linked_identity_invalid', {'instagram_business_account': []}),
-                 ('account_type_missing', {'instagram_business_account': {'id': INSTAGRAM}}),
-                 ('account_type_null', {'instagram_business_account': {'account_type': None}}),
-                 ('account_type_invalid', {'instagram_business_account': {'account_type': 1}}),
-                 ('account_type_invalid', {'instagram_business_account': {'account_type': ''}}),
-                 ('account_type_unsupported', {'instagram_business_account': {'account_type': 'PERSONAL'}}),
-                 ('invalid_id', {'instagram_business_account': {'account_type': 'BUSINESS', 'id': 'bad'}}),
+                 ('invalid_id', {'instagram_business_account': {}}),
+                 ('invalid_id', {'instagram_business_account': {'id': 'bad'}}),
+                 ('none', {'instagram_business_account': {'id': INSTAGRAM}}),
                  ('none', self.meta.page)]
         rows = [{'id': PAGE, 'name': 'Page', **row} for _, row in cases]
         def response(method, url, **kwargs):
@@ -254,7 +253,9 @@ class InstagramAdsTests(unittest.TestCase):
             result = self.diagnose()
         self.assertEqual([row['identity_filter_reason'] for row in result['pages']['items']], [reason for reason, _ in cases])
         self.assertEqual(result['pages']['items'][0]['linked_identity_state'], 'missing')
-        self.assertEqual(result['pages']['items'][3]['account_type_state'], 'missing')
+        for row in result['pages']['items']:
+            self.assertEqual(row['account_type_state'], 'not_requested')
+            self.assertIsNone(row['account_type'])
         self.assertEqual(result['instagram_accounts']['items'][0]['instagram_user_id'], INSTAGRAM)
 
     def test_diagnostic_empty_pages_are_distinct_from_filtered_pages(self):
@@ -367,11 +368,35 @@ class InstagramAdsTests(unittest.TestCase):
         self.assertEqual(row['tasks'], ['ADVERTISE'])
         self.assertEqual(row['tasks_state'], 'present')
         self.assertEqual(normal.result['items'][0]['page_id'], PAGE)
+        self.assertIsNone(normal.result['items'][0]['account_type'])
+        assert_matches_output_schema(self, ads.MANIFEST, 'list_identities', normal)
         self.assertIsInstance(launch, ActionPendingApproval)
         self.assertFalse(self.meta.writes)
         self.assertNotIn('unrequested', json.dumps(result))
         fields = next(params['fields'] for _, path, params, _ in self.meta.calls if path == '/me/accounts')
-        self.assertEqual(fields, 'id,name,tasks,instagram_business_account{id,username,account_type}')
+        self.assertEqual(fields, 'id,name,tasks,instagram_business_account{id,username}')
+
+    def test_discovery_handles_portfolio_and_legacy_pages_without_subtype(self):
+        identities = [('201', '301', 'brand_one'), ('202', '302', 'brand_two'), ('203', '303', 'brand_three')]
+        self.meta.user_pages = [
+            {'id': page, 'name': username, 'tasks': ['ADVERTISE', 'MANAGE'],
+             'instagram_business_account': {'id': instagram, 'username': username}}
+            for page, instagram, username in identities
+        ] + [{'id': '204', 'name': 'Legacy Page', 'tasks': ['ADVERTISE', 'MANAGE']}]
+        def response(method, url, **kwargs):
+            if '/connected_instagram_accounts?' in url:
+                return {'data': [{'id': instagram, 'username': username} for _, instagram, username in identities]}
+            return self.meta(method, url, **kwargs)
+        with patch.object(ads, 'json_request', response):
+            normal = ads.BUNDLED_TOOL.execute('list_identities', {'account_id': ACCOUNT, 'limit': 20}, self.api)
+            diagnostic = self.diagnose()
+        assert_matches_output_schema(self, ads.MANIFEST, 'list_identities', normal)
+        self.assertEqual([(row['page_id'], row['instagram_user_id'], row['username'])
+                          for row in normal.result['items']], identities)
+        self.assertTrue(all(row['account_type'] is None for row in normal.result['items']))
+        self.assertEqual(len(diagnostic['user_pages']['items']), 4)
+        self.assertEqual(diagnostic['user_pages']['items'][-1]['identity_filter_reason'], 'linked_identity_missing')
+        self.assertFalse(self.meta.writes)
 
     def test_page_advertising_tasks_are_required_for_discovery_and_launch(self):
         for tasks, allowed in ((None, False), ([], False), (['ANALYZE'], False), ('ADVERTISE', False),
@@ -1449,16 +1474,23 @@ class InstagramAdsTests(unittest.TestCase):
                 self.assertEqual([call[1] for call in self.meta.calls], ['/me', '/me/permissions'])
                 self.assertFalse(self.meta.writes)
 
-    def test_creators_remain_usable_for_other_outcomes_and_profile_is_explicitly_limited(self):
-        self.meta.page['instagram_business_account']['account_type'] = 'MEDIA_CREATOR'
-        for objective in ('WEBSITE_CLICKS', 'ENGAGEMENTS', 'VIDEO_VIEWS'):
-            approval = self.queue(launch_input(objective))
-            self.assertIsInstance(ads.BUNDLED_TOOL.execute_approved(approval, self.api), ApprovalExecuted)
-            self.meta.writes.clear()
-        result = ads.BUNDLED_TOOL.execute('launch_campaign', launch_input('PROFILE_VISITS'), self.api)
+    def test_professional_link_without_subtype_supports_all_four_outcomes(self):
+        for objective in ads.OBJECTIVES:
+            with self.subTest(objective=objective):
+                approval = self.queue(launch_input(objective))
+                self.assertIsNone(approval.payload['proposal']['identity']['account_type'])
+                self.assertIsInstance(ads.BUNDLED_TOOL.execute_approved(approval, self.api), ApprovalExecuted)
+                self.meta.writes.clear()
+
+    def test_profile_visit_provider_rejection_remains_terminal_under_paused_parent(self):
+        approval = self.queue(launch_input('PROFILE_VISITS'))
+        self.meta.fail_write = 2
+        result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
         self.assertIsInstance(result, ActionFailed)
-        self.assertIn('Business', result.error)
-        self.assertFalse(self.meta.writes)
+        self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'PAUSED')
+        self.assertEqual(len(self.meta.writes), 2)
+        self.assertIn(CAMPAIGN, result.error)
+        self.assertFalse(any(fields.get('status') == 'ACTIVE' for _, fields in self.meta.writes))
 
     def test_unknown_eligibility_is_disclosed_and_not_claimed_as_provider_acceptance(self):
         self.meta.media.pop('boost_eligibility_info')
