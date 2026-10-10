@@ -156,6 +156,7 @@ def _google_error_context(body: bytes) -> dict[str, str | bool]:
 def report_ads_failure(
     tool_id: str, action_id: str, exc: BaseException, *, phase: str,
     confirmed: Sequence[str] = (),
+    diagnostic_context: dict[str, str | int | bool] | None = None,
 ) -> None:
     """Report once at the catch that returns the failed action.
 
@@ -163,8 +164,11 @@ def report_ads_failure(
     contain provider text, so they belong only in authenticated diagnostics.
     Preserve the original HTTP cause across curated/reconnect exceptions.
     """
-    host_errors.report_warning(f"tools.{tool_id}", exc,
-        context=ads_failure_context(tool_id, action_id, exc, phase=phase, confirmed=confirmed), kind="provider_failure")
+    context = ads_failure_context(tool_id, action_id, exc, phase=phase, confirmed=confirmed)
+    # Explicit tool-selected metadata is additive; preserve standard evidence.
+    for key, value in (diagnostic_context or {}).items():
+        context.setdefault(key, value)
+    host_errors.report_warning(f"tools.{tool_id}", exc, context=context, kind="provider_failure")
 
 
 def ads_failure_context(

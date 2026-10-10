@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 
+from host.runtime.browser import client as browser_client
 from host.runtime.browser.client import BrowserError
 from host.runtime.browser.accounts import Profile, Accounts
 from host.runtime.browser.providers import PROVIDERS
@@ -636,6 +637,103 @@ class BrowserSessionsTests(unittest.TestCase):
             thread.join(timeout=5)
             server.server_close()
             server.worker.shutdown()
+
+    def test_busy_admission_reports_no_submission_through_approved_tool(self):
+        api = FakeHostAPI()
+        selected = {"accounts": [{"account_id": "acct_" + "a" * 32, "provider": "x", "provider_identifier": "example", "state": "connected"}]}
+        with patch("host.tools.browser.client.request", return_value=selected):
+            pending = BUNDLED_TOOL.execute("x_post_tweet", {"account_id": "acct_" + "a" * 32, "text": "hello"}, api)
+        approved = api.approvals.approve(pending.approval_id)
+        socket_path = str(self.root / "busy.sock")
+        server = UnixSocketServer(socket_path, Handler)
+        server.busy = threading.Lock()
+        server.worker = ThreadPoolExecutor(max_workers=1)
+        dispatch = Mock()
+        server.profiles = SimpleNamespace(dispatch=dispatch)
+        thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
+        thread.start()
+
+        def user(name):
+            return SimpleNamespace(pw_uid=os.getuid() if name == "kern-tools" else -1)
+
+        try:
+            with patch("host.runtime.browser.service.pwd.getpwnam", side_effect=user), patch.object(
+                browser_client, "Connection", side_effect=lambda: UnixHTTPConnection(socket_path),
+            ):
+                # Busy during the account check: no worker task, let alone a post.
+                server.busy.acquire()
+                result = BUNDLED_TOOL.execute_approved(approved, api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("No post or message was submitted by this attempt", result.error)
+                dispatch.assert_not_called()
+                server.busy.release()
+
+                # Account check succeeds; posting itself is rejected at admission.
+                def hold_after_list(operation, body, *, agent_action):
+                    server.busy = Mock(acquire=Mock(return_value=False))
+                    return selected
+                dispatch.side_effect = hold_after_list
+                result = BUNDLED_TOOL.execute_approved(approved, api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("No post or message was submitted by this attempt", result.error)
+                self.assertEqual(dispatch.call_count, 1)
+                self.assertEqual(dispatch.call_args.args[0], "list")
+
+                # The same text after dispatch is not evidence of non-execution.
+                server.busy = threading.Lock()
+                dispatch.reset_mock()
+                dispatch.side_effect = [selected, BrowserError("Browser is busy. Wait for the current action to finish.")]
+                result = BUNDLED_TOOL.execute_approved(approved, api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertNotIn("No post or message was submitted", result.error)
+                self.assertEqual(dispatch.call_count, 2)
+                self.assertEqual(dispatch.call_args.args[0], "post_tweet")
+        finally:
+            server.shutdown()
+            thread.join(timeout=5)
+            server.server_close()
+            server.worker.shutdown()
+
+    def test_busy_client_and_unapproved_calls_do_not_require_approval(self):
+        connection = Mock()
+        response = {"code": "browser_busy", "execution_state": "not_started"}
+        connection.getresponse.return_value = SimpleNamespace(status=409, read=lambda *args: json.dumps(response).encode())
+        with patch.object(browser_client, "Connection", return_value=connection):
+            with self.assertRaises(browser_client.BrowserActionNotStarted) as failure:
+                browser_client.request("/operator/list")
+            self.assertIn("not started", str(failure.exception))
+            self.assertNotIn("approval", str(failure.exception))
+            with self.assertRaises(ApiError) as operator_failure:
+                admin_browser.control("list", {})
+            self.assertNotIn("approval", str(operator_failure.exception))
+            for action, payload in (("x_connection_status", {}),
+                                    ("x_post_tweet", {"account_id": "acct_" + "a" * 32, "text": "hello"})):
+                with self.subTest(action=action):
+                    result = BUNDLED_TOOL.execute(action, payload, FakeHostAPI())
+                    self.assertIsInstance(result, ActionFailed)
+                    self.assertIn("not started", result.error)
+                    self.assertNotIn("approval", result.error)
+                    self.assertNotIn("No post or message was submitted", result.error)
+
+    def test_unknown_browser_failure_does_not_claim_no_submission(self):
+        for status, body in [(409, {"error": "Browser is busy."}),
+                             (503, {"code": "browser_busy", "execution_state": "not_started"}),
+                             (409, {"code": "browser_busy", "execution_state": "unknown"})]:
+            connection = Mock()
+            connection.getresponse.return_value = SimpleNamespace(status=status, read=lambda *args: json.dumps(body).encode())
+            with self.subTest(status=status, body=body), patch.object(browser_client, "Connection", return_value=connection):
+                with self.assertRaises(BrowserError) as failure:
+                    browser_client.request("/actions/post_tweet", self.body)
+                self.assertNotIn("No post or message was submitted", str(failure.exception))
+                connection.request.assert_called_once()
+                connection.close.assert_called_once()
+        connection = Mock()
+        connection.getresponse.side_effect = TimeoutError()
+        with patch.object(browser_client, "Connection", return_value=connection):
+            with self.assertRaisesRegex(BrowserError, "check the website") as failure:
+                browser_client.request("/actions/post_tweet", self.body)
+            self.assertNotIn("No post or message was submitted", str(failure.exception))
+            connection.request.assert_called_once()
 
     def test_untrusted_peer_is_closed_before_allocating_a_handler_thread(self):
         server = Server.__new__(Server)

@@ -50,7 +50,8 @@ class Handler(UnixSocketRequestHandler):
         # Other operations retain the admission guard against request backlog.
         acquired = operation != "cancel"
         if acquired and not server.busy.acquire(timeout=1):
-            self._send_json(409, {"error": "Browser is busy. Wait for the current action to finish."})
+            self._send_json(409, {"error": "Browser is busy. Wait for the current action to finish.",
+                                  "code": "browser_busy", "execution_state": "not_started"})
             return
         try:
             result = server.worker.submit(

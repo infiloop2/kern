@@ -144,6 +144,33 @@ class LinkedInContractTests(unittest.TestCase):
         with patch("host.tools.browser.client.request", side_effect=[{"accounts": [ACCOUNT]}, {"status": "sent", "recipient_profile_url": TARGET}]):
             self.assertIsInstance(BUNDLED_TOOL.execute_approved(record, api), ActionFailed)
 
+    def test_busy_reads_and_recipient_resolution_do_not_require_approval(self):
+        for action, payload in (("linkedin_connection_status", {}),
+                                ("linkedin_read_conversation", {"account_id": ACCOUNT_ID, "recipient_profile_url": TARGET}),
+                                ("linkedin_send_dm", {"account_id": ACCOUNT_ID, "recipient_profile_url": TARGET, "text": "hello"})):
+            responses = [[client.BrowserActionNotStarted()]]
+            if action != "linkedin_connection_status":
+                responses.append([{"accounts": [ACCOUNT]}, client.BrowserActionNotStarted()])
+            for sequence in responses:
+                with self.subTest(action=action, call_count=len(sequence)), patch("host.tools.browser.client.request", side_effect=sequence) as request:
+                    result = BUNDLED_TOOL.execute(action, payload, FakeHostAPI())
+                    self.assertIsInstance(result, ActionFailed)
+                    self.assertIn("not started", result.error)
+                    self.assertNotIn("approval", result.error)
+                    self.assertNotIn("No post or message was submitted", result.error)
+                    self.assertEqual(request.call_count, len(sequence))
+
+    def test_busy_approved_dm_reports_no_submission_without_retry(self):
+        api, record = self.approval()
+        for sequence in ([client.BrowserActionNotStarted()],
+                         [{"accounts": [ACCOUNT]}, client.BrowserActionNotStarted()]):
+            with self.subTest(call_count=len(sequence)), patch("host.tools.browser.client.request", side_effect=sequence) as request:
+                result = BUNDLED_TOOL.execute_approved(record, api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("No post or message was submitted by this attempt", result.error)
+                self.assertIn("another attempt requires a new approval", result.error)
+                self.assertEqual(request.call_count, len(sequence))
+
     def test_approval_rejects_account_changes_and_uncertain_send_never_retries(self):
         api, record = self.approval()
         for changed in ({**ACCOUNT, "provider_identifier": TARGET}, {**ACCOUNT, "state": "needs_attention"}, {**ACCOUNT, "provider": "x"}):

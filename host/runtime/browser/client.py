@@ -13,6 +13,13 @@ class BrowserError(RuntimeError):
     pass
 
 
+class BrowserActionNotStarted(BrowserError):
+    """The service rejected admission before queueing any browser work."""
+
+    def __init__(self) -> None:
+        super().__init__("Browser is busy. The action was not started. Wait for the current action to finish.")
+
+
 class Connection(http.client.HTTPConnection):
     def __init__(self) -> None:
         super().__init__("localhost", timeout=180)
@@ -40,6 +47,8 @@ def request(path: str, body: dict[str, Any] | None = None) -> dict[str, Any]:
         if not isinstance(result, dict):
             raise ValueError("invalid response")
         if response.status != 200:
+            if response.status == 409 and result.get("code") == "browser_busy" and result.get("execution_state") == "not_started":
+                raise BrowserActionNotStarted()
             # Only our service's bounded errors; browser/provider errors never cross IPC.
             raise BrowserError(str(result.get("error", "Browser unavailable.")))
         return result

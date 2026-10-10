@@ -401,7 +401,7 @@ class XAdsTest(unittest.TestCase):
                 return result
             self.provider._respond = incorrect
             result = self.approve(approval)
-            self.assertIn("billing basis", result.error)
+            self.assertIn("pay_by", result.error)
             self.assertEqual(len(self.provider.writes), 2)
             self.assertEqual(self.provider.campaign["entity_status"], "PAUSED")
             self.provider.calls.clear()
@@ -586,6 +586,251 @@ class XAdsTest(unittest.TestCase):
                     if not after_child:
                         self.assertFalse(any(method == "PUT" for method, _, _ in self.provider.writes))
                     self.provider.calls.clear()
+
+    def test_equivalent_read_representations_pass_both_activation_barriers(self):
+        variants = (
+            ("inherited funding", lambda p: p.group.update(funding_instrument_id=p.campaign["funding_instrument_id"])),
+            ("integer strings", lambda p: p.campaign.update({key: str(p.campaign[key]) for key in tool.s.BUDGETS})),
+            ("missing child fields", lambda p: [p.group.pop(key, None) for key in (*tool.s.BUDGETS, "standard_delivery")]),
+            ("null optional fields", lambda p: (p.campaign.update(frequency_cap=None, duration_in_days=None), p.group.update(frequency_cap=None, duration_in_days=None, audience_expansion=None, bid_amount_local_micro=None))),
+            ("manual creative", lambda p: p.group.update(creative_source="MANUAL", automatic_tweet_promotion=False)),
+            ("default inclusion", lambda p: [row.pop("operator_type", None) for row in p.targets]),
+            ("zero fractional seconds", lambda p: p.group.update(start_time=START.replace("Z", ".000Z"), end_time=END.replace("Z", ".000Z"))),
+            ("same instant with offset", lambda p: p.group.update({key: datetime.strptime(p.group[key], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc).astimezone(timezone(timedelta(hours=1))).isoformat() for key in ("start_time", "end_time")})),
+        )
+        for after_child in (False, True):
+            for label, mutate in variants:
+                with self.subTest(after_child=after_child, variant=label):
+                    self.provider = AdsProvider()
+                    self.diagnostics.reset_mock()
+                    approval = self.propose("launch_campaign", plan())
+                    original = self.provider._respond
+                    def changing(method, path, params):
+                        response = original(method, path, params)
+                        trigger = method == "PUT" and path.endswith("/line_items/group1") if after_child else method == "POST" and path.endswith("/promoted_tweets")
+                        if trigger:
+                            mutate(self.provider)
+                        return response
+                    self.provider._respond = changing
+                    self.assertIsInstance(self.approve(approval), ApprovalExecuted)
+                    self.assertEqual(self.provider.campaign["entity_status"], "ACTIVE")
+                    self.assertEqual(len(self.provider.writes), 7)
+                    self.diagnostics.assert_not_called()
+
+    def test_normalization_keeps_changed_or_malformed_settings_blocked(self):
+        mutations = (
+            lambda p: p.group.update(funding_instrument_id="otherfund"),
+            lambda p: p.group.update(automatic_tweet_promotion=0),
+            lambda p: p.group.update(automatic_tweet_promotion="false"),
+            lambda p: p.group.update(creative_source="AUTOMATIC"),
+            lambda p: p.campaign.update(daily_budget_amount_local_micro=True),
+            lambda p: p.campaign.update(total_budget_amount_local_micro=50000000.0),
+            lambda p: p.campaign.update(total_budget_amount_local_micro="50000001"),
+            lambda p: p.group.update(daily_budget_amount_local_micro=0),
+            lambda p: p.group.update(bid_amount_local_micro=1000000),
+            lambda p: p.group.update(bid_amount_local_micro="1000000"),
+            lambda p: p.group.update(bid_amount_local_micro=0),
+            lambda p: p.group.update(standard_delivery=False),
+            lambda p: p.group.update(start_time=START.replace("Z", ".001Z")),
+            lambda p: p.group.update(start_time=START.replace("Z", ".0000001Z")),
+            lambda p: p.group.update(start_time=START.replace("Z", "+00:00:00.000001")),
+            lambda p: p.group.update(start_time=START.removesuffix("Z")),
+            lambda p: p.group.update(start_time=START.replace("Z", "+01:00")),
+            lambda p: p.group.update(unknown_config=None),
+            lambda p: p.targets[0].update(operator_type="NE"),
+            lambda p: p.targets[0].pop("deleted"),
+            lambda p: p.promoted[0].pop("deleted"),
+        )
+        for after_child in (False, True):
+            for mutate in mutations:
+                with self.subTest(after_child=after_child, mutate=mutate):
+                    self.provider = AdsProvider()
+                    self.diagnostics.reset_mock()
+                    approval = self.propose("launch_campaign", plan())
+                    original = self.provider._respond
+                    def changing(method, path, params):
+                        response = original(method, path, params)
+                        trigger = method == "PUT" and path.endswith("/line_items/group1") if after_child else method == "POST" and path.endswith("/promoted_tweets")
+                        if trigger:
+                            mutate(self.provider)
+                        return response
+                    self.provider._respond = changing
+                    self.assertIsInstance(self.approve(approval), ActionFailed)
+                    self.assertEqual(self.provider.campaign["entity_status"], "PAUSED")
+                    self.assertFalse(any(path.endswith("/campaigns/camp1") for _, path, _ in self.provider.writes))
+                    self.diagnostics.assert_called_once()
+
+    def test_activation_and_end_results_require_confirmed_provider_status(self):
+        cases = (
+            ("launch_campaign", "line_items/group1", {"entity_status": "PAUSED"}),
+            ("launch_campaign", "line_items/group1", {"funding_instrument_id": "otherfund"}),
+            ("launch_campaign", "line_items/group1", {"bid_amount_local_micro": "1000000"}),
+            ("launch_campaign", "campaigns/camp1", {"entity_status": "PAUSED"}),
+            ("launch_campaign", "campaigns/camp1", {"total_budget_amount_local_micro": 60000000}),
+            ("launch_campaign", "campaigns/camp1", {"standard_delivery": False}),
+            ("end_campaign", "campaigns/camp1", {"entity_status": "ACTIVE"}),
+            ("end_campaign", "campaigns/camp1", {"entity_status": None}),
+            ("end_campaign", "campaigns/camp1", {"deleted": True}),
+            ("end_campaign", "campaigns/camp1", {"deleted": None}),
+        )
+        for action, suffix, changes in cases:
+            with self.subTest(action=action, suffix=suffix):
+                self.provider = AdsProvider()
+                self.diagnostics.reset_mock()
+                values = plan() if action == "launch_campaign" else {"account_id": ACCOUNT_ID, "campaign_id": "camp1"}
+                approval = self.propose(action, values)
+                original = self.provider._respond
+                def wrong_status(method, path, params):
+                    response = original(method, path, params)
+                    if method == "PUT" and path.endswith("/" + suffix):
+                        response["data"].update(changes)
+                    return response
+                self.provider._respond = wrong_status
+                result = self.approve(approval)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertTrue(any(key in result.error for key in changes))
+                self.assertEqual(len([call for call in self.provider.writes if call[0] == "PUT" and call[1].endswith("/" + suffix)]), 1)
+                self.diagnostics.assert_called_once()
+                if suffix.startswith("line_items"):
+                    self.assertEqual(self.provider.campaign["entity_status"], "PAUSED")
+
+    def test_auto_bid_amount_in_creation_reply_stops_before_child_writes(self):
+        for amount in (0, 1000000, "1000000", True):
+            with self.subTest(amount=amount):
+                self.provider = AdsProvider()
+                self.diagnostics.reset_mock()
+                approval = self.propose("launch_campaign", plan())
+                original = self.provider._respond
+                def added_bid(method, path, params):
+                    response = original(method, path, params)
+                    if method == "POST" and path.endswith("/line_items"):
+                        self.provider.group["bid_amount_local_micro"] = amount
+                    return response
+                self.provider._respond = added_bid
+                result = self.approve(approval)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("bid_amount_local_micro", result.error)
+                self.assertEqual(len(self.provider.writes), 2)
+                self.assertEqual(self.provider.campaign["entity_status"], "PAUSED")
+                self.diagnostics.assert_called_once()
+
+    def test_snapshot_mismatch_reports_fields_once_before_each_activation(self):
+        for after_child in (False, True):
+            with self.subTest(after_child=after_child):
+                self.provider = AdsProvider()
+                self.diagnostics.reset_mock()
+                approval = self.propose("launch_campaign", plan())
+                original = self.provider._respond
+                def changing(method, path, params):
+                    response = original(method, path, params)
+                    trigger = method == "PUT" and path.endswith("/line_items/group1") if after_child else method == "POST" and path.endswith("/promoted_tweets")
+                    if trigger:
+                        # Equivalent money representations must not crowd the useful
+                        # diagnostic for the genuinely unknown configured field.
+                        self.provider.campaign["daily_budget_amount_local_micro"] = str(self.provider.campaign["daily_budget_amount_local_micro"])
+                        self.provider.group["unknown_config"] = "private configuration value"
+                    return response
+                self.provider._respond = changing
+                result = self.approve(approval)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("different from its creation response", result.error)
+                self.assertEqual(self.provider.campaign["entity_status"], "PAUSED")
+                self.assertEqual(self.provider.group["entity_status"], "ACTIVE" if after_child else "PAUSED")
+                self.assertFalse(any(path.endswith("/campaigns/camp1") for _, path, _ in self.provider.writes))
+                self.diagnostics.assert_called_once()
+                context = self.diagnostics.call_args.args[0]["context"]
+                self.assertEqual(context["verification_comparison"], "creation_to_active_child_readback" if after_child else "creation_to_paused_readback")
+                self.assertEqual(context["verification_difference_1"], "ad_group.unknown_config: MISSING -> STRING")
+                self.assertNotIn("verification_difference_2", context)
+                self.assertFalse(context["verification_differences_truncated"])
+                self.assertIn("create campaign camp1", context["confirmed_resources"])
+                self.assertIn("promoted post ad1", context["confirmed_resources"])
+                self.assertNotIn("private configuration value", json.dumps(context))
+
+    def test_parent_activation_unknown_drift_is_terminal_and_may_be_live(self):
+        approval = self.propose("launch_campaign", plan())
+        original = self.provider._respond
+        def changed(method, path, params):
+            response = original(method, path, params)
+            if method == "PUT" and path.endswith("/campaigns/camp1"):
+                self.provider.campaign["unknown_config"] = "private configuration value"
+            return response
+        self.provider._respond = changed
+        result = self.approve(approval)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("Delivery may be active", result.error)
+        self.assertEqual(self.provider.campaign["entity_status"], "ACTIVE")
+        self.assertEqual(len(self.provider.writes), 7)
+        self.diagnostics.assert_called_once()
+        context = self.diagnostics.call_args.args[0]["context"]
+        self.assertEqual(context["verification_comparison"], "creation_to_active_parent_response")
+        self.assertEqual(context["verification_difference_1"], "campaign.unknown_config: MISSING -> STRING")
+        self.assertNotIn("private configuration value", json.dumps(context))
+
+    def test_role_order_is_stable_but_membership_changes_still_require_approval(self):
+        for changed in (False, True):
+            with self.subTest(changed=changed):
+                self.provider = AdsProvider()
+                self.provider.access["permissions"] = ["AD_MANAGER", "ACCOUNT_ADMIN"]
+                approval = self.propose("launch_campaign", plan())
+                self.provider.access["permissions"] = ["ACCOUNT_ADMIN", "AD_MANAGER"] if not changed else ["AD_MANAGER"]
+                result = self.approve(approval)
+                if changed:
+                    self.assertIsInstance(result, ActionFailed)
+                    self.assertEqual(self.provider.writes, [])
+                else:
+                    self.assertIsInstance(result, ApprovalExecuted)
+
+    def test_reference_changes_identify_fields_without_echoing_creative_values(self):
+        for stage in ("before launch", "paused", "active child"):
+            with self.subTest(stage=stage):
+                self.provider = AdsProvider()
+                self.diagnostics.reset_mock()
+                approval = self.propose("launch_campaign", plan())
+                if stage == "before launch":
+                    self.provider.post["full_text"] = "private edited creative"
+                original = self.provider._respond
+                def changing(method, path, params):
+                    response = original(method, path, params)
+                    if stage == "paused" and method == "POST" and path.endswith("/promoted_tweets") or stage == "active child" and method == "PUT" and path.endswith("/line_items/group1"):
+                        self.provider.post["full_text"] = "private edited creative"
+                    return response
+                self.provider._respond = changing
+                self.assertIsInstance(self.approve(approval), ActionFailed)
+                if stage == "before launch":
+                    self.assertEqual(self.provider.writes, [])
+                else:
+                    self.assertEqual(self.provider.campaign["entity_status"], "PAUSED")
+                self.diagnostics.assert_called_once()
+                context = self.diagnostics.call_args.args[0]["context"]
+                self.assertIn("post.content_sha256: STRING -> STRING", json.dumps(context))
+                self.assertNotIn("private edited creative", json.dumps(context))
+                self.assertNotIn("Build with Kern", json.dumps(context))
+
+    def test_snapshot_difference_metadata_never_echoes_values_or_hostile_keys(self):
+        before = {"name": "private name", "media": {"url": "https://example.com/private?token=credential"}, "targeting": [{"targeting_value": "private phrase"}]}
+        after = {"name": "other private name", "media": {"url": "https://example.com/other?token=othercredential"}, "targeting": [{"targeting_value": None}], "https://private.example/secret": "private value", "access_token": "credential"}
+        context = tool._difference_context(before, after, "creation_to_paused_readback")
+        serialized = json.dumps(context)
+        for sensitive in ("private", "credential", "https://", "access_token"):
+            self.assertNotIn(sensitive, serialized)
+        self.assertIn("targeting[0].targeting_value: STRING -> NULL", serialized)
+        self.assertIn("other_field: MISSING -> STRING", serialized)
+        deep_before, deep_after = 0, 1
+        for _ in range(10):
+            deep_before, deep_after = {"nested": deep_before}, {"nested": deep_after}
+        cases = (
+            ({}, {f"field_{index}": "value" for index in range(100)}),
+            ([0] * 64, [0] * 63 + [1]),
+            (deep_before, deep_after),
+        )
+        for before, after in cases:
+            with self.subTest(after=after):
+                context = tool._difference_context(before, after, "creation_to_paused_readback")
+                self.assertLessEqual(len(context), 10)
+                self.assertLessEqual(len(json.dumps(context).encode()), 4096)
+                self.assertTrue(all(not isinstance(value, str) or len(value.encode()) <= 512 for value in context.values()))
+                self.assertTrue(context["verification_differences_truncated"])
 
     def test_known_pending_creative_configures_active_without_claiming_delivery(self):
         approval = self.propose("launch_campaign", plan())

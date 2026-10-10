@@ -51,9 +51,9 @@ class MetaFixture:
                         'currency': 'USD', 'timezone_name': 'America/New_York',
                         'account_status': 1, 'disable_reason': 0, 'user_tasks': ['ADVERTISE'],
                         'funding_source': 'billing-id', 'min_daily_budget': '50'}
-        self.page = {'id': PAGE, 'name': 'Real Page', 'instagram_business_account': {
+        self.page = {'id': PAGE, 'name': 'Real Page', 'tasks': ['ADVERTISE'], 'instagram_business_account': {
             'id': INSTAGRAM, 'username': 'owned_profile', 'account_type': 'BUSINESS'}}
-        self.user_pages = [{**deepcopy(self.page), 'tasks': ['ADVERTISE']}]
+        self.user_pages = [self.page]
         self.media = {'id': MEDIA, 'owner': {'id': INSTAGRAM}, 'caption': 'The exact original caption',
                       'media_type': 'VIDEO', 'media_product_type': 'REELS',
                       'media_url': 'https://cdninstagram.com/source.mp4?signature=first',
@@ -349,7 +349,7 @@ class InstagramAdsTests(unittest.TestCase):
             self.assertIsInstance(denied, ActionFailed)
             self.assertEqual(self.meta.calls, [])
 
-    def test_user_pages_expose_access_difference_without_authorizing_launch(self):
+    def test_first_promotion_uses_explicit_access_not_promotion_history(self):
         self.meta.user_pages[0]['access_token'] = 'unrequested-page-token'
         self.meta.user_pages[0]['email'] = 'unrequested@example.com'
         def response(method, url, **kwargs):
@@ -366,13 +366,68 @@ class InstagramAdsTests(unittest.TestCase):
         self.assertEqual(row['instagram_user_id'], INSTAGRAM)
         self.assertEqual(row['tasks'], ['ADVERTISE'])
         self.assertEqual(row['tasks_state'], 'present')
-        self.assertEqual(normal.result['items'], [])
-        self.assertIsInstance(launch, ActionFailed)
-        self.assertIn('Page advertising access', launch.error)
+        self.assertEqual(normal.result['items'][0]['page_id'], PAGE)
+        self.assertIsInstance(launch, ActionPendingApproval)
         self.assertFalse(self.meta.writes)
         self.assertNotIn('unrequested', json.dumps(result))
         fields = next(params['fields'] for _, path, params, _ in self.meta.calls if path == '/me/accounts')
         self.assertEqual(fields, 'id,name,tasks,instagram_business_account{id,username,account_type}')
+
+    def test_page_advertising_tasks_are_required_for_discovery_and_launch(self):
+        for tasks, allowed in ((None, False), ([], False), (['ANALYZE'], False), ('ADVERTISE', False),
+                               (['ADVERTISE', 1], False), (['ADVERTISE'], True), (['MANAGE'], True),
+                               (['PROFILE_PLUS_ADVERTISE'], True), (['PROFILE_PLUS_MANAGE'], True),
+                               (['PROFILE_PLUS_FULL_CONTROL'], True)):
+            with self.subTest(tasks=tasks):
+                self.meta.page['tasks'] = tasks
+                listing = ads.BUNDLED_TOOL.execute('list_identities', {'account_id': ACCOUNT}, self.api)
+                self.assertEqual(bool(listing.result['items']), allowed)
+                launch = ads.BUNDLED_TOOL.execute('launch_campaign', launch_input(), self.api)
+                self.assertIsInstance(launch, ActionPendingApproval if allowed else ActionFailed)
+                self.assertFalse(self.meta.writes)
+
+    def test_user_page_must_match_selected_advertiser_instagram_access(self):
+        def response(method, url, **kwargs):
+            if '/connected_instagram_accounts?' in url:
+                return {'data': [{'id': '999', 'username': 'other_profile'}]}
+            return self.meta(method, url, **kwargs)
+        with patch.object(ads, 'json_request', response):
+            listing = ads.BUNDLED_TOOL.execute('list_identities', {'account_id': ACCOUNT}, self.api)
+            launch = ads.BUNDLED_TOOL.execute('launch_campaign', launch_input(), self.api)
+        self.assertEqual(listing.result['items'], [])
+        self.assertIsInstance(launch, ActionFailed)
+        self.assertIn('Instagram advertising access', launch.error)
+        self.assertFalse(self.meta.writes)
+
+    def test_identity_discovery_cursor_continues_user_pages_not_promotion_history(self):
+        self.meta.page_cursor = 'next_page'
+        result = ads.BUNDLED_TOOL.execute('list_identities', {'account_id': ACCOUNT, 'after': 'user_cursor', 'limit': 1}, self.api)
+        calls = {path: params for _, path, params, _ in self.meta.calls}
+        self.assertEqual(calls['/me/accounts']['after'], 'user_cursor')
+        self.assertEqual(calls['/me/accounts']['limit'], '1')
+        self.assertNotIn('after', calls['/act_100/connected_instagram_accounts'])
+        self.assertNotIn('/act_100/promote_pages', calls)
+        self.assertEqual(result.result['next_cursor'], 'next_page')
+
+    def test_page_task_revocation_blocks_creation_or_parent_activation(self):
+        for phase in ('before_creation', 'before_activation'):
+            self.api, self.meta = connected_api(), MetaFixture()
+            with self.subTest(phase=phase), patch.object(ads, 'json_request', self.meta):
+                approval = self.queue()
+                if phase == 'before_creation':
+                    self.meta.page['tasks'] = ['ANALYZE']
+                else:
+                    def revoke(path, fields):
+                        if path == '/act_100/ads':
+                            self.meta.page['tasks'] = ['ANALYZE']
+                    self.meta.write_hook = revoke
+                result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn('Page advertising access', result.error)
+                self.assertEqual(len(self.meta.writes), 0 if phase == 'before_creation' else 6)
+                self.assertFalse(any(path == '/' + CAMPAIGN and fields.get('status') == 'ACTIVE' for path, fields in self.meta.writes))
+                if phase == 'before_activation':
+                    self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'PAUSED')
 
     def test_user_page_tasks_preserve_missing_null_empty_and_invalid_shape(self):
         for state, value in (('missing', None), ('null', None), ('empty', []), ('invalid', 'ADVERTISE'),
@@ -625,7 +680,7 @@ class InstagramAdsTests(unittest.TestCase):
         self.assertEqual(self.api.approvals.counter, 0)
 
     def test_approval_binds_credential_access_caption_destination_and_budget(self):
-        for kind in ('caption', 'scope', 'funding', 'token', 'grant', 'app', 'username', 'budget', 'dsa_default', 'access'):
+        for kind in ('caption', 'scope', 'business_scope', 'funding', 'token', 'grant', 'app', 'username', 'budget', 'dsa_default', 'access'):
             self.api, self.meta = connected_api(), MetaFixture()
             with self.subTest(kind=kind), patch.object(ads, 'json_request', self.meta):
                 value = launch_input('WEBSITE_CLICKS')
@@ -635,6 +690,7 @@ class InstagramAdsTests(unittest.TestCase):
                 approval = self.queue(value)
                 if kind == 'caption': self.meta.media['caption'] = 'Changed'
                 elif kind == 'scope': self.meta.permissions.remove('ads_management')
+                elif kind == 'business_scope': self.meta.permissions.remove('business_management')
                 elif kind == 'funding': self.meta.account['funding_source'] = 'other-billing'
                 elif kind == 'token': self.api.credentials.record['secret']['access_token'] = 'new-token'
                 elif kind == 'grant': self.api.credentials.record['metadata']['grant_id'] = 'reconnected'
@@ -1319,7 +1375,7 @@ class InstagramAdsTests(unittest.TestCase):
         start = ads.CREDENTIALS.start_connect(params, self.api)
         query = parse_qs(urlsplit(start['authorization_url']).query)
         self.assertEqual(set(query['scope'][0].split(',')), set(ads.SCOPES))
-        self.assertNotIn('business_management', query['scope'][0])
+        self.assertIn('business_management', query['scope'][0].split(','))
         self.assertNotIn('meta-secret', start['authorization_url'])
         result = ads.CREDENTIALS.complete_connect({**params, 'state': start['state'], 'code': 'code'}, self.api)
         self.assertEqual(result['account']['id'], '900')
@@ -1335,9 +1391,10 @@ class InstagramAdsTests(unittest.TestCase):
         self.assertEqual(ads.MANIFEST.tool_id, 'instagram_ads')
 
     def test_expired_or_insufficient_grant_requires_reconnect_without_requests(self):
-        for kind in ('expiry', 'scopes'):
+        for kind in ('expiry', 'scopes', 'legacy_five_scopes'):
             self.api = connected_api()
             if kind == 'expiry': self.api.credentials.record['secret']['expires_at'] = 1
+            elif kind == 'legacy_five_scopes': self.api.credentials.record['account']['scopes'].remove('business_management')
             else: self.api.credentials.record['account']['scopes'] = ['ads_read']
             before = len(self.meta.calls)
             result = ads.BUNDLED_TOOL.execute('list_accounts', {}, self.api)
@@ -1345,6 +1402,25 @@ class InstagramAdsTests(unittest.TestCase):
             self.assertTrue(result.reconnect_required)
             self.assertEqual(len(self.meta.calls), before)
             self.assertIsNone(self.api.credentials.record)
+
+    def test_oauth_missing_business_permission_does_not_save_replacement(self):
+        redirect = 'https://kern.example/tool-oauth/instagram_ads/callback'
+        previous = deepcopy(self.api.credentials.record)
+        self.meta.permissions.remove('business_management')
+        start = ads.CREDENTIALS.start_connect({'redirect_uri': redirect}, self.api)
+        with self.assertRaisesRegex(RuntimeError, 'all required'):
+            ads.CREDENTIALS.complete_connect({'redirect_uri': redirect, 'state': start['state'], 'code': 'code'}, self.api)
+        self.assertEqual(self.api.credentials.record, previous)
+        self.assertFalse(self.meta.writes)
+
+    def test_live_business_permission_revocation_stops_before_page_data(self):
+        self.meta.permissions.remove('business_management')
+        result = ads.BUNDLED_TOOL.execute('diagnose_account', {'account_id': ACCOUNT}, self.api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertTrue(result.reconnect_required)
+        self.assertIn('business_management', result.error)
+        self.assertEqual([call[1] for call in self.meta.calls], ['/me', '/me/permissions'])
+        self.assertFalse(self.meta.writes)
 
     def test_direct_reads_recheck_remotely_revoked_scopes_before_account_data(self):
         values = {

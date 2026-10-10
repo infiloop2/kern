@@ -12,6 +12,12 @@ from host.tools.shared import outputs
 from host.tools.shared.inputs import clip_text
 from host.tools.browser.reply_context import target_tweet
 
+_APPROVED_ACTION_NOT_STARTED = (
+    "Browser is busy. The action was not started. "
+    "No post or message was submitted by this attempt. "
+    "Do not retry posting or messaging automatically; another attempt requires a new approval."
+)
+
 ACCOUNT = outputs.obj({
     "account_id": outputs.text("Stable Kern connected-account identifier."),
     "provider": {"type": "string", "enum": ["x", "linkedin"]},
@@ -108,6 +114,8 @@ class BrowserTool(Tool):
         if approval.action_id == "linkedin_send_dm":
             try:
                 return linkedin.execute_approved(approval)
+            except client.BrowserActionNotStarted:
+                return ActionFailed(_APPROVED_ACTION_NOT_STARTED)
             except client.BrowserError as exc:
                 return ActionFailed(str(exc))
         payload = approval.payload
@@ -133,6 +141,8 @@ class BrowserTool(Tool):
             if result.get("status") == "posted" and isinstance(result.get("url"), str):
                 return ApprovalExecuted(f"{'Replied to ' + reply_id if reply_id else 'Posted on X'} as @{account}: {result['url']}")
             return ActionFailed("Could not confirm publication. Check X before approving another attempt.")
+        except client.BrowserActionNotStarted:
+            return ActionFailed(_APPROVED_ACTION_NOT_STARTED)
         except client.BrowserError as exc:
             return ActionFailed(str(exc))
 
