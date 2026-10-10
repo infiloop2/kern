@@ -49,6 +49,20 @@ class AdsDiagnosticsTests(unittest.TestCase):
         self.assertLessEqual(len(json.dumps(context).encode()), 4096)
         self.assertTrue(all(len(value.encode()) <= 512 and "\ufffd" not in value for value in chunks))
 
+    def test_additive_verification_metadata_preserves_provider_and_failure_evidence(self):
+        exc = AdsProviderError("Provider rejected request.", "POST campaigns", status=400, body=b'{"errors":[{"code":"INVALID","message":"useful provider detail"}]}')
+        with patch("host.tools.shared.ads_diagnostics.host_errors.emit_record") as emit:
+            report_ads_failure("x_ads", "launch_campaign", exc, phase="verify paused campaign", confirmed=("campaign c1",),
+                               diagnostic_context={"verification_difference_1": "campaign.name: STRING -> STRING", "phase": "must not replace", "http_status": 200})
+        emit.assert_called_once()
+        context = emit.call_args.args[0]["context"]
+        self.assertEqual(context["phase"], "verify paused campaign")
+        self.assertEqual(context["http_status"], 400)
+        self.assertEqual(context["operation"], "POST campaigns")
+        self.assertEqual(context["confirmed_resources"], "campaign c1")
+        self.assertEqual(context["verification_difference_1"], "campaign.name: STRING -> STRING")
+        self.assertIn("useful provider detail", context["provider_response"])
+
     def test_transport_and_verification_failures_need_no_provider_body(self):
         for exc in (WebRequestError("Provider unavailable."), RuntimeError("Created campaign settings did not match.")):
             with self.subTest(exc=type(exc).__name__), patch("host.tools.shared.ads_diagnostics.host_errors.emit_record") as emit:

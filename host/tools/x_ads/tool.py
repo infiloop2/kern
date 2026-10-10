@@ -62,6 +62,19 @@ def _time(value: JSONValue | None, name: str) -> datetime:
         raise ValueError(f"X Ads {name} is not a valid date.") from exc
 
 
+def _returned_time(value: JSONValue | None) -> str | None:
+    """Compare provider ISO timestamps by instant, without rounding or defaults."""
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.0{1,9})?(?:Z|[+-][0-9]{2}:?[0-9]{2})", value, re.ASCII):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.microsecond:
+            return None
+        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (ValueError, OverflowError):
+        return None
+
+
 def _flight(values: JSONObject, *, future_end: bool) -> None:
     start = _time(values.get("start_time"), "start_time")
     end = _time(values.get("end_time"), "end_time")
@@ -125,7 +138,7 @@ def _account(client: Client, account_id: str, *, write: bool = False) -> tuple[J
         raise RuntimeError("X Ads did not return authenticated-user permissions.")
     if write and not any(role in WRITE_ROLES for role in permissions):
         raise ValueError("This X Ads user needs ACCOUNT_ADMIN or AD_MANAGER permission for advertising writes.")
-    return row, {"user_id": access["user_id"], "permissions": permissions}
+    return row, {"user_id": access["user_id"], "permissions": cast(list[JSONValue], sorted(cast(list[str], permissions)))}
 
 
 def _promoter(client: Client, account_id: str, promoter_id: str) -> JSONObject:
@@ -238,28 +251,106 @@ def _bundle(client: Client, account_id: str, campaign_id: str) -> JSONObject:
     return bundle
 
 
-def _snapshot(bundle: JSONObject) -> str:
+def _stable_state(value: JSONValue) -> JSONValue:
     derived = {"updated_at", "effective_status", "servable", "reasons_not_servable"}
-    def stable(value: JSONValue) -> JSONValue:
-        if isinstance(value, dict):
-            return {key: stable(item) for key, item in value.items() if key not in derived}
-        if isinstance(value, list):
-            return [stable(item) for item in value]
-        return value
+    if isinstance(value, dict):
+        return {key: _stable_state(item) for key, item in value.items() if key not in derived}
+    if isinstance(value, list):
+        return [_stable_state(item) for item in value]
+    return value
+
+
+def _snapshot(bundle: JSONObject) -> str:
     # Bind configured state, including unknown fields, without copying huge
     # provider snapshots. Derived delivery fields can change with the child
     # activation itself; configured entity_status remains bound separately.
-    return _digest(stable(bundle))
+    return _digest(_configured_state(bundle))
 
 
-def _launch_snapshot(bundle: JSONObject, initial_review: JSONValue | None) -> str:
+def _configured_state(bundle: JSONObject) -> JSONObject:
+    """Canonicalize only known equivalent representations, binding other fields."""
+    result = cast(JSONObject, _stable_state(bundle))
+    campaign, group = cast(JSONObject, result["campaign"]), cast(JSONObject, result["ad_group"])
+    for row in (campaign, group):
+        for key in s.BUDGETS:
+            amount = s.money(row, key)
+            if amount is not None:
+                row[key] = amount
+        for key in ("frequency_cap", "duration_in_days"):
+            row.setdefault(key, None)
+    for key in (*s.BUDGETS, "bid_amount_local_micro", "standard_delivery", "audience_expansion"):
+        group.setdefault(key, None)
+    for key in ("start_time", "end_time"):
+        instant = _returned_time(group.get(key))
+        if instant is not None:
+            group[key] = instant
+    # X's GET line-item example adds the inherited funding ID omitted by POST.
+    # A provided different ID is retained here and rejected by verification.
+    if group.get("funding_instrument_id") is None:
+        group["funding_instrument_id"] = campaign.get("funding_instrument_id")
+    if group.get("automatic_tweet_promotion") is None:
+        group["automatic_tweet_promotion"] = False
+    if group.get("creative_source") is None:
+        group["creative_source"] = "MANUAL"
+    for target in cast(list[JSONObject], result["targeting"]):
+        if target.get("operator_type") is None:
+            target["operator_type"] = "EQ"
+    return result
+
+
+def _launch_state(bundle: JSONObject, initial_review: JSONValue | None) -> JSONObject:
     """Allow X to accept a pending creative, binding all other state exactly."""
     posts = cast(list[JSONObject], bundle["promoted_posts"])
     current_review = posts[0].get("approval_status")
     if current_review != initial_review and not (initial_review == "PENDING" and current_review == "ACCEPTED"):
         raise ValueError("The X Ads creative review state changed outside the approved launch flow.")
-    adjusted: JSONObject = {**bundle, "promoted_posts": [{**posts[0], "approval_status": initial_review}]}
-    return _snapshot(adjusted)
+    return {**bundle, "promoted_posts": [{**posts[0], "approval_status": initial_review}]}
+
+
+def _launch_snapshot(bundle: JSONObject, initial_review: JSONValue | None) -> str:
+    return _snapshot(_launch_state(bundle, initial_review))
+
+
+def _difference_context(before: JSONValue, after: JSONValue, comparison: str) -> dict[str, str | int | bool]:
+    """Bounded field names and JSON types only; never retain compared values."""
+    missing = object()
+    differences: list[str] = []
+    visited = 0
+    truncated = False
+    def value_type(value: object) -> str:
+        return "MISSING" if value is missing else "NULL" if value is None else {
+            bool: "BOOLEAN", int: "NUMBER", float: "NUMBER", str: "STRING", dict: "OBJECT", list: "ARRAY",
+        }.get(type(value), "OTHER")
+    def record(left: object, right: object, path: str) -> None:
+        nonlocal truncated
+        if len(differences) < 8:
+            differences.append(f"{path or 'root'}: {value_type(left)} -> {value_type(right)}")
+        else:
+            truncated = True
+    def walk(left: object, right: object, path: str, depth: int) -> None:
+        nonlocal visited, truncated
+        visited += 1
+        if visited > 512 or depth > 8 or len(path) > 160 or len(differences) >= 8:
+            truncated = True
+            return
+        if type(left) is not type(right):
+            record(left, right, path)
+        elif isinstance(left, dict) and isinstance(right, dict):
+            keys = sorted(set(left) | set(right))
+            truncated = truncated or len(keys) > 64
+            for key in keys[:64]:
+                safe_key = key if re.fullmatch(r"[a-z][a-z0-9_]{0,63}", key, re.ASCII) and not re.search(r"secret|token|password|authorization|signature", key) else "other_field"
+                walk(left.get(key, missing), right.get(key, missing), f"{path}.{safe_key}" if path else safe_key, depth + 1)
+        elif isinstance(left, list) and isinstance(right, list):
+            length = max(len(left), len(right))
+            truncated = truncated or length > 32
+            for index in range(min(length, 32)):
+                walk(left[index] if index < len(left) else missing, right[index] if index < len(right) else missing, f"{path}[{index}]", depth + 1)
+        elif left != right:
+            record(left, right, path)
+    walk(before, after, "", 0)
+    return {"verification_comparison": comparison, "verification_differences_truncated": truncated,
+            **{f"verification_difference_{index + 1}": item for index, item in enumerate(differences)}}
 
 
 def _launch_plan(values: JSONObject) -> JSONObject:
@@ -331,6 +422,7 @@ def _group_params(plan: JSONObject, campaign_id: str) -> dict[str, str]:
 
 
 def _confirm_settings(row: JSONObject, params: dict[str, str]) -> None:
+    mismatches: list[str] = []
     for key, value in params.items():
         actual = row.get(key)
         if key == "standard_delivery":
@@ -339,39 +431,57 @@ def _confirm_settings(row: JSONObject, params: dict[str, str]) -> None:
             matches = actual == value.split(",")
         elif key.endswith("_local_micro"):
             matches = s.money(row, key) == value
+        elif key in ("start_time", "end_time"):
+            matches = _returned_time(actual) == value
         else:
             matches = actual == value
         if not matches:
-            raise RuntimeError(f"X Ads did not confirm the requested {key} setting.")
+            mismatches.append(key)
+    if mismatches:
+        raise RuntimeError("X Ads did not confirm the requested settings: " + ", ".join(mismatches) + ".")
 
 
-def _confirm_campaign(campaign: JSONObject, plan: JSONObject, currency: JSONValue) -> None:
-    _confirm_settings(campaign, {**_campaign_params(plan), "budget_optimization": "CAMPAIGN"})
+def _confirm_campaign(campaign: JSONObject, plan: JSONObject, currency: JSONValue, *, status: str = "PAUSED") -> None:
+    _confirm_settings(campaign, {**_campaign_params(plan), "budget_optimization": "CAMPAIGN", "entity_status": status})
     if campaign.get("currency") != currency or campaign.get("deleted") is not False:
         raise RuntimeError("X Ads did not confirm the campaign's funding currency or live state.")
+    for key in ("frequency_cap", "duration_in_days"):
+        if campaign.get(key) is not None:
+            raise RuntimeError(f"X Ads returned an unapproved campaign {key} setting.")
+
+
+def _confirm_group(group: JSONObject, plan: JSONObject, campaign_id: str, currency: JSONValue, status: str) -> None:
+    _confirm_settings(group, {**_group_params(plan, campaign_id), "entity_status": status})
+    checks = {
+        "currency": group.get("currency") == currency,
+        "deleted": group.get("deleted") is False,
+        "pay_by": group.get("pay_by") == OBJECTIVES[str(plan["objective"])][1],
+        "funding_instrument_id": group.get("funding_instrument_id") in (None, plan["funding_instrument_id"]),
+        "audience_expansion": group.get("audience_expansion") == plan.get("audience_expansion"),
+        "automatic_tweet_promotion": group.get("automatic_tweet_promotion") is None or group.get("automatic_tweet_promotion") is False,
+        "creative_source": group.get("creative_source") in (None, "MANUAL"),
+        **{key: group.get(key) is None for key in (*s.BUDGETS, "bid_amount_local_micro", "standard_delivery", "frequency_cap", "duration_in_days")},
+    }
+    mismatches = [key for key, matches in checks.items() if not matches]
+    if mismatches:
+        raise RuntimeError("X Ads returned unapproved ad-group settings: " + ", ".join(mismatches) + ".")
 
 
 def _verify_created(bundle: JSONObject, plan: JSONObject, currency: JSONValue, *, group_status: str) -> None:
     campaign, group = cast(JSONObject, bundle["campaign"]), cast(JSONObject, bundle["ad_group"])
     campaign_id = _id(campaign.get("id"), "campaign")
     _confirm_campaign(campaign, plan, currency)
-    _confirm_settings(group, {**_group_params(plan, campaign_id), "entity_status": group_status})
-    if (group.get("currency") != currency or group.get("deleted") is not False
-            or group.get("pay_by") != OBJECTIVES[str(plan["objective"])][1]
-            or group.get("audience_expansion") != plan.get("audience_expansion")
-            or group.get("automatic_tweet_promotion") or group.get("creative_source") not in (None, "MANUAL")
-            or any(group.get(key) is not None for key in (*s.BUDGETS, "standard_delivery"))
-            or any(row.get(key) is not None for row in (campaign, group) for key in ("frequency_cap", "duration_in_days"))):
-        raise ValueError("X Ads returned delivery or billing settings outside the approved launch terms.")
+    _confirm_group(group, plan, campaign_id, currency, group_status)
     rows = cast(list[JSONObject], bundle["targeting"])
     targets = _targets(cast(list[JSONValue], [{"type": row.get("targeting_type"), "value": row.get("targeting_value")} for row in rows]))
     expected = cast(list[JSONObject], plan["targeting"])
     if (sorted((str(r["type"]), str(r["value"])) for r in targets) != sorted((str(r["type"]), str(r["value"])) for r in expected)
-            or any(row.get("operator_type") not in (None, "EQ") for row in rows)):
+            or any(row.get("operator_type") not in (None, "EQ") or row.get("deleted") is not False for row in rows)):
         raise ValueError(MISMATCH)
     promoted = cast(list[JSONObject], bundle["promoted_posts"])
     if (len(promoted) != 1 or promoted[0].get("tweet_id") != plan["post_id"]
-            or promoted[0].get("entity_status") != "ACTIVE" or promoted[0].get("approval_status") not in ("ACCEPTED", "PENDING")):
+            or promoted[0].get("entity_status") != "ACTIVE" or promoted[0].get("deleted") is not False
+            or promoted[0].get("approval_status") not in ("ACCEPTED", "PENDING")):
         raise ValueError("Launch requires exactly one active post association with explicit ACCEPTED or PENDING X review. Rejected, missing or unknown review leaves the created parent paused; inspect its IDs.")
 
 
@@ -582,6 +692,7 @@ class XAdsTool:
         if approval.action_id not in ("launch_campaign", "end_campaign"):
             return ActionFailed("Unsupported X Ads approval action.")
         writes: Writes | None = None
+        diagnostic_context: dict[str, str | int | bool] = {}
         try:
             client = Client(api)
             writes = Writes(client)
@@ -594,9 +705,13 @@ class XAdsTool:
                     raise ValueError(MISMATCH)
                 references, funding = _references(client, plan)
                 if _digest(references) != payload.get("reference_sha256") or funding["currency"] != payload.get("currency"):
+                    diagnostic_context = _difference_context({"references": payload.get("references"), "currency": payload.get("currency")},
+                        {"references": references, "currency": funding["currency"]}, "approval_to_launch_references")
                     raise ValueError(MISMATCH)
                 _flight(plan, future_end=True)
                 created = self._create(writes, plan, funding)
+                writes.attempted = "verify creation responses"
+                _verify_created(created, plan, funding["currency"], group_status="PAUSED")
                 campaign_id = str(cast(JSONObject, created["campaign"])["id"])
                 group_id = str(cast(JSONObject, created["ad_group"])["id"])
                 prefix = f"/accounts/{plan['account_id']}"
@@ -607,12 +722,15 @@ class XAdsTool:
                 initial_review = cast(JSONObject, cast(list[JSONValue], created["promoted_posts"])[0]).get("approval_status")
                 previous_review = cast(JSONObject, cast(list[JSONValue], current["promoted_posts"])[0])["approval_status"]
                 if _launch_snapshot(current, initial_review) != snapshot:
-                    raise ValueError(MISMATCH)
+                    diagnostic_context = _difference_context(_configured_state(created), _configured_state(_launch_state(current, initial_review)), "creation_to_paused_readback")
+                    raise ValueError("X Ads returned configured state different from its creation response. Inspect Host diagnostics before a new approval.")
                 current_references, _ = _references(client, plan)
                 if _digest(current_references) != payload.get("reference_sha256"):
+                    diagnostic_context = _difference_context(payload.get("references"), current_references, "approval_to_paused_references")
                     raise ValueError(MISMATCH)
                 _flight(plan, future_end=True)
-                writes.entity("PUT", prefix + "/line_items/" + group_id, {"entity_status": "ACTIVE"}, "activate ad group", expected_id=group_id)
+                activated_group = writes.entity("PUT", prefix + "/line_items/" + group_id, {"entity_status": "ACTIVE"}, "activate ad group", expected_id=group_id)
+                _confirm_group(activated_group, plan, campaign_id, funding["currency"], "ACTIVE")
                 # The parent's paused state is the spending barrier. Confirm the
                 # child, all settings and references before activating it last.
                 writes.attempted = "verify active child under paused parent"
@@ -623,12 +741,19 @@ class XAdsTool:
                     raise ValueError("X Ads returned a new creative review after acceptance. The parent remains paused.")
                 cast(JSONObject, current["ad_group"])["entity_status"] = "PAUSED"
                 if _launch_snapshot(current, initial_review) != snapshot:
-                    raise ValueError(MISMATCH)
+                    diagnostic_context = _difference_context(_configured_state(created), _configured_state(_launch_state(current, initial_review)), "creation_to_active_child_readback")
+                    raise ValueError("X Ads returned configured state different from its creation response. Inspect Host diagnostics before a new approval.")
                 current_references, _ = _references(client, plan)
                 if _digest(current_references) != payload.get("reference_sha256"):
+                    diagnostic_context = _difference_context(payload.get("references"), current_references, "approval_to_active_child_references")
                     raise ValueError(MISMATCH)
                 _flight(plan, future_end=True)
-                writes.entity("PUT", prefix + "/campaigns/" + campaign_id, {"entity_status": "ACTIVE"}, "activate campaign", expected_id=campaign_id)
+                activated_campaign = writes.entity("PUT", prefix + "/campaigns/" + campaign_id, {"entity_status": "ACTIVE"}, "activate campaign", expected_id=campaign_id)
+                _confirm_campaign(activated_campaign, plan, funding["currency"], status="ACTIVE")
+                final_bundle = {**current, "campaign": {**activated_campaign, "entity_status": "PAUSED"}}
+                if _launch_snapshot(final_bundle, initial_review) != snapshot:
+                    diagnostic_context = _difference_context(_configured_state(created), _configured_state(_launch_state(final_bundle, initial_review)), "creation_to_active_parent_response")
+                    raise RuntimeError("X Ads returned changed configured state after parent activation. Delivery may be active; inspect Host diagnostics and X Ads.")
                 review_message = "Last observed X review PENDING: delivery is blocked until X accepts, then may start within the approved flight without another Kern write or approval." if final_review == "PENDING" else "Last observed X review ACCEPTED: delivery can spend now or at its approved start."
                 return ApprovalExecuted(f"Created new X Ads campaign {campaign_id}, ad group {group_id}, and post association {cast(JSONObject, cast(list[JSONValue], created['promoted_posts'])[0])['id']}; configured campaign and ad group ACTIVE. Objective {plan['objective']}, AUTO bidding; {funding['currency']} daily {_units(plan[s.BUDGETS[0]])}, total {_units(plan[s.BUDGETS[1]])}. {review_message} Configured ACTIVE is not proof of delivery; inspect X Ads/performance.")
             account_id, campaign_id = _id(payload.get("account_id"), "account"), _id(payload.get("campaign_id"), "campaign")
@@ -640,15 +765,18 @@ class XAdsTool:
             prefix = f"/accounts/{account_id}"
             _entity(client, prefix + "/campaigns/" + campaign_id, campaign_id)
             writes.confirmed.append(f"existing campaign {campaign_id}")
-            writes.entity("PUT", prefix + "/campaigns/" + campaign_id, {"entity_status": "PAUSED"}, "end campaign", expected_id=campaign_id)
+            ended_campaign = writes.entity("PUT", prefix + "/campaigns/" + campaign_id, {"entity_status": "PAUSED"}, "end campaign", expected_id=campaign_id)
+            _confirm_settings(ended_campaign, {"entity_status": "PAUSED"})
+            if ended_campaign.get("deleted") is not False:
+                raise RuntimeError("X Ads did not confirm deleted=false for the retained campaign after stopping.")
             return ApprovalExecuted(f"Ended delivery for X Ads campaign {campaign_id} by pausing its parent. Campaign/reporting retained; no Kern resume or permanent deletion. X Ads Manager can resume it. Stopping may take time; past delivery can still be billed.")
         except (ValueError, RuntimeError) as exc:
             report_ads_failure("x_ads", approval.action_id, exc, phase=writes.attempted if writes and writes.attempted else "approval revalidation",
-                               confirmed=writes.confirmed if writes else ())
+                               confirmed=writes.confirmed if writes else (), diagnostic_context=diagnostic_context)
             return writes.failure(str(exc)) if writes is not None else ActionFailed(str(exc))
         except (KeyError, TypeError) as exc:
             report_ads_failure("x_ads", approval.action_id, exc, phase=writes.attempted if writes and writes.attempted else "approval revalidation",
-                               confirmed=writes.confirmed if writes else ())
+                               confirmed=writes.confirmed if writes else (), diagnostic_context=diagnostic_context)
             return writes.failure("The stored X Ads approval is incomplete. Request a new approval.") if writes is not None else ActionFailed("The stored X Ads approval is incomplete.")
 
     def _create(self, writes: Writes, plan: JSONObject, funding: JSONObject) -> JSONObject:
@@ -658,8 +786,7 @@ class XAdsTool:
         _confirm_campaign(campaign, plan, funding["currency"])
         group = writes.entity("POST", prefix + "/line_items", _group_params(plan, campaign_id), "create ad group")
         group_id = str(group["id"])
-        if group.get("currency") != funding["currency"] or group.get("pay_by") != OBJECTIVES[str(plan["objective"])][1]:
-            raise RuntimeError("X Ads did not confirm the approved ad-group currency and billing basis.")
+        _confirm_group(group, plan, campaign_id, funding["currency"], "PAUSED")
         targets: list[JSONObject] = []
         for target in cast(list[JSONObject], plan["targeting"]):
             targets.append(writes.entity("POST", prefix + "/targeting_criteria", {"line_item_id": group_id,

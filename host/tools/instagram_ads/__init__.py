@@ -32,8 +32,8 @@ from .contract import MANIFEST, LAUNCH_FIELDS, LAUNCH_REQUIRED
 
 GRAPH = "https://graph.facebook.com/v25.0"
 INTERACTIVE_BUDGET_SECONDS = 240
-SCOPES = ("ads_management", "ads_read", "pages_show_list", "pages_read_engagement", "instagram_basic")
-RECONNECT = "Instagram Ads is no longer authorized. Connect again under Home > Integrations > Instagram Ads."
+SCOPES = ("ads_management", "ads_read", "pages_show_list", "pages_read_engagement", "instagram_basic", "business_management")
+RECONNECT = "Instagram Ads is no longer authorized. Connect again under Home > Integrations > Instagram Ads and approve all requested permissions, including business_management for business portfolio assets."
 ID_RE = re.compile(r"^[0-9]{1,30}$")
 CURSOR_RE = re.compile(r"^[A-Za-z0-9_+=:/.-]{1,1024}$")
 # Meta's currency offset is not always the ISO currency exponent (e.g. BHD).
@@ -42,6 +42,8 @@ OFFSET_ONE = frozenset("CLP COP CRC HUF ISK IDR JPY KRW PYG TWD VND".split())
 OFFSET_HUNDRED = frozenset("DZD ARS AUD BHD BDT BOB BGN BRL GBP CAD CNY HRK CZK DKK EGP EUR GTQ HNL HKD INR ILS JOD KES LVL LTL MOP MYR MXN NZD NIO NGN NOK PKR PEN PHP PLN QAR RON RUB SAR RSD SGD SKK ZAR SEK CHF THB TRY AED UAH USD UYU VEF FBZ VES".split())
 DSA_COUNTRIES = frozenset("AT BE BG HR CY CZ DK EE FI FR DE GR HU IE IT LV LT LU MT NL PL PT RO SK SI ES SE AX GF GP MQ RE MF YT".split())
 ACCOUNT_FIELDS = "id,account_id,name,currency,timezone_name,account_status,disable_reason,user_tasks,funding_source,min_daily_budget,default_dsa_beneficiary,default_dsa_payor"
+USER_PAGE_FIELDS = "id,name,tasks,instagram_business_account{id,username,account_type}"
+PAGE_AD_TASKS = frozenset({"ADVERTISE", "MANAGE", "PROFILE_PLUS_ADVERTISE", "PROFILE_PLUS_MANAGE", "PROFILE_PLUS_FULL_CONTROL"})
 CAMPAIGN_FIELDS = "id,account_id,name,objective,buying_type,status,effective_status,daily_budget,lifetime_budget,spend_cap,special_ad_categories,is_adset_budget_sharing_enabled,issues_info"
 ADSET_FIELDS = "id,account_id,campaign_id,name,status,effective_status,lifetime_budget,daily_budget,start_time,end_time,bid_strategy,bid_amount,bid_constraints,billing_event,optimization_goal,optimization_sub_event,destination_type,promoted_object,is_dynamic_creative,is_budget_schedule_enabled,targeting,adset_schedule,pacing_type,frequency_control_specs,daily_spend_cap,daily_min_spend_target,lifetime_spend_cap,lifetime_min_spend_target,dsa_beneficiary,dsa_payor,issues_info"
 CREATIVE_FIELDS = "id,account_id,name,object_id,instagram_user_id,source_instagram_media_id,call_to_action,call_to_action_type,link_url,object_url,destination_spec,object_story_spec,body,asset_feed_spec,degrees_of_freedom_spec"
@@ -419,13 +421,14 @@ def _diagnose_account(graph: _Graph, value: JSONObject, api: HostAPI, connection
         _diagnostic_params(value, api, "instagram_after"),
         lambda row: {"instagram_user_id": _diagnostic_text(row, "id"), "username": _diagnostic_text(row, "username")},
         "diagnostic Instagram accounts")
-    user_pages = _diagnostic_edge(graph, "/me/accounts", "id,name,tasks,instagram_business_account{id,username,account_type}",
+    user_pages = _diagnostic_edge(graph, "/me/accounts", USER_PAGE_FIELDS,
         _diagnostic_params(value, api, "user_pages_after"), _diagnostic_user_page, "diagnostic user Pages")
     return {"message": "Provider evidence only. Missing tasks or filtered Pages do not prove missing Meta access. "
-            "pages comes from the advertiser's promote_pages; user_pages comes from the Facebook user's accounts edge. "
+            "pages comes from the advertiser's promote_pages and lists previously promoted Pages, not permission to run a first ad. "
+            "user_pages comes from the Facebook user's accounts edge. "
             "User Page visibility and Page tasks do not establish access through the selected advertiser. "
             "A failed edge is unavailable, not empty. Each cursor continues only its own edge; no pages are followed automatically. "
-            "No ad creation, provider authorization or delivery was tested; launch guards remain unchanged.",
+            "No ad creation, provider authorization or delivery was tested.",
             "connection": {"facebook_user_id": connection["id"], "name": connection["label"], "scopes": connection["scopes"]},
             "account": _account_result(account), "user_tasks_state": _field_state(account, "user_tasks", list),
             "launch_task_check_passes": bool({"ADVERTISE", "MANAGE"}.intersection(_strings(account.get("user_tasks")))),
@@ -433,9 +436,10 @@ def _diagnose_account(graph: _Graph, value: JSONObject, api: HostAPI, connection
 
 
 def _identity(graph: _Graph, account_id: str, page_id: str, instagram_id: str) -> JSONObject:
-    pages = graph.get("/act_" + account_id + "/promote_pages", "id,name,instagram_business_account{id,username,account_type}", limit="100")
+    # promote_pages is promotion history, so it cannot authorize a first ad.
+    pages = graph.get("/me/accounts", USER_PAGE_FIELDS, limit="100")
     match = next((row for row in _rows(pages, maximum=100) if row.get("id") == page_id), None)
-    if match is None:
+    if match is None or not _page_ad_access(match):
         raise ToolInputValidationError("Page advertising access was not confirmed within the bounded 100-Page check.")
     linked = _object(match.get("instagram_business_account"), "the Page's linked professional Instagram identity")
     if linked.get("id") != instagram_id or linked.get("account_type") not in {"BUSINESS", "MEDIA_CREATOR"}:
@@ -448,6 +452,10 @@ def _identity(graph: _Graph, account_id: str, page_id: str, instagram_id: str) -
         raise RuntimeError("Meta did not return a valid professional Instagram username.")
     return {"page_id": page_id, "page_name": str(match.get("name") or ""), "instagram_user_id": instagram_id,
             "username": username, "account_type": linked["account_type"]}
+
+
+def _page_ad_access(page: JSONObject) -> bool:
+    return _field_state(page, "tasks", list) == "present" and bool(PAGE_AD_TASKS.intersection(_strings(page.get("tasks"))))
 
 
 def _media(graph: _Graph, media_id: str, instagram_id: str) -> JSONObject:
@@ -891,14 +899,19 @@ def _read(graph: _Graph, action: str, value: JSONObject, api: HostAPI) -> JSONOb
         return _account_result(account)
     prefix = "/act_" + account_id
     if action == "list_identities":
-        listing = graph.get(prefix + "/promote_pages", "id,name,instagram_business_account{id,username,account_type}", **params)
+        listing = graph.get("/me/accounts", USER_PAGE_FIELDS, **params)
+        connected = graph.get(prefix + "/connected_instagram_accounts", "id,username", limit="100")
+        instagram_ids = {_id(row.get("id"), "Instagram id") for row in _rows(connected, maximum=100)}
         rows = []
         for row in _rows(listing, maximum=int(params["limit"])):
             linked = row.get("instagram_business_account")
-            if isinstance(linked, dict) and linked.get("account_type") in {"BUSINESS", "MEDIA_CREATOR"}:
+            linked_id = linked.get("id") if isinstance(linked, dict) else None
+            if (_page_ad_access(row) and isinstance(linked, dict) and linked.get("account_type") in {"BUSINESS", "MEDIA_CREATOR"}
+                    and isinstance(linked_id, str) and linked_id in instagram_ids):
                 rows.append({"page_id": _id(row.get("id"), "Page id"), "page_name": str(row.get("name") or ""),
                     "instagram_user_id": _id(linked.get("id"), "Instagram id"), "username": str(linked.get("username") or ""), "account_type": linked["account_type"]})
-        return {"message": "Advertiser Pages with real linked professional Instagram identities; launch verifies Instagram asset access separately.",
+        return {"message": "User Pages with advertising tasks and linked professional Instagram identities connected to the selected advertiser "
+                "within a bounded 100-identity check. Cursor continues user Pages; filtered pages can be empty. Launch rechecks access.",
                 "items": cast(list[JSONValue], rows), "next_cursor": _cursor(listing)}
     if action == "list_posts":
         instagram_id = _id(value["instagram_user_id"], "instagram_user_id")
