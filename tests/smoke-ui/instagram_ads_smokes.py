@@ -12,7 +12,7 @@ def run(page, url, log_in, open_home_integration):
     guide = page.locator("[data-guide-section='tool:instagram_ads']")
     expect(page.locator("#integration-detail-logo [data-integration-logo='tool:instagram_ads']")).to_have_attribute('data-logo-source', 'brand')
     expect(guide).to_contain_text('separate from the working organic Instagram connection')
-    expect(guide).to_contain_text('Creator identities can use the other three outcomes')
+    expect(guide).to_contain_text('account_type returns null')
     expect(guide).to_contain_text('activates parent last')
     expect(guide).to_contain_text('later release delivery within the approved flight')
     expect(guide).to_contain_text('Meta ad spend is separate')
