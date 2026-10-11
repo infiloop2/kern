@@ -536,7 +536,8 @@ def check_resource_protection(
         "system.slice": 20,
         "system.slice/kern-admin-api.service": 8,
         "system.slice/kern-postgres.service": 8,
-        "kern_workspace.slice": 4,
+        "kern_workspace.slice": 14,
+        "kern_workspace.slice/kern-browser.service": 10,
         "kern_workspace.slice/kern-workspace.service": 4,
     }
     weights = {
@@ -566,6 +567,19 @@ def check_resource_protection(
                 failures.append(f"resources: {group} io.weight={lines!r}, expected default {weight}")
         except OSError as exc:
             failures.append(f"resources: cannot read {group} io.weight: {exc}")
+    browser = cgroup_root / "kern_workspace.slice/kern-browser.service"
+    for filename, expected in (("cpu.weight", 100), ("memory.max", 2 * 1024**3)):
+        try:
+            if int((browser / filename).read_text()) != expected:
+                failures.append(f"resources: browser {filename} must be {expected}")
+        except (OSError, ValueError) as exc:
+            failures.append(f"resources: cannot read browser {filename}: {exc}")
+    try:
+        quota, period = map(int, (browser / "cpu.max").read_text().split())
+        if period <= 0 or quota != 2 * period:
+            failures.append("resources: browser cpu.max must allow two cores")
+    except (OSError, ValueError) as exc:
+        failures.append(f"resources: cannot read browser cpu.max: {exc}")
     try:
         qos = (cgroup_root / "io.cost.qos").read_text().splitlines()
         model = (cgroup_root / "io.cost.model").read_text().splitlines()

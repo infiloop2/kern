@@ -10,17 +10,17 @@ from host.runtime.browser.client import BrowserError
 from host.runtime.browser.providers import x
 from host.runtime.browser.actions.x_composer import MATCHES_TEXT, active_composer
 from host.runtime.browser.actions.x_diagnostics import composer_state, preparation_facts, reply_target
-from host.runtime.core import host_errors
+from host.runtime.core import host_errors, host_metrics
 
 if TYPE_CHECKING:
     from host.runtime.browser.accounts import Profile
 
 X_POST_DAILY_LIMIT = 50
 TWEET_ID = re.compile(r"[0-9]{1,25}")
-PREPARATION_TIMEOUT_MS = 60000
-COMPOSER_TIMEOUT_MS = 10000
-REPLY_COMPOSER_TIMEOUT_MS = 20000
-CONFIRMATION_TIMEOUT_MS = 20000
+PREPARATION_TIMEOUT_MS = 120000
+COMPOSER_TIMEOUT_MS = 20000
+REPLY_COMPOSER_TIMEOUT_MS = 30000
+CONFIRMATION_TIMEOUT_MS = 30000
 RECOVERABLE_STEPS = frozenset({"wait_for_composer", "clear_composer", "verify_empty_composer",
                                "type_post_text", "wait_for_submit_enabled"})
 
@@ -66,6 +66,10 @@ def _report_failure(stage: str, exc: Exception, *, step: str = "") -> None:
     if isinstance(exc, PreparationFailed):
         context.update(exc.facts)
         context.update(step=exc.step, failure_type=exc.failure_type)
+        # Incident-time pressure helps distinguish slow rendering from login
+        # failures. Cumulative browser CPU alone does not measure contention.
+        context.update({key: value for key, value in host_metrics.resource_snapshot().items()
+                        if key.startswith(("host_", "browser_"))})
     elif step:
         context["step"] = step
     host_errors.report_warning("browser.x_post_tweet", safe, context=context)
@@ -93,7 +97,7 @@ def execute(profile: Profile, body: dict[str, Any]) -> dict[str, Any]:
         except Exception as exc:
             _report_failure("prepare", exc, step=step)
             detail = str(exc) if isinstance(exc, BrowserError) else f"Preparation failed at {step} ({type(exc).__name__})."
-            raise BrowserError(f"Post was not submitted. {detail} Open the browser to check the account; see Host diagnostics for the failed step.") from None
+            raise BrowserError(f"Post was not submitted. {detail} See Host diagnostics for the failed step.") from None
         profile.data["usage"]["x_post_tweet"] = {"day": day, "count": count + 1}
         profile.save()  # Count the attempt before the only submit click.
         try:
@@ -135,12 +139,12 @@ def prepare_post(page: Any, account: str, text: str, reply_id: str = "") -> None
 
     for attempt in (1, 2):
         try:
-            navigation_timeout = begin("navigate_to_target" if reply_id else "navigate_to_composer", 20000)
+            navigation_timeout = begin("navigate_to_target" if reply_id else "navigate_to_composer", 30000)
             response = page.goto(f"https://x.com/i/status/{reply_id}" if reply_id else "https://x.com/compose/post",
                                  wait_until="domcontentloaded", timeout=navigation_timeout)
             if response is not None and response.status >= 400:
                 raise BrowserError(f"X returned HTTP {response.status} while opening the post page")
-            account_timeout = begin("verify_account")
+            account_timeout = begin("verify_account", x.ACCOUNT_TIMEOUT_MS)
             if x.verify_account(page, timeout=account_timeout) != account:
                 raise BrowserError("The signed-in account changed. Reconnect in Browser settings.")
             if reply_id:
@@ -175,11 +179,13 @@ def prepare_post(page: Any, account: str, text: str, reply_id: str = "") -> None
             timeout(COMPOSER_TIMEOUT_MS)  # Preparation must finish within the shared budget.
             return
         except Exception as exc:
-            # Only transient composer waits qualify, before any submit or usage
-            # increment. Navigation, account/target mismatch, changed text and
-            # submission errors are terminal. Never force a click or pick first.
-            if (attempt == 1 and step in RECOVERABLE_STEPS
-                    and isinstance(exc, (PlaywrightTimeoutError, AssertionError))
+            # Share one recovery across page readiness and composer waits,
+            # before any submit or usage increment. Explicit login/challenge,
+            # navigation, account/target mismatch and changed text stay terminal.
+            recoverable = ((step == "verify_account" and isinstance(exc, x.PageNotReady))
+                           or (step in RECOVERABLE_STEPS
+                               and isinstance(exc, (PlaywrightTimeoutError, AssertionError))))
+            if (attempt == 1 and recoverable
                     and time.monotonic() < deadline):
                 recovery_step, recovery_failure_type = step, type(exc).__name__
                 continue
@@ -187,6 +193,8 @@ def prepare_post(page: Any, account: str, text: str, reply_id: str = "") -> None
             facts = {"preparation_elapsed_ms": round((now - started) * 1000),
                      "step_elapsed_ms": round((now - step_started) * 1000),
                      "preparation_attempt": attempt, **preparation_facts(page, reply_id)}
+            if isinstance(exc, (x.PageNotReady, x.LoginRequired)):
+                facts["account_state"] = "page_not_ready" if isinstance(exc, x.PageNotReady) else "login_required"
             if recovery_step:
                 facts.update(recovery_step=recovery_step, recovery_failure_type=recovery_failure_type)
             raise PreparationFailed(step, exc, facts).with_traceback(exc.__traceback__) from None

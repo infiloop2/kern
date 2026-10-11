@@ -22,7 +22,7 @@ class BrowserActionNotStarted(BrowserError):
 
 class Connection(http.client.HTTPConnection):
     def __init__(self) -> None:
-        super().__init__("localhost", timeout=180)
+        super().__init__("localhost", timeout=240)
 
     def connect(self) -> None:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)

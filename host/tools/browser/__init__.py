@@ -135,8 +135,10 @@ class BrowserTool(Tool):
             account, _, reply_id = validate_post(proposal)
             accounts = client.request("/actions/list").get("accounts")
             selected = next((item for item in accounts if isinstance(item, dict) and item.get("account_id") == account_id), None) if isinstance(accounts, list) else None
-            if not selected or selected.get("provider") != "x" or selected.get("provider_identifier") != account or selected.get("state") != "connected":
-                return ActionFailed("X account or login state changed after approval. Recheck the connection before requesting another approval.")
+            if not selected or selected.get("provider") != "x" or selected.get("provider_identifier") != account:
+                return ActionFailed("The saved X account changed or was removed after approval. Recheck the connection before requesting another approval.")
+            if selected.get("state") != "connected":
+                return ActionFailed("The saved X connection needs attention; this post was not attempted. Use Check login or Save and close in Browser settings before requesting another approval.")
             result = client.request("/actions/post_tweet", {"account_id": account_id, **proposal})
             if result.get("status") == "posted" and isinstance(result.get("url"), str):
                 return ApprovalExecuted(f"{'Replied to ' + reply_id if reply_id else 'Posted on X'} as @{account}: {result['url']}")

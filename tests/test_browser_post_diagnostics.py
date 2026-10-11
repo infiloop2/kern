@@ -39,6 +39,7 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
         self.expect = self.enterContext(patch("playwright.sync_api.expect"))
         self.submit = self.enterContext(patch.object(posts, "submit_prepared_post"))
         self.emit = self.enterContext(patch.object(posts.host_errors, "emit_record"))
+        self.resources = self.enterContext(patch.object(posts.host_metrics, "resource_snapshot", return_value={}))
         self.body = {"provider_identifier": "example", "text": "Approved exact text"}
 
     def assert_failed_step(self, step, body=None, failure_type="TimeoutError"):
@@ -46,7 +47,7 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
             posts.execute(self.profile, body or self.body)
         self.assertIn("Post was not submitted", str(caught.exception))
         self.assertIn(step, str(caught.exception))
-        if failure_type != "BrowserError":
+        if failure_type not in {"BrowserError", "PageNotReady", "LoginRequired"}:
             self.assertIn(failure_type, str(caught.exception))
         self.assertEqual(self.profile.data["usage"], {})
         self.submit.assert_not_called()
@@ -85,10 +86,10 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
         target.get_by_test_id.return_value.click.side_effect = TimeoutError("private-live-token")
         self.assert_failed_step("open_reply_composer", {**self.body, "in_reply_to_tweet_id": "12345"})
 
-    def test_reply_click_gets_twenty_seconds_within_shared_preparation_deadline(self):
+    def test_reply_click_gets_thirty_seconds_within_shared_preparation_deadline(self):
         target = self.page.locator.return_value.filter.return_value
         clock = [0.0]
-        for elapsed, expected_timeout in ((0.0, 20000), (55.0, 5000)):
+        for elapsed, expected_timeout in ((0.0, 30000), (115.0, 5000)):
             with self.subTest(elapsed=elapsed):
                 clock[0] = 0.0
                 def advance(*args, **kwargs):
@@ -305,6 +306,65 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
         self.page.get_by_role.return_value.get_by_test_id.return_value.press_sequentially.assert_called_once()
         self.emit.assert_not_called()
 
+    def test_account_page_recovers_once_and_submits_exact_reply_once(self):
+        self.verify.side_effect = [posts.x.PageNotReady("X page not ready"), "example"]
+        posts.execute(self.profile, {**self.body, "in_reply_to_tweet_id": "12345"})
+        self.assertEqual([call.args[0] for call in self.page.goto.call_args_list],
+                         ["https://x.com/i/status/12345"] * 2)
+        self.assertEqual(self.verify.call_count, 2)
+        self.page.locator.return_value.filter.return_value.get_by_test_id.return_value.click.assert_called_once()
+        self.submit.assert_called_once_with(self.page, "example", "12345")
+        self.assertEqual(self.profile.data["usage"]["x_post_tweet"]["count"], 1)
+        self.emit.assert_not_called()
+
+    def test_unready_account_stops_after_one_recovery_and_remains_inconclusive(self):
+        self.resources.return_value = {"host_cpu_pressure_some_avg10": 22.5,
+                                       "host_memory_pressure_full_avg10": 12.0,
+                                       "host_io_pressure_some_avg10": 75.0,
+                                       "browser_memory_bytes": 123456, "agents_memory_bytes": 654321}
+        self.verify.side_effect = posts.x.PageNotReady("X page not ready")
+        self.assert_failed_step("verify_account", failure_type="PageNotReady")
+        self.assertEqual(self.page.goto.call_count, 2)
+        context = self.emit.call_args.args[0]["context"]
+        self.assertEqual(context["account_state"], "page_not_ready")
+        self.assertEqual(context["recovery_failure_type"], "PageNotReady")
+        self.assertEqual(context["host_cpu_pressure_some_avg10"], 22.5)
+        self.assertEqual(context["host_memory_pressure_full_avg10"], 12.0)
+        self.assertEqual(context["host_io_pressure_some_avg10"], 75.0)
+        self.assertEqual(context["browser_memory_bytes"], 123456)
+        self.assertNotIn("agents_memory_bytes", context)
+        self.assertEqual(self.profile.data["state"], "connected")
+
+    def test_explicit_login_never_recovers_or_types(self):
+        self.verify.side_effect = posts.x.LoginRequired("X requires sign-in")
+        self.assert_failed_step("verify_account", failure_type="LoginRequired")
+        self.page.goto.assert_called_once()
+        self.page.get_by_role.return_value.get_by_test_id.return_value.press_sequentially.assert_not_called()
+        self.assertEqual(self.emit.call_args.args[0]["context"]["account_state"], "login_required")
+
+    def test_account_recovery_does_not_allow_changed_account_or_second_composer_recovery(self):
+        for second in ("different", "example"):
+            with self.subTest(second=second):
+                self.page.goto.reset_mock()
+                self.verify.side_effect = [posts.x.PageNotReady("X page not ready"), second]
+                self.expect.return_value.to_be_editable.side_effect = AssertionError("private-live-token")
+                self.assert_failed_step("verify_account" if second == "different" else "wait_for_composer",
+                                        failure_type="BrowserError" if second == "different" else "AssertionError")
+                self.assertEqual(self.page.goto.call_count, 2)
+                self.page.get_by_role.return_value.get_by_test_id.return_value.press_sequentially.assert_not_called()
+
+    def test_account_readiness_recovery_keeps_original_deadline(self):
+        clock = [0.0]
+        def unready(*args, **kwargs):
+            clock[0] = 119.0 if self.verify.call_count == 1 else 121.0
+            raise posts.x.PageNotReady("X page not ready")
+        self.verify.side_effect = unready
+        with patch.object(posts.time, "monotonic", side_effect=lambda: clock[0]):
+            self.assert_failed_step("verify_account", failure_type="PageNotReady")
+        self.assertEqual(self.page.goto.call_count, 2)
+        self.assertEqual(self.page.goto.call_args.kwargs["timeout"], 1000)
+        self.assertEqual(self.verify.call_args.kwargs["timeout"], 1000)
+
     def test_partial_typing_is_cleared_on_recovery_without_an_extra_submission(self):
         editor = self.page.get_by_role.return_value.get_by_test_id.return_value
         editor.press_sequentially.side_effect = [TimeoutError("private-live-token"), None]
@@ -345,7 +405,7 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
         editor = self.page.get_by_role.return_value.get_by_test_id.return_value
         clock = [0.0]
         def expire(*args, **kwargs):
-            clock[0] = 61.0
+            clock[0] = 121.0
             raise TimeoutError(self.page.url.split("?")[1])
         editor.fill.side_effect = expire
         with patch.object(posts.time, "monotonic", side_effect=lambda: clock[0]):
@@ -370,11 +430,11 @@ class BrowserPostDiagnosticsTests(unittest.TestCase):
         clock = [0.0]
         def clear(*args, **kwargs):
             if editor.fill.call_count == 1:
-                clock[0] = 55.0
+                clock[0] = 115.0
                 raise TimeoutError(self.page.url.split("?")[1])
         editor.fill.side_effect = clear
         with patch.object(posts.time, "monotonic", side_effect=lambda: clock[0]):
             posts.execute(self.profile, self.body)
-        self.assertEqual([call.kwargs["timeout"] for call in self.page.goto.call_args_list], [20000, 5000])
+        self.assertEqual([call.kwargs["timeout"] for call in self.page.goto.call_args_list], [30000, 5000])
         self.assertEqual(editor.press_sequentially.call_args.kwargs["timeout"], 5000)
         self.submit.assert_called_once()

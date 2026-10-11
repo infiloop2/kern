@@ -1154,6 +1154,52 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
             )
         )
 
+    def test_npm_public_aws_credential_packages_are_exact_exceptions(self) -> None:
+        from host.network_integrations.npm_packages import guard
+
+        for name in ("credential-provider-node", "credential-provider-web-identity"):
+            for path in (f"/@aws-sdk%2f{name}", f"/@aws-sdk%2F{name}",
+                         f"/%40aws-sdk%2F{name}", f"/@aws-sdk/{name}"):
+                for method in ("GET", "HEAD"):
+                    with self.subTest(path=path, method=method):
+                        self.assertIsNone(guard.request_denied(
+                            self.config, method, "registry.npmjs.org", path,
+                            "", [], b"",
+                        ))
+                        self.assertIsNone(guard.request_denied(
+                            self.config, method, "registry.npmjs.org", path,
+                            "version=latest", [], b"",
+                        ))
+                        for query, reason in (
+                            ("value=ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789", "request_param_secret_denied"),
+                            ("access_token=mFzQpLdRaWxVkHsN", "request_param_secret_denied"),
+                            ("owner=alice%40example.com", "request_param_pii_denied"),
+                            ("value=%FF", "request_param_encoded_blob_denied"),
+                        ):
+                            with self.subTest(query=query):
+                                self.assertEqual(guard.request_denied(
+                                    self.config, method, "registry.npmjs.org", path,
+                                    query, [], b"",
+                                ), reason)
+
+        for path in (
+            "/@aws-sdk%2fcredential-provider-node-AKIAIOSFODNN7EXAMPLE",
+            "/@other%2fcredential-provider-node-AKIAIOSFODNN7EXAMPLE",
+            "/@aws-sdk%2fcredential-provider-node/AKIAIOSFODNN7EXAMPLE",
+            "/@aws-sdk%2fcredential-provider-web-identity/AKIAIOSFODNN7EXAMPLE",
+        ):
+            with self.subTest(path=path):
+                self.assertEqual(guard.request_denied(
+                    self.config, "GET", "registry.npmjs.org", path, "", [], b"",
+                ), "request_param_secret_denied")
+        for method, host in (("POST", "registry.npmjs.org"), ("GET", "evil.invalid"),
+                             ("GET", "nodejs.org")):
+            with self.subTest(method=method, host=host):
+                self.assertEqual(guard.request_denied(
+                    self.config, method, host, "/@aws-sdk%2fcredential-provider-node",
+                    "", [], b"",
+                ), "network_policy_denied")
+
     def test_github_reads_guard_query_values_with_machine_tokens_allowed(self) -> None:
         from host.network_integrations.github import guard
         from host.network_integrations.github.manifest import GitHubIntegration

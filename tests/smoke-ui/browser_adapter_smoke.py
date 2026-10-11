@@ -173,6 +173,79 @@ def check_post_text(page):
     print("Post preparation passed: Unicode, blank lines, image emoji, slow editor, trusted keys and changed-text rejection.", flush=True)
 
 
+def check_account_readiness(page):
+    # Real DOM readiness, redirects and submission observation; no live X calls.
+    for scenario in ("delayed", "recover", "unready", "login", "challenge", "login_input",
+                     "hidden_login", "hidden_profile", "hidden_duplicate_profile", "duplicate_profile",
+                     "invalid_profile", "changed_account", "lost_response"):
+        navigations, submissions = [], []
+        def fixture(route):
+            if route.request.method == "POST":
+                submissions.append(route.request.post_data)
+                if scenario == "lost_response":
+                    route.abort()
+                    return
+                body = {"data": {"create_tweet": {"tweet_results": {"result": {
+                    "rest_id": "123", "core": {"user_results": {"result": {"core": {"screen_name": "example"}}}},
+                    "legacy": {"in_reply_to_status_id_str": "12345"}
+                }}}}}
+                route.fulfill(status=200, content_type="application/json", body=json.dumps(body))
+                return
+            navigations.append(route.request.url)
+            html = REPLY_HTML
+            if (scenario in ("recover", "changed_account", "lost_response") and len(navigations) == 1) or scenario == "unready":
+                html = '<div role="progressbar">Loading</div>'
+            elif scenario == "delayed":
+                html = html.replace('data-testid="AppTabBar_Profile_Link"', 'id="delayed-profile"')
+                html += "<script>setTimeout(() => document.getElementById('delayed-profile').dataset.testid='AppTabBar_Profile_Link', 100)</script>"
+            elif scenario in ("login", "challenge"):
+                path = "/i/flow/login" if scenario == "login" else "/account/access"
+                html += f"<script>history.replaceState(null, '', '{path}')</script>"
+            elif scenario in ("login_input", "hidden_login"):
+                html += '<input autocomplete="username"' + (' hidden' if scenario == "hidden_login" else '') + '>'
+            elif scenario == "hidden_profile":
+                html = html.replace('data-testid="AppTabBar_Profile_Link"', 'hidden data-testid="AppTabBar_Profile_Link"')
+            elif scenario in ("hidden_duplicate_profile", "duplicate_profile"):
+                html += '<a data-testid="AppTabBar_Profile_Link" href="/different"' + (' hidden' if scenario == "hidden_duplicate_profile" else '') + '>Profile</a>'
+            elif scenario == "invalid_profile":
+                html = html.replace('href="/example"', 'href="/private/invalid"')
+            elif scenario == "changed_account":
+                html = html.replace('href="/example"', 'href="/different"')
+            route.fulfill(status=200, content_type="text/html", body=html)
+        page.route("https://x.com/**", fixture)
+        try:
+            with (patch.object(x, "ACCOUNT_TIMEOUT_MS", 1500),
+                  patch.object(x_post_tweet, "COMPOSER_TIMEOUT_MS", 1500),
+                  patch.object(x_post_tweet, "CONFIRMATION_TIMEOUT_MS", 500 if scenario == "lost_response" else 5000)):
+                if scenario in ("unready", "login", "challenge", "login_input", "hidden_profile", "duplicate_profile", "invalid_profile", "changed_account"):
+                    try:
+                        x_post_tweet.prepare_post(page, "example", "Approved reply", "12345")
+                        raise AssertionError(f"Unsafe {scenario} account accepted")
+                    except x_post_tweet.PreparationFailed as exc:
+                        assert exc.step == "verify_account", str(exc)
+                        expected = "PageNotReady" if scenario in ("unready", "hidden_profile", "duplicate_profile") else (
+                            "LoginRequired" if scenario in ("login", "challenge", "login_input") else "BrowserError")
+                        assert exc.failure_type == expected, exc.failure_type
+                        assert "private/invalid" not in str(exc)
+                    assert not submissions
+                else:
+                    x_post_tweet.prepare_post(page, "example", "Approved reply", "12345")
+                    assert not submissions
+                    if scenario == "lost_response":
+                        try:
+                            x_post_tweet.submit_prepared_post(page, "example", "12345")
+                            raise AssertionError("Unconfirmed post accepted")
+                        except PlaywrightTimeoutError:
+                            pass
+                    else:
+                        assert x_post_tweet.submit_prepared_post(page, "example", "12345") == "https://x.com/example/status/123"
+                    assert submissions == ["Approved reply"]
+                assert len(navigations) == (2 if scenario in ("recover", "unready", "hidden_profile", "duplicate_profile", "changed_account", "lost_response") else 1), scenario
+        finally:
+            page.unroute("https://x.com/**", fixture)
+    print("X account readiness: bounded recovery, explicit login/challenge, account mismatch and single submission passed.", flush=True)
+
+
 def check_composer_recovery(page):
     """Real locator/input coverage without using a live account or publishing."""
     text = "Approved 🎉\n\nexact text"
@@ -554,6 +627,7 @@ def run(playwright):
             browser.page.evaluate("window.onbeforeunload = () => 'Unsaved draft'")
             browser.input({"kind": "home"})
             check_post_text(browser.page)
+            check_account_readiness(browser.page)
             check_composer_recovery(browser.page)
             check_reply_preparation(browser.page)
             exact_text = "First line\nCafé 😀 +\tend".ljust(280, "x")
