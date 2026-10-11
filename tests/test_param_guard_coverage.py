@@ -1157,9 +1157,24 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
     def test_npm_public_aws_credential_packages_are_exact_exceptions(self) -> None:
         from host.network_integrations.npm_packages import guard
 
-        for name in ("credential-provider-node", "credential-provider-web-identity"):
-            for path in (f"/@aws-sdk%2f{name}", f"/@aws-sdk%2F{name}",
-                         f"/%40aws-sdk%2F{name}", f"/@aws-sdk/{name}"):
+        # Public SDK metadata names from the application's existing dependency
+        # graph, including providers reached only after resolving the first two.
+        packages = (
+            "@aws-sdk/credential-provider-env",
+            "@aws-sdk/credential-provider-http",
+            "@aws-sdk/credential-provider-ini",
+            "@aws-sdk/credential-provider-login",
+            "@aws-sdk/credential-provider-node",
+            "@aws-sdk/credential-provider-process",
+            "@aws-sdk/credential-provider-sso",
+            "@aws-sdk/credential-provider-web-identity",
+            "@aws-sdk/token-providers",
+            "@smithy/credential-provider-imds",
+        )
+        for package in packages:
+            scope, name = package.split("/")
+            for path in (f"/{scope}%2f{name}", f"/{scope}%2F{name}",
+                         f"/%40{scope[1:]}%2F{name}", f"/{package}"):
                 for method in ("GET", "HEAD"):
                     with self.subTest(path=path, method=method):
                         self.assertIsNone(guard.request_denied(
@@ -1187,6 +1202,8 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
             "/@other%2fcredential-provider-node-AKIAIOSFODNN7EXAMPLE",
             "/@aws-sdk%2fcredential-provider-node/AKIAIOSFODNN7EXAMPLE",
             "/@aws-sdk%2fcredential-provider-web-identity/AKIAIOSFODNN7EXAMPLE",
+            "/@aws-sdk%2ftoken-providers-AKIAIOSFODNN7EXAMPLE",
+            "/@smithy%2fcredential-provider-imds/AKIAIOSFODNN7EXAMPLE",
         ):
             with self.subTest(path=path):
                 self.assertEqual(guard.request_denied(
