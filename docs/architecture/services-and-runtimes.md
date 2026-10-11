@@ -14,7 +14,7 @@
 | `kern-embedding.socket`, `kern-embedding.service` | `kern-embedding` | Socket-activated local text embeddings; no network or database access, with a five-minute idle exit. |
 | `kern-transcription.socket`, `kern-transcription.service` | `kern-transcription` | Resident local speech recognition on an admin-only socket; starts at boot, no network or database access. |
 | `kern_agent.slice` | — | Top-level cgroup slice holding every agent runtime scope (underscore, not dash: dashes in slice names encode nesting, and the weight must compare against `system.slice` directly). `CPUWeight=50` guarantees the host services CPU time under contention while leaving idle cores to the agent; aggregate `MemoryHigh=75%`/`MemoryMax=80%`/`MemorySwapMax=5G` protect the host, while lower per-scope limits contain one busy thread before it stalls its peers; `TasksMax=4096` stops a slice-wide fork bomb from exhausting kernel PIDs. |
-| `kern_workspace.slice` | — | Cgroup slice for Workspace, browser, and inference workloads. `CPUWeight=50`, `IOWeight=50`, and `MemoryLow=4%`; the memory protection is assigned to the Workspace service. |
+| `kern_workspace.slice` | — | Cgroup slice for Workspace, browser, and inference workloads. `CPUWeight=50`, `IOWeight=50`, and `MemoryLow=14%`; memory protection covers 4% for Workspace and 10% for the browser. CPU priority remains below `system.slice`, whose default weight is 100. |
 | `kern-io-control.service` | root | Boot-time oneshot enabling the kernel I/O-cost controller on the root, admin, and agent disks so I/O weights are enforced with the default NVMe scheduler. |
 
 ## Process Inventory
@@ -102,7 +102,8 @@ keeps running after its turn was recovered as failed.
 
 The admin API and Postgres each have `MemoryLow=8%`, and the optional tunnel
 has `MemoryLow=4%`, backed by `MemoryLow=20%` on their parent `system.slice`.
-Workspace has a separate 4% budget on both its slice and service. These are
+The Workspace service has `MemoryLow=4%` and the browser has `MemoryLow=10%`,
+backed by `MemoryLow=14%` on their parent `kern_workspace.slice`. These are
 best-effort protections for memory actually in use, not preallocated RAM or
 hard `MemoryMin` reservations. Unused budgets remain available to agents.
 They reduce reclaim of the UI's working set without forcing an OOM merely

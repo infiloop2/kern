@@ -162,6 +162,27 @@ class BrowserSessionsTests(unittest.TestCase):
         with self.assertRaises(BrowserError):
             post_tweet(restored, self.body)
 
+    def test_inconclusive_x_check_preserves_last_state_and_time_but_returns_error(self):
+        from host.runtime.browser.providers.x import PageNotReady
+        self.connect()
+        for state in ("connected", "needs_attention"):
+            self.engine.data.update(state=state, checked_at="2026-10-01T00:00:00+00:00")
+            with patch("host.runtime.browser.providers.x.verify_account", side_effect=PageNotReady("X page not ready")):
+                with self.assertRaisesRegex(PageNotReady, "page not ready"):
+                    self.engine.dispatch("check", {})
+            stored = self.engine_store.accounts()[self.engine.account_id][1]
+            self.assertEqual(stored["state"], state)
+            self.assertEqual(stored["checked_at"], "2026-10-01T00:00:00+00:00")
+            self.assertIsNone(self.engine.browser)
+
+    def test_explicit_x_login_requirement_marks_check_as_needing_attention(self):
+        from host.runtime.browser.providers.x import LoginRequired
+        self.connect()
+        with patch("host.runtime.browser.providers.x.verify_account", side_effect=LoginRequired("X requires sign-in")):
+            self.assertEqual(self.engine.dispatch("check", {})["state"], "needs_attention")
+        with self.assertRaises(BrowserError):
+            post_tweet(self.engine, self.body)
+
     def test_provider_contract_preserves_identifier_and_x_action_rejects_it(self):
         provider = SimpleNamespace(name="fixture", login_url="https://fixture.example/",
                                    verify_account=lambda page: "Owner@example.test",
@@ -915,7 +936,10 @@ class BrowserSessionsTests(unittest.TestCase):
         for changes in ({"provider_identifier": "other"}, {"provider": "linkedin"}, {"state": "needs_attention"}):
             blocked = {"accounts": [{**selected["accounts"][0], **changes}]}
             with patch("host.tools.browser.client.request", return_value=blocked) as request:
-                self.assertIsInstance(BUNDLED_TOOL.execute_approved(approved, api), ActionFailed)
+                result = BUNDLED_TOOL.execute_approved(approved, api)
+                self.assertIsInstance(result, ActionFailed)
+                expected = "connection needs attention" if "state" in changes else "account changed or was removed"
+                self.assertIn(expected, result.error)
                 request.assert_called_once_with("/actions/list")
 
     def test_tool_returns_only_schema_metadata(self):

@@ -48,8 +48,8 @@ class Browser:
             self.context = self.process.context
             if storage_state is not None:
                 self.context.set_storage_state(cast("StorageState", storage_state))
-            self.context.set_default_timeout(10000)
-            self.context.set_default_navigation_timeout(20000)
+            self.context.set_default_timeout(30000)
+            self.context.set_default_navigation_timeout(30000)
             self.context.route("**/*", self.route_request)
             # Keep WebSocket native: Playwright routing replaces its constructor
             # and breaks X login. Secure sockets use Chromium's HTTPS relay.

@@ -76,7 +76,8 @@ class ResourceProtectionVerificationTests(unittest.TestCase):
             "system.slice/kern-admin-api.service": (8, 200),
             "system.slice/kern-postgres.service": (8, 200),
             "system.slice/kern-cloudflared.service": (4, 200),
-            "kern_workspace.slice": (4, 50),
+            "kern_workspace.slice": (14, 50),
+            "kern_workspace.slice/kern-browser.service": (10, 25),
             "kern_workspace.slice/kern-workspace.service": (4, 200),
             "kern_agent.slice": (0, 25),
         }
@@ -85,6 +86,9 @@ class ResourceProtectionVerificationTests(unittest.TestCase):
             path.mkdir(parents=True, exist_ok=True)
             (path / "memory.low").write_text(str((self.memory * percent // 100) // 4096 * 4096))
             (path / "io.weight").write_text(f"default {weight}\n")
+        browser = self.root / "kern_workspace.slice/kern-browser.service"
+        for filename, value in (("cpu.max", "200000 100000"), ("cpu.weight", "100"), ("memory.max", str(2 * 1024**3))):
+            (browser / filename).write_text(value)
         (self.root / "io.cost.qos").write_text("259:2 enable=1 ctrl=auto rpct=0.00\n259:0 enable=1 ctrl=auto\n")
         (self.root / "io.cost.model").write_text("259:2 ctrl=auto model=linear\n259:0 ctrl=auto model=linear\n")
         self.enterContext(patch.object(io_control, "backing_devices", return_value=["259:0", "259:2"]))
@@ -98,6 +102,21 @@ class ResourceProtectionVerificationTests(unittest.TestCase):
     def test_unprotected_parent_fails_even_when_services_have_memory_low(self):
         (self.root / "system.slice/memory.low").write_text("0\n")
         self.assertTrue(any("system.slice memory.low=0" in error for error in self.check()))
+
+    def test_browser_protection_requires_parent_leaf_and_effective_cpu_limits(self):
+        paths = {
+            "kern_workspace.slice/memory.low": "0",
+            "kern_workspace.slice/kern-browser.service/memory.low": "0",
+            "kern_workspace.slice/kern-browser.service/cpu.max": "100000 100000",
+            "kern_workspace.slice/kern-browser.service/cpu.weight": "25",
+        }
+        for name, value in paths.items():
+            with self.subTest(name=name):
+                path = self.root / name
+                original = path.read_text()
+                path.write_text(value)
+                self.assertTrue(self.check())
+                path.write_text(original)
 
     def test_weights_without_an_enabled_controller_fail(self):
         (self.root / "io.cost.qos").write_text("259:2 enable=0 ctrl=auto\n")
@@ -124,7 +143,7 @@ class BootstrapProtectionTests(unittest.TestCase):
         apply = bootstrap.split("apply_live_resource_protection() {", 1)[1].split("\n}", 1)[0]
         for unit, percent, weight in (
             ("system.slice", 20, 100),
-            ("kern_workspace.slice", 4, 50),
+            ("kern_workspace.slice", 14, 50),
             ("kern-workspace.service", 4, 200),
             ("kern-admin-api.service", 8, 200),
             ("kern-postgres.service", 8, 200),
@@ -132,8 +151,17 @@ class BootstrapProtectionTests(unittest.TestCase):
         ):
             self.assertIn(f"systemctl set-property --runtime {unit} MemoryLow={percent}% IOWeight={weight}", apply)
         self.assertIn("systemctl set-property --runtime kern_agent.slice IOWeight=25", apply)
+        self.assertIn("systemctl set-property --runtime kern-browser.service MemoryLow=10% CPUQuota=200% CPUWeight=100", apply)
         self.assertNotIn("systemctl restart", apply)
         self.assertIn("  bootstrap_phase start_services\n  bootstrap_phase apply_live_resource_protection\n  bootstrap_phase verify_deployment", bootstrap)
+
+    def test_browser_limits_persist_across_boot_with_matching_parent_protection(self):
+        bootstrap = render._render_bootstrap()
+        browser = bootstrap.split("cat > /etc/systemd/system/kern-browser.service", 1)[1].split("\nUNIT", 1)[0]
+        for setting in ("CPUQuota=200%", "CPUWeight=100", "MemoryLow=10%", "MemoryMax=2G", "TimeoutStopSec=240"):
+            self.assertIn(setting, browser)
+        workspace = bootstrap.split("cat > /etc/systemd/system/kern_workspace.slice", 1)[1].split("\nUNIT", 1)[0]
+        self.assertIn("MemoryLow=14%", workspace)
 
     def test_boot_and_reconfigure_enable_controller_before_postgres(self):
         bootstrap = render._render_bootstrap()

@@ -7,7 +7,7 @@ import time
 from typing import Any
 
 from host.runtime.browser_network.relay import Network
-from host.runtime.browser.providers import PROVIDERS
+from host.runtime.browser.providers import PROVIDERS, x
 from host.runtime.browser.actions import ACTIONS
 from host.runtime.browser.browser import Browser, WIDTH, HEIGHT
 from host.runtime.browser.client import BrowserError
@@ -73,15 +73,24 @@ class Profile:
                 raise BrowserError("Close the browser popup before checking the login.")
             if not self.data["provider_identifier"]:
                 return self.status()
+            previous_state = self.data["state"]
+            inconclusive = False
             self.data["state"] = "needs_attention"
             try:
                 live_account = self.provider.verify_account(self.launch().page)
                 self.data["state"] = "connected" if live_account == self.data["provider_identifier"] else "needs_attention"
+            except x.PageNotReady:
+                # Keep the last checked state/time, but return the error rather
+                # than presenting this inconclusive check as a fresh success.
+                inconclusive = True
+                self.data["state"] = previous_state
+                raise
             except BrowserError:
                 self.data["state"] = "needs_attention"
             finally:
                 self.close()
-                self.data["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+                if not inconclusive:
+                    self.data["checked_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
                 self.save()
             return self.status()
         if operation == "open" and not body:

@@ -1660,7 +1660,8 @@ Description=Kern Workspaces Backend
 [Slice]
 CPUWeight=50
 IOWeight=50
-MemoryLow=4%
+# Protect the workspace (4%) and active browser (10%) below this parent.
+MemoryLow=14%
 UNIT
 
 cat > /etc/systemd/system/kern-network-proxy.service <<'UNIT'
@@ -1839,13 +1840,16 @@ ProtectHome=yes
 ProtectSystem=strict
 InaccessiblePaths=/mnt/kern-agent /mnt/kern-admin
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-CPUQuota=100%
-CPUWeight=25
+# Allow short rendering bursts across two cores; retain the host slice priority.
+CPUQuota=200%
+CPUWeight=100
 IOWeight=25
+# Best-effort reclaim protection, not a reservation or a larger allocation.
+MemoryLow=10%
 MemoryMax=2G
 TasksMax=256
 KillMode=mixed
-TimeoutStopSec=180
+TimeoutStopSec=240
 
 [Install]
 WantedBy=multi-user.target
@@ -2102,8 +2106,9 @@ apply_live_resource_protection() {
 # surviving a retained-root reconfiguration. Never restart system.slice.
 systemctl set-property --runtime system.slice MemoryLow=20% IOWeight=100
 systemctl set-property --runtime kern_agent.slice IOWeight=25
-systemctl set-property --runtime kern_workspace.slice MemoryLow=4% IOWeight=50
+systemctl set-property --runtime kern_workspace.slice MemoryLow=14% IOWeight=50
 systemctl set-property --runtime kern-workspace.service MemoryLow=4% IOWeight=200
+systemctl set-property --runtime kern-browser.service MemoryLow=10% CPUQuota=200% CPUWeight=100
 systemctl set-property --runtime kern-admin-api.service MemoryLow=8% IOWeight=200
 systemctl set-property --runtime kern-postgres.service MemoryLow=8% IOWeight=200
 if [ "$cloudflare_connection_count" -gt 0 ]; then

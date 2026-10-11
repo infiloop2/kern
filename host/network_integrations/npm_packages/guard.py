@@ -11,6 +11,8 @@ keeps the parameter guard.
 
 from __future__ import annotations
 
+from urllib.parse import unquote
+
 from host.network_integrations.base import (
     AccountAttestor,
     ManagedIntegration,
@@ -26,10 +28,14 @@ ROUTES = {
 }
 
 # Public package names are normally scanned because registry lookup paths can
-# encode attacker-readable data. This exact dependency name is a false positive
-# for the guard's credential-language rule; keep the exception static and scan
-# its query string normally.
-PUBLIC_PACKAGE_PATH_EXCEPTIONS = frozenset({"/token-types"})
+# encode attacker-readable data. These exact public dependency names are false
+# positives for the guard's credential-language rule. Match decoded paths so
+# npm's encoded scoped-package separator works; keep queries guarded normally.
+PUBLIC_PACKAGE_PATH_EXCEPTIONS = frozenset({
+    "/token-types",
+    "/@aws-sdk/credential-provider-node",
+    "/@aws-sdk/credential-provider-web-identity",
+})
 
 
 def host_allowed(config: ManagedIntegration, host: str) -> bool:
@@ -70,6 +76,6 @@ def request_denied(
         # Tarball URLs (/<pkg>/-/<pkg>-<version>.tgz) are provider-returned after
         # metadata resolution, not agent-authored names.
         return None
-    if path in PUBLIC_PACKAGE_PATH_EXCEPTIONS:
+    if host.lower() == "registry.npmjs.org" and unquote(path) in PUBLIC_PACKAGE_PATH_EXCEPTIONS:
         return request_param_denial("", query)
     return request_param_denial(path, query)

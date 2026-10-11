@@ -78,12 +78,14 @@ Login acceptance is not guaranteed and challenges remain operator-controlled.
 
 Browser joins `kern_workspace.slice`, alongside transcription and embeddings,
 so it has lower CPU priority than the admin control plane. Its whole process
-tree has `CPUQuota=100%` (one core), `CPUWeight=25`, `IOWeight=25`,
-`MemoryMax=2G` and `TasksMax=256`. These bound Browser usage and reduce its
-priority during contention; they do not reserve memory or guarantee UI latency.
+tree has `CPUQuota=200%` (up to two cores), `CPUWeight=100`, `IOWeight=25`,
+`MemoryLow=10%`, `MemoryMax=2G` and `TasksMax=256`. The workspace parent has
+`MemoryLow=14%`, covering the browser's 10% and workspace service's 4%. This gives
+active browser memory best-effort reclaim protection and more CPU share within
+the workspace slice; it does not reserve RAM or guarantee UI latency.
 Shutdown sends SIGTERM to the service first (`KillMode=mixed`), allowing an
-in-flight action and browser cleanup to finish, with a 180-second stop timeout.
-The IPC client also uses a plain 180-second timeout, allowing for launch,
+in-flight action and browser cleanup to finish, with a 240-second stop timeout.
+The IPC client also uses a plain 240-second timeout, allowing for launch,
 navigation, submission and snapshot work. This is not a request deadline;
 a stalled worker or lost response can still leave publication unconfirmed.
 
@@ -335,8 +337,18 @@ duplicate-text check, idempotency API, uncertain status, reconciliation endpoint
 submission-error pause. A new attempt requires a new tool request and approval;
 separately approved calls may intentionally publish identical content.
 
-Composer preparation has a shared 60-second action budget, with at most one
-recovery pass for composer readiness, clearing, typing or submit-button waits.
+Composer preparation has a shared 120-second action budget, with at most one
+recovery pass shared by account-page readiness, composer readiness, clearing,
+typing and submit-button waits. Account verification waits up to 30 seconds for
+a unique visible profile link or an explicit login/account-access state. If
+neither appears, it reports that X did not finish loading a verifiable account;
+this does not establish that the session expired. Explicit login forms/routes
+and account-access challenges stop preparation without recovery. An inconclusive
+operator Check login returns an error and preserves the last checked state and
+timestamp; it never promotes an account to connected. Navigation and reply opening
+allow 30 seconds, composer steps 20 seconds, and publication confirmation 30
+seconds. Preparation waits are clipped to the remaining shared budget. General
+browser navigation and locator defaults are 30 seconds for operator operations.
 Recovery navigates to the same composer or approved reply target and verifies
 the live account again before typing. Navigation failures, account/target
 mismatches and changed approved text remain terminal. Recovery never clicks
@@ -354,11 +366,15 @@ Diagnostics preserve the original exception type and safe stack, without raw
 Playwright messages, page text, cookies or credentials. Navigation HTTP failures
 include the status. No preparation failure submits or consumes a posting attempt.
 Preparation warnings also include elapsed preparation and failed-step time,
-attempt number, the first recovery step/type when applicable, and a best-effort
+attempt number, the first recovery step/type when applicable, an account-state
+classification for unready pages or explicit login requirements, and a best-effort
 structural snapshot: approved reply target ID, hostname, known route category,
 article/target/dialog/editor counts, and (for one matching reply control)
 visibility, enabled state and a center-point obstruction check. A unique visible
 popup editor adds attached/visible/enabled/editable/focused/empty booleans.
+Preparation failures also capture host load, CPU/memory/I/O pressure and browser
+resource totals when available. These incident-time readings help investigate
+contention; cumulative browser CPU is not a utilization measurement.
 These are facts observed after failure, not proof of its cause. Snapshot errors retain partial
 facts and never replace the original failure. No page text, screenshots, arbitrary
 attributes, paths or query parameters are captured. Target matching is unchanged;
