@@ -33,8 +33,16 @@ ROUTES = {
 # npm's encoded scoped-package separator works; keep queries guarded normally.
 PUBLIC_PACKAGE_PATH_EXCEPTIONS = frozenset({
     "/token-types",
+    "/@aws-sdk/credential-provider-env",
+    "/@aws-sdk/credential-provider-http",
+    "/@aws-sdk/credential-provider-ini",
+    "/@aws-sdk/credential-provider-login",
     "/@aws-sdk/credential-provider-node",
+    "/@aws-sdk/credential-provider-process",
+    "/@aws-sdk/credential-provider-sso",
     "/@aws-sdk/credential-provider-web-identity",
+    "/@aws-sdk/token-providers",
+    "/@smithy/credential-provider-imds",
 })
 
 
