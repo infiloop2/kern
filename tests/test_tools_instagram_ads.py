@@ -682,16 +682,19 @@ class InstagramAdsTests(unittest.TestCase):
                     self.assertNotIn('call_to_action', creative)
                 self.assertEqual(self.api.costs.calls, [])
 
-    def live_engagement_approval(self, mutate=None, phase='paused'):
-        # Sanitized GET get_campaign result from the failed live $1 launch.
-        # Only IDs/name are anonymized; omitted fields and provider values stay.
-        fixture = json.loads((Path(__file__).parent / 'fixtures/instagram_ads/engagement_readback.json').read_text())
+    def observed_reel_approval(self, mutate=None, phase='paused', objective='ENGAGEMENTS'):
+        # Sanitized GET get_campaign results from failed live $1 launches.
+        # IDs, labels and profile handle are anonymized; omissions and values stay.
+        filename = 'profile_visit_readback.json' if objective == 'PROFILE_VISITS' else 'engagement_readback.json'
+        fixture = json.loads((Path(__file__).parent / 'fixtures/instagram_ads' / filename).read_text())
         self.meta.account['timezone_name'] = 'Europe/London'
         self.meta.minimum = 100
         self.meta.media['caption'] = fixture['source_caption']
-        value = launch_input()
+        value = launch_input(objective)
         value.update(lifetime_budget='100', start_time='2026-10-10T21:30:00Z', end_time='2026-10-11T21:30:00Z',
                      audience={'countries': ['IN'], 'advantage_plus': True})
+        if objective == 'PROFILE_VISITS':
+            value.update(start_time='2026-10-12T13:00:00Z', end_time='2026-10-13T13:00:00Z')
         approval = self.queue(value)
         def hook(path, fields):
             if path == '/act_100/ads':
@@ -710,7 +713,7 @@ class InstagramAdsTests(unittest.TestCase):
                     raise ValueError('Python 3.10 rejects basic timezone offsets')
                 return datetime.fromisoformat(text)
             clock.fromisoformat.side_effect = python310_parse
-            approval = self.live_engagement_approval()
+            approval = self.observed_reel_approval()
             result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
         self.assertIsInstance(result, ApprovalExecuted, result)
         self.assertEqual([path for path, _ in self.meta.writes],
@@ -759,7 +762,7 @@ class InstagramAdsTests(unittest.TestCase):
                 with self.subTest(phase=phase, field=field), patch.object(ads, 'json_request', self.meta), \
                      patch.object(ads, 'datetime', wraps=datetime) as clock:
                     clock.now.return_value = datetime(2026, 10, 10, 19, tzinfo=timezone.utc)
-                    approval = self.live_engagement_approval(mutate, phase)
+                    approval = self.observed_reel_approval(mutate, phase)
                     result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
                     self.assertIsInstance(result, ActionFailed, result)
                     self.assertEqual(len(self.meta.writes), 4 if phase == 'paused' else 6)
@@ -775,10 +778,69 @@ class InstagramAdsTests(unittest.TestCase):
             with self.subTest(text=text), self.assertRaises(ads.ToolInputValidationError):
                 ads._time(text, 'start_time')
 
+    def test_observed_profile_visit_readback_verifies_exact_profile_at_both_barriers(self):
+        with patch.object(ads, 'datetime', wraps=datetime) as clock:
+            clock.now.return_value = datetime(2026, 10, 12, 11, tzinfo=timezone.utc)
+            approval = self.observed_reel_approval(objective='PROFILE_VISITS')
+            result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+        self.assertIsInstance(result, ApprovalExecuted, result)
+        self.assertEqual([path for path, _ in self.meta.writes],
+                         ['/act_100/campaigns', '/act_100/adsets', '/act_100/adcreatives', '/act_100/ads', '/800', '/600', '/500'])
+        for resource in (ADSET, CREATIVE):
+            self.assertEqual(sum(method == 'GET' and path == '/' + resource for method, path, _, _ in self.meta.calls), 2)
+        self.assertNotIn('destination_spec', self.meta.resources[CREATIVE])
+        self.assertNotIn('object_id', self.meta.resources[CREATIVE])
+        self.assertEqual(self.meta.resources[CREATIVE]['call_to_action'],
+                         {'type': 'VIEW_INSTAGRAM_PROFILE', 'value': {'link': 'https://www.instagram.com/owned_profile'}})
+        self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'ACTIVE')
+
+    def test_observed_profile_visit_shape_rejects_missing_evidence_and_drift_at_both_barriers(self):
+        changes = {
+            'missing_cta': lambda rows: rows[CREATIVE].pop('call_to_action'),
+            'null_cta': lambda rows: rows[CREATIVE].update(call_to_action=None),
+            'cta_type_only': lambda rows: rows[CREATIVE].update(call_to_action={'type': 'VIEW_INSTAGRAM_PROFILE'}),
+            'wrong_link': lambda rows: rows[CREATIVE]['call_to_action']['value'].update(link='https://www.instagram.com/another_profile'),
+            'extra_cta_value': lambda rows: rows[CREATIVE]['call_to_action']['value'].update(app_destination='INSTAGRAM_DIRECT'),
+            'wrong_cta': lambda rows: rows[CREATIVE]['call_to_action'].update(type='LEARN_MORE'),
+            'wrong_cta_type': lambda rows: rows[CREATIVE].update(call_to_action_type='LEARN_MORE'),
+            'destination_spec': lambda rows: rows[CREATIVE].update(destination_spec={'website': {'url': 'https://unapproved.example/'}}),
+            'malformed_destination': lambda rows: rows[CREATIVE].update(destination_spec=False),
+            'top_link': lambda rows: rows[CREATIVE].update(link_url='https://unapproved.example/'),
+            'object_url': lambda rows: rows[CREATIVE].update(object_url='https://unapproved.example/'),
+            'story_link': lambda rows: rows[CREATIVE].update(object_story_spec={'link_data': {'link': 'https://unapproved.example/'}}),
+            'story_cta': lambda rows: rows[CREATIVE].update(object_story_spec={'video_data': {'call_to_action': {'type': 'VIEW_INSTAGRAM_PROFILE', 'value': {'link': 'https://www.instagram.com/another_profile'}}}}),
+            'missing_identity': lambda rows: rows[CREATIVE].pop('instagram_user_id'),
+            'identity': lambda rows: rows[CREATIVE].update(instagram_user_id='999'),
+            'source': lambda rows: rows[CREATIVE].update(source_instagram_media_id='999'),
+            'null_page': lambda rows: rows[CREATIVE].update(object_id=None),
+            'adset_destination': lambda rows: rows[ADSET].update(destination_type='WEBSITE'),
+            'optimization_goal': lambda rows: rows[ADSET].update(optimization_goal='LINK_CLICKS'),
+            'subevent': lambda rows: rows[ADSET].update(optimization_sub_event='POST_INTERACTION'),
+            'budget': lambda rows: rows[ADSET].update(lifetime_budget='101'),
+            'flight': lambda rows: rows[ADSET].update(end_time='2026-10-13T14:01:00+0100'),
+            'geography': lambda rows: rows[ADSET]['targeting']['geo_locations'].update(countries=['US']),
+            'caption': lambda rows: rows[CREATIVE].update(body='Changed caption'),
+            'enhancement': lambda rows: rows[CREATIVE]['degrees_of_freedom_spec']['creative_features_spec']['text_generation'].update(enroll_status='OPT_IN'),
+        }
+        for phase in ('paused', 'active_children'):
+            for field, mutate in changes.items():
+                self.api, self.meta = connected_api(), MetaFixture()
+                with self.subTest(phase=phase, field=field), patch.object(ads, 'json_request', self.meta), \
+                     patch.object(ads, 'datetime', wraps=datetime) as clock:
+                    clock.now.return_value = datetime(2026, 10, 12, 11, tzinfo=timezone.utc)
+                    approval = self.observed_reel_approval(mutate, phase, objective='PROFILE_VISITS')
+                    result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+                    self.assertIsInstance(result, ActionFailed, result)
+                    self.assertEqual(len(self.meta.writes), 4 if phase == 'paused' else 6)
+                    self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'PAUSED')
+                    self.assertFalse(any(path == '/500' for path, _ in self.meta.writes))
+
     def test_engagement_defaults_do_not_relax_other_outcomes(self):
         for objective in ('WEBSITE_CLICKS', 'PROFILE_VISITS', 'VIDEO_VIEWS'):
             for phase in ('paused', 'active_children'):
                 for field in ('optimization_sub_event', 'destination_spec'):
+                    if objective == 'PROFILE_VISITS' and field == 'destination_spec':
+                        continue  # Observed omission is covered with exact CTA evidence above.
                     self.api, self.meta = connected_api(), MetaFixture()
                     with self.subTest(objective=objective, phase=phase, field=field), patch.object(ads, 'json_request', self.meta):
                         approval = self.queue(launch_input(objective))

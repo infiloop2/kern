@@ -759,10 +759,11 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
         raise RuntimeError("Creative Page identity differs from approval.")
     if _has_enhancement(creative.get("degrees_of_freedom_spec")):
         raise RuntimeError("Provider enabled a creative enhancement outside the approved original Reel.")
-    # The observed ON_POST engagement creative omits this unset field. Other
-    # outcomes still require its readback; returned extra configuration is never
-    # accepted, and every returned CTA/URL/story override is checked below.
-    if "destination_spec" not in creative and value["objective"] != "ENGAGEMENTS":
+    # Existing-post ENGAGEMENTS and PROFILE_VISITS creatives omit this unset
+    # field. PROFILE_VISITS still requires the exact approved profile CTA/link
+    # below and INSTAGRAM_PROFILE ad-set destination above at both barriers.
+    # Other outcomes require readback; returned extra configuration is rejected.
+    if "destination_spec" not in creative and value["objective"] not in {"ENGAGEMENTS", "PROFILE_VISITS"}:
         raise RuntimeError("Meta did not return the requested destination configuration. It cannot be verified before activation.")
     if "destination_spec" in creative and creative["destination_spec"] is not None and creative["destination_spec"] != {}:
         raise RuntimeError("Creative has additional destination configuration or optimization outside approval.")
