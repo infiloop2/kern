@@ -18,6 +18,9 @@ def run(page, url, log_in, open_home_integration):
     expect(guide).to_contain_text('Meta ad spend is separate')
     expect(guide).to_contain_text('Meta Ads Manager > Advertising settings')
     expect(guide).to_contain_text('fresh geography/optional interests')
+    expect(guide).to_contain_text('Meta API v26.0')
+    expect(guide).to_contain_text('API-version upgrade alone does not require reconnecting')
+    expect(guide).to_contain_text('Malformed non-string URL fields stop activation')
     expect(guide).not_to_contain_text('list_audiences')
     expect(guide).not_to_contain_text('audience_ids')
     expect(guide.locator('.guide-capability')).to_have_count(11)
@@ -41,6 +44,7 @@ def run(page, url, log_in, open_home_integration):
     expect(input_parameters).not_to_contain_text('dsa_payor')
     caption = '<script>window.unapprovedContent = true</script> Original caption & tags'
     payload = {'tool_id': 'instagram_ads', 'proposal': {
+        'connection': {'api_version': 'v26.0'},
         'input': {'account_id': '100', 'page_id': '200', 'instagram_user_id': '300', 'media_id': '400',
                   'objective': 'WEBSITE_CLICKS', 'lifetime_budget': '2500', 'special_ad_category': 'NONE',
                   'start_time': '2099-01-01T00:00:00Z', 'end_time': '2099-01-03T00:00:00Z'},

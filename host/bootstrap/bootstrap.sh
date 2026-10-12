@@ -514,6 +514,21 @@ bootstrap_log() {
   printf '%s %s\n' "$(date -u +%FT%TZ)" "$1" >&2
 }
 
+# Retry transient HTTP failures (including 504) and timeouts with curl's
+# exponential backoff. At most four attempts; retries may start for 180s and
+# the final attempt may take another 60s. Permanent errors still fail promptly.
+bootstrap_download() {
+  local destination="$1" url="$2" status
+  if curl -fsSL --connect-timeout 15 --max-time 60 \
+    --retry 3 --retry-max-time 180 --output "$destination" "$url"; then
+    return 0
+  else
+    status=$?
+    bootstrap_log "download failed (exit ${status}): ${url}"
+    return "$status"
+  fi
+}
+
 install_system_packages() {
 bootstrap_log "== installing system packages =="
 # First boot races the AMI's apt-daily/apt-daily-upgrade timers: both are
@@ -935,7 +950,7 @@ case "$arch" in
   arm64) node_arch=arm64 ;;
   *) echo "unsupported architecture: ${arch}" >&2; exit 1 ;;
 esac
-curl -fsSLo /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"
+bootstrap_download /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"
 tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner
 rm -f /tmp/node.tar.xz
 
@@ -989,7 +1004,7 @@ case "$arch" in
   arm64) uv_arch=aarch64-unknown-linux-gnu ;;
   *) echo "unsupported uv architecture: ${arch}" >&2; exit 1 ;;
 esac
-curl -fsSLo /tmp/uv.tar.gz "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_arch}.tar.gz"
+bootstrap_download /tmp/uv.tar.gz "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_arch}.tar.gz"
 tar -xzf /tmp/uv.tar.gz -C /tmp
 install -m 0755 "/tmp/uv-${uv_arch}/uv" /usr/local/bin/uv
 rm -rf /tmp/uv.tar.gz "/tmp/uv-${uv_arch}"
@@ -1102,7 +1117,7 @@ if [ "$cloudflare_connection_count" -gt 0 ]; then
     arm64) cloudflared_arch=arm64 ;;
     *) echo "unsupported cloudflared architecture: ${arch}" >&2; exit 1 ;;
   esac
-  curl -fsSLo /usr/local/bin/cloudflared \
+  bootstrap_download /usr/local/bin/cloudflared \
     "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${cloudflared_arch}"
   chmod 755 /usr/local/bin/cloudflared
   cloudflared_version="$(/usr/local/bin/cloudflared --version)"

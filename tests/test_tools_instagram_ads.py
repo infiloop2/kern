@@ -56,6 +56,8 @@ class MetaFixture:
         self.page = {'id': PAGE, 'name': 'Real Page', 'tasks': ['ADVERTISE'], 'instagram_business_account': {
             'id': INSTAGRAM, 'username': 'owned_profile'}}
         self.user_pages = [self.page]
+        self.connected_instagrams = [{'id': INSTAGRAM, 'username': 'owned_profile'}]
+        self.minimum_budgets = None
         self.media = {'id': MEDIA, 'owner': {'id': INSTAGRAM}, 'caption': 'The exact original caption',
                       'media_type': 'VIDEO', 'media_product_type': 'REELS',
                       'media_url': 'https://cdninstagram.com/source.mp4?signature=first',
@@ -75,7 +77,8 @@ class MetaFixture:
     def __call__(self, method, url, **kwargs):
         parsed = urlsplit(url)
         assert parsed.scheme == 'https' and parsed.netloc == 'graph.facebook.com'
-        path = parsed.path.removeprefix('/v25.0')
+        assert parsed.path.startswith('/v26.0/'), 'Every Graph request must use v26.0'
+        path = parsed.path.removeprefix('/v26.0')
         fields = {key: rows[0] for key, rows in parse_qs(parsed.query, keep_blank_values=True).items()}
         if method == 'GET':
             assert 'account_type' not in fields.get('fields', ''), 'Facebook Login IGUser has no account_type field'
@@ -135,7 +138,7 @@ class MetaFixture:
         elif path.endswith('/promote_pages'):
             result = {'data': [deepcopy(self.page)]}
         elif path.endswith('/connected_instagram_accounts'):
-            result = {'data': [{'id': INSTAGRAM, 'username': 'owned_profile'}]}
+            result = {'data': deepcopy(self.connected_instagrams)}
         elif path == '/' + MEDIA:
             return deepcopy(self.media)
         elif path == '/' + INSTAGRAM + '/media':
@@ -151,7 +154,8 @@ class MetaFixture:
             else:
                 result = {'data': [{'key': code, 'name': code, 'type': 'country'} for code in ('US', 'DE', 'JP', 'BH', 'GF', 'IN')[:int(fields['limit'])]]}
         elif path.endswith('/minimum_budgets'):
-            return {'data': [{'currency': self.account['currency'], 'min_daily_budget_imp': self.minimum}]}
+            return {'data': deepcopy(self.minimum_budgets) if self.minimum_budgets is not None
+                    else [{'currency': self.account['currency'], 'min_daily_budget_imp': self.minimum}]}
         elif path == '/act_' + ACCOUNT + '/campaigns':
             result = {'data': [deepcopy(self.resources[CAMPAIGN])]}
         elif path == '/' + CAMPAIGN + '/adsets':
@@ -682,19 +686,29 @@ class InstagramAdsTests(unittest.TestCase):
                     self.assertNotIn('call_to_action', creative)
                 self.assertEqual(self.api.costs.calls, [])
 
-    def observed_reel_approval(self, mutate=None, phase='paused', objective='ENGAGEMENTS'):
+    def observed_reel_approval(self, mutate=None, phase='paused', objective='ENGAGEMENTS', fixture_name=None):
         # Sanitized GET get_campaign results from failed live $1 launches.
         # IDs, labels and profile handle are anonymized; omissions and values stay.
-        filename = 'profile_visit_readback.json' if objective == 'PROFILE_VISITS' else 'engagement_readback.json'
+        filename = fixture_name or ('profile_visit_readback.json' if objective == 'PROFILE_VISITS' else 'engagement_readback.json')
         fixture = json.loads((Path(__file__).parent / 'fixtures/instagram_ads' / filename).read_text())
         self.meta.account['timezone_name'] = 'Europe/London'
         self.meta.minimum = 100
         self.meta.media['caption'] = fixture['source_caption']
+        if 'source_reel' in fixture:
+            self.meta.media.update(fixture['source_reel'])
+            self.meta.account.update(fixture['account_fields_observed'])
+            self.meta.page = deepcopy(fixture['page_observed'])
+            self.meta.user_pages = [self.meta.page]
+            self.meta.connected_instagrams = deepcopy(fixture['connected_instagrams_observed'])
+            self.meta.minimum_budgets = deepcopy(fixture['minimum_budgets_subset_observed'])
         value = launch_input(objective)
         value.update(lifetime_budget='100', start_time='2026-10-10T21:30:00Z', end_time='2026-10-11T21:30:00Z',
                      audience={'countries': ['IN'], 'advantage_plus': True})
         if objective == 'PROFILE_VISITS':
             value.update(start_time='2026-10-12T13:00:00Z', end_time='2026-10-13T13:00:00Z')
+        if fixture_name == 'profile_visit_v26_readback.json':
+            self.assertEqual(fixture['api_version'], 'v26.0')
+            value.update(start_time='2026-10-12T14:00:00Z', end_time='2026-10-13T14:00:00Z')
         approval = self.queue(value)
         def hook(path, fields):
             if path == '/act_100/ads':
@@ -834,6 +848,90 @@ class InstagramAdsTests(unittest.TestCase):
                     self.assertEqual(len(self.meta.writes), 4 if phase == 'paused' else 6)
                     self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'PAUSED')
                     self.assertFalse(any(path == '/500' for path, _ in self.meta.writes))
+
+    def test_operator_v26_profile_responses_pass_complete_launch_with_exact_source_caption(self):
+        with patch.object(ads, 'datetime', wraps=datetime) as clock:
+            clock.now.return_value = datetime(2026, 10, 12, 11, tzinfo=timezone.utc)
+            approval = self.observed_reel_approval(objective='PROFILE_VISITS', fixture_name='profile_visit_v26_readback.json')
+            self.assertEqual(approval.payload['proposal']['connection']['api_version'], 'v26.0')
+            self.assertEqual(approval.payload['proposal']['minimum_lifetime_budget'], '100')
+            self.assertEqual(approval.payload['proposal']['source_reel']['caption'], self.meta.media['caption'])
+            self.assertIn('\n\nBina Pooche', self.meta.media['caption'])
+            result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+        self.assertIsInstance(result, ApprovalExecuted, result)
+        self.assertEqual([path for path, _ in self.meta.writes],
+                         ['/act_100/campaigns', '/act_100/adsets', '/act_100/adcreatives', '/act_100/ads', '/800', '/600', '/500'])
+        for resource in (ADSET, CREATIVE):
+            self.assertEqual(sum(method == 'GET' and path == '/' + resource for method, path, _, _ in self.meta.calls), 2)
+        for key in ('link_url', 'object_url', 'destination_spec', 'object_id'):
+            self.assertNotIn(key, self.meta.resources[CREATIVE])
+        self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'ACTIVE')
+
+    def test_version_upgrade_invalidates_launch_and_pause_approvals_before_provider_calls(self):
+        for action in ('launch_campaign', 'end_campaign'):
+            for version in ('v25.0', None):
+                self.api, self.meta = connected_api(), MetaFixture()
+                with self.subTest(action=action, version=version), patch.object(ads, 'json_request', self.meta):
+                    if action == 'launch_campaign':
+                        approval = self.queue()
+                        connection = approval.payload['proposal']['connection']
+                    else:
+                        pending = ads.BUNDLED_TOOL.execute(action, {'account_id': ACCOUNT, 'campaign_id': CAMPAIGN}, self.api)
+                        self.assertIsInstance(pending, ActionPendingApproval, pending)
+                        approval = self.api.approvals.approve(pending.approval_id)
+                        connection = approval.payload['connection']
+                    if version is None:
+                        connection.pop('api_version')
+                    else:
+                        connection['api_version'] = version
+                    before = len(self.meta.calls)
+                    result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+                    self.assertIsInstance(result, ActionFailed, result)
+                    self.assertIn('API version changed after approval', result.error)
+                    self.assertEqual(len(self.meta.calls), before)
+                    self.assertFalse(self.meta.writes)
+                    self.assertIsNotNone(self.api.credentials.record)
+
+    def test_url_mismatch_diagnostics_are_bounded_private_and_terminal_at_both_barriers(self):
+        base = 'https://www.instagram.com/owned_profile'
+        cases = ((False, 'invalid_type'), (0, 'invalid_type'), ([], 'invalid_type'), ({}, 'invalid_type'),
+                 (base + '/', 'trailing_slash_only'), (base + '?access_token=private-secret', 'query_changed'),
+                 (base + '#private-secret', 'fragment_changed'), ('https://private-secret@www.instagram.com/owned_profile', 'credentials_present'),
+                 ('https://unapproved.example/private-secret', 'host_changed'), ('http://www.instagram.com/owned_profile', 'scheme_changed'),
+                 ('https://www.instagram.com:444/owned_profile', 'port_changed'), ('https://www.instagram.com/private-secret', 'path_changed'),
+                 ('https://www.instagram.com:private-secret/owned_profile', 'malformed_url'), ('x' * 2049, 'over_length'))
+        for phase in ('paused', 'active_children'):
+            for field in ('link_url', 'object_url', 'object_story_spec.video_data.link', 'call_to_action.value.link'):
+                for actual, reason in cases:
+                    self.api, self.meta = connected_api(), MetaFixture()
+                    with self.subTest(phase=phase, field=field, reason=reason, actual=actual), \
+                         patch.object(ads, 'json_request', self.meta), patch.object(ads, 'datetime', wraps=datetime) as clock:
+                        clock.now.return_value = datetime(2026, 10, 12, 11, tzinfo=timezone.utc)
+                        def mutate(rows):
+                            if field == 'object_story_spec.video_data.link':
+                                rows[CREATIVE]['object_story_spec'] = {'video_data': {'link': deepcopy(actual)}}
+                            elif field == 'call_to_action.value.link':
+                                rows[CREATIVE]['call_to_action']['value']['link'] = deepcopy(actual)
+                            else:
+                                rows[CREATIVE][field] = deepcopy(actual)
+                        approval = self.observed_reel_approval(mutate, phase, objective='PROFILE_VISITS', fixture_name='profile_visit_v26_readback.json')
+                        self.diagnostics.reset_mock()
+                        result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+                        self.assertIsInstance(result, ActionFailed, result)
+                        self.assertIn(field, result.error)
+                        self.assertIn(reason, result.error)
+                        self.assertEqual(len(self.meta.writes), 4 if phase == 'paused' else 6)
+                        self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'PAUSED')
+                        self.assertFalse(any(path == '/500' for path, _ in self.meta.writes))
+                        self.diagnostics.assert_called_once()
+                        context = self.diagnostics.call_args.args[0]['context']
+                        self.assertEqual(context['verification_field'], field)
+                        self.assertEqual(context['verification_reason'], reason)
+                        self.assertEqual(context['api_version'], 'v26.0')
+                        self.assertEqual(context['operation'], 'GET /700')
+                        serialized = json.dumps(self.diagnostics.call_args.args[0], default=str) + result.error
+                        self.assertNotIn('private-secret', serialized)
+                        self.assertNotIn('https://', serialized)
 
     def test_engagement_defaults_do_not_relax_other_outcomes(self):
         for objective in ('WEBSITE_CLICKS', 'PROFILE_VISITS', 'VIDEO_VIEWS'):
@@ -1037,7 +1135,7 @@ class InstagramAdsTests(unittest.TestCase):
                 submitted_geo = []
                 error = {'code': 100, 'error_subcode': 3858634, 'message': 'provider secret meta-token'}
                 def reject(method, url, **kwargs):
-                    path = urlsplit(url).path.removeprefix('/v25.0')
+                    path = urlsplit(url).path.removeprefix('/v26.0')
                     if method == 'POST':
                         posted.append(path)
                         if path == '/act_100/adsets':
@@ -1668,6 +1766,7 @@ class InstagramAdsTests(unittest.TestCase):
     def test_oauth_uses_actual_lifetime_scopes_signed_callback_and_separate_config(self):
         params = {'redirect_uri': 'https://kern.example/tool-oauth/instagram_ads/callback'}
         start = ads.CREDENTIALS.start_connect(params, self.api)
+        self.assertEqual(urlsplit(start['authorization_url']).path, '/v26.0/dialog/oauth')
         query = parse_qs(urlsplit(start['authorization_url']).query)
         self.assertEqual(set(query['scope'][0].split(',')), set(ads.SCOPES))
         self.assertIn('business_management', query['scope'][0].split(','))

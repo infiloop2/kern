@@ -96,6 +96,53 @@ class InstagramAdsApprovalHostTests(ToolsHostTestCase):
         self.assertEqual(decision['approval']['status'], 'failed')
         self.assertFalse(self.meta.writes)
 
+    def test_api_version_change_persists_terminal_launch_and_pause_failure_without_calls(self):
+        for action in ('launch_campaign', 'end_campaign'):
+            with self.subTest(action=action):
+                if action == 'launch_campaign':
+                    approval = self.queue()
+                    approved_connection = state.tool_approval(approval)['payload']['proposal']['connection']
+                else:
+                    pending = tools_host.execute_action('instagram_ads', action, {'account_id': '100', 'campaign_id': '500'},
+                                                        connection_id='meta-selected', origin_thread_id=None)
+                    self.assertEqual(pending['status'], 'pending_approval', pending)
+                    approval = pending['approval_id']
+                    approved_connection = state.tool_approval(approval)['payload']['connection']
+                self.assertEqual(approved_connection['api_version'], 'v26.0')
+                before = len(self.meta.calls)
+                with patch.object(ads, 'API_VERSION', 'v27.0'):
+                    decision = tools_host.decide_approval(approval, 'approve', public_hostname=None)
+                self.assertEqual(decision['approval']['status'], 'failed')
+                self.assertIn('API version changed after approval', decision['approval']['result'])
+                self.assertEqual(len(self.meta.calls), before)
+                self.assertFalse(self.meta.writes)
+                self.assertEqual(state.page_tool_events_before(None)[0]['outcome'], 'failed')
+                self.assertIsNotNone(state.tool_credential('instagram_ads', 'meta-selected'))
+                with self.assertRaisesRegex(tools_host.ToolCallError, 'not pending'):
+                    tools_host.decide_approval(approval, 'approve', public_hostname=None)
+
+    def test_url_mismatch_receipt_names_field_without_url_and_leaves_parent_paused(self):
+        pending = tools_host.execute_action('instagram_ads', 'launch_campaign', launch_input('PROFILE_VISITS'),
+                                            connection_id='meta-selected', origin_thread_id=None)
+        self.assertEqual(pending['status'], 'pending_approval', pending)
+        def drift(path, fields):
+            if path == '/act_100/ads':
+                self.meta.resources['700']['link_url'] = 'https://private-secret@www.instagram.com/owned_profile'
+        self.meta.write_hook = drift
+        decision = tools_host.decide_approval(pending['approval_id'], 'approve', public_hostname=None)
+        self.assertEqual(decision['approval']['status'], 'failed')
+        self.assertIn('link_url', decision['approval']['result'])
+        self.assertIn('credentials_present', decision['approval']['result'])
+        self.assertNotIn('private-secret', json.dumps(decision))
+        receipt = state.page_tool_events_before(None)[0]
+        self.assertEqual(receipt['outcome'], 'failed')
+        self.assertIn('link_url', receipt['detail'])
+        self.assertNotIn('private-secret', receipt['detail'])
+        self.assertEqual(self.meta.resources['500']['status'], 'PAUSED')
+        self.assertEqual(len(self.meta.writes), 4)
+        with self.assertRaisesRegex(tools_host.ToolCallError, 'not pending'):
+            tools_host.decide_approval(pending['approval_id'], 'approve', public_hostname=None)
+
     def test_regional_rejection_persists_partial_ids_and_terminal_paused_failure(self):
         value = launch_input()
         value['audience'] = {'country_group': 'worldwide'}
