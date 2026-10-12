@@ -1,4 +1,4 @@
-"""Meta Marketing API v25.0: bounded reads, approved new Reel launch and pause.
+"""Meta Marketing API v26.0: bounded reads, approved new Reel launch and pause.
 
 No request here retries a write. A launch creates under a paused parent and
 activates that parent only after readback and a second resource revalidation.
@@ -30,7 +30,8 @@ from host.tools.tool import CredentialFlow, OAuthStartConnectParams, OAuthStartC
 
 from .contract import MANIFEST, LAUNCH_FIELDS, LAUNCH_REQUIRED
 
-GRAPH = "https://graph.facebook.com/v25.0"
+API_VERSION = "v26.0"
+GRAPH = "https://graph.facebook.com/" + API_VERSION
 INTERACTIVE_BUDGET_SECONDS = 240
 SCOPES = ("ads_management", "ads_read", "pages_show_list", "pages_read_engagement", "instagram_basic", "business_management")
 RECONNECT = "Instagram Ads is no longer authorized. Connect again under Home > Integrations > Instagram Ads and approve all requested permissions, including business_management for business portfolio assets."
@@ -52,8 +53,8 @@ AD_FIELDS = "id,account_id,campaign_id,adset_id,name,status,effective_status,iss
 MEDIA_FIELDS = "id,owner,caption,media_type,media_product_type,media_url,permalink,timestamp,boost_eligibility_info"
 OBJECTIVES = {
     "WEBSITE_CLICKS": ("OUTCOME_TRAFFIC", "LINK_CLICKS", "WEBSITE"),
-    # Follow the dedicated v25.0 profile-visit creation guide. The general
-    # Reels table still calls this VISIT_INSTAGRAM_PROFILE; do not auto-switch.
+    # The observed v26.0 profile-visit ad set returns this exact mapping.
+    # Do not substitute another optimization goal from the SDK enum.
     "PROFILE_VISITS": ("OUTCOME_TRAFFIC", "PROFILE_VISIT", "INSTAGRAM_PROFILE"),
     "ENGAGEMENTS": ("OUTCOME_ENGAGEMENT", "POST_ENGAGEMENT", "ON_POST"),
     "VIDEO_VIEWS": ("OUTCOME_ENGAGEMENT", "THRUPLAY", "ON_VIDEO"),
@@ -234,7 +235,7 @@ class MetaCredentialStore(OAuth2CredentialStore):
     def start_connect(self, params: OAuthStartConnectParams, api: HostAPI) -> OAuthStartConnectResult:
         state = signed_state(secret=api.config["INSTAGRAM_ADS_APP_SECRET"], tool_id=MANIFEST.tool_id,
                              extra={"redirect_uri": params["redirect_uri"]})
-        return {"authorization_url": "https://www.facebook.com/v25.0/dialog/oauth?" + encode_query({
+        return {"authorization_url": "https://www.facebook.com/" + API_VERSION + "/dialog/oauth?" + encode_query({
             "client_id": api.config["INSTAGRAM_ADS_APP_ID"], "redirect_uri": params["redirect_uri"],
             "response_type": "code", "scope": ",".join(SCOPES), "state": state,
             "auth_type": "rerequest",
@@ -245,7 +246,8 @@ class MetaCredentialStore(OAuth2CredentialStore):
         try:
             return self._complete_connect(params, api)
         except Exception as exc:
-            report_ads_failure("instagram_ads", "oauth_complete_connect", exc, phase="connection")
+            report_ads_failure("instagram_ads", "oauth_complete_connect", exc, phase="connection",
+                               diagnostic_context={"api_version": API_VERSION})
             raise
 
     def _complete_connect(self, params: OAuthCompleteConnectParams, api: HostAPI) -> OAuthCompleteConnectResult:
@@ -303,7 +305,7 @@ def _connection(graph: _Graph, api: HostAPI) -> JSONObject:
     if identity.get("id") != stored["account"]["id"] or set(SCOPES) - set(scopes):
         raise IntegrationReconnectRequired(RECONNECT)
     return {"id": identity["id"], "label": str(identity.get("name") or identity["id"]),
-            "scopes": cast(list[JSONValue], scopes), "fingerprint": _fingerprint(api, graph.token)}
+            "scopes": cast(list[JSONValue], scopes), "fingerprint": _fingerprint(api, graph.token), "api_version": API_VERSION}
 
 
 def _offset(currency: str) -> int | None:
@@ -390,7 +392,8 @@ def _diagnostic_edge(graph: _Graph, path: str, fields: str, params: dict[str, st
     except IntegrationReconnectRequired:
         raise
     except Exception as exc:
-        report_ads_failure("instagram_ads", "diagnose_account", exc, phase=stage)
+        report_ads_failure("instagram_ads", "diagnose_account", exc, phase=stage,
+                           diagnostic_context={"api_version": API_VERSION})
         # Read only typed numeric metadata. Never return exception/provider text.
         current: BaseException | None = exc
         seen: set[int] = set()
@@ -705,6 +708,47 @@ def _has_enhancement(value: JSONValue) -> bool:
     return isinstance(value, list) and any(_has_enhancement(item) for item in value)
 
 
+def _url_difference(actual: JSONValue, expected: JSONValue) -> str:
+    # Return only fixed classifications, never provider URLs or their parts.
+    # These describe a failure; they do not normalize or accept any difference.
+    if not isinstance(actual, str):
+        return "invalid_type"
+    if len(actual) > 2048:
+        return "over_length"
+    if not isinstance(expected, str):
+        return "unexpected_destination"
+    if actual == expected + "/":
+        return "trailing_slash_only"
+    try:
+        returned, approved = urlsplit(actual), urlsplit(expected)
+        if returned.username is not None or returned.password is not None:
+            return "credentials_present"
+        if returned.scheme != approved.scheme:
+            return "scheme_changed"
+        if returned.hostname != approved.hostname:
+            return "host_changed"
+        if returned.port != approved.port:
+            return "port_changed"
+        if returned.path != approved.path:
+            return "path_changed"
+        if returned.query != approved.query:
+            return "query_changed"
+        if returned.fragment != approved.fragment:
+            return "fragment_changed"
+    except ValueError:
+        return "malformed_url"
+    return "url_form_changed"
+
+
+class _DestinationMismatch(RuntimeError):
+    def __init__(self, field: str, actual: JSONValue, expected: JSONValue, creative_id: str) -> None:
+        reason = _url_difference(actual, expected)
+        super().__init__(f"Creative {field} differs from the approved destination ({reason}). URL values are omitted.")
+        self.diagnostic_context: dict[str, str | int | bool] = {
+            "verification_field": field, "verification_reason": reason, "operation": "GET /" + creative_id,
+        }
+
+
 def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, children_active: bool) -> JSONObject:
     value = _object(proposal["input"], "input")
     campaign = _campaign(graph, str(value["account_id"]), ids["campaign_id"])
@@ -767,12 +811,16 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
         raise RuntimeError("Meta did not return the requested destination configuration. It cannot be verified before activation.")
     if "destination_spec" in creative and creative["destination_spec"] is not None and creative["destination_spec"] != {}:
         raise RuntimeError("Creative has additional destination configuration or optimization outside approval.")
-    if any(creative.get(key) and creative[key] != proposal["destination"] for key in ("link_url", "object_url")):
-        raise RuntimeError("Creative contains a top-level destination outside approval.")
+    for key in ("link_url", "object_url"):
+        returned = creative.get(key)
+        # Only absent/null/empty-string mean unset; malformed falsy values must
+        # not silently bypass an exact destination check.
+        if returned is not None and returned != "" and (not isinstance(returned, str) or returned != proposal["destination"]):
+            raise _DestinationMismatch(key, returned, proposal["destination"], ids["creative_id"])
     if creative.get("body") is not None and creative["body"] != _object(proposal["source_reel"], "source Reel")["caption"]:
         raise RuntimeError("Creative caption differs from the approved original Reel.")
     cta = proposal["call_to_action"]
-    returned_ctas = [creative["call_to_action"]] if creative.get("call_to_action") is not None else []
+    returned_ctas: list[tuple[str, JSONValue]] = [("call_to_action", creative["call_to_action"])] if creative.get("call_to_action") is not None else []
     story = creative.get("object_story_spec")
     if story is not None and not isinstance(story, dict):
         raise RuntimeError("Meta returned malformed creative story configuration.")
@@ -788,11 +836,22 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
                 if "message" in data and data["message"] != _object(proposal["source_reel"], "source Reel")["caption"]:
                     raise RuntimeError("Creative text overrides the approved original Reel.")
                 if data.get("call_to_action") is not None:
-                    returned_ctas.append(data["call_to_action"])
+                    returned_ctas.append(("object_story_spec." + key + ".call_to_action", data["call_to_action"]))
                 if data.get("link") is not None and data["link"] != proposal["destination"]:
-                    raise RuntimeError("Creative story contains an unapproved destination.")
-    if (cta is not None and (not returned_ctas or any(not _matches(cta, actual, exact_keys=True) for actual in returned_ctas))) or (cta is None and any(returned_ctas)):
-        raise RuntimeError("Provider did not confirm the exact approved CTA and destination.")
+                    raise _DestinationMismatch("object_story_spec." + key + ".link", data["link"], proposal["destination"], ids["creative_id"])
+    if cta is None and returned_ctas:
+        raise RuntimeError("Creative call_to_action was not approved for this outcome.")
+    if cta is not None:
+        if not returned_ctas:
+            raise RuntimeError("Meta did not return the exact approved call_to_action and destination.")
+        approved_link = _object(_object(cta, "approved CTA")["value"], "approved CTA value")["link"]
+        for label, actual in returned_ctas:
+            if isinstance(actual, dict) and isinstance(actual.get("value"), dict):
+                returned_link = _object(actual["value"], "CTA value").get("link")
+                if not isinstance(returned_link, str) or returned_link != approved_link:
+                    raise _DestinationMismatch(label + ".value.link", returned_link, approved_link, ids["creative_id"])
+            if not _matches(cta, actual, exact_keys=True):
+                raise RuntimeError("Creative " + label + " differs from the exact approved CTA.")
     allowed_types = (None, _object(cta, "CTA")["type"]) if cta is not None else (None, "", "NONE")
     if creative.get("call_to_action_type") not in allowed_types:
         raise RuntimeError("Creative CTA type differs from approval.")
@@ -811,7 +870,10 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
 
 def _failure(exc: Exception, *, action: str, phase: str, confirmed: tuple[str, ...] = (), diagnose: bool = True) -> ActionFailed:
     if diagnose:
-        report_ads_failure("instagram_ads", action, exc, phase=phase, confirmed=confirmed)
+        context: dict[str, str | int | bool] = {"api_version": API_VERSION}
+        if isinstance(exc, _DestinationMismatch):
+            context.update(exc.diagnostic_context)
+        report_ads_failure("instagram_ads", action, exc, phase=phase, confirmed=confirmed, diagnostic_context=context)
     if isinstance(exc, IntegrationReconnectRequired):
         return ActionFailed(str(exc), reconnect_required=True)
     if isinstance(exc, ToolInputValidationError):
@@ -1059,6 +1121,8 @@ class InstagramAdsTool:
                 raise RuntimeError("Invalid Instagram Ads approval.")
             proposal = _object(payload.get("proposal"), "launch proposal") if approval.action_id == "launch_campaign" else payload
             connection = _object(proposal.get("connection"), "approved connection")
+            if connection.get("api_version") != API_VERSION:
+                raise RuntimeError("Instagram Ads API version changed after approval. Request a new approval.")
             token = CREDENTIALS.access_token(api)
             if connection.get("fingerprint") != _fingerprint(api, token):
                 raise RuntimeError("Instagram Ads connection or app credentials changed after approval. Request a new approval.")
