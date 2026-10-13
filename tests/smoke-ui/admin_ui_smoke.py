@@ -2498,19 +2498,53 @@ def mobile_smoke(page, url: str) -> None:
 
     page.locator("#panel-tool-log .home-back").click()
     page.locator("#panel-home").get_by_role("button", name=re.compile(r"Host diagnostics")).click()
+    host_diagnostics_smoke(page)
+
+
+def host_diagnostics_smoke(page) -> None:
+    """Filter across the whole log and copy a full lazy-loaded diagnostic."""
+    from playwright.sync_api import expect
     expect(page.locator("#host-diagnostics")).to_contain_text("agentic_web_app.request")
     expect(page.locator("#host-diagnostics")).to_contain_text("orchestrator.execution")
     maintenance = page.locator("#host-diagnostics tr").filter(has_text="admin_api.codex_session_sweep")
     expect(maintenance).to_contain_text("info")
-    expect(maintenance).to_contain_text("Codex cleanup completed")
     maintenance.locator("summary").click()
     expect(maintenance.locator("pre.metadata")).to_contain_text("skip_referenced")
-    maintenance.locator("summary").click()
-    page.locator("#host-diagnostic-filter").click()
+    # Changing filters must work even with expanded details.
+    page.locator("#host-diagnostic-severity").select_option("error")
     expect(maintenance).to_have_count(0)
     expect(page.locator("#host-diagnostics")).to_contain_text("orchestrator.execution")
-    page.locator("#host-diagnostic-filter").click()
+    page.locator("#host-diagnostic-severity").select_option("warning")
+    expect(page.locator("#host-diagnostics")).to_contain_text("agentic_web_app.request")
+    page.locator("#host-diagnostic-component").select_option("admin_api.codex_session_sweep")
+    expect(page.locator("#host-diagnostics")).to_contain_text("No host diagnostics match")
+    page.locator("#host-diagnostic-severity").select_option("info")
     expect(maintenance).to_have_count(1)
+    # Stub only the OS clipboard; use real detail fetch, formatting and button.
+    page.evaluate("""() => {
+      window.__diagnosticCopy = null;
+      Object.defineProperty(navigator, 'clipboard', { configurable: true, value: {
+        write: async items => { window.__diagnosticCopy = await (await items[0].getType('text/plain')).text(); },
+        writeText: async text => { window.__diagnosticCopy = text; }
+      }});
+    }""")
+    maintenance.get_by_role("button", name="Copy complete diagnostic").click()
+    expect(maintenance.locator("[data-copy-feedback]")).to_have_text("Copied to clipboard")
+    copied = json.loads(page.evaluate("window.__diagnosticCopy"))
+    assert copied["component"] == "admin_api.codex_session_sweep"
+    assert copied["context"]["skip_referenced"] == 5
+    assert copied["fingerprint"] == "3" * 64
+    assert copied["boot_id"] and copied["host_version"] and copied["first_seen_at"]
+    assert "traceback" in copied
+    page.evaluate("""() => {
+      navigator.clipboard.write = async () => { throw new Error('clipboard unavailable'); };
+      navigator.clipboard.writeText = navigator.clipboard.write;
+    }""")
+    maintenance.get_by_role("button", name="Copy complete diagnostic").click()
+    expect(maintenance.locator("[data-copy-feedback]")).to_contain_text("Copy failed")
+    page.locator("#host-diagnostic-component").select_option("")
+    page.locator("#host-diagnostic-severity").select_option("")
+    expect(page.locator("#host-diagnostics tr")).to_have_count(4)
     assert_no_horizontal_overflow(page, "host diagnostics")
 
 

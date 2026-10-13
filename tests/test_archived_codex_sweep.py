@@ -1,4 +1,4 @@
-"""Single Codex reconciliation phase runs at startup and hourly."""
+"""Single Codex reconciliation phase runs at startup and daily."""
 
 import unittest
 from unittest.mock import patch
@@ -7,11 +7,11 @@ from host.runtime.admin_api import service
 
 
 class CodexMaintenanceTests(unittest.TestCase):
-    def test_maintenance_reconciles_at_startup_then_hourly(self) -> None:
+    def test_maintenance_reconciles_at_startup_then_daily(self) -> None:
         with (
             patch.object(service, "prune_state") as prune,
             patch.object(service, "reconcile_codex_sessions") as reconcile,
-            patch.object(service.time, "monotonic", side_effect=[0, 3599, 3600, 3601, 7199, 7200]),
+            patch.object(service.time, "monotonic", side_effect=[0, 86399, 86400, 86401, 172799, 172800]),
             patch.object(service.time, "sleep", side_effect=[None, None, None, None, None, KeyboardInterrupt]),
         ):
             with self.assertRaises(KeyboardInterrupt):

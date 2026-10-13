@@ -1459,12 +1459,13 @@ def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dic
         return {"event": event}
     if method == "GET" and path == "/v1/host-diagnostics":
         before, limit = event_page_query(
-            query, {"before", "limit", "service", "severity"}, "host diagnostic"
+            query, {"before", "limit", "service", "severity", "component"}, "host diagnostic"
         )
         return {
             "events": host_diagnostics_before(
-                before, limit, one(query, "service"), one(query, "severity")
-            )
+                before, limit, one(query, "service"), one(query, "severity"), one(query, "component")
+            ),
+            "components": sorted({row["component"] for row in STATE.host_diagnostics}),
         }
     host_diagnostic_match = re.fullmatch(r"^/v1/host-diagnostics/([1-9][0-9]*)$", path)
     if method == "GET" and host_diagnostic_match:
@@ -2465,6 +2466,7 @@ def host_diagnostics_before(
     limit: int,
     service: str | None,
     severity: str | None,
+    component: str | None,
 ) -> list[dict[str, Any]]:
     with STATE.lock:
         errors = list(reversed(STATE.host_diagnostics))
@@ -2474,6 +2476,8 @@ def host_diagnostics_before(
             errors = [error for error in errors if error["service"] == service]
         if severity is not None:
             errors = [error for error in errors if error["severity"] == severity]
+        if component is not None:
+            errors = [error for error in errors if error["component"] == component]
         return [
             {
                 key: value

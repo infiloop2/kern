@@ -284,15 +284,20 @@ def clear_thread_provider_session(
 
 
 def codex_cleanup_candidates(runtime: str) -> list[tuple[str, str, bool]]:
-    """Idle mappings eligible for size checks or seven-day archive cleanup."""
+    """Idle mappings eligible for size checks or existing workspace archive policy."""
     with _read() as cur:
         cur.execute(
-            "SELECT session.thread_id, session.provider_session_id, COALESCE(chat.archived, FALSE)"
+            "SELECT session.thread_id, session.provider_session_id, (COALESCE(chat.archived, FALSE)"
+            " OR COALESCE(app.archived, FALSE) OR schedule.deleted_at IS NOT NULL)"
             " FROM thread_sessions AS session LEFT JOIN chat_threads AS chat USING (thread_id)"
+            " LEFT JOIN web_apps AS app ON app.app_id = session.thread_id"
+            " LEFT JOIN schedules AS schedule ON schedule.thread_id = session.thread_id"
             " WHERE session.agent_runtime = %s AND session.run_status = 'idle'"
             " AND session.provider_session_id IS NOT NULL"
             " AND (COALESCE(chat.archived, FALSE) = FALSE"
             " OR chat.archived_at <= CURRENT_TIMESTAMP - INTERVAL '7 days')"
+            " AND (schedule.deleted_at IS NULL"
+            " OR schedule.deleted_at::timestamptz <= CURRENT_TIMESTAMP - INTERVAL '7 days')"
             " ORDER BY session.thread_id", (runtime,),
         )
         return [(str(row[0]), str(row[1]), bool(row[2])) for row in cur.fetchall()]
@@ -302,17 +307,31 @@ def detach_idle_codex_session(
     cur: Any, thread_id: str, runtime: str, session_id: str, *, archived: bool,
 ) -> bool:
     """Recheck idle ownership and archive policy, then preserve Kern history."""
-    cur.execute(
-        "SELECT archived, archived_at <= CURRENT_TIMESTAMP - INTERVAL '7 days'"
-        " FROM chat_threads WHERE thread_id = %s FOR SHARE SKIP LOCKED", (thread_id,),
-    )
-    chat = cur.fetchone()
-    if chat is None:
-        # A busy Chat must be skipped; Apps/Standing agents have no Chat row.
-        cur.execute("SELECT 1 FROM chat_threads WHERE thread_id = %s", (thread_id,))
-        if archived or cur.fetchone() is not None:
-            return False
-    elif bool(chat[0]) != archived or (archived and not chat[1]):
+    # Check all existing workspace records without adding a second archive
+    # state. Locks keep a concurrent restore from racing the detach; a busy
+    # row is skipped so cleanup does not hold up operator actions.
+    found = False
+    for table, key, archive_expression, grace_expression in (
+        ("chat_threads", "thread_id", "archived",
+         "archived_at <= CURRENT_TIMESTAMP - INTERVAL '7 days'"),
+        ("web_apps", "app_id", "archived", "TRUE"),
+        ("schedules", "thread_id", "deleted_at IS NOT NULL",
+         "deleted_at::timestamptz <= CURRENT_TIMESTAMP - INTERVAL '7 days'"),
+    ):
+        cur.execute(
+            f"SELECT {archive_expression}, {grace_expression} FROM {table}"
+            f" WHERE {key} = %s FOR SHARE SKIP LOCKED", (thread_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            cur.execute(f"SELECT 1 FROM {table} WHERE {key} = %s", (thread_id,))
+            if cur.fetchone() is not None:
+                return False
+        else:
+            found = True
+            if bool(row[0]) != archived or (archived and not row[1]):
+                return False
+    if archived and not found:
         return False
     session = thread_session_config(thread_id, cur)
     if (session is None or session["agent_runtime"] != runtime

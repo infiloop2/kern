@@ -24,7 +24,7 @@ import {
   refreshFiles,
 } from "./files.js";
 import { refreshAgentProcesses } from "./processes.js";
-import { agentLog, hostDiagnosticLog, netLog, toolLog, toggleHostDiagnosticFilter, toggleNetDeniedFilter } from "./logs.js";
+import { agentLog, changeHostDiagnosticFilters, copyHostDiagnostic, hostDiagnosticLog, netLog, toolLog, toggleNetDeniedFilter } from "./logs.js";
 import {
   addDomainRule, addGithubRepo, deleteGithubCredential, saveXaiVideoStorage, deleteXaiVideoStorage,
   loadPolicy, recheckGithubAudit, removeDomainRule,
@@ -1473,7 +1473,7 @@ document.addEventListener("click", event => {
     "agent-page": () => agentLog.showPage(button.dataset.page).catch(() => {}),
     "tool-page": () => toolLog.showPage(button.dataset.page).catch(() => {}),
     "host-diagnostic-page": () => hostDiagnosticLog.showPage(button.dataset.page).catch(() => {}),
-    "toggle-host-diagnostic-filter": () => toggleHostDiagnosticFilter(),
+    "copy-host-diagnostic": () => copyHostDiagnostic(button),
     "enable-tool": () => setToolEnabled(button.dataset.tool, true),
     "disable-tool": () => setToolEnabled(button.dataset.tool, false),
     "save-tool-config": () => saveToolConfig(button.dataset.tool, button.dataset.key),
@@ -1540,6 +1540,8 @@ window.addEventListener("popstate", event => {
   }
 });
 bindIPhoneStandaloneSidebarSwipe();
+$("host-diagnostic-severity").addEventListener("change", changeHostDiagnosticFilters);
+$("host-diagnostic-component").addEventListener("change", changeHostDiagnosticFilters);
 $("github-credential-mode").addEventListener("change", toggleGithubCredentialMode);
 $("policy-guard-request-content").addEventListener("change", event => {
   const websocket = $("policy-allow-websocket");

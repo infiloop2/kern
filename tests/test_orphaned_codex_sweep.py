@@ -112,6 +112,59 @@ class OrphanedCodexSweepTests(unittest.TestCase):
         self.assertEqual(context["measured_retired_bytes"], 20 * 1024 * 1024)
         self.report.assert_not_called()
 
+    def test_unloaded_mapping_verification_continues_to_later_mappings_and_orphans(self):
+        bad, good, orphan = session(1), session(2), session(3)
+        for present in (False, True, "unverifiable"):
+            with self.subTest(present=present):
+                self.delete.reset_mock()
+                self.use(orphan)
+                self.candidates.return_value = [("app-1", bad["id"], False), ("app-2", good["id"], False)]
+                with (
+                    patch.object(orchestrator, "live_thread_ids", return_value=set()),
+                    patch.object(codex_app_server, "session_rollout_size", side_effect=[
+                        codex_app_server.CodexRolloutMeasurementError(f"thread not loaded: {bad['id']}"),
+                        20 * 1024 * 1024,
+                    ]),
+                    patch.object(codex_app_server, "session_rollout_exists", return_value=present,
+                                 side_effect=codex_app_server.CodexRolloutMeasurementError("unverifiable")
+                                 if present == "unverifiable" else None),
+                    patch.object(cleanup.state, "mutation"),
+                    patch.object(cleanup.state, "detach_idle_codex_session", return_value=True) as detach,
+                ):
+                    self.assertEqual(cleanup.reconcile_codex_sessions(), 2)
+                self.assertEqual([c.args[3] for c in detach.call_args_list],
+                                 [bad["id"], good["id"]] if present is False else [good["id"]])
+                self.assertEqual([c.args[1] for c in self.delete.call_args_list], [good["id"], orphan["id"]])
+                self.assertEqual(self.info.call_args.kwargs["context"]["detached_missing"], int(present is False))
+                self.report.assert_not_called()
+
+    def test_live_or_changed_missing_mapping_is_preserved(self):
+        root = session(1)
+        self.candidates.return_value = [("app-1", root["id"], False)]
+        for became_live in (True, False):
+            with (
+                self.subTest(became_live=became_live),
+                patch.object(orchestrator, "live_thread_ids", side_effect=[set(), {"app-1"} if became_live else set()]),
+                patch.object(codex_app_server, "session_rollout_size", side_effect=
+                             codex_app_server.CodexRolloutMeasurementError(f"thread not loaded: {root['id']}")),
+                patch.object(codex_app_server, "session_rollout_exists", return_value=False),
+                patch.object(cleanup.state, "mutation"),
+                patch.object(cleanup.state, "detach_idle_codex_session", return_value=False) as detach,
+            ):
+                self.assertEqual(cleanup.reconcile_codex_sessions(), 0)
+                self.assertEqual(detach.call_count, 0 if became_live else 1)
+                self.assertEqual(self.info.call_args.kwargs["context"]["detached_missing"], 0)
+        self.delete.assert_not_called()
+
+    def test_unloaded_orphan_does_not_starve_later_orphans(self):
+        bad, good = session(1), session(2)
+        self.use(bad, good)
+        self.server.call.side_effect = [codex_app_server.CodexAppServerError(f"thread not loaded: {bad['id']}"), {"thread": good}]
+        self.assertEqual(cleanup.reconcile_codex_sessions(), 1)
+        self.delete.assert_called_once_with(self.server, good["id"])
+        self.assertEqual(self.info.call_args.kwargs["context"]["orphan_read_failed"], 1)
+        self.assertEqual(self.info.call_args.kwargs["context"]["outcome"], "partial")
+
     def test_transport_timeout_stops_account_and_reports_exact_phase(self):
         self.enterContext(patch.object(codex_app_server, "CODEX_RUNTIME_TYPES", ("codex", "codex-2")))
         root = session(1)

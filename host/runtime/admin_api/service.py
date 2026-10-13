@@ -293,7 +293,7 @@ THREAD_HANDOFF_ACTIVITY_DETAIL_LIMIT = 1_000
 THREAD_HANDOFF_ACTIVITY_OUTPUT_LIMIT = 8_000
 THREAD_HANDOFF_ACTIVITY_EVENT_CHARACTER_LIMIT = 8_000
 MAINTENANCE_INTERVAL_SECONDS = 3600  # scheduled state cleanup cadence (not per-request)
-CODEX_RECONCILIATION_INTERVAL_SECONDS = 3600
+CODEX_RECONCILIATION_INTERVAL_SECONDS = 24 * 3600
 THREAD_EVENT_MESSAGE_BYTES_LIMIT = 200_000
 # The in-thread boundary text. Retained events remain available to audit and
 # history APIs, while Chat treats this marker as the new visible beginning.
@@ -1115,13 +1115,18 @@ def _host_diagnostics_route(request: _RouteRequest) -> dict[str, Any]:
     severity_filter = _one(request.query, "severity")
     if severity_filter is not None and severity_filter not in {"error", "warning", "info"}:
         raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic severity is invalid")
+    component_filter = _one(request.query, "component")
+    if component_filter is not None and (not component_filter or len(component_filter.encode("utf-8")) > 256):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic component is invalid")
     return {
         "events": state.page_host_diagnostics_before(
             _optional_non_negative_int(request.query, "before"),
             service=service_filter,
             severity=severity_filter,
+            component=component_filter,
             limit=_event_page_limit(request.query),
-        )
+        ),
+        "components": state.host_diagnostic_components(),
     }
 
 
@@ -1315,7 +1320,7 @@ _ROUTES: tuple[_Route, ...] = (
         "GET",
         "/v1/host-diagnostics",
         _host_diagnostics_route,
-        query_keys=frozenset({"before", "limit", "service", "severity"}),
+        query_keys=frozenset({"before", "limit", "service", "severity", "component"}),
         query_label="host diagnostic",
     ),
     _Route("GET", re.compile(r"/v1/host-diagnostics/([1-9][0-9]*)"), _host_diagnostic_route),

@@ -1,4 +1,4 @@
-"""Hourly Codex size, archive and unreferenced-root reconciliation."""
+"""Daily Codex size, archive and unreferenced-root reconciliation."""
 
 from __future__ import annotations
 
@@ -63,6 +63,8 @@ def reconcile_codex_sessions() -> int:
             "mapped_measured_bytes": 0, "detached": 0, "stored_roots": 0,
             "orphan_checked": 0, "retired_oversized": 0, "retired_archived": 0,
             "retired_orphan": 0, "measured_retired_bytes": 0, "measurement_failed": 0,
+            "orphan_read_failed": 0,
+            "detached_missing": 0,
         })
         retired: set[str] = set()
         phase = "initialize"
@@ -96,16 +98,34 @@ def reconcile_codex_sessions() -> int:
                     try:
                         size = codex_app_server.session_rollout_size(server, session_id)
                     except codex_app_server.CodexRolloutMeasurementError as exc:
+                        if (codex_app_server.is_unloaded_session_error(exc, session_id)
+                            or str(exc) == f"no rollout found for thread id {session_id}"):
+                            phase = "verify_missing_rollout"
+                            try:
+                                exists = codex_app_server.session_rollout_exists(server, session_id)
+                            except codex_app_server.CodexRolloutMeasurementError as verification_error:
+                                exc = verification_error
+                            else:
+                                if not exists:
+                                    phase = "detach_missing"
+                                    with state.mutation() as cur:
+                                        if thread_id in orchestrator.live_thread_ids():
+                                            counts["skip_live_thread"] += 1
+                                            continue
+                                        detached = state.detach_idle_codex_session(
+                                            cur, thread_id, runtime, session_id, archived=archived,
+                                        )
+                                    if detached:
+                                        counts["detached"] += 1
+                                        counts["detached_missing"] += 1
+                                    else:
+                                        counts["skip_changed_mapping"] += 1
+                                    continue
                         counts["measurement_failed"] += 1
                         host_errors.report_warning(
                             "admin_api.codex_session_sweep.measure", exc,
                             context={"runtime": runtime, "thread_id": thread_id, "session_id": session_id},
                         )
-                        continue
-                    except codex_app_server.CodexAppServerError as exc:
-                        if str(exc) != f"no rollout found for thread id {session_id}":
-                            raise
-                        counts["skip_missing_rollout"] += 1
                         continue
                     counts["mapped_measured"] += 1
                     counts["mapped_measured_bytes"] += size
@@ -165,6 +185,13 @@ def reconcile_codex_sessions() -> int:
                         "threadId": session_id, "includeTurns": False,
                     }, timeout=5)["thread"]
                 except codex_app_server.CodexAppServerError as exc:
+                    if codex_app_server.is_unloaded_session_error(exc, session_id):
+                        counts["orphan_read_failed"] += 1
+                        host_errors.report_warning(
+                            "admin_api.codex_session_sweep.read", exc,
+                            context={"runtime": runtime, "session_id": session_id},
+                        )
+                        continue
                     if str(exc) != f"no rollout found for thread id {session_id}":
                         raise
                     fresh = thread
@@ -201,7 +228,7 @@ def reconcile_codex_sessions() -> int:
                     "admin_api.codex_session_sweep.close", exc, context={"runtime": runtime},
                 )
             retired_count = counts["retired_oversized"] + counts["retired_archived"] + counts["retired_orphan"]
-            if outcome == "completed" and counts["measurement_failed"]:
+            if outcome == "completed" and (counts["measurement_failed"] or counts["orphan_read_failed"]):
                 outcome = "partial"
             host_errors.report_info(
                 "admin_api.codex_session_sweep",
