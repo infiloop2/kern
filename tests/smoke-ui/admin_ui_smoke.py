@@ -2500,6 +2500,17 @@ def mobile_smoke(page, url: str) -> None:
     page.locator("#panel-home").get_by_role("button", name=re.compile(r"Host diagnostics")).click()
     expect(page.locator("#host-diagnostics")).to_contain_text("agentic_web_app.request")
     expect(page.locator("#host-diagnostics")).to_contain_text("orchestrator.execution")
+    maintenance = page.locator("#host-diagnostics tr").filter(has_text="admin_api.codex_session_sweep")
+    expect(maintenance).to_contain_text("info")
+    expect(maintenance).to_contain_text("Codex cleanup completed")
+    maintenance.locator("summary").click()
+    expect(maintenance.locator("pre.metadata")).to_contain_text("skip_referenced")
+    maintenance.locator("summary").click()
+    page.locator("#host-diagnostic-filter").click()
+    expect(maintenance).to_have_count(0)
+    expect(page.locator("#host-diagnostics")).to_contain_text("orchestrator.execution")
+    page.locator("#host-diagnostic-filter").click()
+    expect(maintenance).to_have_count(1)
     assert_no_horizontal_overflow(page, "host diagnostics")
 
 

@@ -796,9 +796,8 @@ class AwsSmoke:
             raise AssertionError("could not write preserved-volume marker")
         self._aws("ec2", "stop-instances", "--instance-ids", instance_id)
         self._aws("ec2", "wait", "instance-stopped", "--instance-ids", instance_id)
-        # Deliberately drift managed launch settings while compute is stopped.
-        self._aws("ec2", "modify-instance-attribute", "--instance-id", instance_id,
-                  "--instance-type", "Value=t3.micro")
+        # Instance type is preserved, not a managed setting to drift here.
+        # Deliberately drift the managed settings while compute is stopped.
         self._aws("ec2", "modify-instance-attribute", "--instance-id", instance_id,
                   "--instance-initiated-shutdown-behavior", "Value=stop")
         self._aws("ec2", "modify-instance-metadata-options", "--instance-id", instance_id,

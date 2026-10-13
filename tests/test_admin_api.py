@@ -6876,6 +6876,22 @@ class ToolRoutesTests(unittest.TestCase):
             self.request("POST", f"/v1/host-diagnostics/{first}")
         self.assertEqual(write.exception.code, HTTPStatus.NOT_FOUND)
 
+    def test_host_diagnostics_accepts_information_maintenance_filter(self) -> None:
+        event = {
+            "service": "kern-admin-api", "component": "admin_api.codex_session_sweep",
+            "severity": "info", "kind": "maintenance", "exception_type": "",
+            "summary": "Codex cleanup completed", "traceback": "",
+            "context": {"runtime": "codex", "retired_roots": 3},
+            "fingerprint": "c" * 64, "host_version": "1.19.106",
+            "boot_id": "boot-1", "pid": 1234,
+        }
+        diagnostic_id = state.ingest_host_diagnostic(1_800_000_000_000_000, event)
+        status, body = self.request("GET", "/v1/host-diagnostics?severity=info")
+        self.assertEqual(status, 200)
+        self.assertEqual([row["id"] for row in body["events"]], [diagnostic_id])
+        _, detail = self.request("GET", f"/v1/host-diagnostics/{diagnostic_id}")
+        self.assertEqual(detail["diagnostic"]["context"], event["context"])
+
     def test_oauth_callback_serves_the_ui_shell(self) -> None:
         request = urllib.request.Request(f"{self.base_url}/oauth/callback?code=x&state=y")
         with urllib.request.urlopen(request, timeout=10) as response:

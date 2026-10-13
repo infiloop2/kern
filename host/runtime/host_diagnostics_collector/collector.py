@@ -24,13 +24,14 @@ from host.runtime.core.host_errors import (
 
 RETRY_SECONDS = 3
 FINGERPRINT_RE = re.compile(r"^[0-9a-f]{64}$")
-SEVERITIES = frozenset({"error", "warning"})
+SEVERITIES = frozenset({"error", "warning", "info"})
 KINDS = frozenset({
     "unexpected_exception",
     "service_exit",
     "invariant_failure",
     "provider_failure",
     "unexpected_behavior",
+    "maintenance",
 })
 
 

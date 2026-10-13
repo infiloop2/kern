@@ -111,7 +111,7 @@ def emit_record(record: dict[str, Any]) -> None:
     Reporting must never replace or mask the failure being reported.
     """
     message = json.dumps(record, sort_keys=True, separators=(",", ":"))
-    priority = "4" if record.get("severity") == "warning" else "3"
+    priority = "6" if record.get("severity") == "info" else "4" if record.get("severity") == "warning" else "3"
     fields = (
         f"MESSAGE={message}\n"
         f"PRIORITY={priority}\n"
@@ -142,26 +142,21 @@ def report_unexpected(
         print(f"{JOURNAL_TAG}: unexpected error reporter failure", file=sys.stderr, flush=True)
 
 
-def report_warning(
+def _report_message(
     component: str,
     issue: BaseException | str,
     *,
     context: dict[str, Any] | None = None,
-    kind: str = "unexpected_behavior",
+    severity: str,
+    kind: str,
 ) -> None:
-    """Record a contained anomaly for operator debugging.
-
-    String warnings deliberately have no traceback. Exception warnings retain
-    their bounded traceback, but remain warnings because the service handled
-    the failure and continued operating.
-    """
     try:
         if isinstance(issue, BaseException):
             record = _exception_record(
                 component,
                 issue,
                 context,
-                severity="warning",
+                severity=severity,
                 kind=kind,
             )
         else:
@@ -178,7 +173,7 @@ def report_warning(
                 host_version = ""
             record = {
                 "component": _clip(component, MAX_COMPONENT_BYTES),
-                "severity": "warning",
+                "severity": severity,
                 "kind": kind,
                 "exception_type": "",
                 "summary": _clip(summary, MAX_SUMMARY_BYTES),
@@ -189,7 +184,28 @@ def report_warning(
             }
         emit_record(record)
     except Exception:
-        print(f"{JOURNAL_TAG}: warning reporter failure", file=sys.stderr, flush=True)
+        print(f"{JOURNAL_TAG}: {severity} reporter failure", file=sys.stderr, flush=True)
+
+
+def report_warning(
+    component: str,
+    issue: BaseException | str,
+    *,
+    context: dict[str, Any] | None = None,
+    kind: str = "unexpected_behavior",
+) -> None:
+    """Record a contained anomaly, retaining a traceback for exceptions."""
+    _report_message(component, issue, context=context, severity="warning", kind=kind)
+
+
+def report_info(
+    component: str,
+    message: str,
+    *,
+    context: dict[str, Any] | None = None,
+) -> None:
+    """Record a bounded maintenance outcome without classifying it as an error."""
+    _report_message(component, message, context=context, severity="info", kind="maintenance")
 
 
 def report_service_exit(service: str, result: str, exit_code: str, exit_status: str) -> None:

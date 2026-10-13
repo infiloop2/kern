@@ -2157,6 +2157,18 @@ class HostErrorStorageTests(unittest.TestCase):
         filtered = state.page_host_diagnostics_before(None, severity="warning")
         self.assertEqual([row["service"] for row in filtered], ["kern-tools"])
 
+    def test_information_maintenance_records_are_stored_and_filterable(self) -> None:
+        event = dict(
+            self.event(), severity="info", kind="maintenance", exception_type="",
+            summary="Codex cleanup completed", traceback="",
+            context={"runtime": "codex", "retired_roots": 3},
+        )
+        diagnostic_id = state.ingest_host_diagnostic(1_800_000_000_000_000, event)
+        rows = state.page_host_diagnostics_before(None, severity="info")
+        self.assertEqual([row["id"] for row in rows], [diagnostic_id])
+        self.assertEqual(rows[0]["kind"], "maintenance")
+        self.assertEqual(state.host_diagnostic(diagnostic_id)["context"], event["context"])
+
     def test_coalesced_sequence_rotation_does_not_consume_retention_slots(self) -> None:
         seen_usec = 1_800_000_000_000_000
         with (

@@ -77,6 +77,96 @@ def _fake_deploy_key(workdir: object) -> Path:
 
 
 class DeployUnitTests(unittest.TestCase):
+    def test_instance_type_cli_accepts_deploy_recovery_and_uses_code_default_when_omitted(self) -> None:
+        for mode in ("deploy", "recover"):
+            with self.subTest(mode=mode):
+                base = ["--agent-name", "kern-test"]
+                if mode == "deploy":
+                    base.extend(["--admin-password-sha256", SAMPLE_ADMIN_PASSWORD_SHA256])
+                self.assertIsNone(deploy._parse_args(mode, base).instance_type)
+                parsed = deploy._parse_args(mode, [*base, "--instance-type", "m7i.xlarge"])
+                self.assertEqual(parsed.instance_type, "m7i.xlarge")
+                self.assertEqual(aws_resources._instance_settings(parsed.instance_type)["InstanceType"], "m7i.xlarge")
+                self.assertEqual(aws_resources._instance_settings()["InstanceType"], aws_resources.INSTANCE_TYPE)
+                for extra in (
+                    ["--provider", "lima", "--instance-type", "m7i.xlarge"],
+                    ["--instance-type", ""],
+                    ["--instance-type", "m7i"],
+                    ["--instance-type", "m7i.xlarge --other"],
+                ):
+                    with self.subTest(extra=extra), contextlib.redirect_stderr(io.StringIO()):
+                        with self.assertRaises(SystemExit) as error:
+                            deploy._parse_args(mode, [*base, *extra])
+                        self.assertEqual(error.exception.code, 2)
+        for mode in ("upgrade", "reconfigure"):
+            argv = ["--agent-name", "kern-test", "--instance-type", "m7i.xlarge"]
+            if mode == "reconfigure":
+                argv.extend(["--admin-password-sha256", SAMPLE_ADMIN_PASSWORD_SHA256])
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                deploy._parse_args(mode, argv)
+
+    def test_incompatible_compute_fails_before_any_deploy_or_recovery_mutation(self) -> None:
+        for mode in ("deploy", "recover"):
+            for instance_type in ("t4g.small", "m7g.large"):
+                with self.subTest(mode=mode, instance_type=instance_type), contextlib.ExitStack() as stack:
+                    stack.enter_context(patch.dict(os.environ, dict(SAMPLE_AWS_ENV)))
+                    ec2 = stack.enter_context(patch("host.cli.aws_resources._aws", return_value={
+                        "InstanceTypes": [{"ProcessorInfo": {"SupportedArchitectures": ["arm64"]}}],
+                    }))
+                    network = stack.enter_context(patch("host.cli.lifecycle_aws._default_network"))
+                    terminate = stack.enter_context(patch("host.cli.lifecycle_aws._terminate_instances"))
+                    storage = stack.enter_context(patch("host.cli.lifecycle_aws._ensure_storage_volumes"))
+                    launch = stack.enter_context(patch("host.cli.lifecycle_aws._launch_instance"))
+                    stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                    argv = ["--agent-name", "kern-test", "--instance-type", instance_type]
+                    if mode == "deploy":
+                        argv.extend(["--admin-password-sha256", SAMPLE_ADMIN_PASSWORD_SHA256,
+                                     "--operator-ssh-public-key", SAMPLE_SSH_PUBLIC_KEY])
+                    self.assertEqual(deploy.main_for_mode(mode, argv), 2)
+                    self.assertEqual(ec2.call_count, 1)
+                    self.assertEqual(ec2.call_args.args[1:], ("ec2", "describe-instance-types", "--instance-types", instance_type))
+                    for mutation in (network, terminate, storage, launch):
+                        mutation.assert_not_called()
+
+    def test_instance_type_override_reaches_deploy_and_recovery_in_both_deliveries(self) -> None:
+        for mode in ("deploy", "recover"):
+            for github in (False, True):
+                with self.subTest(mode=mode, github=github), contextlib.ExitStack() as stack:
+                    stack.enter_context(patch.dict(os.environ, dict(SAMPLE_AWS_ENV)))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._find_existing_instances", return_value=["i-old"] if mode == "recover" else []))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._existing_storage_volume_availability_zone", return_value="us-east-1a"))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._existing_storage_roles", return_value={"admin", "agent"} if mode == "recover" else set()))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._check_existing_version_hints"))
+                    stack.enter_context(patch("host.cli.aws_resources._aws", return_value={"InstanceTypes": [{"ProcessorInfo": {"SupportedArchitectures": ["x86_64"]}}]}))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._resolve_github_pin", return_value=("d" * 40, repo_version())))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._security_group_access_state", return_value=(False, True)))
+                    stack.enter_context(patch("host.cli.lifecycle_aws.prepare_upgrade", return_value=SAMPLE_UPGRADE))
+                    replace = stack.enter_context(patch("host.cli.lifecycle_aws.replace_root", return_value=("i-123", "sg-1")))
+                    launch = stack.enter_context(patch("host.cli.lifecycle_aws._launch_instance", return_value=("i-123", "sg-1")))
+                    terminate = stack.enter_context(patch("host.cli.lifecycle_aws._terminate_instances"))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._preserve_existing_storage_volumes_on_instance_termination"))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._ensure_storage_volumes", return_value={"admin": "vol-admin", "agent": "vol-agent"}))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._attach_storage_volumes"))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._wait_for_instance", return_value={"PublicDnsName": "ec2.example"}))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._generate_deploy_key", side_effect=_fake_deploy_key))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._write_runtime_code_archive"))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._provision_over_ssh"))
+                    stack.enter_context(patch("host.cli.lifecycle_aws._close_security_group_ssh_ingress"))
+                    stack.enter_context(contextlib.redirect_stdout(io.StringIO()))
+                    stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
+                    argv = ["--agent-name", "kern-test", "--instance-type", "m7i.xlarge"]
+                    if mode == "deploy":
+                        argv.extend(["--admin-password-sha256", SAMPLE_ADMIN_PASSWORD_SHA256,
+                                     "--operator-ssh-public-key", SAMPLE_SSH_PUBLIC_KEY])
+                    if github:
+                        argv.extend(["--bootstrap-from-github", "d" * 40])
+                    self.assertEqual(deploy.main_for_mode(mode, argv), 0)
+                    launch.assert_called_once()
+                    replace.assert_not_called()
+                    self.assertEqual(launch.call_args.kwargs["instance_type"], "m7i.xlarge")
+                    self.assertEqual(terminate.call_count, int(mode == "recover"))
+
     def test_aws_lifecycle_normalizes_agent_name_before_locking(self) -> None:
         command = deploy.LifecycleCommand(mode="upgrade", agent_name=" kern-test ", provider="aws")
         with patch.dict(os.environ, {"AWS_REGION": "us-east-1"}, clear=False), patch(
@@ -446,6 +536,7 @@ class DeployUnitTests(unittest.TestCase):
         )
 
         discovery_actions = statements["Ec2Discovery"]["Action"]
+        self.assertIn("ec2:DescribeInstanceTypes", discovery_actions)
         self.assertIn("ec2:DescribeInstanceCreditSpecifications", discovery_actions)
         self.assertNotIn("ec2:RunInstances", discovery_actions)
         self.assertNotIn("ec2:CreateVolume", discovery_actions)
@@ -579,6 +670,16 @@ class DeployUnitTests(unittest.TestCase):
         self.assertEqual(agent_mapping, [{"DeviceName": "/dev/sdg", "Ebs": {"DeleteOnTermination": False}}])
 
     def test_launch_instance_sets_unlimited_cpu_credits_and_stop_on_shutdown(self) -> None:
+        self._assert_launch_instance_settings(None, "t3.small", True)
+
+    def test_launch_instance_override_omits_credits_for_nonburstable_types(self) -> None:
+        for instance_type in ("m7i.xlarge", "t3.large", "t3a.large", "t8i.small"):
+            with self.subTest(instance_type=instance_type):
+                self._assert_launch_instance_settings(instance_type, instance_type, instance_type.startswith(("t3", "t8i")))
+
+    def _assert_launch_instance_settings(
+        self, instance_type: str | None, expected_type: str, credits: bool,
+    ) -> None:
         config = sample_input_config()
         calls: list[tuple[str, ...]] = []
 
@@ -607,10 +708,14 @@ class DeployUnitTests(unittest.TestCase):
                     network=("vpc-1", "subnet-1", "us-east-1a"),
                     ssh_ingress=True,
                     cloudflare_egress=True,
+                    instance_type=instance_type,
                 )
         self.assertEqual(instance_id, "i-123")
         run = next(call for call in calls if call[:2] == ("ec2", "run-instances"))
-        self.assertEqual(json.loads(run[run.index("--credit-specification") + 1]), {"CpuCredits": "unlimited"})
+        self.assertEqual(run[run.index("--instance-type") + 1], expected_type)
+        self.assertEqual("--credit-specification" in run, credits)
+        if credits:
+            self.assertEqual(json.loads(run[run.index("--credit-specification") + 1]), {"CpuCredits": "unlimited"})
         # An OS-initiated shutdown stops the instance, preserving bootstrap logs.
         self.assertIn("--instance-initiated-shutdown-behavior", run)
         self.assertEqual(run[run.index("--instance-initiated-shutdown-behavior") + 1], "stop")

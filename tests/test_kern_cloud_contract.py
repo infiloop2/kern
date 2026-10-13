@@ -132,8 +132,9 @@ class KernCloudContractTests(unittest.TestCase):
         self.assertGreaterEqual(tuple(map(int, version.split('.'))), (1, 0, 0))
         policy = json.loads((ROOT / 'iam_policy.json').read_text())
         digest = hashlib.sha256(json.dumps(policy, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        # Intentional DescribeInstanceTypes contract update paired with Infiverse PR #838.
         # Digest of Cloud's separately reviewed approved_iam_policy.json.
-        self.assertEqual(digest, '9a6b6705b955d7eb767001e46b2a1dec13894b1dc802c70d18feb931acf95857')
+        self.assertEqual(digest, 'ede932aad768eaf97138797c76ee5c1ea0f809fa7fb018665b7dab8a10055cde')
         for declaration in ("PUBLIC_GITHUB_REPOSITORY = 'infiloop2/kern'", "OPERATOR_TUNNEL_TOKEN_ENV_NAME = 'KERN_CLOUDFLARE_TUNNEL_TOKEN'", 'ADMIN_API_PORT = 7443'):
             self.assertIn(declaration, source('host/constants.py').splitlines())
 

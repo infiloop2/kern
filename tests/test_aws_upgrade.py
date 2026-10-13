@@ -20,6 +20,7 @@ class Ec2:
         self.user_data = None
         self.instance = {
             "InstanceId": "i-old", "State": {"Name": state}, "Architecture": "x86_64",
+            "InstanceType": "t3.small",
             "VirtualizationType": "hvm", "CurrentInstanceBootMode": "legacy-bios",
             "VpcId": "vpc-1", "SubnetId": "subnet-1", "Placement": {"AvailabilityZone": "us-east-1a"},
             "RootDeviceType": "ebs", "RootDeviceName": "/dev/sda1",
@@ -151,11 +152,26 @@ class RootUpgradeTests(unittest.TestCase):
                 mappings = {m["Ebs"]["VolumeId"]: m["Ebs"]["DeleteOnTermination"] for m in self.ec2.instance["BlockDeviceMappings"]}
                 self.assertEqual(mappings, {"vol-new": True, "vol-admin": False, "vol-agent": False})
                 settings = aws._instance_settings()
-                type_call = next(c for c in calls if "--instance-type" in c)
-                self.assertEqual(json.loads(type_call[-1]), {"Value": settings["InstanceType"]})
+                self.assertFalse(any("--instance-type" in c for c in calls))
                 credits = next(c for c in calls if c[0] == "modify-instance-credit-specification")
                 self.assertEqual(json.loads(credits[-1]), [{"InstanceId": "i-old", **settings["CreditSpecification"]}])
                 self.assertEqual((self.workdir / "user_data.base64").stat().st_mode & 0o777, 0o600)
+
+    def test_root_rebuild_preserves_custom_size_and_only_applies_credits_to_burstable_types(self):
+        for state in ("running", "stopped"):
+            for instance_type in ("m7i.xlarge", "t3.large", "t8i.small"):
+                with self.subTest(state=state, instance_type=instance_type):
+                    self.ec2.__init__(state)
+                    self.ec2.instance["InstanceType"] = instance_type
+                    self.assertEqual(self.run_upgrade(), ("i-old", "sg-current"))
+                    calls = self.ec2.calls
+                    self.assertFalse(any("--instance-type" in c for c in calls))
+                    self.assertEqual(self.ec2.instance["InstanceType"], instance_type)
+                    actions = [c[0] for c in calls]
+                    self.assertEqual("modify-instance-credit-specification" in actions, instance_type in {"t3.large", "t8i.small"})
+                    self.assertNotIn("terminate-instances", actions)
+                    self.assertNotIn("run-instances", actions)
+                    self.assertEqual(set(self.ec2.volumes), {"vol-new", "vol-admin", "vol-agent"})
 
     def test_unsupported_states_require_explicit_recovery_without_writes(self):
         for state in ("pending", "stopping", "shutting-down", "terminated"):

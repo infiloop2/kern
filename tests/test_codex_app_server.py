@@ -606,6 +606,43 @@ class CodexAppServerTests(unittest.TestCase):
                 self.assertIs(raised.exception, error)
                 self.assertEqual(server.call.call_count, 1)
 
+    def test_session_size_accepts_a_provider_archived_rollout(self) -> None:
+        session_id = "01900000-0000-7000-8000-000000000001"
+        server = MagicMock(runtime_type="codex")
+        path = f"{codex_app_server_module.AGENT_CWD}/.codex/archived_sessions/rollout-date-{session_id}.jsonl"
+        server.call.side_effect = [
+            {"thread": {"id": session_id, "path": path}},
+            {"exitCode": 0, "stdout": "20971520\n"},
+        ]
+        self.assertEqual(codex_app_server_module.session_rollout_size(server, session_id), 20 * 1024 * 1024)
+        self.assertEqual(server.call.call_args_list[1].args[1]["command"][-1], path)
+
+    def test_measurement_errors_are_distinct_from_transport_errors(self) -> None:
+        session_id = "01900000-0000-7000-8000-000000000001"
+        path = f"{codex_app_server_module.AGENT_CWD}/.codex/sessions/rollout-date-{session_id}.jsonl"
+        for output in ("not a size", "-1", None):
+            with self.subTest(output=output):
+                server = MagicMock(runtime_type="codex")
+                server.call.side_effect = [
+                    {"thread": {"id": session_id, "path": path}},
+                    {"exitCode": 0, "stdout": output},
+                ]
+                with self.assertRaises(codex_app_server_module.CodexRolloutMeasurementError):
+                    codex_app_server_module.session_rollout_size(server, session_id)
+        for thread in ({"id": "other", "path": None}, {"id": session_id, "path": 42}, None):
+            with self.subTest(thread=thread):
+                server = MagicMock(runtime_type="codex")
+                server.call.return_value = {"thread": thread}
+                with self.assertRaises(codex_app_server_module.CodexRolloutMeasurementError):
+                    codex_app_server_module.session_rollout_size(server, session_id)
+                self.assertEqual(server.call.call_count, 1)
+        server = MagicMock(runtime_type="codex")
+        timeout = codex_app_server_module.CodexTimeout("transport timeout")
+        server.call.side_effect = timeout
+        with self.assertRaises(codex_app_server_module.CodexTimeout) as error:
+            codex_app_server_module.session_rollout_size(server, session_id)
+        self.assertIs(error.exception, timeout)
+
     def test_session_size_rejects_other_homes_and_unexpected_files(self) -> None:
         session_id = "01900000-0000-7000-8000-000000000001"
         home = codex_app_server_module.AGENT_CWD

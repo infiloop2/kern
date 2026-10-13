@@ -27,6 +27,8 @@ class LifecycleCommand:
     # VM on the operator's machine). Only the provider selection point and
     # provider modules branch on this.
     provider: str = "aws"
+    # AWS deploy/recovery override; None uses the code default.
+    instance_type: str | None = None
 
 
 class LifecycleProvider(Protocol):

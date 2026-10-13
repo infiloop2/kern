@@ -1,23 +1,25 @@
 # Host Diagnostics
 
-Kern records service errors and contained warnings for operator debugging in
+Kern records service errors, contained warnings, and bounded maintenance information for operator debugging in
 the read-only **Host diagnostics** panel. Errors are reserved for service-level
 exceptions and abnormal service exits. Warnings capture strange behavior that
 the service contained, including provider and tool failures that deserve more
-context than the normal product result carries.
+context than the normal product result carries. Information records describe
+maintenance progress and outcomes without classifying successful work as a failure.
 
 ## Capture and storage
 
 Host services call `report_unexpected` for service-level exceptions and
-`report_warning` for contained anomalies. Both emit one structured journald
+`report_warning` for contained anomalies, and `report_info` for maintenance.
+All emit one structured journald
 record tagged `KERN_HOST_DIAGNOSTIC=1`; systemd supplies the trusted originating
 unit, PID, boot id, and timestamp. Every managed service also has an
 `ExecStopPost` hook that emits an error when systemd reports an abnormal result.
 
 `kern-host-errors.service` follows tagged records from the fixed set of
 Kern service units, validates every field, and writes them to
-`host_diagnostics` in PostgreSQL. Records contain severity (`error` or
-`warning`), component, kind, exception type, summary, optional traceback,
+`host_diagnostics` in PostgreSQL. Records contain severity (`error`,
+`warning`, or `info`), component, kind, exception type, summary, optional traceback,
 explicit context, host version, and fingerprint.
 
 The reporter does not inspect locals, environment variables, or request
@@ -49,7 +51,7 @@ from creating an exceptionally large row.
 
 The collector follows only new records and has no replay spool. Repeats with
 the same service and fingerprint coalesce for 60 seconds. One shared retention
-cap keeps the newest 10,000 error and warning rows.
+cap keeps the newest 10,000 diagnostic rows, including maintenance information.
 
 ## Operator surface
 
@@ -61,7 +63,7 @@ GET /v1/host-diagnostics?before=&limit=&service=&severity=
 GET /v1/host-diagnostics/{id}
 ```
 
-`severity` accepts `error` or `warning`. List pages omit traceback, context,
+`severity` accepts `error`, `warning`, or `info`. List pages omit traceback, context,
 and fingerprint; the UI loads those fields only when the operator expands a
 row. The panel is display-only.
 
@@ -74,7 +76,9 @@ operator response or relying on truncation as redaction.
 
 This is a curated diagnostic view, not a replacement for the system journal.
 Ordinary validation failures, user denials, and successful operational events
-remain in their existing product and audit surfaces.
+remain in their existing product and audit surfaces. Bounded Codex maintenance
+start/completion summaries are an explicit exception, so empty passes and skip
+reasons remain visible without inventing errors.
 
 Dictation reports slow requests/inference and contained failures through this
 same pipeline, with bounded durations, process CPU time and random request IDs.

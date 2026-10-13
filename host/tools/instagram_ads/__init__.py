@@ -708,6 +708,22 @@ def _has_enhancement(value: JSONValue) -> bool:
     return isinstance(value, list) and any(_has_enhancement(item) for item in value)
 
 
+def _destination_matches(actual: JSONValue, expected: JSONValue, objective: JSONValue) -> bool:
+    if not isinstance(actual, str):
+        return False
+    if actual == expected:
+        return True
+    # The observed PROFILE_VISITS response uses instagram.com instead of the
+    # approved www.instagram.com, with the same HTTPS profile path and no
+    # query/fragment. Accept only those literal forms and HTTPS's default port.
+    # Other goals and every other URL component remain exact.
+    if (objective != "PROFILE_VISITS" or not isinstance(expected, str)
+            or re.fullmatch(r"https://www\.instagram\.com/[A-Za-z0-9_.]{1,30}", expected) is None):
+        return False
+    profile_path = expected[len("https://www.instagram.com"):]
+    return actual in {"https://instagram.com" + profile_path, "https://instagram.com:443" + profile_path}
+
+
 def _url_difference(actual: JSONValue, expected: JSONValue) -> str:
     # Return only fixed classifications, never provider URLs or their parts.
     # These describe a failure; they do not normalize or accept any difference.
@@ -856,7 +872,7 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
         returned = creative.get(key)
         # Only absent/null/empty-string mean unset; malformed falsy values must
         # not silently bypass an exact destination check.
-        if returned is not None and returned != "" and (not isinstance(returned, str) or returned != proposal["destination"]):
+        if returned is not None and returned != "" and not _destination_matches(returned, proposal["destination"], value["objective"]):
             raise _DestinationMismatch(key, returned, proposal["destination"], ids["creative_id"], source_permalink)
     if creative.get("body") is not None and creative["body"] != _object(proposal["source_reel"], "source Reel")["caption"]:
         raise RuntimeError("Creative caption differs from the approved original Reel.")
@@ -878,7 +894,7 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
                     raise RuntimeError("Creative text overrides the approved original Reel.")
                 if data.get("call_to_action") is not None:
                     returned_ctas.append(("object_story_spec." + key + ".call_to_action", data["call_to_action"]))
-                if data.get("link") is not None and data["link"] != proposal["destination"]:
+                if data.get("link") is not None and not _destination_matches(data["link"], proposal["destination"], value["objective"]):
                     raise _DestinationMismatch("object_story_spec." + key + ".link", data["link"], proposal["destination"], ids["creative_id"], source_permalink)
     if cta is None and returned_ctas:
         raise RuntimeError("Creative call_to_action was not approved for this outcome.")
@@ -887,11 +903,15 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
             raise RuntimeError("Meta did not return the exact approved call_to_action and destination.")
         approved_link = _object(_object(cta, "approved CTA")["value"], "approved CTA value")["link"]
         for label, actual in returned_ctas:
+            checked_cta = actual
             if isinstance(actual, dict) and isinstance(actual.get("value"), dict):
                 returned_link = _object(actual["value"], "CTA value").get("link")
-                if not isinstance(returned_link, str) or returned_link != approved_link:
+                if not _destination_matches(returned_link, approved_link, value["objective"]):
                     raise _DestinationMismatch(label + ".value.link", returned_link, approved_link, ids["creative_id"], source_permalink)
-            if not _matches(cta, actual, exact_keys=True):
+                # Compare all CTA keys/type/settings exactly after validating
+                # this one link. Do not mutate the response or approval.
+                checked_cta = {**actual, "value": {**_object(actual["value"], "CTA value"), "link": approved_link}}
+            if not _matches(cta, checked_cta, exact_keys=True):
                 raise RuntimeError("Creative " + label + " differs from the exact approved CTA.")
     allowed_types = (None, _object(cta, "CTA")["type"]) if cta is not None else (None, "", "NONE")
     if creative.get("call_to_action_type") not in allowed_types:

@@ -194,10 +194,12 @@ cloud configuration: `LimaConfig` carries only the validated `agent_name`,
 and `--bootstrap-from-github` and the AWS environment variables are rejected
 or ignored respectively.
 
-Compute shape is pinned on both providers — `INSTANCE_TYPE` (`t3.small`) for
-EC2 and `LIMA_VM_CPUS` / `LIMA_VM_MEMORY_GIB` (2 CPUs / 2 GiB) for Lima — so
-every host runs identical compute, every replacement recreates an identical
-VM, and the rendered Lima definition is fully deterministic.
+Compute defaults are pinned on both providers — `INSTANCE_TYPE` (`t3.small`)
+for EC2 and `LIMA_VM_CPUS` / `LIMA_VM_MEMORY_GIB` (2 CPUs / 2 GiB) for Lima.
+AWS deploy and recovery accept `--instance-type` to override the EC2 default
+for that operation; CPU and RAM both follow the selected type. Omitting it
+uses the code default. AWS upgrade and reconfiguration keep the existing type.
+Lima's rendered compute shape remains fixed and rejects this AWS-only option.
 
 Kern runs `limactl` with the parent environment unchanged, so an ambient
 `LIMA_HOME` selects a non-default Lima home exactly as it would for direct
