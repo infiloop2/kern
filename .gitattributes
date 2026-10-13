@@ -1,0 +1,5 @@
+# Collapse tests (including handwritten tests, helpers and fixtures) in GitHub diffs.
+**/tests/** linguist-generated=true
+
+# Collapse checked-in generated code in GitHub diffs.
+host/param_guard_words.py linguist-generated=true

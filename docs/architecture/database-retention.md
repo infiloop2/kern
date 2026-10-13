@@ -89,7 +89,7 @@ The categories are:
 When adding or renaming a table, update this inventory in the same change.
 
 Provider-file cleanup is separate from PostgreSQL history retention. The admin
-maintenance loop sweeps Codex sessions at startup and daily. Archived Chats
+maintenance loop sweeps Codex sessions at startup and hourly. Archived Chats
 retain their provider context for seven days from `chat_threads.archived_at`,
 then detach only their provider mapping before supported Codex deletion. Chat
 records, messages, self-memory, and the clear-context boundary remain, so the

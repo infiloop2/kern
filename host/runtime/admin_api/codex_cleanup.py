@@ -1,4 +1,4 @@
-"""Daily Codex size, archive and unreferenced-root reconciliation."""
+"""Hourly Codex size, archive and unreferenced-root reconciliation."""
 
 from __future__ import annotations
 
@@ -40,7 +40,7 @@ def _eligible(thread: dict[str, Any], runtime: str, before: float) -> bool:
 
 
 def reconcile_codex_sessions() -> int:
-    """Apply size, archive and unreferenced-root cleanup in one daily pass.
+    """Apply size, archive and unreferenced-root cleanup in one hourly pass.
 
     A seven-day inactivity grace protects sessions being created or handed off.
     Running/FINISHING turns are skipped; archive state is rechecked at detach.
@@ -105,7 +105,7 @@ def reconcile_codex_sessions() -> int:
                 codex_app_server.delete_session(server, session_id)
                 deleted += 1
         except Exception as exc:
-            # Stop this account after any provider failure; the next daily pass
+            # Stop this account after any provider failure; the next hourly pass
             # rediscovers remaining logs, including a failed post-detach delete.
             host_errors.report_unexpected("admin_api.codex_session_sweep", exc, context={"runtime": runtime})
         finally:

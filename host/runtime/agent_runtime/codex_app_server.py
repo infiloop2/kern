@@ -58,9 +58,9 @@ CODEX_RUNTIME_TYPES = tuple(OPENAI_PROVIDER_KEYS)
 AGENT_CWD = "/mnt/kern-agent/agent-home"
 ACCOUNT_ID_HELPER_TIMEOUT_SECONDS = 10
 CLIENT_VERSION = "v1.0"
-# A soft per-session limit: a turn may exceed it, but successful completion
-# retires the session before the next turn. This is not a CODEX_HOME quota.
-SESSION_ROLLOUT_MAX_BYTES = 100 * 1024 * 1024
+# A soft per-session limit: a turn may exceed it; hourly maintenance retires
+# oversized idle sessions. This is not a CODEX_HOME quota.
+SESSION_ROLLOUT_MAX_BYTES = 10 * 1024 * 1024
 # Under the orchestrator's five-minute active recheck, so a scheduled recheck
 # always revalidates, while the five-second pending poll never becomes a
 # provider-traffic loop.

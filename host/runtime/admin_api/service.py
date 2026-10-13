@@ -293,7 +293,7 @@ THREAD_HANDOFF_ACTIVITY_DETAIL_LIMIT = 1_000
 THREAD_HANDOFF_ACTIVITY_OUTPUT_LIMIT = 8_000
 THREAD_HANDOFF_ACTIVITY_EVENT_CHARACTER_LIMIT = 8_000
 MAINTENANCE_INTERVAL_SECONDS = 3600  # scheduled state cleanup cadence (not per-request)
-CODEX_RECONCILIATION_INTERVAL_SECONDS = 24 * 3600
+CODEX_RECONCILIATION_INTERVAL_SECONDS = 3600
 THREAD_EVENT_MESSAGE_BYTES_LIMIT = 200_000
 # The in-thread boundary text. Retained events remain available to audit and
 # history APIs, while Chat treats this marker as the new visible beginning.
