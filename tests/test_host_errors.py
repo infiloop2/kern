@@ -94,6 +94,26 @@ class HostErrorReporterTests(unittest.TestCase):
 
         self.assertIn("PRIORITY=4\n", run.call_args.kwargs["input"])
 
+    @patch("host.runtime.core.host_errors.subprocess.run")
+    def test_emit_record_uses_info_journal_priority(self, run: Mock) -> None:
+        host_errors.emit_record({"severity": "info", "kind": "maintenance", "summary": "cleanup complete"})
+        self.assertIn("PRIORITY=6\n", run.call_args.kwargs["input"])
+
+    @patch("host.runtime.core.host_errors.emit_record")
+    def test_maintenance_information_reaches_the_diagnostic_collector(self, emit: Mock) -> None:
+        host_errors.report_info(
+            "admin_api.codex_session_sweep", "cleanup completed",
+            context={"runtime": "codex", "retired_roots": 3, "private_object": object()},
+        )
+        record = emit.call_args.args[0]
+        _, event = collector.parse_journal_record(journal_row(record))
+        self.assertIsNotNone(event)
+        self.assertEqual(event["severity"], "info")
+        self.assertEqual(event["kind"], "maintenance")
+        self.assertEqual(event["context"], {"runtime": "codex", "retired_roots": 3})
+        self.assertEqual(event["traceback"], "")
+        self.assertEqual(event["exception_type"], "")
+
     @patch("host.runtime.core.host_errors.emit_record")
     def test_warning_record_is_distinct_from_service_errors(self, emit: Mock) -> None:
         error = RuntimeError("provider rejected request")

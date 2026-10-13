@@ -62,7 +62,7 @@ The categories are:
 | `bedrock_credentials` | fixed | Singleton. |
 | `turn_usage` | retention | 90 days by last measurement time; Analytics queries seven UTC calendar days. |
 | `bedrock_usage` | retention | Daily counters for the latest 400 days; model ids are normalized to a finite catalog plus `other`. |
-| `host_diagnostics` | retention | Newest 10,000 coalesced error and warning rows, with at most 99 rows of amortization slack. |
+| `host_diagnostics` | retention | Newest 10,000 coalesced error, warning, and maintenance information rows, with at most 99 rows of amortization slack. |
 | `admin_passkey_config` | fixed | Singleton. |
 | `admin_passkeys` | fixed | Exactly zero or one administrator passkey; reset precedes replacement. |
 | `conversation_search_state` | fixed | Singleton search/embedding generations. |

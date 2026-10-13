@@ -1,0 +1,13 @@
+{
+  "api_version": "v26.0",
+  "verification_field": "link_url",
+  "verification_reason": "host_changed",
+  "verification_host": "instagram.com",
+  "verification_https": true,
+  "verification_standard_port": true,
+  "verification_path_matches_approved": true,
+  "verification_query_present": false,
+  "verification_fragment_present": false,
+  "verification_matches_source_reel": false,
+  "verification_embedded_target": "uninspected"
+}

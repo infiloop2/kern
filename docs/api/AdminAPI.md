@@ -1892,17 +1892,20 @@ GET /v1/host-diagnostics/{id}
 
 | Method | Path | Request | Response | Behavior |
 | --- | --- | --- | --- | --- |
-| `GET` | `/v1/host-diagnostics` | `?before=&limit=&service=&severity=` | `{"events": [...]}` | Lists host errors and warnings newest first. `before` is the row's ordering `seq`, `limit` is 1–100, optional `service` selects one exact systemd service name, and optional `severity` accepts `error` or `warning`. List rows omit traceback, context, and fingerprint. |
+| `GET` | `/v1/host-diagnostics` | `?before=&limit=&service=&severity=` | `{"events": [...]}` | Lists host errors, warnings, and maintenance information newest first. `before` is the row's ordering `seq`, `limit` is 1–100, optional `service` selects one exact systemd service name, and optional `severity` accepts `error`, `warning`, or `info`. List rows omit traceback, context, and fingerprint. |
 | `GET` | `/v1/host-diagnostics/{id}` | none | `{"diagnostic": {...}}` | Loads the full bounded diagnostic record by its stable numeric `id`, including traceback, context, and fingerprint. Returns `404` when the row does not exist. |
 
 The API is display-only: there are no resolve, dismiss, delete, or report
 routes. Ordinary validation, user-decision, and network-policy outcomes do not
-belong in this log. See [Host diagnostics](../architecture/host-diagnostics.md)
+belong in this log. Informational maintenance records use `severity=info` and
+`kind=maintenance`; Codex cleanup emits per-account start/completion summaries
+with counts, skip reasons, duration, and outcome in detail context.
+See [Host diagnostics](../architecture/host-diagnostics.md)
 for best-effort capture, safety, and retention.
 
 Host diagnostic list rows contain stable `id` and `diagnostic_id` fields, the rotating
 newest-first paging cursor `seq`, `first_seen_at`,
-`last_seen_at`, `service`, `component`, `kind`, `exception_type`, `summary`,
+`last_seen_at`, `service`, `component`, `kind`, `severity`, `exception_type`, `summary`,
 `occurrence_count`, `host_version`, `boot_id`, `pid`, and `has_details`. Detail
 reads additionally contain `traceback`, `context`, and `fingerprint`.
 

@@ -103,7 +103,10 @@ def replace_root(
         _stop_instance(env, instance_id, plan.instance["State"]["Name"])
         group = aws._ensure_security_group(config, env, plan.network[0],
                                           ssh_ingress=ssh_ingress, cloudflare_egress=cloudflare_egress)
-        aws._configure_existing_instance(config, env, instance_id, user_data_path, group, target_version)
+        aws._configure_existing_instance(
+            config, env, instance_id, user_data_path, group, target_version,
+            instance_type=plan.instance["InstanceType"],
+        )
         replacing = True
         _log(f"replacing root {old_root} with {new_root}")
         aws._aws(env, "ec2", "detach-volume", "--volume-id", old_root, "--instance-id", instance_id)

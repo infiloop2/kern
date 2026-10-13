@@ -108,6 +108,10 @@ class CodexSessionNotFoundError(CodexAppServerError, ProviderSessionLost):
     """The requested local Codex session no longer exists."""
 
 
+class CodexRolloutMeasurementError(CodexAppServerError):
+    """One rollout cannot be measured; the provider transport still succeeded."""
+
+
 class CodexTurnFinishing(CodexAppServerError, ProviderTurnFinishing):
     """A steer arrived after Codex published this turn's completion."""
 
@@ -1290,18 +1294,21 @@ def session_rollout_size(server: CodexAppServer, session_id: str) -> int:
     thread = server.call(
         "thread/read", {"threadId": session_id, "includeTurns": False}, timeout=5,
     )["thread"]
+    if not isinstance(thread, dict) or thread.get("id") != session_id:
+        raise CodexRolloutMeasurementError("Codex returned mismatched session metadata")
     path = thread.get("path")
     if path is None:
         return 0
+    if not isinstance(path, str):
+        raise CodexRolloutMeasurementError("Codex returned an invalid session rollout path")
     rollout = PurePosixPath(path)
-    sessions = PurePosixPath(AGENT_CWD) / f".{server.runtime_type}" / "sessions"
+    home = PurePosixPath(AGENT_CWD) / f".{server.runtime_type}"
     if (
-        thread.get("id") != session_id
-        or not rollout.is_relative_to(sessions)
+        not any(rollout.is_relative_to(home / directory) for directory in ("sessions", "archived_sessions"))
         or ".." in rollout.parts
         or not rollout.name.endswith(f"-{session_id}.jsonl")
     ):
-        raise CodexAppServerError("Codex returned an unexpected session rollout path")
+        raise CodexRolloutMeasurementError("Codex returned an unexpected session rollout path")
     result = server.call(
         "command/exec",
         {
@@ -1313,10 +1320,13 @@ def session_rollout_size(server: CodexAppServer, session_id: str) -> int:
         timeout=5,
     )
     if result.get("exitCode") != 0:
-        raise CodexAppServerError("Could not measure Codex session rollout")
-    size = int(result["stdout"].strip())
+        raise CodexRolloutMeasurementError("Could not measure Codex session rollout")
+    try:
+        size = int(result["stdout"].strip())
+    except (KeyError, AttributeError, ValueError) as exc:
+        raise CodexRolloutMeasurementError("Codex returned an invalid session rollout size") from exc
     if size < 0:
-        raise CodexAppServerError("Codex returned a negative session rollout size")
+        raise CodexRolloutMeasurementError("Codex returned a negative session rollout size")
     return size
 
 

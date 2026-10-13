@@ -867,6 +867,109 @@ class InstagramAdsTests(unittest.TestCase):
             self.assertNotIn(key, self.meta.resources[CREATIVE])
         self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'ACTIVE')
 
+    def test_observed_profile_hostname_alias_passes_complete_flow_at_both_barriers(self):
+        evidence = json.loads((Path(__file__).parent / 'fixtures/instagram_ads/profile_visit_host_alias_evidence.json').read_text())
+        for phase in ('paused', 'active_children'):
+            for port in ('', ':443'):
+                self.api, self.meta = connected_api(), MetaFixture()
+                with self.subTest(phase=phase, port=port), patch.object(ads, 'json_request', self.meta), \
+                     patch.object(ads, 'datetime', wraps=datetime) as clock:
+                    clock.now.return_value = datetime(2026, 10, 12, 11, tzinfo=timezone.utc)
+                    # The failure-time evidence identifies host/path/protocol
+                    # and a standard port, not the original literal URL. Test
+                    # both literal forms satisfying that observed evidence.
+                    alias = 'https://' + evidence['verification_host'] + port + '/owned_profile'
+                    def mutate(rows):
+                        creative = rows[CREATIVE]
+                        creative.update(link_url=alias, object_url=alias)
+                        creative['call_to_action']['value']['link'] = alias
+                        creative['object_story_spec'] = {
+                            key: {'link': alias, 'call_to_action': deepcopy(creative['call_to_action'])}
+                            for key in ('link_data', 'video_data')}
+                    approval = self.observed_reel_approval(mutate, phase, objective='PROFILE_VISITS', fixture_name='profile_visit_v26_readback.json')
+                    expected = approval.payload['proposal']['destination']
+                    self.assertEqual(ads._url_difference(alias, expected), evidence['verification_reason'])
+                    captured = ads._url_evidence(alias, expected, approval.payload['proposal']['source_reel']['permalink'])
+                    for key, value in evidence.items():
+                        if key in captured:
+                            self.assertEqual(captured[key], value)
+                    original_cta = deepcopy(approval.payload['proposal']['call_to_action'])
+                    result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+                    self.assertIsInstance(result, ApprovalExecuted, result)
+                    self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'ACTIVE')
+                    self.assertEqual(self.meta.writes[-1][0], '/500')
+                    self.assertEqual(sum(method == 'GET' and path == '/700' for method, path, _, _ in self.meta.calls), 2)
+                    self.assertEqual(self.meta.resources[CREATIVE]['call_to_action']['value']['link'], alias)
+                    self.assertEqual(approval.payload['proposal']['call_to_action'], original_cta)
+
+    def test_profile_alias_does_not_accept_other_url_or_cta_changes(self):
+        aliases = ('https://instagram.com/other_profile', 'https://instagram.com/owned_profile/',
+                   'https://instagram.com/owned_profile?x=1', 'https://instagram.com/owned_profile#x',
+                   'https://user@instagram.com/owned_profile', 'http://instagram.com/owned_profile',
+                   'https://instagram.com:444/owned_profile', 'https://instagram.com./owned_profile',
+                   'https://instagram.com.evil.example/owned_profile', 'https://l.instagram.com/owned_profile',
+                   'https://instagram.com/owned%5Fprofile', 'https://instagram.com/Owned_profile',
+                   'https://instagram.com:0443/owned_profile', 'https://instagram.com/owned_profile?')
+        for phase in ('paused', 'active_children'):
+            for field in ('link_url', 'object_url', 'story_link', 'cta_link'):
+                for alias in aliases:
+                    self.api, self.meta = connected_api(), MetaFixture()
+                    with self.subTest(phase=phase, field=field, alias=alias), patch.object(ads, 'json_request', self.meta), \
+                         patch.object(ads, 'datetime', wraps=datetime) as clock:
+                        clock.now.return_value = datetime(2026, 10, 12, 11, tzinfo=timezone.utc)
+                        def mutate(rows):
+                            rows[CREATIVE]['link_url'] = 'https://instagram.com/owned_profile'
+                            if field == 'story_link':
+                                rows[CREATIVE]['object_story_spec'] = {'video_data': {'link': alias}}
+                            elif field == 'cta_link':
+                                rows[CREATIVE]['call_to_action']['value']['link'] = alias
+                            else:
+                                rows[CREATIVE][field] = alias
+                        approval = self.observed_reel_approval(mutate, phase, objective='PROFILE_VISITS', fixture_name='profile_visit_v26_readback.json')
+                        result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+                        self.assertIsInstance(result, ActionFailed, result)
+                        self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'PAUSED')
+                        self.assertEqual(len(self.meta.writes), 4 if phase == 'paused' else 6)
+            for change in ('cta_type', 'cta_extra', 'cta_value_extra', 'story_identity'):
+                self.api, self.meta = connected_api(), MetaFixture()
+                with self.subTest(phase=phase, change=change), patch.object(ads, 'json_request', self.meta), \
+                     patch.object(ads, 'datetime', wraps=datetime) as clock:
+                    clock.now.return_value = datetime(2026, 10, 12, 11, tzinfo=timezone.utc)
+                    def mutate(rows):
+                        creative = rows[CREATIVE]
+                        creative['call_to_action']['value']['link'] = 'https://instagram.com/owned_profile'
+                        if change == 'cta_type':
+                            creative['call_to_action']['type'] = 'LEARN_MORE'
+                        elif change == 'cta_extra':
+                            creative['call_to_action']['extra'] = True
+                        elif change == 'cta_value_extra':
+                            creative['call_to_action']['value']['extra'] = True
+                        else:
+                            creative['object_story_spec'] = {'instagram_user_id': '999'}
+                    approval = self.observed_reel_approval(mutate, phase, objective='PROFILE_VISITS', fixture_name='profile_visit_v26_readback.json')
+                    result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+                    self.assertIsInstance(result, ActionFailed, result)
+                    self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'PAUSED')
+
+    def test_other_outcomes_keep_exact_url_matching_at_both_barriers(self):
+        for objective in ('WEBSITE_CLICKS', 'ENGAGEMENTS', 'VIDEO_VIEWS'):
+            for phase in ('paused', 'active_children'):
+                self.api, self.meta = connected_api(), MetaFixture()
+                with self.subTest(objective=objective, phase=phase), patch.object(ads, 'json_request', self.meta):
+                    value = launch_input(objective)
+                    if objective == 'WEBSITE_CLICKS':
+                        value['destination_url'] = 'https://www.example.com/exact'
+                    approval = self.queue(value)
+                    def mutate(path, fields):
+                        if path == ('/act_100/ads' if phase == 'paused' else '/600'):
+                            self.meta.resources[CREATIVE]['link_url'] = ('https://example.com/exact' if objective == 'WEBSITE_CLICKS'
+                                                                      else 'https://instagram.com/owned_profile')
+                    self.meta.write_hook = mutate
+                    result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+                    self.assertIsInstance(result, ActionFailed, result)
+                    self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'PAUSED')
+                    self.assertEqual(len(self.meta.writes), 4 if phase == 'paused' else 6)
+
     def test_version_upgrade_invalidates_launch_and_pause_approvals_before_provider_calls(self):
         for action in ('launch_campaign', 'end_campaign'):
             for version in ('v25.0', None):
@@ -934,11 +1037,11 @@ class InstagramAdsTests(unittest.TestCase):
                         self.assertNotIn('https://', serialized)
                         self.assertNotIn('unapproved.example', serialized)
 
-    def test_failure_time_url_evidence_does_not_accept_aliases_source_or_embedded_targets(self):
+    def test_failure_time_url_evidence_rejects_changed_profiles_source_or_embedded_targets(self):
         base = 'https://www.instagram.com/owned_profile'
         source = 'https://www.instagram.com/reel/owned/'
         shim = 'https://l.facebook.com/l.php?u='
-        cases = (('https://instagram.com/owned_profile', 'instagram.com', False, True, 'uninspected'),
+        cases = (('https://instagram.com/other_profile', 'instagram.com', False, False, 'uninspected'),
                  (source, 'www.instagram.com', True, False, 'uninspected'),
                  (shim + quote(base, safe='') + '&access_token=private-secret', 'l.facebook.com', False, False, 'approved_destination'),
                  (shim + quote(source, safe=''), 'l.facebook.com', False, False, 'source_reel'),

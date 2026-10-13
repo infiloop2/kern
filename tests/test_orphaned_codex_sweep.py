@@ -31,6 +31,8 @@ class OrphanedCodexSweepTests(unittest.TestCase):
         self.references = self.enterContext(patch.object(cleanup.state, "referenced_provider_session_ids", return_value=set()))
         self.live = self.enterContext(patch.object(orchestrator, "live_provider_session_ids", return_value=set()))
         self.report = self.enterContext(patch.object(cleanup.host_errors, "report_unexpected"))
+        self.info = self.enterContext(patch.object(cleanup.host_errors, "report_info"))
+        self.warning = self.enterContext(patch.object(cleanup.host_errors, "report_warning"))
         self.enterContext(patch.object(cleanup.time, "time", return_value=2_000_000))
 
     def use(self, *threads):
@@ -46,6 +48,128 @@ class OrphanedCodexSweepTests(unittest.TestCase):
         self.server.call.assert_called_once_with("thread/read", {"threadId": old["id"], "includeTurns": False}, timeout=5)
         self.server.close.assert_called_once()
         self.report.assert_not_called()
+
+    def test_empty_pass_reports_start_and_completion(self):
+        self.assertEqual(cleanup.reconcile_codex_sessions(), 0)
+        self.server.start.assert_called_once_with(init_timeout=45)
+        self.assertEqual(self.info.call_count, 2)
+        started, finished = self.info.call_args_list
+        self.assertIn("started", started.args[1])
+        self.assertEqual(started.kwargs["context"]["limit_bytes"], 10 * 1024 * 1024)
+        self.assertIn("completed", finished.args[1])
+        context = finished.kwargs["context"]
+        self.assertEqual(context["outcome"], "completed")
+        self.assertEqual(context["mapped_checked"], 0)
+        self.assertEqual(context["stored_roots"], 0)
+        self.assertEqual(context["retired_roots"], 0)
+        self.assertGreaterEqual(context["elapsed_seconds"], 0)
+        self.warning.assert_not_called()
+
+    def test_summary_counts_protected_roots_and_reasons(self):
+        roots = [session(1), session(2), session(3, updatedAt=2_000_000),
+                 session(4, originator="other"), session(5, path=None),
+                 session(6, ephemeral=True), session(7, status={"type": "active"})]
+        self.use(*roots)
+        self.references.return_value = {roots[0]["id"]}
+        self.live.return_value = {roots[1]["id"]}
+        self.assertEqual(cleanup.reconcile_codex_sessions(), 0)
+        context = self.info.call_args.kwargs["context"]
+        self.assertEqual(context["stored_roots"], 7)
+        for reason in ("referenced", "live_session", "inactivity_grace", "foreign_origin",
+                       "missing_path", "ephemeral_or_unknown", "provider_active_or_unknown"):
+            self.assertEqual(context[f"skip_{reason}"], 1)
+
+    def test_nonfinite_or_invalid_updated_times_cannot_bypass_grace(self):
+        self.use(*(session(index, updatedAt=updated) for index, updated in enumerate(
+            (float("nan"), float("inf"), -1, None, True), start=1,
+        )))
+        self.assertEqual(cleanup.reconcile_codex_sessions(), 0)
+        self.delete.assert_not_called()
+        self.assertEqual(self.info.call_args.kwargs["context"]["skip_invalid_updated_at"], 5)
+
+    def test_one_unmeasurable_rollout_does_not_starve_later_mappings(self):
+        bad, good = session(1), session(2)
+        self.candidates.return_value = [("app-1", bad["id"], False), ("app-2", good["id"], False)]
+        with (
+            patch.object(orchestrator, "live_thread_ids", return_value=set()),
+            patch.object(codex_app_server, "session_rollout_size", side_effect=[
+                codex_app_server.CodexRolloutMeasurementError("Could not measure Codex session rollout"),
+                20 * 1024 * 1024,
+            ]),
+            patch.object(cleanup.state, "mutation"),
+            patch.object(cleanup.state, "detach_idle_codex_session", return_value=True) as detach,
+        ):
+            self.assertEqual(cleanup.reconcile_codex_sessions(), 1)
+        detach.assert_called_once()
+        self.assertEqual(detach.call_args.args[3], good["id"])
+        self.delete.assert_called_once_with(self.server, good["id"])
+        self.warning.assert_called_once()
+        self.assertEqual(self.warning.call_args.kwargs["context"]["session_id"], bad["id"])
+        context = self.info.call_args.kwargs["context"]
+        self.assertEqual(context["outcome"], "partial")
+        self.assertEqual(context["measurement_failed"], 1)
+        self.assertEqual(context["retired_oversized"], 1)
+        self.assertEqual(context["measured_retired_bytes"], 20 * 1024 * 1024)
+        self.report.assert_not_called()
+
+    def test_transport_timeout_stops_account_and_reports_exact_phase(self):
+        self.enterContext(patch.object(codex_app_server, "CODEX_RUNTIME_TYPES", ("codex", "codex-2")))
+        root = session(1)
+        self.candidates.side_effect = [[("app-1", root["id"], False), ("app-2", session(2)["id"], False)], []]
+        with (
+            patch.object(orchestrator, "live_thread_ids", return_value=set()),
+            patch.object(codex_app_server, "session_rollout_size", side_effect=codex_app_server.CodexTimeout("timed out")),
+        ):
+            self.assertEqual(cleanup.reconcile_codex_sessions(), 0)
+        self.delete.assert_not_called()
+        self.assertEqual(self.sessions.call_count, 1)
+        context = self.report.call_args.kwargs["context"]
+        self.assertEqual(context["runtime"], "codex")
+        self.assertEqual(context["phase"], "measure")
+        self.assertEqual(context["session_id"], root["id"])
+        self.assertEqual(context["mapped_checked"], 1)
+        summaries = [call.kwargs["context"] for call in self.info.call_args_list if "outcome" in call.kwargs["context"]]
+        self.assertEqual([row["outcome"] for row in summaries], ["failed", "completed"])
+
+    def test_failed_startup_still_reports_summary_and_preserves_mappings(self):
+        self.server.start.side_effect = codex_app_server.CodexTimeout("initialize timeout")
+        self.assertEqual(cleanup.reconcile_codex_sessions(), 0)
+        self.candidates.assert_not_called()
+        self.delete.assert_not_called()
+        self.server.close.assert_called_once()
+        self.assertEqual(self.report.call_args.kwargs["context"]["phase"], "initialize")
+        self.assertEqual(self.info.call_args.kwargs["context"]["outcome"], "failed")
+
+    def test_detached_delete_failure_is_visible_without_counting_retirement(self):
+        root = session(1)
+        self.candidates.return_value = [("app-1", root["id"], False)]
+        self.delete.side_effect = codex_app_server.CodexTimeout("delete timeout")
+        with (
+            patch.object(orchestrator, "live_thread_ids", return_value=set()),
+            patch.object(codex_app_server, "session_rollout_size", return_value=20 * 1024 * 1024),
+            patch.object(cleanup.state, "mutation"),
+            patch.object(cleanup.state, "detach_idle_codex_session", return_value=True),
+        ):
+            self.assertEqual(cleanup.reconcile_codex_sessions(), 0)
+        context = self.info.call_args.kwargs["context"]
+        self.assertEqual(context["detached"], 1)
+        self.assertEqual(context["retired_roots"], 0)
+        self.assertEqual(context["measured_retired_bytes"], 0)
+        self.assertEqual(self.report.call_args.kwargs["context"]["phase"], "delete_mapped")
+
+    def test_stale_listing_does_not_retire_a_mapped_root_twice(self):
+        root = session(1)
+        self.use(root)
+        self.candidates.return_value = [("app-1", root["id"], False)]
+        with (
+            patch.object(orchestrator, "live_thread_ids", return_value=set()),
+            patch.object(codex_app_server, "session_rollout_size", return_value=20 * 1024 * 1024),
+            patch.object(cleanup.state, "mutation"),
+            patch.object(cleanup.state, "detach_idle_codex_session", return_value=True),
+        ):
+            self.assertEqual(cleanup.reconcile_codex_sessions(), 1)
+        self.delete.assert_called_once_with(self.server, root["id"])
+        self.assertEqual(self.info.call_args.kwargs["context"]["skip_already_retired"], 1)
 
     def test_mapped_live_recent_foreign_and_unsafe_sessions_are_preserved(self):
         threads = [session(1), session(2), session(3, updatedAt=2_000_000),

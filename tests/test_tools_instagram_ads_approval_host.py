@@ -121,6 +121,26 @@ class InstagramAdsApprovalHostTests(ToolsHostTestCase):
                 with self.assertRaisesRegex(tools_host.ToolCallError, 'not pending'):
                     tools_host.decide_approval(approval, 'approve', public_hostname=None)
 
+    def test_profile_host_alias_executes_once_with_exact_approval_and_final_receipt(self):
+        pending = tools_host.execute_action('instagram_ads', 'launch_campaign', launch_input('PROFILE_VISITS'),
+                                            connection_id='meta-selected', origin_thread_id=None)
+        self.assertEqual(pending['status'], 'pending_approval', pending)
+        before = deepcopy(state.tool_approval(pending['approval_id'])['payload'])
+        def alias(path, fields):
+            if path == '/act_100/ads':
+                creative = self.meta.resources['700']
+                creative['link_url'] = 'https://instagram.com/owned_profile'
+                creative['call_to_action']['value']['link'] = creative['link_url']
+        self.meta.write_hook = alias
+        decision = tools_host.decide_approval(pending['approval_id'], 'approve', public_hostname=None)
+        self.assertEqual(decision['approval']['status'], 'executed', decision)
+        self.assertEqual(state.tool_approval(pending['approval_id'])['payload'], before)
+        self.assertEqual(state.page_tool_events_before(None)[0]['outcome'], 'executed')
+        self.assertEqual(self.meta.resources['500']['status'], 'ACTIVE')
+        self.assertEqual(len(self.meta.writes), 7)
+        with self.assertRaisesRegex(tools_host.ToolCallError, 'not pending'):
+            tools_host.decide_approval(pending['approval_id'], 'approve', public_hostname=None)
+
     def test_url_mismatch_receipt_names_field_without_url_and_leaves_parent_paused(self):
         pending = tools_host.execute_action('instagram_ads', 'launch_campaign', launch_input('PROFILE_VISITS'),
                                             connection_id='meta-selected', origin_thread_id=None)

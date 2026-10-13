@@ -945,6 +945,16 @@ def seed_state() -> None:
             "pid": 1664,
             "has_details": True,
         },
+        {
+            "id": 3, "seq": 3, "diagnostic_id": "host_diagnostic_3",
+            "first_seen_at": ago(1), "last_seen_at": ago(1),
+            "service": "kern-admin-api", "component": "admin_api.codex_session_sweep",
+            "severity": "info", "kind": "maintenance", "exception_type": "",
+            "summary": "Codex cleanup completed for codex: retired 3 roots",
+            "traceback": "", "context": {"runtime": "codex", "retired_roots": 3, "skip_referenced": 5},
+            "fingerprint": "3" * 64, "occurrence_count": 1, "host_version": VERSION,
+            "boot_id": "mock-boot-20260728", "pid": 1420, "has_details": True,
+        },
     ])
 
     for minutes, method, host, path, decision in [

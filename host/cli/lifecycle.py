@@ -82,6 +82,15 @@ def _parse_args(mode: str, argv: list[str] | None) -> LifecycleCommand:
                 "for example: printf %%s 'your-password' | sha256sum"
             ),
         )
+    if mode in {"deploy", "recover"}:
+        parser.add_argument(
+            "--instance-type",
+            metavar="EC2_INSTANCE_TYPE",
+            help=(
+                "AWS EC2 instance type, which determines CPU and RAM (for example, m7i.xlarge). "
+                "Must support the x86_64 Ubuntu image. Omit to use the code default. AWS only."
+            ),
+        )
     if mode == "recover":
         parser.add_argument(
             "--allow-upgrade",
@@ -98,6 +107,12 @@ def _parse_args(mode: str, argv: list[str] | None) -> LifecycleCommand:
             ),
         )
     args = parser.parse_args(argv)
+    instance_type = getattr(args, "instance_type", None)
+    if instance_type is not None:
+        if args.provider != "aws":
+            parser.error("--instance-type is only supported with --provider aws")
+        if not re.fullmatch(r"[a-z][a-z0-9-]*\.[a-z0-9-]+", instance_type):
+            parser.error("--instance-type must be an EC2 instance type such as m7i.xlarge")
     admin_password_sha256: str | None = None
     if mode in {"deploy", "reconfigure"}:
         digest = str(args.admin_password_sha256).strip().lower()
@@ -126,6 +141,7 @@ def _parse_args(mode: str, argv: list[str] | None) -> LifecycleCommand:
         operator_cloudflare_hostname=getattr(args, "operator_cloudflare_hostname", None),
         reset_admin_passkeys=bool(getattr(args, "reset_admin_passkeys", False)),
         provider=args.provider,
+        instance_type=instance_type,
     )
 
 

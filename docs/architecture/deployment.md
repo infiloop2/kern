@@ -38,6 +38,30 @@ The command is intentionally split by lifecycle intent:
 | `host.cli.start` | Exactly one existing Kern instance plus existing admin and agent data volumes. | None. | Starts the EC2 instance and waits for `running`; does not mutate Kern state. |
 | `host.cli.stop` | Exactly one existing Kern instance plus existing admin and agent data volumes. | None. | Stops the EC2 instance and waits for `stopped`; does not mutate Kern state. |
 
+AWS deploy and recovery accept an optional `--instance-type`, for example
+`python3 -m host.cli.recover --agent-name my-kern --instance-type m7i.xlarge`.
+Add the same flag to a normal deploy command to choose its initial size.
+
+The EC2 type determines both CPU and RAM; `m7i.xlarge` provides 4 vCPUs and
+16 GiB RAM. There is no separate RAM flag. The type must support Kern's
+x86_64 Ubuntu image and be available in the host's availability zone. The CLI
+checks supported architecture through EC2 before any AWS mutations; AWS
+validates remaining launch compatibility and capacity. The flag is rejected for
+Lima, upgrade and reconfigure.
+
+Omitting the flag on deploy or recovery uses the code's `INSTANCE_TYPE`
+default (`t3.small`). Upgrade and reconfiguration preserve the retained
+instance's current type, including a manual resize; they never force it back
+to the code default. Recovery recreates compute, so pass the flag each time to
+retain a custom size. This is a CLI option; Kern Cloud needs its own
+control-plane changes to expose it.
+
+Unlimited CPU-credit settings apply only to the supported burstable T families;
+other types receive no credit specification. The optional type preflight requires
+`ec2:DescribeInstanceTypes`, included in the supplied IAM policy. Deploy the
+matching Kern Cloud approved policy from Infiverse PR #838 before publishing
+this Kern release.
+
 The target `VERSION` is the local checkout's `VERSION`; the GitHub delivery
 requires the pinned commit's `VERSION` to equal it.
 
@@ -288,7 +312,7 @@ instance for the normal full bootstrap. Running and stopped instances are
 accepted; all other states require explicit `recover`. A stopped host finishes
 running. There is no automatic fallback to recreation.
 
-Launch and upgrade share the settings for instance type, Unlimited CPU credits,
+Launch and upgrade share the settings for applicable Unlimited CPU credits,
 IMDSv2, shutdown behavior, root size/type/deletion policy, and instance tags.
 Both reconcile the same security-group rules and render fresh user data. Upgrade
 retains the existing subnet, AZ, primary interface, and instance identity; its

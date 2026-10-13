@@ -199,8 +199,11 @@ usual memory recall. There is no additional model call or generated summary.
 Measurement and deletion use the existing agent-owned app-server transport;
 the admin service gains no filesystem access. Kern commits the cleared mapping
 before deletion, so an interrupted or partially failed deletion cannot leave
-the next firing resuming a retired session. Measurement or detach failures
-leave the session alone. Deletion failures are host diagnostics and may leave
+the next firing resuming a retired session. File-specific measurement failures
+leave that mapping alone, emit a warning, and do not prevent later mappings
+from being checked. Valid native paths in both `sessions` and
+`archived_sessions` can be measured. Transport, detach, or deletion failures
+stop that account's pass. Deletion failures are host diagnostics and may leave
 orphaned provider data; they do not fail completed work. Hourly maintenance
 rediscovers stale unmapped provider sessions instead of keeping a retry queue.
 
@@ -245,6 +248,22 @@ aborts that account's orphan pass. No model call or direct rollout/database
 edit is used. Referenced idle sessions use the 10 MiB policy in this same pass.
 Provider log databases, generated images, and allocated SQLite space remain
 outside these policies.
+
+Each account emits an informational start and completion record in Host
+diagnostics, including empty passes. Completion records contain duration,
+mapped candidate/check counts, listed/referenced/live root counts, detach and
+retirement counts, file-specific measurement failures, and counted skip
+reasons. Outcomes are `completed`, `partial` (contained measurement failures),
+or `failed`. Errors include the failing phase and exact thread/session IDs when
+known. A start without a completion helps identify a stalled pass. Startup
+allows 45 seconds, matching the ordinary Codex status-probe allowance.
+
+`measured_retired_bytes` sums measured oversized mapped rollouts retired by
+that pass. It excludes archived/unreferenced roots and native children and is
+not an allocated-space or filesystem-free-space measurement. Skip reasons
+distinguish live work, references, inactivity grace, missing/unsafe paths,
+foreign ownership, unknown/active provider status, and changed mappings.
+Referenced roots can include archived Chats still in their seven-day grace.
 
 ## Refresh triggers
 

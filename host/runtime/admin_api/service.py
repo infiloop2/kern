@@ -1113,7 +1113,7 @@ def _host_diagnostics_route(request: _RouteRequest) -> dict[str, Any]:
     if service_filter is not None and SERVICE_NAME_RE.fullmatch(service_filter) is None:
         raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic service is invalid")
     severity_filter = _one(request.query, "severity")
-    if severity_filter is not None and severity_filter not in {"error", "warning"}:
+    if severity_filter is not None and severity_filter not in {"error", "warning", "info"}:
         raise ApiError(HTTPStatus.BAD_REQUEST, "host diagnostic severity is invalid")
     return {
         "events": state.page_host_diagnostics_before(

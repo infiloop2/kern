@@ -94,14 +94,25 @@ def _terminate_instances(instance_ids: list[str], env: dict[str, str]) -> None:
     _aws(env, "ec2", "wait", "instance-terminated", "--instance-ids", *instance_ids)
 
 
-def _instance_settings() -> dict[str, Any]:
+def _validate_launch_instance_type(env: dict[str, str], instance_type: str) -> None:
+    """Reject incompatible compute before deploy/recovery changes AWS resources."""
+    types = _aws(env, "ec2", "describe-instance-types", "--instance-types", instance_type)["InstanceTypes"]
+    if len(types) != 1 or "x86_64" not in types[0]["ProcessorInfo"]["SupportedArchitectures"]:
+        raise ConfigError(f"instance type {instance_type} does not support Kern's x86_64 Ubuntu image")
+
+
+def _instance_settings(instance_type: str | None = None) -> dict[str, Any]:
     """The instance settings owned by Kern, shared by launch and root rebuild."""
-    return {
-        "InstanceType": INSTANCE_TYPE,
-        "CreditSpecification": {"CpuCredits": "unlimited"},
+    selected_type = INSTANCE_TYPE if instance_type is None else instance_type
+    settings: dict[str, Any] = {
+        "InstanceType": selected_type,
         "InstanceInitiatedShutdownBehavior": "stop",
         "MetadataOptions": {"HttpTokens": "required", "HttpEndpoint": "enabled"},
     }
+    # Credit settings apply only to the burstable T families, not M/C/R types.
+    if selected_type.split(".")[0] in {"t2", "t3", "t3a", "t4g", "t8i"}:
+        settings["CreditSpecification"] = {"CpuCredits": "unlimited"}
+    return settings
 
 
 def _root_volume_settings() -> dict[str, Any]:
@@ -123,15 +134,14 @@ def _configure_existing_instance(
     user_data_path: Path,
     security_group_id: str,
     target_version: str,
+    *,
+    instance_type: str,
 ) -> None:
-    """Apply the launch settings to a stopped instance before its fresh boot."""
-    settings = _instance_settings()
-    for name, value in (
-        ("--instance-type", settings["InstanceType"]),
-        ("--instance-initiated-shutdown-behavior", settings["InstanceInitiatedShutdownBehavior"]),
-    ):
-        _aws(env, "ec2", "modify-instance-attribute", "--instance-id", instance_id,
-             name, json.dumps({"Value": value}))
+    """Apply managed settings before fresh boot without resizing retained compute."""
+    settings = _instance_settings(instance_type)
+    _aws(env, "ec2", "modify-instance-attribute", "--instance-id", instance_id,
+         "--instance-initiated-shutdown-behavior",
+         json.dumps({"Value": settings["InstanceInitiatedShutdownBehavior"]}))
     _aws(env, "ec2", "modify-instance-attribute", "--instance-id", instance_id,
          "--groups", security_group_id)
     # The legacy Value attribute takes already-base64 text, consistently in
@@ -142,10 +152,11 @@ def _configure_existing_instance(
     encoded.write_text(base64.b64encode(user_data_path.read_bytes()).decode("ascii"))
     _aws(env, "ec2", "modify-instance-attribute", "--instance-id", instance_id,
          "--attribute", "userData", "--value", f"file://{encoded}")
-    credit_result = _aws(env, "ec2", "modify-instance-credit-specification", "--instance-credit-specifications",
-         json.dumps([{"InstanceId": instance_id, **settings["CreditSpecification"]}]))
-    if credit_result.get("UnsuccessfulInstanceCreditSpecifications"):
-        raise ConfigError(f"failed to apply CPU credit settings: {credit_result['UnsuccessfulInstanceCreditSpecifications']}")
+    if "CreditSpecification" in settings:
+        credit_result = _aws(env, "ec2", "modify-instance-credit-specification", "--instance-credit-specifications",
+             json.dumps([{"InstanceId": instance_id, **settings["CreditSpecification"]}]))
+        if credit_result.get("UnsuccessfulInstanceCreditSpecifications"):
+            raise ConfigError(f"failed to apply CPU credit settings: {credit_result['UnsuccessfulInstanceCreditSpecifications']}")
     metadata = settings["MetadataOptions"]
     _aws(env, "ec2", "modify-instance-metadata-options", "--instance-id", instance_id,
          "--http-tokens", metadata["HttpTokens"], "--http-endpoint", metadata["HttpEndpoint"])
@@ -163,6 +174,7 @@ def _launch_instance(
     network: tuple[str, str, str],
     ssh_ingress: bool,
     cloudflare_egress: bool,
+    instance_type: str | None = None,
 ) -> tuple[str, str]:
     vpc_id, subnet_id, _availability_zone = network
     _log(f"using vpc {vpc_id}, public subnet {subnet_id}")
@@ -174,13 +186,17 @@ def _launch_instance(
         cloudflare_egress=cloudflare_egress,
     )
     ami_id = _ubuntu_ami(env)
-    _log(f"using Ubuntu AMI {ami_id}, instance type {INSTANCE_TYPE}")
+    settings = _instance_settings(instance_type)
+    _log(f"using Ubuntu AMI {ami_id}, instance type {settings['InstanceType']}")
     # Pass user data via fileb:// rather than a raw string. The AWS CLI v2 default
     # cli_binary_format is "base64", so a raw --user-data string would be decoded
     # as base64 (corrupting the script and breaking cloud-init). fileb:// reads the
     # bytes as-is and base64-encodes them for EC2 regardless of that setting.
     user_data_path = _write_user_data(user_data, workdir)
-    settings = _instance_settings()
+    credit_args = (
+        ["--credit-specification", json.dumps(settings["CreditSpecification"])]
+        if "CreditSpecification" in settings else []
+    )
     response = _aws(env,
         "ec2",
         "run-instances",
@@ -190,8 +206,7 @@ def _launch_instance(
         settings["InstanceType"],
         # Allow bootstrap and agent startup to burst even when earned credits
         # are exhausted, regardless of the account's CPU-credit default.
-        "--credit-specification",
-        json.dumps(settings["CreditSpecification"]),
+        *credit_args,
         "--subnet-id",
         subnet_id,
         "--security-group-ids",
