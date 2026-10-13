@@ -8,7 +8,7 @@ import json
 from pathlib import Path
 import re
 import unittest
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, quote, urlsplit
 from unittest.mock import patch
 
 from host.tools import instagram_ads as ads
@@ -932,6 +932,53 @@ class InstagramAdsTests(unittest.TestCase):
                         serialized = json.dumps(self.diagnostics.call_args.args[0], default=str) + result.error
                         self.assertNotIn('private-secret', serialized)
                         self.assertNotIn('https://', serialized)
+                        self.assertNotIn('unapproved.example', serialized)
+
+    def test_failure_time_url_evidence_does_not_accept_aliases_source_or_embedded_targets(self):
+        base = 'https://www.instagram.com/owned_profile'
+        source = 'https://www.instagram.com/reel/owned/'
+        shim = 'https://l.facebook.com/l.php?u='
+        cases = (('https://instagram.com/owned_profile', 'instagram.com', False, True, 'uninspected'),
+                 (source, 'www.instagram.com', True, False, 'uninspected'),
+                 (shim + quote(base, safe='') + '&access_token=private-secret', 'l.facebook.com', False, False, 'approved_destination'),
+                 (shim + quote(source, safe=''), 'l.facebook.com', False, False, 'source_reel'),
+                 (shim + quote(base, safe='') + '&u=' + quote(base, safe=''), 'l.facebook.com', False, False, 'other'),
+                 ('https://l.facebook.com/l.php?u=https%3A%2F%2Fprivate-secret.example%2Fsecret', 'l.facebook.com', False, False, 'other'),
+                 ('https://private-secret.example/l.php?u=' + quote(base, safe=''), 'other', False, False, 'uninspected'),
+                 (shim + quote(base, safe='') + '&x=1' * 16, 'l.facebook.com', False, False, None))
+        for phase in ('paused', 'active_children'):
+            for field in ('link_url', 'object_url', 'object_story_spec.video_data.link', 'call_to_action.value.link'):
+                for actual, host, matches_source, matches_path, embedded in cases:
+                    self.api, self.meta = connected_api(), MetaFixture()
+                    with self.subTest(phase=phase, field=field, host=host, embedded=embedded), \
+                         patch.object(ads, 'json_request', self.meta), patch.object(ads, 'datetime', wraps=datetime) as clock:
+                        clock.now.return_value = datetime(2026, 10, 12, 11, tzinfo=timezone.utc)
+                        def mutate(rows):
+                            if field == 'object_story_spec.video_data.link':
+                                rows[CREATIVE]['object_story_spec'] = {'video_data': {'link': actual}}
+                            elif field == 'call_to_action.value.link':
+                                rows[CREATIVE]['call_to_action']['value']['link'] = actual
+                            else:
+                                rows[CREATIVE][field] = actual
+                        approval = self.observed_reel_approval(mutate, phase, objective='PROFILE_VISITS', fixture_name='profile_visit_v26_readback.json')
+                        self.diagnostics.reset_mock()
+                        result = ads.BUNDLED_TOOL.execute_approved(approval, self.api)
+                        self.assertIsInstance(result, ActionFailed, result)
+                        context = self.diagnostics.call_args.args[0]['context']
+                        self.assertEqual(context['verification_host'], host)
+                        self.assertEqual(context['verification_matches_source_reel'], matches_source)
+                        self.assertEqual(context['verification_path_matches_approved'], matches_path)
+                        self.assertEqual(context.get('verification_embedded_target'), embedded)
+                        self.assertEqual(len(self.meta.writes), 4 if phase == 'paused' else 6)
+                        self.assertEqual(self.meta.resources[CAMPAIGN]['status'], 'PAUSED')
+                        # Evidence is captured from the failing response, even
+                        # if a later provider read omits the offending field.
+                        self.meta.resources[CREATIVE].pop('link_url', None)
+                        serialized = json.dumps(self.diagnostics.call_args.args[0], default=str) + result.error
+                        self.assertNotIn('private-secret', serialized)
+                        self.assertNotIn('https://', serialized)
+                        self.assertNotIn('owned_profile', serialized)
+                        self.assertNotIn('/reel/owned/', serialized)
 
     def test_engagement_defaults_do_not_relax_other_outcomes(self):
         for objective in ('WEBSITE_CLICKS', 'PROFILE_VISITS', 'VIDEO_VIEWS'):

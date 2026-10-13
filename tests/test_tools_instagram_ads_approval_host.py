@@ -129,7 +129,13 @@ class InstagramAdsApprovalHostTests(ToolsHostTestCase):
             if path == '/act_100/ads':
                 self.meta.resources['700']['link_url'] = 'https://private-secret@www.instagram.com/owned_profile'
         self.meta.write_hook = drift
-        decision = tools_host.decide_approval(pending['approval_id'], 'approve', public_hostname=None)
+        with patch('host.tools.shared.ads_diagnostics.host_errors.emit_record') as diagnostics:
+            decision = tools_host.decide_approval(pending['approval_id'], 'approve', public_hostname=None)
+        diagnostics.assert_called_once()
+        context = diagnostics.call_args.args[0]['context']
+        self.assertEqual(context['verification_host'], 'www.instagram.com')
+        self.assertTrue(context['verification_path_matches_approved'])
+        self.assertNotIn('private-secret', json.dumps(diagnostics.call_args.args[0], default=str))
         self.assertEqual(decision['approval']['status'], 'failed')
         self.assertIn('link_url', decision['approval']['result'])
         self.assertIn('credentials_present', decision['approval']['result'])

@@ -131,6 +131,25 @@ class OrphanedCodexSweepTests(unittest.TestCase):
             detach.assert_called_once()
         self.delete.assert_not_called()
 
+    def test_idle_session_retirement_starts_at_ten_mib(self):
+        small, boundary, large = session(1), session(2), session(3)
+        self.candidates.return_value = [
+            ("thread-1", small["id"], False),
+            ("thread-2", boundary["id"], False),
+            ("thread-3", large["id"], False),
+        ]
+        with (
+            patch.object(orchestrator, "live_thread_ids", return_value=set()),
+            patch.object(codex_app_server, "session_rollout_size", side_effect=[
+                10 * 1024 * 1024 - 1, 10 * 1024 * 1024, 20 * 1024 * 1024,
+            ]),
+            patch.object(cleanup.state, "mutation"),
+            patch.object(cleanup.state, "detach_idle_codex_session", return_value=True) as detach,
+        ):
+            self.assertEqual(cleanup.reconcile_codex_sessions(), 2)
+        self.assertEqual([c.args[3] for c in detach.call_args_list], [boundary["id"], large["id"]])
+        self.assertEqual([c.args[1] for c in self.delete.call_args_list], [boundary["id"], large["id"]])
+
     def test_measurement_failure_preserves_mapping(self):
         self.candidates.return_value = [("thread-1", session(1)["id"], False)]
         with (

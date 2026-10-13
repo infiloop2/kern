@@ -16,7 +16,7 @@ from collections.abc import Callable
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import cast
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from host.tools.host_api import ApprovalRecord, ConnectionAccount, HostAPI
 from host.tools.manifest import ToolManifest
@@ -740,13 +740,53 @@ def _url_difference(actual: JSONValue, expected: JSONValue) -> str:
     return "url_form_changed"
 
 
+def _url_evidence(actual: JSONValue, expected: JSONValue, source_permalink: JSONValue) -> dict[str, str | int | bool]:
+    # Capture fixed labels/comparisons at failure time: later creative GETs may
+    # omit the offending field. Never retain arbitrary hosts, paths or queries.
+    result: dict[str, str | int | bool] = {"verification_host": "uninspected"}
+    if not isinstance(actual, str) or len(actual) > 2048:
+        return result
+    try:
+        returned = urlsplit(actual)
+        host = returned.hostname or ""
+        known_hosts = {"instagram.com", "www.instagram.com", "l.instagram.com",
+                       "facebook.com", "www.facebook.com", "m.facebook.com", "l.facebook.com", "lm.facebook.com"}
+        result["verification_host"] = host if host in known_hosts else "other"
+        result["verification_https"] = returned.scheme == "https"
+        result["verification_standard_port"] = returned.port in (None, 443)
+        result["verification_query_present"] = bool(returned.query)
+        result["verification_fragment_present"] = bool(returned.fragment)
+        result["verification_matches_source_reel"] = isinstance(source_permalink, str) and actual == source_permalink
+        if isinstance(expected, str):
+            result["verification_path_matches_approved"] = returned.path == urlsplit(expected).path
+        # Inspect only a recognized shim's u parameter. This is evidence of an
+        # embedded string, not proof of redirect behavior or an accepted URL.
+        embedded = "uninspected"
+        if host in {"l.instagram.com", "l.facebook.com", "lm.facebook.com"} and returned.path == "/l.php":
+            targets = parse_qs(returned.query, keep_blank_values=True, max_num_fields=16).get("u", [])
+            embedded = "absent" if not targets else "other"
+            if len(targets) == 1:
+                if isinstance(expected, str) and targets[0] == expected:
+                    embedded = "approved_destination"
+                elif isinstance(source_permalink, str) and targets[0] == source_permalink:
+                    embedded = "source_reel"
+        result["verification_embedded_target"] = embedded
+    except ValueError:
+        # Malformed ports, netlocs or excessive query fields still fail the
+        # original guard; diagnostic parsing must never mask that failure.
+        pass
+    return result
+
+
 class _DestinationMismatch(RuntimeError):
-    def __init__(self, field: str, actual: JSONValue, expected: JSONValue, creative_id: str) -> None:
+    def __init__(self, field: str, actual: JSONValue, expected: JSONValue, creative_id: str,
+                 source_permalink: JSONValue = None) -> None:
         reason = _url_difference(actual, expected)
         super().__init__(f"Creative {field} differs from the approved destination ({reason}). URL values are omitted.")
         self.diagnostic_context: dict[str, str | int | bool] = {
             "verification_field": field, "verification_reason": reason, "operation": "GET /" + creative_id,
         }
+        self.diagnostic_context.update(_url_evidence(actual, expected, source_permalink))
 
 
 def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, children_active: bool) -> JSONObject:
@@ -793,6 +833,7 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
                 or ("smart_pse_enabled" in promoted and promoted["smart_pse_enabled"] is not False)):
             raise RuntimeError("Provider promoted object contains unapproved fields or settings.")
     creative = graph.get("/" + ids["creative_id"], CREATIVE_FIELDS)
+    source_permalink = _object(proposal["source_reel"], "source Reel").get("permalink")
     # Meta generates a label and omits object_id for existing Instagram posts.
     # Exact account/IG/source IDs are required; Page linkage and media ownership
     # are independently revalidated before creation and parent activation.
@@ -816,7 +857,7 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
         # Only absent/null/empty-string mean unset; malformed falsy values must
         # not silently bypass an exact destination check.
         if returned is not None and returned != "" and (not isinstance(returned, str) or returned != proposal["destination"]):
-            raise _DestinationMismatch(key, returned, proposal["destination"], ids["creative_id"])
+            raise _DestinationMismatch(key, returned, proposal["destination"], ids["creative_id"], source_permalink)
     if creative.get("body") is not None and creative["body"] != _object(proposal["source_reel"], "source Reel")["caption"]:
         raise RuntimeError("Creative caption differs from the approved original Reel.")
     cta = proposal["call_to_action"]
@@ -838,7 +879,7 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
                 if data.get("call_to_action") is not None:
                     returned_ctas.append(("object_story_spec." + key + ".call_to_action", data["call_to_action"]))
                 if data.get("link") is not None and data["link"] != proposal["destination"]:
-                    raise _DestinationMismatch("object_story_spec." + key + ".link", data["link"], proposal["destination"], ids["creative_id"])
+                    raise _DestinationMismatch("object_story_spec." + key + ".link", data["link"], proposal["destination"], ids["creative_id"], source_permalink)
     if cta is None and returned_ctas:
         raise RuntimeError("Creative call_to_action was not approved for this outcome.")
     if cta is not None:
@@ -849,7 +890,7 @@ def _verify(graph: _Graph, proposal: JSONObject, ids: dict[str, str], *, childre
             if isinstance(actual, dict) and isinstance(actual.get("value"), dict):
                 returned_link = _object(actual["value"], "CTA value").get("link")
                 if not isinstance(returned_link, str) or returned_link != approved_link:
-                    raise _DestinationMismatch(label + ".value.link", returned_link, approved_link, ids["creative_id"])
+                    raise _DestinationMismatch(label + ".value.link", returned_link, approved_link, ids["creative_id"], source_permalink)
             if not _matches(cta, actual, exact_keys=True):
                 raise RuntimeError("Creative " + label + " differs from the exact approved CTA.")
     allowed_types = (None, _object(cta, "CTA")["type"]) if cta is not None else (None, "", "NONE")
