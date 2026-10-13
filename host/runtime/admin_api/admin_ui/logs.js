@@ -6,7 +6,7 @@
 
 import { api } from "./api.js";
 import {
-  $, badge, esc, eventPayloadText, formatDateTime, formatNetworkReason,
+  $, badge, copyText, esc, eventPayloadText, formatDateTime, formatNetworkReason,
   networkEventTarget, setHtml,
 } from "./helpers.js";
 
@@ -14,23 +14,29 @@ const EVENT_PAGE_SIZE = 100;
 const EVENT_PAGER_WINDOW = 10;
 
 let netEventFilter = "all";
-let hostDiagnosticFilter = "all";
+let hostDiagnosticSeverity = "";
+let hostDiagnosticComponent = "";
+const hostDiagnosticDetails = new Map();
 
 function createPagedLog(config) {
   const log = {
     pages: [],
     page: 1,
     hasMore: true,
+    requestVersion: 0,
     async fetchPage(before) {
       const params = new URLSearchParams(config.query ? config.query() : {});
       if (before !== null) params.set("before", String(before));
       const suffix = params.toString();
       const response = await api("GET", config.endpoint + (suffix ? `?${suffix}` : ""));
+      if (config.onResponse) config.onResponse(response);
       return Array.isArray(response.events) ? response.events : [];
     },
-    async showFirstPage() {
-      if (config.pauseWhileOpen && document.querySelector(config.pauseWhileOpen)) return;
+    async showFirstPage(force = false) {
+      if (!force && config.pauseWhileOpen && document.querySelector(config.pauseWhileOpen)) return;
+      const requestVersion = ++log.requestVersion;
       const events = await log.fetchPage(null);
+      if (requestVersion !== log.requestVersion) return;
       log.pages = [events];
       log.page = 1;
       log.hasMore = events.length === EVENT_PAGE_SIZE;
@@ -39,10 +45,12 @@ function createPagedLog(config) {
     async showPage(requested) {
       const target = Math.max(Number(requested) || 1, 1);
       if (target === 1) return log.showFirstPage();
+      const requestVersion = ++log.requestVersion;
       while (!log.pages[target - 1] && log.hasMore) {
         const previous = log.pages[log.pages.length - 1] || [];
         if (!previous.length) break;
         const events = await log.fetchPage(previous[previous.length - 1].seq);
+        if (requestVersion !== log.requestVersion) return;
         if (!events.length) {
           log.hasMore = false;
           break;
@@ -155,17 +163,31 @@ export const toolLog = createPagedLog({
 
 export const hostDiagnosticLog = createPagedLog({
   endpoint: "/v1/host-diagnostics",
-  query: () => (hostDiagnosticFilter === "error" ? { severity: "error" } : {}),
+  query: () => ({
+    ...(hostDiagnosticSeverity ? { severity: hostDiagnosticSeverity } : {}),
+    ...(hostDiagnosticComponent ? { component: hostDiagnosticComponent } : {}),
+  }),
+  onResponse: response => {
+    if (!Array.isArray(response.components)) return;
+    const components = [...new Set([...response.components, hostDiagnosticComponent]
+      .filter(component => typeof component === "string" && component))].sort();
+    const select = $("host-diagnostic-component");
+    const key = JSON.stringify(components);
+    if (select.dataset.components === key) return;
+    select.replaceChildren(new Option("All components", ""), ...components.map(component => new Option(component, component)));
+    select.value = hostDiagnosticComponent;
+    select.dataset.components = key;
+  },
   summaryId: "host-diagnostic-page-summary",
   tableId: "host-diagnostics",
   pagerId: "host-diagnostic-pager",
   pageAction: "host-diagnostic-page",
-  pauseWhileOpen: "#host-diagnostics .host-diagnostic-details[open]",
+  pauseWhileOpen: "#host-diagnostics .host-diagnostic-details[open], #host-diagnostics [data-copy-feedback]:not(:empty)",
   columns: 5,
   header: `<tr><th>last seen</th><th>service</th><th>component</th><th>diagnostic</th><th>details</th></tr>`,
-  summarySuffix: () => (hostDiagnosticFilter === "error" ? " · errors only" : ""),
+  summarySuffix: () => [hostDiagnosticSeverity, hostDiagnosticComponent].filter(Boolean).map(value => ` · ${value}`).join(""),
   emptySummary: () => "No diagnostics",
-  emptyState: () => `No ${hostDiagnosticFilter === "error" ? "host errors" : "host diagnostics"} have been recorded.`,
+  emptyState: () => "No host diagnostics match the selected filters.",
   row: diagnostic => {
     const repeats = Number(diagnostic.occurrence_count) > 1
       ? ` <span class="badge warning">×${esc(diagnostic.occurrence_count)}</span>` : "";
@@ -175,7 +197,7 @@ export const hostDiagnosticLog = createPagedLog({
         <td class="mono">${esc(diagnostic.service)}</td>
         <td class="mono">${esc(diagnostic.component)}</td>
         <td>${badge(diagnostic.severity)} ${badge(diagnostic.kind)}${repeats}<pre>${esc(diagnostic.summary)}</pre></td>
-        <td>${diagnostic.has_details ? `<details class="host-diagnostic-details" data-host-diagnostic-id="${esc(diagnostic.id)}"><summary class="muted">view</summary><pre class="metadata"></pre></details>` : ""}</td>
+        <td><button class="ghost sm" data-action="copy-host-diagnostic" data-diagnostic-id="${esc(diagnostic.id)}" aria-label="Copy complete diagnostic">Copy</button> <span class="muted" data-copy-feedback role="status"></span>${diagnostic.has_details ? `<details class="host-diagnostic-details" data-host-diagnostic-id="${esc(diagnostic.id)}"><summary class="muted">view</summary><pre class="metadata"></pre></details>` : ""}</td>
       </tr>`;
   },
 });
@@ -183,6 +205,34 @@ export const hostDiagnosticLog = createPagedLog({
 // Argument objects can each be up to 64 KiB. Audit pages therefore return only
 // has_arguments and load one exact object when the operator expands it, instead
 // of transferring up to 100 payloads on every five-second live refresh.
+function loadHostDiagnostic(id) {
+  if (!hostDiagnosticDetails.has(id)) {
+    const pending = api("GET", `/v1/host-diagnostics/${encodeURIComponent(id)}`).then(response => {
+      if (!response.diagnostic) throw new Error("Diagnostic details unavailable");
+      return response.diagnostic;
+    }).finally(() => {
+      hostDiagnosticDetails.delete(id);
+    });
+    hostDiagnosticDetails.set(id, pending);
+  }
+  return hostDiagnosticDetails.get(id);
+}
+
+export async function copyHostDiagnostic(button) {
+  const feedback = button.parentElement.querySelector("[data-copy-feedback]");
+  button.disabled = true;
+  feedback.textContent = "Copying…";
+  try {
+    await copyText(loadHostDiagnostic(button.dataset.diagnosticId).then(diagnostic => JSON.stringify(diagnostic, null, 2)));
+    feedback.textContent = "Copied to clipboard";
+  } catch (error) {
+    feedback.textContent = `Copy failed: ${error.message}`;
+  } finally {
+    button.disabled = false;
+    setTimeout(() => { feedback.textContent = ""; }, 2500);
+  }
+}
+
 document.addEventListener("toggle", async event => {
   const details = event.target;
   if (!(details instanceof HTMLDetailsElement) || !details.open || !details.matches(".tool-event-arguments")) return;
@@ -207,8 +257,7 @@ document.addEventListener("toggle", async event => {
   if (!id || !pre || pre.dataset.filled === "1") return;
   pre.dataset.filled = "1";
   try {
-    const response = await api("GET", `/v1/host-diagnostics/${encodeURIComponent(id)}`);
-    const error = response.diagnostic || {};
+    const error = await loadHostDiagnostic(id);
     const lines = [
       `${error.exception_type || error.kind || "error"}: ${error.summary || ""}`,
       error.traceback || "",
@@ -234,8 +283,8 @@ export function toggleNetDeniedFilter() {
   netLog.showFirstPage().catch(() => {});
 }
 
-export function toggleHostDiagnosticFilter() {
-  hostDiagnosticFilter = hostDiagnosticFilter === "error" ? "all" : "error";
-  $("host-diagnostic-filter").textContent = hostDiagnosticFilter === "error" ? "Show all" : "Show errors only";
-  hostDiagnosticLog.showFirstPage().catch(() => {});
+export function changeHostDiagnosticFilters() {
+  hostDiagnosticSeverity = $("host-diagnostic-severity").value;
+  hostDiagnosticComponent = $("host-diagnostic-component").value;
+  hostDiagnosticLog.showFirstPage(true).catch(() => {});
 }

@@ -3,6 +3,30 @@
 
 export const $ = id => document.getElementById(id);
 
+export async function copyText(value) {
+  if (navigator.clipboard && window.isSecureContext) {
+    if (value instanceof Promise && typeof ClipboardItem === "function" && navigator.clipboard.write) {
+      const content = value.then(text => new Blob([text], { type: "text/plain" }));
+      await navigator.clipboard.write([new ClipboardItem({ "text/plain": content })]);
+    } else {
+      await navigator.clipboard.writeText(await value);
+    }
+    return;
+  }
+  const input = document.createElement("textarea");
+  input.value = await value;
+  input.setAttribute("readonly", "");
+  input.style.position = "fixed";
+  input.style.opacity = "0";
+  document.body.append(input);
+  try {
+    input.select();
+    if (!document.execCommand("copy")) throw new Error("Copy failed");
+  } finally {
+    input.remove();
+  }
+}
+
 export const RUNTIME_PROVIDERS = {
   codex: { label: "Codex", provider: "openai", providerLabel: "OpenAI" },
   "codex-2": { label: "Codex 2", provider: "openai", providerLabel: "OpenAI" },

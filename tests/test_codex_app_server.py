@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import threading
+import tempfile
 import time
 from typing import Any
 import unittest
@@ -642,6 +643,43 @@ class CodexAppServerTests(unittest.TestCase):
         with self.assertRaises(codex_app_server_module.CodexTimeout) as error:
             codex_app_server_module.session_rollout_size(server, session_id)
         self.assertIs(error.exception, timeout)
+
+    def test_unloaded_read_is_a_contained_measurement_failure_only_for_exact_id(self) -> None:
+        session_id = "01900000-0000-7000-8000-000000000001"
+        for error in (CodexAppServerError(f"thread not loaded: {session_id}"),
+                      CodexAppServerError("thread not loaded: another-id"),
+                      codex_app_server_module.CodexTimeout(f"thread not loaded: {session_id}")):
+            server = MagicMock(runtime_type="codex")
+            server.call.side_effect = error
+            expected = (codex_app_server_module.CodexRolloutMeasurementError
+                        if type(error) is CodexAppServerError and str(error).endswith(session_id)
+                        else type(error))
+            with self.assertRaises(expected):
+                codex_app_server_module.session_rollout_size(server, session_id)
+
+    def test_rollout_presence_probe_checks_both_directories_and_refuses_uncertainty(self) -> None:
+        session_id = "01900000-0000-7000-8000-000000000001"
+        with tempfile.TemporaryDirectory() as directory:
+            home = Path(directory) / ".codex"
+            home.mkdir()
+            server = MagicMock(runtime_type="codex")
+            def execute(method, params, **kwargs):
+                self.assertEqual(method, "command/exec")
+                result = subprocess.run(params["command"], text=True, capture_output=True, timeout=5)
+                return {"exitCode": result.returncode, "stdout": result.stdout}
+            server.call.side_effect = execute
+            with patch.object(codex_app_server_module, "AGENT_CWD", directory):
+                self.assertFalse(codex_app_server_module.session_rollout_exists(server, session_id))
+                for name in ("sessions", "archived_sessions"):
+                    folder = home / name / "2026"
+                    folder.mkdir(parents=True)
+                    rollout = folder / f"rollout-date-{session_id}.jsonl"
+                    rollout.touch()
+                    self.assertTrue(codex_app_server_module.session_rollout_exists(server, session_id))
+                    rollout.unlink()
+                (home / "sessions" / "linked").symlink_to(home / "archived_sessions", target_is_directory=True)
+                with self.assertRaises(codex_app_server_module.CodexRolloutMeasurementError):
+                    codex_app_server_module.session_rollout_exists(server, session_id)
 
     def test_session_size_rejects_other_homes_and_unexpected_files(self) -> None:
         session_id = "01900000-0000-7000-8000-000000000001"

@@ -182,7 +182,7 @@ supplied settings apply only when admitting a new turn, without queuing changes.
 
 ## Automatic Codex session rotation
 
-At startup and every hour, one reconciliation pass checks idle Codex
+At startup and every day, one reconciliation pass checks idle Codex
 sessions across all three accounts. At 10 MiB or more
 (`SESSION_ROLLOUT_MAX_BYTES`), it clears the exact provider-session mapping and
 asks Codex to delete the retired root and its internal native children. This
@@ -201,30 +201,34 @@ the admin service gains no filesystem access. Kern commits the cleared mapping
 before deletion, so an interrupted or partially failed deletion cannot leave
 the next firing resuming a retired session. File-specific measurement failures
 leave that mapping alone, emit a warning, and do not prevent later mappings
-from being checked. Valid native paths in both `sessions` and
+from being checked. An exact `thread not loaded` or `no rollout found` metadata
+error triggers a read-only presence check under both session directories. Only
+confirmed absence permits detaching the still-idle, unchanged mapping; an
+existing file or uncertain check preserves it and records a warning. A missing
+mapping is counted as `detached_missing`, not a deleted file. An unloaded
+orphan read is also contained so later roots can be checked. Valid native paths in both `sessions` and
 `archived_sessions` can be measured. Transport, detach, or deletion failures
 stop that account's pass. Deletion failures are host diagnostics and may leave
-orphaned provider data; they do not fail completed work. Hourly maintenance
+orphaned provider data; they do not fail completed work. Daily maintenance
 rediscovers stale unmapped provider sessions instead of keeping a retry queue.
 
-This is a soft per-session limit, checked during hourly reconciliation, not a
+This is a soft per-session limit, checked during daily reconciliation, not a
 whole-directory quota. One turn may exceed the limit. Codex owns deletion of
 its metadata; Kern never edits or truncates its databases directly.
 
-### Hourly archived-chat sweep
+### Daily archived-thread sweep
 
-The admin maintenance loop also sweeps all archived Chats at startup and every
-hour thereafter. Chats retain their Codex context for seven days after
-archiving; repeated archive requests preserve the original clock, and restoring
-then rearchiving starts a new one. Existing archives start their grace period
-at upgrade because their original archive time was not recorded. For each eligible archived Chat
-with an idle Codex mapping, it rechecks archive state, skips live executions
-(including FINISHING), detaches the mapping, and deletes that Codex session
-through the same supported API. All three Codex accounts are covered, including
-archived spawned Chats. Apps and scheduled threads are not Chat archive entries
-and are outside this sweep.
+The admin maintenance loop checks existing workspace archive records at startup
+and daily, across all three accounts and spawned Chats. Chats retain their
+Codex context for seven days from `chat_threads.archived_at`; Standing agents
+use seven days from `schedules.deleted_at`. Archived Apps are eligible on the
+next pass: their existing record has only an archive flag, no archive timestamp.
+Cleanup joins these existing records to thread mappings and rechecks the
+relevant archive state under row locks before detaching. There is no new
+schema, duplicated archive state, or change to archive/restore operations.
+Live executions (including FINISHING) are skipped.
 
-The sweep preserves the archived Chat, its name, Kern history, self-memory,
+The sweep preserves the archived agent, its name, Kern history, self-memory,
 settings, and clear-context boundary. It adds no memory-cleared event. Restoring
 the Chat keeps the existing UX: its next message automatically receives retained
 history and memory through the normal handoff. A concurrent restore before
@@ -235,9 +239,9 @@ This is fixed host maintenance, with no model call or user-managed schedule.
 A provider startup failure preserves the mappings. A deletion failure is
 reported in host diagnostics and ends that account's pass; already detached
 sessions stay detached so partial deletion cannot break the next message.
-Unprocessed mappings are considered by the next hourly sweep.
+Unprocessed mappings are considered by the next daily sweep.
 
-Hourly maintenance also lists persisted app-server root sessions across all three
+Daily maintenance also lists persisted app-server root sessions across all three
 Codex accounts and compares their IDs with Kern's current mappings and live
 turns. Unreferenced `kern-host` roots in agent home are deleted after seven days
 of inactivity; ownership, activity and references are checked again before
@@ -253,7 +257,7 @@ Each account emits an informational start and completion record in Host
 diagnostics, including empty passes. Completion records contain duration,
 mapped candidate/check counts, listed/referenced/live root counts, detach and
 retirement counts, file-specific measurement failures, and counted skip
-reasons. Outcomes are `completed`, `partial` (contained measurement failures),
+reasons. Outcomes are `completed`, `partial` (contained measurement or orphan-read failures),
 or `failed`. Errors include the failing phase and exact thread/session IDs when
 known. A start without a completion helps identify a stalled pass. Startup
 allows 45 seconds, matching the ordinary Codex status-probe allowance.
@@ -263,7 +267,7 @@ that pass. It excludes archived/unreferenced roots and native children and is
 not an allocated-space or filesystem-free-space measurement. Skip reasons
 distinguish live work, references, inactivity grace, missing/unsafe paths,
 foreign ownership, unknown/active provider status, and changed mappings.
-Referenced roots can include archived Chats still in their seven-day grace.
+Referenced roots can include archived threads still in their seven-day grace.
 
 ## Refresh triggers
 

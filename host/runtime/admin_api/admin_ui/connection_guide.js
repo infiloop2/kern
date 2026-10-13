@@ -3,7 +3,7 @@
 // bundled-tool content comes from the same manifests that drive execution.
 
 import { api } from "./api.js";
-import { $, esc, inlineCode, setHtml } from "./helpers.js";
+import { $, copyText, esc, inlineCode, setHtml } from "./helpers.js";
 import { CUSTOM_DOMAIN_GUIDE, HOST_INFERENCE_INTEGRATIONS, MANAGED_INTEGRATIONS } from "./integration_catalog.js";
 import { renderHomeManagedStatuses } from "./network.js";
 
@@ -86,30 +86,13 @@ export function dismissCallbackCopyFeedback() {
   hideCallbackCopyFeedback();
 }
 
-function legacyCopy(value) {
-  const input = document.createElement("textarea");
-  input.value = value;
-  input.setAttribute("readonly", "");
-  input.style.position = "fixed";
-  input.style.opacity = "0";
-  document.body.append(input);
-  input.select();
-  const copied = document.execCommand("copy");
-  input.remove();
-  if (!copied) throw new Error("Copy failed");
-}
-
 export async function copyCallbackUri(button) {
   const value = button.dataset.copyValue || "";
   const feedback = button.parentElement?.querySelector("[data-callback-copy-feedback]");
   const generation = ++copyFeedbackGeneration;
   hideCallbackCopyFeedback();
   try {
-    if (navigator.clipboard && window.isSecureContext) {
-      await navigator.clipboard.writeText(value);
-    } else {
-      legacyCopy(value);
-    }
+    await copyText(value);
     if (generation !== copyFeedbackGeneration) return;
     if (feedback) {
       feedback.textContent = "Copied";

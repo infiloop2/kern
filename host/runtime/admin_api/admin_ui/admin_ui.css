@@ -2675,6 +2675,17 @@ pre.metadata {
   gap: 0.5rem;
 }
 
+.host-diagnostic-filter {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  min-width: 0;
+  max-width: 100%;
+  font-size: 0.8rem;
+}
+.host-diagnostic-component-filter { width: min(24rem, 100%); }
+.host-diagnostic-filter select { width: 100%; }
+
 .audit-toolbar {
   justify-content: space-between;
   margin: 0.8rem 0 0.6rem;

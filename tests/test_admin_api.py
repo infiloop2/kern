@@ -3798,7 +3798,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('data-action="open-home-view" data-view="processes"', html)
         self.assertIn('data-action="open-home-view" data-view="host-diagnostics"', html)
         self.assertLess(html.index('data-view="tool-log"'), html.index('data-view="host-diagnostics"'))
-        self.assertIn("Service errors and contained warnings", html)
+        self.assertIn("Service errors, warnings, and maintenance information", html)
         self.assertIn('id="host-diagnostic-pager"', html)
         self.assertIn('endpoint: "/v1/host-diagnostics"', ui)
         self.assertIn(
@@ -6829,6 +6829,7 @@ class ToolRoutesTests(unittest.TestCase):
             event,
             service="kern-tools",
             severity="warning",
+            component="tools.execute",
             kind="provider_failure",
             fingerprint="b" * 64,
         )
@@ -6846,6 +6847,12 @@ class ToolRoutesTests(unittest.TestCase):
         self.assertEqual([row["seq"] for row in filtered["events"]], [first])
         _, warnings = self.request("GET", "/v1/host-diagnostics?severity=warning")
         self.assertEqual([row["seq"] for row in warnings["events"]], [second])
+        self.assertEqual(body["components"], ["orchestrator.execution", "tools.execute"])
+        _, combined = self.request("GET", "/v1/host-diagnostics?severity=warning&component=tools.execute")
+        self.assertEqual([row["seq"] for row in combined["events"]], [second])
+        self.assertEqual(combined["components"], body["components"])
+        _, empty = self.request("GET", "/v1/host-diagnostics?severity=error&component=tools.execute")
+        self.assertEqual(empty["events"], [])
         _, detail = self.request("GET", f"/v1/host-diagnostics/{first}")
         self.assertEqual(detail["diagnostic"]["traceback"], event["traceback"])
         self.assertEqual(detail["diagnostic"]["context"], {"thread_id": "thread-1"})

@@ -89,9 +89,11 @@ The categories are:
 When adding or renaming a table, update this inventory in the same change.
 
 Provider-file cleanup is separate from PostgreSQL history retention. The admin
-maintenance loop sweeps Codex sessions at startup and hourly. Archived Chats
-retain their provider context for seven days from `chat_threads.archived_at`,
-then detach only their provider mapping before supported Codex deletion. Chat
+maintenance loop sweeps Codex sessions at startup and daily. Existing workspace
+records determine archived eligibility: seven days from `chat_threads.archived_at`
+for Chats and `schedules.deleted_at` for Standing agents; archived Apps are
+eligible on the next pass because they have no archive timestamp. Cleanup
+detaches only the provider mapping before supported Codex deletion. Agent
 records, messages, self-memory, and the clear-context boundary remain, so the
 next message after restoration uses the normal history handoff. See
 [Codex session rotation](agent-provider-lifecycle.md#automatic-codex-session-rotation).

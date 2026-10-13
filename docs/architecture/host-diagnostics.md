@@ -109,3 +109,9 @@ CPU totals from before the check are included with a `_before` suffix when
 available. Compare them with the failure snapshot only if the service did not
 restart. CLI output is excluded. The timeout still follows the existing runtime
 error path; it does not relax authentication checks or retry a failed agent turn.
+
+The panel offers All/Error/Warning/Info severity and component selectors. Component
+choices cover the retained log, not just the current page. Each row has a Copy
+button that loads and copies the complete diagnostic as JSON, including context,
+traceback, timestamps, version, process, boot and fingerprint, with visible
+success or failure feedback. Expanded details remain available independently.

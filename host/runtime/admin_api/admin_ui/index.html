@@ -584,10 +584,20 @@
         <div class="home-detail-nav"><button class="home-back" data-action="home-back">← Back to Home</button><span>Activity and diagnostics</span></div>
         <section>
           <h2>Host diagnostics</h2>
-          <p class="muted">Service errors and contained warnings that may help diagnose strange host or provider behavior, newest first.</p>
+          <p class="muted">Service errors, warnings, and maintenance information, newest first. Filter by severity or component and copy a complete diagnostic for debugging.</p>
           <div class="audit-toolbar">
             <span class="muted" id="host-diagnostic-page-summary"></span>
-            <button class="ghost sm" id="host-diagnostic-filter" data-action="toggle-host-diagnostic-filter">Show errors only</button>
+            <label class="host-diagnostic-filter">Severity
+              <select id="host-diagnostic-severity">
+                <option value="">All severities</option>
+                <option value="error">Error</option>
+                <option value="warning">Warning</option>
+                <option value="info">Info</option>
+              </select>
+            </label>
+            <label class="host-diagnostic-filter host-diagnostic-component-filter">Component
+              <select id="host-diagnostic-component"><option value="">All components</option></select>
+            </label>
           </div>
           <div class="table-scroll"><table id="host-diagnostics"></table></div>
           <div class="pager" id="host-diagnostic-pager"></div>

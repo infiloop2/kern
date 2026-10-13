@@ -58,7 +58,7 @@ CODEX_RUNTIME_TYPES = tuple(OPENAI_PROVIDER_KEYS)
 AGENT_CWD = "/mnt/kern-agent/agent-home"
 ACCOUNT_ID_HELPER_TIMEOUT_SECONDS = 10
 CLIENT_VERSION = "v1.0"
-# A soft per-session limit: a turn may exceed it; hourly maintenance retires
+# A soft per-session limit: a turn may exceed it; daily maintenance retires
 # oversized idle sessions. This is not a CODEX_HOME quota.
 SESSION_ROLLOUT_MAX_BYTES = 10 * 1024 * 1024
 # Under the orchestrator's five-minute active recheck, so a scheduled recheck
@@ -1283,6 +1283,57 @@ def _codex_item_activity_unchecked(
     )
 
 
+def is_unloaded_session_error(exc: CodexAppServerError, session_id: str) -> bool:
+    """Match one rejected metadata read, never a transport timeout or another id."""
+    return not isinstance(exc, CodexTimeout) and str(exc) == f"thread not loaded: {session_id}"
+
+
+def session_rollout_exists(server: CodexAppServer, session_id: str) -> bool:
+    """Verify file presence as the agent without loading or altering a session."""
+    UUID(session_id)
+    probe = """import os
+import sys
+from pathlib import Path
+
+home = Path(sys.argv[1])
+session_id = sys.argv[2]
+found = False
+
+def failed(error):
+    raise error
+
+for name in ('sessions', 'archived_sessions'):
+    root = home / name
+    if root.is_symlink():
+        raise RuntimeError('unsafe session directory')
+    try:
+        root.stat()
+    except FileNotFoundError:
+        continue
+    if not root.is_dir():
+        raise RuntimeError('invalid session directory')
+    for directory, children, files in os.walk(root, onerror=failed, followlinks=False):
+        if any(Path(directory, child).is_symlink() for child in children):
+            raise RuntimeError('unsafe session subdirectory')
+        if any(filename.endswith('-' + session_id + '.jsonl') for filename in files):
+            found = True
+            break
+    if found:
+        break
+print('1' if found else '0')
+"""
+    home = str(PurePosixPath(AGENT_CWD) / f".{server.runtime_type}")
+    result = server.call("command/exec", {
+        "command": ["/usr/bin/python3", "-c", probe, home, session_id],
+        "cwd": AGENT_CWD, "timeoutMs": 5000,
+        "sandboxPolicy": {"type": "dangerFullAccess"},
+    }, timeout=10)
+    output = result.get("stdout")
+    if result.get("exitCode") != 0 or not isinstance(output, str) or output.strip() not in {"0", "1"}:
+        raise CodexRolloutMeasurementError("Could not verify Codex rollout presence")
+    return output.strip() == "1"
+
+
 def session_rollout_size(server: CodexAppServer, session_id: str) -> int:
     """Measure one persisted session as kern-agent, without reading its text.
 
@@ -1291,9 +1342,15 @@ def session_rollout_size(server: CodexAppServer, session_id: str) -> int:
     Deletion uses thread/delete by id, never the returned filesystem path.
     """
     UUID(session_id)
-    thread = server.call(
-        "thread/read", {"threadId": session_id, "includeTurns": False}, timeout=5,
-    )["thread"]
+    try:
+        thread = server.call(
+            "thread/read", {"threadId": session_id, "includeTurns": False}, timeout=5,
+        )["thread"]
+    except CodexAppServerError as exc:
+        if not (is_unloaded_session_error(exc, session_id)
+                or (not isinstance(exc, CodexTimeout) and str(exc) == f"no rollout found for thread id {session_id}")):
+            raise
+        raise CodexRolloutMeasurementError(str(exc)) from exc
     if not isinstance(thread, dict) or thread.get("id") != session_id:
         raise CodexRolloutMeasurementError("Codex returned mismatched session metadata")
     path = thread.get("path")

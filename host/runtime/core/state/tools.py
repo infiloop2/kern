@@ -520,6 +520,7 @@ def page_host_diagnostics_before(
     *,
     service: str | None = None,
     severity: str | None = None,
+    component: str | None = None,
     limit: int = EVENT_PAGE_LIMIT,
 ) -> list[dict[str, Any]]:
     clauses: list[str] = []
@@ -530,6 +531,9 @@ def page_host_diagnostics_before(
     if severity is not None:
         clauses.append("severity = %s")
         params.append(severity)
+    if component is not None:
+        clauses.append("component = %s")
+        params.append(component)
     return _page_before(
         "host_diagnostics",
         _HOST_DIAGNOSTIC_FIELDS,
@@ -539,6 +543,13 @@ def page_host_diagnostics_before(
         extra_clause=" AND ".join(clauses) if clauses else None,
         extra_params=tuple(params),
     )
+
+
+def host_diagnostic_components() -> list[str]:
+    """List component names across the bounded retained diagnostic log."""
+    with db.transaction() as cur:
+        cur.execute("SELECT DISTINCT component FROM host_diagnostics ORDER BY component")
+        return [str(row[0]) for row in cur.fetchall()]
 
 
 def host_diagnostic(diagnostic_id: int) -> dict[str, Any] | None:

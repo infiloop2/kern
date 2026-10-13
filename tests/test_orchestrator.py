@@ -1437,6 +1437,43 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual([t[0] for t in state.codex_cleanup_candidates("codex") if t[2]], [])
         self.assertEqual(state.thread_session_config("thread-71")["provider_session_id"], "session-71")
 
+    def test_archived_apps_and_standing_agents_use_existing_workspace_records(self) -> None:
+        from host.runtime.workspace.web_apps import backend as apps
+        with patch.object(apps, "active_agent_runtimes", return_value=["codex"]):
+            app_id = apps.create_web_app()["app_id"]
+        schedule = schedules.create_schedule({
+            "name": "Archive cleanup", "triggers": [], "agent_runtime": "codex",
+            "model": "gpt-6-astra", "effort": "high",
+        }, actor="user")
+        schedule_id = schedule["thread_id"]
+        with state.mutation() as cur:
+            for thread_id in (app_id, schedule_id):
+                state.save_thread_session(cur, "codex", thread_id, "session-" + thread_id,
+                                          state.utc_now(), "gpt-6-astra", "high")
+        with patch.object(apps, "call_admin_api", return_value={"thread": {"status": "idle"}}):
+            apps.set_web_app_archived(app_id, True)
+        schedules.delete_schedule(schedule["id"], {"expected_revision": [str(schedule["revision"])]}, actor="user")
+        self.assertEqual(state.codex_cleanup_candidates("codex"), [(app_id, "session-" + app_id, True)])
+        with state.mutation() as cur:
+            self.assertFalse(state.detach_idle_codex_session(cur, schedule_id, "codex", "session-" + schedule_id, archived=True))
+            cur.execute("UPDATE schedules SET deleted_at = '2020-01-01T00:00:00Z' WHERE thread_id = %s", (schedule_id,))
+        self.assertEqual({t[0] for t in state.codex_cleanup_candidates("codex") if t[2]}, {app_id, schedule_id})
+        with patch.object(apps, "call_admin_api", return_value={"thread": {"status": "idle"}}):
+            apps.set_web_app_archived(app_id, False)
+        with state.mutation() as cur:
+            self.assertFalse(state.detach_idle_codex_session(cur, app_id, "codex", "session-" + app_id, archived=True))
+        restored = schedules.restore_revision(schedule["id"], schedule["revision"],
+                                               {"expected_revision": schedule["revision"] + 1})
+        self.assertFalse(restored["deleted"])
+        with state.mutation() as cur:
+            self.assertFalse(state.detach_idle_codex_session(cur, schedule_id, "codex", "session-" + schedule_id, archived=True))
+            cur.execute("UPDATE web_apps SET archived = TRUE WHERE app_id = %s", (app_id,))
+            cur.execute("UPDATE schedules SET deleted_at = '2020-01-01T00:00:00Z' WHERE thread_id = %s", (schedule_id,))
+        with patch.object(codex_cleanup.codex_app_server, "delete_session") as delete:
+            self.assertEqual(codex_cleanup.reconcile_codex_sessions(), 2)
+        self.assertEqual({call.args[1] for call in delete.call_args_list},
+                         {"session-" + app_id, "session-" + schedule_id})
+
     def test_archived_chat_sweep_preserves_history_for_restore(self) -> None:
         thread_id = "thread-71"
         with state.mutation() as cur:
