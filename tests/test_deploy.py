@@ -105,29 +105,6 @@ class DeployUnitTests(unittest.TestCase):
             with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
                 deploy._parse_args(mode, argv)
 
-    def test_incompatible_compute_fails_before_any_deploy_or_recovery_mutation(self) -> None:
-        for mode in ("deploy", "recover"):
-            for instance_type in ("t4g.small", "m7g.large"):
-                with self.subTest(mode=mode, instance_type=instance_type), contextlib.ExitStack() as stack:
-                    stack.enter_context(patch.dict(os.environ, dict(SAMPLE_AWS_ENV)))
-                    ec2 = stack.enter_context(patch("host.cli.aws_resources._aws", return_value={
-                        "InstanceTypes": [{"ProcessorInfo": {"SupportedArchitectures": ["arm64"]}}],
-                    }))
-                    network = stack.enter_context(patch("host.cli.lifecycle_aws._default_network"))
-                    terminate = stack.enter_context(patch("host.cli.lifecycle_aws._terminate_instances"))
-                    storage = stack.enter_context(patch("host.cli.lifecycle_aws._ensure_storage_volumes"))
-                    launch = stack.enter_context(patch("host.cli.lifecycle_aws._launch_instance"))
-                    stack.enter_context(contextlib.redirect_stderr(io.StringIO()))
-                    argv = ["--agent-name", "kern-test", "--instance-type", instance_type]
-                    if mode == "deploy":
-                        argv.extend(["--admin-password-sha256", SAMPLE_ADMIN_PASSWORD_SHA256,
-                                     "--operator-ssh-public-key", SAMPLE_SSH_PUBLIC_KEY])
-                    self.assertEqual(deploy.main_for_mode(mode, argv), 2)
-                    self.assertEqual(ec2.call_count, 1)
-                    self.assertEqual(ec2.call_args.args[1:], ("ec2", "describe-instance-types", "--instance-types", instance_type))
-                    for mutation in (network, terminate, storage, launch):
-                        mutation.assert_not_called()
-
     def test_instance_type_override_reaches_deploy_and_recovery_in_both_deliveries(self) -> None:
         for mode in ("deploy", "recover"):
             for github in (False, True):
@@ -137,7 +114,7 @@ class DeployUnitTests(unittest.TestCase):
                     stack.enter_context(patch("host.cli.lifecycle_aws._existing_storage_volume_availability_zone", return_value="us-east-1a"))
                     stack.enter_context(patch("host.cli.lifecycle_aws._existing_storage_roles", return_value={"admin", "agent"} if mode == "recover" else set()))
                     stack.enter_context(patch("host.cli.lifecycle_aws._check_existing_version_hints"))
-                    stack.enter_context(patch("host.cli.aws_resources._aws", return_value={"InstanceTypes": [{"ProcessorInfo": {"SupportedArchitectures": ["x86_64"]}}]}))
+                    stack.enter_context(patch("host.cli.aws_resources._aws", side_effect=AssertionError("unexpected EC2 preflight call")))
                     stack.enter_context(patch("host.cli.lifecycle_aws._resolve_github_pin", return_value=("d" * 40, repo_version())))
                     stack.enter_context(patch("host.cli.lifecycle_aws._default_network", return_value=("vpc-1", "subnet-1", "us-east-1a")))
                     stack.enter_context(patch("host.cli.lifecycle_aws._security_group_access_state", return_value=(False, True)))
@@ -536,7 +513,7 @@ class DeployUnitTests(unittest.TestCase):
         )
 
         discovery_actions = statements["Ec2Discovery"]["Action"]
-        self.assertIn("ec2:DescribeInstanceTypes", discovery_actions)
+        self.assertNotIn("ec2:DescribeInstanceTypes", discovery_actions)
         self.assertIn("ec2:DescribeInstanceCreditSpecifications", discovery_actions)
         self.assertNotIn("ec2:RunInstances", discovery_actions)
         self.assertNotIn("ec2:CreateVolume", discovery_actions)

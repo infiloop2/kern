@@ -94,13 +94,6 @@ def _terminate_instances(instance_ids: list[str], env: dict[str, str]) -> None:
     _aws(env, "ec2", "wait", "instance-terminated", "--instance-ids", *instance_ids)
 
 
-def _validate_launch_instance_type(env: dict[str, str], instance_type: str) -> None:
-    """Reject incompatible compute before deploy/recovery changes AWS resources."""
-    types = _aws(env, "ec2", "describe-instance-types", "--instance-types", instance_type)["InstanceTypes"]
-    if len(types) != 1 or "x86_64" not in types[0]["ProcessorInfo"]["SupportedArchitectures"]:
-        raise ConfigError(f"instance type {instance_type} does not support Kern's x86_64 Ubuntu image")
-
-
 def _instance_settings(instance_type: str | None = None) -> dict[str, Any]:
     """The instance settings owned by Kern, shared by launch and root rebuild."""
     selected_type = INSTANCE_TYPE if instance_type is None else instance_type
