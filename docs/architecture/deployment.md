@@ -44,10 +44,9 @@ Add the same flag to a normal deploy command to choose its initial size.
 
 The EC2 type determines both CPU and RAM; `m7i.xlarge` provides 4 vCPUs and
 16 GiB RAM. There is no separate RAM flag. The type must support Kern's
-x86_64 Ubuntu image and be available in the host's availability zone. The CLI
-checks supported architecture through EC2 before any AWS mutations; AWS
-validates remaining launch compatibility and capacity. The flag is rejected for
-Lima, upgrade and reconfigure.
+x86_64 Ubuntu image and be available in the host's availability zone. AWS
+validates compatibility and capacity at launch; the CLI does not preflight
+the type's architecture. The flag is rejected for Lima, upgrade and reconfigure.
 
 Omitting the flag on deploy or recovery uses the code's `INSTANCE_TYPE`
 default (`t3.small`). Upgrade and reconfiguration preserve the retained
@@ -57,10 +56,7 @@ retain a custom size. This is a CLI option; Kern Cloud needs its own
 control-plane changes to expose it.
 
 Unlimited CPU-credit settings apply only to the supported burstable T families;
-other types receive no credit specification. The optional type preflight requires
-`ec2:DescribeInstanceTypes`, included in the supplied IAM policy. Deploy the
-matching Kern Cloud approved policy from Infiverse PR #838 before publishing
-this Kern release.
+other types receive no credit specification.
 
 The target `VERSION` is the local checkout's `VERSION`; the GitHub delivery
 requires the pinned commit's `VERSION` to equal it.

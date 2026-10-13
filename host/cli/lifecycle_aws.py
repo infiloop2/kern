@@ -81,7 +81,6 @@ from host.cli.aws_resources import (
     _security_group_access_state,
     _terminate_instances,
     _wait_for_instance,
-    _validate_launch_instance_type,
 )
 from host.cli.lifecycle_bootstrap import CODE_ARCHIVE_NAME, _generate_deploy_key, _provision_over_ssh
 from host.cli.aws_upgrade import prepare_upgrade, replace_root
@@ -134,8 +133,6 @@ def _main_for_lifecycle_locked(command: LifecycleCommand, config: InputConfig) -
             f"region {config.aws_region}; preparing {command.mode} for "
             f"'{config.agent_name}' at Kern {target_version}"
         )
-        if command.instance_type is not None:
-            _validate_launch_instance_type(aws_env, command.instance_type)
         preferred_availability_zone = _existing_storage_volume_availability_zone(config, aws_env)
         existing = _find_existing_instances(config, aws_env)
         storage_roles = _existing_storage_roles(config, aws_env)
