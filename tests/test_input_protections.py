@@ -95,3 +95,17 @@ class InputProtectionTests(unittest.TestCase):
             instagram_discovery._audio_cursor('opaque',api)
             self.assertFalse(guard.call_args.kwargs['allow_identifiers'])
             self.assertTrue(guard.call_args.kwargs['allow_machine_tokens'])
+
+    def test_prolific_nested_text_guard_declarations_match(self):
+        from host.tools import prolific
+        from host.tools.prolific.validation import guard_text
+        api = FakeHostAPI()
+        for action in prolific.MANIFEST.actions:
+            for field, protection in action.input_protections.items():
+                if protection.kind != "parameter_guard":
+                    continue
+                with self.subTest(action=action.id, field=field), patch.object(api.outbound, "guard_request_parameter_string", side_effect=lambda value, **kw: value) as guard:
+                    self.assertEqual(guard_text("ordinary text", api), "ordinary text")
+                    self.assertEqual(guard.call_args.kwargs.get("allow_longer_text", False), protection.allow_longer_text)
+                    self.assertEqual(guard.call_args.kwargs.get("allow_identifiers", False), protection.allow_identifiers)
+                    self.assertEqual(guard.call_args.kwargs.get("allow_machine_tokens", False), protection.allow_machine_tokens)

@@ -6,7 +6,7 @@ model. That recall is not comprehensive; search again as new needs emerge.
 
 `GET /agent/identity` returns the current thread's immutable host identity.
 Every model turn starts with that identity, even when no memory pages are
-recalled. Existing self-memory is included before any shared-memory matches.
+recalled. Self-memory is considered before shared-memory matches.
 Kern resolves self-memory from that host-authenticated identity; never put an
 identity or page id into the self-memory request.
 

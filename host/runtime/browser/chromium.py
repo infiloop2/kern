@@ -16,17 +16,18 @@ from host.runtime.browser.client import BrowserError
 
 
 class Chromium:
-    def __init__(self, runtime: Any, environment: dict[str, str], settings: dict[str, Any]) -> None:
+    def __init__(self, runtime: Any, environment: dict[str, str], settings: dict[str, Any], *, debug_port: int | None = None) -> None:
+        debug_port = BROWSER_DEBUG_PORT if debug_port is None else debug_port
         self.directory = tempfile.TemporaryDirectory(prefix="kern-browser-profile-")
         self.child: subprocess.Popen[bytes] | None = None
         self.browser: Any = None
         self.closed = False
         try:
-            # One browser is active at a time. Never attach to an older browser
+            # Each slot owns its control port. Never attach to an older browser
             # if a failed shutdown or an unexpected listener occupies its port.
             with socket.socket() as probe:
                 probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-                probe.bind(("127.0.0.1", BROWSER_DEBUG_PORT))
+                probe.bind(("127.0.0.1", debug_port))
             locale = settings.get("locale", "en-US")
             profile = Path(self.directory.name) / "Default"
             profile.mkdir()
@@ -34,7 +35,7 @@ class Chromium:
             self.child = subprocess.Popen(
                 [runtime.chromium.executable_path,
                  f"--user-data-dir={self.directory.name}",
-                 "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={BROWSER_DEBUG_PORT}",
+                 "--remote-debugging-address=127.0.0.1", f"--remote-debugging-port={debug_port}",
                  "--no-first-run", "--no-default-browser-check", f"--lang={locale}",
                  "--window-size=1100,850", "--force-device-scale-factor=1",
                  f"--proxy-server=http://127.0.0.1:{BROWSER_NETWORK_PORT}", "--proxy-bypass-list=<-loopback>",
@@ -50,13 +51,13 @@ class Chromium:
                     raise BrowserError("The sandboxed browser could not start.")
                 with socket.socket() as probe:
                     probe.settimeout(0.2)
-                    if probe.connect_ex(("127.0.0.1", BROWSER_DEBUG_PORT)) == 0:
+                    if probe.connect_ex(("127.0.0.1", debug_port)) == 0:
                         break
                 time.sleep(0.1)
             else:
                 raise BrowserError("The private browser control connection did not become ready.")
             self.browser = runtime.chromium.connect_over_cdp(
-                f"http://127.0.0.1:{BROWSER_DEBUG_PORT}", timeout=max(1, (deadline - time.monotonic()) * 1000),
+                f"http://127.0.0.1:{debug_port}", timeout=max(1, (deadline - time.monotonic()) * 1000),
             )
             # Keep the original Chrome context: creating an incognito context
             # here would undo the launch/context change verified on the laptop.
@@ -78,6 +79,14 @@ class Chromium:
             except Exception:
                 pass  # Preserve the launch/attachment failure.
             raise
+
+    def kill(self) -> None:
+        """Interrupt a capture from its watchdog without calling Playwright."""
+        if self.child is not None:
+            try:
+                os.killpg(self.child.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
     def close(self) -> None:
         if self.closed:

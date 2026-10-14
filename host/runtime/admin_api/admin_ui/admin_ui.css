@@ -1322,6 +1322,7 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 .integration-logo-tool-instagram, .integration-logo-tool-instagram_discovery { background: radial-gradient(circle at 32% 105%, #ffd600 0 18%, #ff7a00 34%, #ff0169 57%, #d300c5 75%, #7638fa 100%); }
 .integration-logo-tool-linkedin { --logo-badge: #0a66c2; background: #0a66c2; }
 .integration-logo-word-linkedin { font-family: Arial, sans-serif; font-size: 1.5rem; letter-spacing: -0.08em; margin-left: -0.06em; }
+.integration-logo-tool-prolific { background: #5c2d91; color: #fff; }
 .integration-logo-tool-polymarket { background: #635bff; }
 .integration-logo-tool-reddit, .integration-logo-tool-reddit_scrapecreators { background: #ff4500; }
 .integration-logo-tool-runway { background: #f4f4f2; color: #111; }

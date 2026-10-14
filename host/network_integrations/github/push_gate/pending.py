@@ -123,3 +123,10 @@ def _cleanup_pending_refs(row: dict[str, Any], push_id: str) -> None:
         _run_helper_json(APPROVE_COMMAND, payload, timeout=APPROVE_HELPER_TIMEOUT_SECONDS)
     except HelperError:
         pass  # leftover refs in the quarantine mirror are inert
+
+
+def review_context(row: dict[str, Any]) -> dict[str, Any]:
+    """Read exact held objects through the existing admin-only root boundary."""
+    payload = _helper_payload(row, row["id"], "review")
+    payload["ref_updates"] = row["ref_updates"]
+    return _run_helper_json(APPROVE_COMMAND, payload, timeout=APPROVE_HELPER_TIMEOUT_SECONDS)

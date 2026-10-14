@@ -36,8 +36,6 @@ a pending approval and the operator decides in the admin UI (see ``admin_api``).
 from __future__ import annotations
 
 from contextlib import contextmanager
-from dataclasses import asdict
-
 from http import HTTPStatus
 import os
 from pathlib import Path
@@ -223,22 +221,15 @@ def _list_bundled_tools(tool_input: Any) -> dict[str, Any]:
 
 
 def _describe_tool(tool_input: Any) -> dict[str, Any]:
-    """One bundled tool's actions with their full input and output schemas.
-
-    The output schema is what the agent gets back, so it belongs next to the
-    input schema: it says which fields a result carries and what each means,
-    which is how the agent plans the call after this one without running the
-    action to find out. It is present only for actions that return a JSON
-    result; an approval-gated action and one that returns a file both carry no
-    output schema, which the approval field and the description already state.
-
-    Agent guidance is included once per described tool. Broad discovery omits
-    it to keep the capability index small, so describe_tool must be a
-    self-contained path from an unfiltered catalog to safe tool use. A caller
-    that used focused discovery may see the same short note twice."""
+    """Input schemas and result kinds; output schemas and usage notes are opt-in."""
     tool_id = _string_field(tool_input, "tool_id")
-    if set(tool_input) - {"tool_id", "action_ids"}:
-        raise tools_host.ToolCallError("describe_tool accepts only tool_id and action_ids.")
+    if set(tool_input) - {"tool_id", "action_ids", "include_output_schema", "include_notes"}:
+        raise tools_host.ToolCallError(
+            "describe_tool accepts only tool_id, action_ids, include_output_schema, and include_notes."
+        )
+    for flag in ("include_output_schema", "include_notes"):
+        if flag in tool_input and not isinstance(tool_input[flag], bool):
+            raise tools_host.ToolCallError(f"{flag} must be a boolean.")
     tool = tools_host.BUNDLED_TOOLS.get(tool_id)
     if tool is None:
         raise tools_host.ToolCallError(
@@ -269,7 +260,7 @@ def _describe_tool(tool_input: Any) -> dict[str, Any]:
             "display_name": manifest.display_name,
             "enabled": tool_id in state.enabled_tool_ids(),
             "reports_cost": manifest.reports_cost,
-            "agent_notes": manifest.agent_notes,
+            **({"agent_notes": manifest.agent_notes} if tool_input.get("include_notes", False) else {}),
             **(
                 {"connected_accounts": state.tool_connections(tool_id)}
                 if manifest.connection in {"oauth", "mcp_oauth"}
@@ -282,8 +273,9 @@ def _describe_tool(tool_input: Any) -> dict[str, Any]:
                     "approval": spec.approval,
                     "input_schema": spec.input_schema,
                     "cost_description": spec.cost_description,
-                    "input_protections": {name: asdict(protection) for name, protection in spec.input_protections.items()},
-                    **({"output_schema": spec.output_schema} if spec.output_schema else {}),
+                    "returns": "approval" if spec.approval == "operator" else "asset" if spec.returns_asset else "json",
+                    **({"output_schema": spec.output_schema}
+                       if tool_input.get("include_output_schema", False) and spec.output_schema else {}),
                     **({"limit_runs_per_day": spec.limit_runs_per_day} if spec.limit_runs_per_day is not None else {}),
                 }
                 for spec in manifest.actions

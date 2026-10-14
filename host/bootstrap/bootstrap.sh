@@ -1520,13 +1520,13 @@ $(cat /tmp/kern_cloudflare_rules)
     oif lo tcp sport @BROWSER_NETWORK_PORT@ meta skuid "kern-browser" ct state established accept
     oif lo tcp sport @BROWSER_NETWORK_PORT@ drop
     # CDP controls cookies and page contents. Only Browser may connect or
-    # answer on this port; keep both directions before broad loopback rules.
-    oif lo ip daddr 127.0.0.1 tcp dport @BROWSER_DEBUG_PORT@ meta skuid "kern-browser" accept
-    oif lo tcp dport @BROWSER_DEBUG_PORT@ tcp flags & syn == 0 ct state established accept
-    oif lo tcp dport @BROWSER_DEBUG_PORT@ drop
-    oif lo tcp sport @BROWSER_DEBUG_PORT@ meta skuid "kern-browser" ct state established accept
-    oif lo tcp sport @BROWSER_DEBUG_PORT@ tcp flags & syn == 0 ct state established accept
-    oif lo tcp sport @BROWSER_DEBUG_PORT@ drop
+    # answer on these slot ports; keep both directions before broad loopback rules.
+    oif lo ip daddr 127.0.0.1 tcp dport @BROWSER_DEBUG_PORT@-@BROWSER_DEBUG_PORT_LAST@ meta skuid "kern-browser" accept
+    oif lo tcp dport @BROWSER_DEBUG_PORT@-@BROWSER_DEBUG_PORT_LAST@ tcp flags & syn == 0 ct state established accept
+    oif lo tcp dport @BROWSER_DEBUG_PORT@-@BROWSER_DEBUG_PORT_LAST@ drop
+    oif lo tcp sport @BROWSER_DEBUG_PORT@-@BROWSER_DEBUG_PORT_LAST@ meta skuid "kern-browser" ct state established accept
+    oif lo tcp sport @BROWSER_DEBUG_PORT@-@BROWSER_DEBUG_PORT_LAST@ tcp flags & syn == 0 ct state established accept
+    oif lo tcp sport @BROWSER_DEBUG_PORT@-@BROWSER_DEBUG_PORT_LAST@ drop
     meta skuid "kern-browser" udp dport 53 accept
     meta skuid "kern-browser" tcp dport 53 accept
     meta skuid "kern-browser" ip daddr { 0.0.0.0/8, 10.0.0.0/8, 100.64.0.0/10, 127.0.0.0/8, 169.254.0.0/16, 172.16.0.0/12, 192.0.0.0/24, 192.168.0.0/16, 198.18.0.0/15, 224.0.0.0/4, 240.0.0.0/4 } drop
@@ -1864,7 +1864,8 @@ IOWeight=25
 # Best-effort reclaim protection, not a reservation or a larger allocation.
 MemoryLow=10%
 MemoryMax=2G
-TasksMax=256
+# Budget processes and threads for four headed Chromium/Xvfb slots.
+TasksMax=1024
 KillMode=mixed
 TimeoutStopSec=240
 

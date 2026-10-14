@@ -246,6 +246,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("download_media", {"url": "https://www.python.org/static/community_logos/python-logo.png"}),
     ),
     "browser": (
+        ("screenshot_url", {"url": "https://example.com/"}),
         ("x_connection_status", {}),
         ("x_post_tweet", {"account_id": "acct_" + "a" * 32, "text": "Kern smoke never submitted"}),
         ("linkedin_connection_status", {}),
@@ -464,6 +465,34 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("list_dm_events", {"max_results": 1}),
         ("read_dm_conversation", {"recipient_user_id": "1", "max_results": 1}),
         ("send_dm", {"recipient_user_id": "1", "text": "Kern smoke. Never sent."}),
+    ),
+    # Fresh-host fixtures stay unconfigured: no live Prolific writes.
+    "prolific": (
+        ("get_account", {}),
+        ("get_filters", {"search": "age"}),
+        ("get_eligibility_count", {}),
+        ("list_studies", {}),
+        ("get_study", {"study_id": "645e4403bdd06d5f66d8fbde"}),
+        ("create_study", {"study": {
+            "name": "Never created", "description": "Fresh host smoke fixture.",
+            "data_collection_method": "AI_TASK_BUILDER_COLLECTION", "data_collection_id": "645e4403bdd06d5f66d8fbde",
+            "total_available_places": 1, "estimated_completion_time": 1, "reward": 100,
+        }}),
+        ("start_study", {"study_id": "645e4403bdd06d5f66d8fbde"}),
+        ("get_collection_export_status", {"collection_id": "645e4403bdd06d5f66d8fbde", "export_id": "645e4403bdd06d5f66d8fbdf"}),
+        ("save_collection_export", {"collection_id": "645e4403bdd06d5f66d8fbde", "export_id": "645e4403bdd06d5f66d8fbdf"}),
+        ("halt_study", {"study_id": "645e4403bdd06d5f66d8fbde"}),
+        ("list_submissions", {"study_id": "645e4403bdd06d5f66d8fbde"}),
+        ("approve_submissions", {"submission_ids": ["645e4403bdd06d5f66d8fbde"]}),
+        ("list_collections", {"workspace_id": "645e4403bdd06d5f66d8fbde"}),
+        ("get_collection", {"collection_id": "645e4403bdd06d5f66d8fbde"}),
+        ("save_collection", {"collection": {
+            "name": "Never created", "workspace_id": "645e4403bdd06d5f66d8fbde",
+            "task_details": {"task_name": "Smoke", "task_introduction": "Read", "task_steps": "Choose"},
+            "collection_items": [{"order": 0, "page_items": ['{"type":"text","content":"Smoke"}']}],
+        }}),
+        ("export_collection", {"collection_id": "645e4403bdd06d5f66d8fbde"}),
+        ("export_demographics", {"study_id": "645e4403bdd06d5f66d8fbde"}),
     ),
     "upwork": (
         ('list_accounts', {}),
@@ -3987,7 +4016,7 @@ PY""", check=True)
                 # three WhatsApp local-state reads are also valid while no
                 # account is linked; only its send must fail closed. Google Ads
                 # country lookup also reads bundled public data without OAuth.
-                direct_without_connection = (tool_id == "whatsapp" and action_id != "send_message") or (tool_id == "browser" and action_id in {"x_connection_status", "linkedin_connection_status"}) or (tool_id == "google_ads" and action_id == "list_locations")
+                direct_without_connection = (tool_id == "whatsapp" and action_id != "send_message") or (tool_id == "browser" and action_id in {"x_connection_status", "linkedin_connection_status", "screenshot_url"}) or (tool_id == "google_ads" and action_id == "list_locations")
                 if tool_id == "indexnow":
                     if response.get("isError") or not isinstance(parsed, dict):
                         raise AssertionError(f"managed-key {name} failed")

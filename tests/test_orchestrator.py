@@ -11,6 +11,7 @@ servers/run_turn seams.
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 import tempfile
 import threading
@@ -24,6 +25,7 @@ from host.runtime.admin_api import codex_cleanup
 from host.runtime.admin_api import service, threads as admin_threads
 from host.runtime.agent_runtime import orchestrator, provider_account_trust
 from host.runtime.admin_api.errors import ApiError
+from host.runtime.memory_context import MemoryDelivery
 from host.runtime.core import db, state
 from host.runtime.workspace import schedules
 from host.runtime.workspace.chat import backend as chat
@@ -161,6 +163,9 @@ class OrchestratorTests(unittest.TestCase):
         )
         self.env_patch.start()
         self.addCleanup(self.env_patch.stop)
+        self.memory_delivery = MemoryDelivery()
+        self.enterContext(patch.object(admin_threads, "memory_delivery", self.memory_delivery))
+        self.enterContext(patch.object(orchestrator, "memory_delivery", self.memory_delivery))
         FakeServer.instances = []
         orchestrator._LIVE.clear()
         self.addCleanup(orchestrator._LIVE.clear)
@@ -398,7 +403,7 @@ class OrchestratorTests(unittest.TestCase):
         with (patch.object(thread_routes.state, "recall_context_events", return_value=history) as history_read,
               patch.object(orchestrator.swarm_annotations, "enqueue_task") as task,
               patch.object(thread_routes, "_recalled_memory_pages", return_value=(
-                  [{"page_id": "release-notes", "content": "Use the release checklist."}], "Recall complete.",
+                  [{"page_id": "release-notes", "revision": 1, "scope": "swarm", "content": "Use the release checklist."}], "Recall complete.",
               )) as recall,
               patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub())):
             self.send_message("thread-1", message, peer_sender_thread_id="thread-2")
@@ -450,6 +455,60 @@ class OrchestratorTests(unittest.TestCase):
                 release.set()
                 self.wait_until_idle('thread-1')
             self.assertEqual(monitor.turns, {})
+
+    def test_memory_admission_notice_expiry_and_clear(self) -> None:
+        pages = [
+            dict(page_id="thread-1", scope="self", revision=1, description="Self", content="self body"),
+            dict(page_id="guide", scope="swarm", revision=1, description="Shared", content="shared body"),
+        ]
+        with (patch.object(admin_threads, "_recalled_memory_pages", return_value=(pages, "Selected guide r1")),
+              patch.object(orchestrator.time, "monotonic", return_value=0.0) as clock,
+              patch.object(orchestrator, "launch_turn") as launch):
+            for number, timestamp in enumerate((0, 100, 200, 300, 500, 599.999, 600), 1):
+                clock.return_value = timestamp
+                self.send_message("thread-1", "continue")
+                turn, message, _session = launch.call_args.args
+                expected = ["thread-1", "guide"] if number in (1, 7) else []
+                self.assertEqual("shared body" in message, number in (1, 7))
+                self.assertEqual("self body" in message, number in (1, 7))
+                self.assertIn('"thread_id": "thread-1"', message)
+                notice = [e for e in read_agent_events() if e["thread_id"] == "thread-1" and e["event_type"] == "thread.notice"][-1]
+                self.assertEqual(notice["payload"]["memory_page_ids"], expected)
+                with db.transaction() as cur:
+                    cur.execute("SELECT run_number FROM agent_events WHERE seq = %s", (notice["seq"],))
+                    self.assertEqual(cur.fetchone(), (turn.run_number,))
+                details = notice["payload"]["memory_recall_details"]
+                diagnostic = json.loads(details.splitlines()[0].partition(': ')[2])
+                self.assertEqual(diagnostic['delivery_status'], 'pending_readiness')
+                self.assertEqual(diagnostic['ttl_seconds'], 600)
+                self.assertEqual(diagnostic['selected_count'], 2)
+                self.assertEqual(diagnostic['prepared_injection_count'], len(expected))
+                self.assertEqual(diagnostic['suppressed_count'], 2 - len(expected))
+                self.assertEqual([p['reason'] for p in diagnostic['pages']],
+                                 ['new' if number == 1 else 'expired' if number == 7 else 'recent'] * 2)
+                self.assertEqual([p['seconds_since_injection'] for p in diagnostic['pages']],
+                                 [None if number == 1 else timestamp] * 2)
+                self.assertIn('prepared for injection', notice['payload']['message'])
+                self.assertNotIn('pending_readiness', message)
+                # Monitor still seeds with the complete selection (IDs/revisions).
+                self.assertEqual(launch.call_args.kwargs["recalled_pages"], pages)
+                orchestrator._provider_session_accepted(turn, "session")
+                orchestrator._provider_ready(turn)
+                orchestrator._finish_turn(turn)
+                orchestrator._close_turn(turn, None)
+            admin_threads.clear_thread_memory("thread-1")
+            self.send_message("thread-1", "new context")
+            turn, message, session = launch.call_args.args
+            self.assertIsNone(session)
+            self.assertIn("shared body", message)
+            # Worker never became ready: next admission must send again.
+            orchestrator._finish_turn(turn, error_message="startup failed")
+            orchestrator._close_turn(turn, None)
+            self.send_message("thread-1", "retry")
+            turn, message, session = launch.call_args.args
+            self.assertIn("shared body", message)
+            orchestrator._finish_turn(turn)
+            orchestrator._close_turn(turn, None)
 
     def test_pasted_peer_header_does_not_create_correspondence(self) -> None:
         from host.agent_messages import MESSAGE_HEADER
@@ -1612,6 +1671,10 @@ class OrchestratorTests(unittest.TestCase):
                 {"message": "remember this decision", "source": "user"},
             )
 
+        pages = [dict(page_id="guide", scope="swarm", revision=1,
+                      description="Guidance", content="shared body")]
+        self.memory_delivery.delivered(thread_id, (("guide", 1),))
+        self.enterContext(patch.object(admin_threads, "_recalled_memory_pages", return_value=(pages, "")))
         attempts: list[tuple[str, str | None]] = []
 
         class StartingServer(FakeServer):
@@ -1647,6 +1710,8 @@ class OrchestratorTests(unittest.TestCase):
 
         self.assertEqual(len(attempts), 2)
         self.assertIsNone(attempts[1][1])
+        self.assertNotIn("shared body", attempts[0][0])
+        self.assertNotIn("shared body", attempts[1][0])
         self.assertIn("remember this decision", attempts[1][0])
         self.assertIn("User:\ncontinue the work", attempts[1][0])
         self.assertIn("CURRENT USER MESSAGE ---\nretry now", attempts[1][0])

@@ -1,8 +1,8 @@
 """Typed Upwork results from captured reads and documented result fields.
 
-Unknown fields or changed types preserve the complete redacted provider JSON in
-provider_details_json. They are never silently discarded or coerced. That fallback
-can be narrowed after observing more response shapes in staging.
+Modeled responses carry unfamiliar fields once, in provider_extra_fields_json at
+their containing object. Opaque responses retain complete provider_details_json.
+Both forms preserve redacted values without clipping or another provider call.
 """
 
 import json
@@ -261,7 +261,7 @@ INVITATIONS = outputs.obj({
 })
 
 # These fields are named by the authenticated reference; their surrounding
-# envelopes have not all been observed. Preserve unmodeled data via the fallback.
+# envelopes have not all been observed. Preserve unmodeled data via local extras.
 HIGHLIGHTS = outputs.obj({
     "certificates": outputs.array_of(outputs.obj({"id": outputs.text("Certificate ID."), "name": outputs.text("Certificate name.")}), "Available certificates."),
     "portfolio_projects": outputs.array_of(outputs.obj({"id": outputs.text("Project ID."), "title": outputs.text("Project title.")}), "Available portfolio projects."),
@@ -307,11 +307,28 @@ for _action, _paths in _CORE_PATHS.items():
             _schema = cast(JSONObject, cast(JSONObject, _schema["properties"])[_field])
 
 
+def _with_extras(schema: JSONObject) -> JSONObject:
+    """Describe local fallback fields without opening provider-owned objects."""
+    if schema.get("type") == "object":
+        fields = cast(JSONObject, schema["properties"])
+        return {**schema, "properties": {
+            **{key: _with_extras(cast(JSONObject, child)) for key, child in fields.items()},
+            "provider_extra_fields_json": outputs.text(
+                "Unmodeled or changed-type fields for this object as redacted JSON; combine with its typed fields."
+            ),
+        }}
+    if schema.get("type") == "array":
+        return {**schema, "items": _with_extras(cast(JSONObject, schema["items"]))}
+    return schema
+
+
 def output_schema(action: str) -> JSONObject:
+    if action in _CORE_PATHS:
+        return _with_extras(BASE_SCHEMAS[action])
     return outputs.obj({
         **cast(JSONObject, BASE_SCHEMAS[action]["properties"]),
-        "provider_details_json": outputs.text("Full Upwork response when some fields are not typed yet."),
-    }, cast(list[str], BASE_SCHEMAS[action].get("required", ["provider_details_json"])))
+        "provider_details_json": outputs.text("Complete redacted Upwork response for this not-yet-modeled result."),
+    }, ["provider_details_json"])
 
 
 def redact_text(text: str, credential: StoredCredential) -> str:
@@ -382,14 +399,15 @@ def response_object(text: str) -> JSONObject:
 
 
 def structured_result(text: str, action: str, credential: StoredCredential) -> JSONObject:
-    """Keep known fields typed and preserve unfamiliar data without clipping."""
+    """Keep known fields typed and preserve unfamiliar data once at its parent."""
     data = response_object(text)
     data = redact_json(data, credential)
+    local_extras = action in _CORE_PATHS
 
     def project(value, schema, depth=0):
         kind = schema.get("type")
         if kind == "object" and isinstance(value, dict):
-            result, complete = {}, True
+            result, extras = {}, {}
             fields = schema["properties"]
             required = schema.get("required", [])
             missing = [key for key in required if key not in value]
@@ -399,39 +417,41 @@ def structured_result(text: str, action: str, credential: StoredCredential) -> J
                 if depth == 0 and key == "trace_id":
                     continue  # Provider tracing metadata is not account/job data.
                 if key not in fields:
-                    complete = False
+                    extras[key] = child
                     continue
-                parsed, covered = project(child, fields[key], depth + 1)
+                parsed = project(child, fields[key], depth + 1)
                 if parsed is not _MISSING:
                     if key in required and parsed == "":
                         raise ValueError("Upwork response has empty required result fields.")
                     result[key] = parsed
                 elif key in required:
                     raise ValueError("Upwork response has invalid required result fields.")
-                complete = complete and covered
-            return result, complete
-        if kind == "array" and isinstance(value, list):
-            result, complete = [], True
-            for child in value:
-                parsed, covered = project(child, schema["items"], depth + 1)
                 if parsed is _MISSING:
-                    return _MISSING, False
+                    extras[key] = child
+            if local_extras and extras:
+                result["provider_extra_fields_json"] = json.dumps(extras, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+            return result
+        if kind == "array" and isinstance(value, list):
+            result = []
+            for child in value:
+                parsed = project(child, schema["items"], depth + 1)
+                if parsed is _MISSING:
+                    return _MISSING
                 result.append(parsed)
-                complete = complete and covered
-            return result, complete
+            return result
         if kind == "integer" and type(value) is float and value.is_integer():
-            return int(value), True
+            return int(value)
         valid = ((kind == "string" and isinstance(value, str)) or
                  (kind == "boolean" and isinstance(value, bool)) or
                  (kind == "integer" and type(value) is int) or
                  (kind == "number" and type(value) in (int, float)) or
                  (kind == "null" and value is None))
-        return (value, True) if valid else (_MISSING, False)
+        return value if valid else _MISSING
 
-    projected, complete = project(data, BASE_SCHEMAS[action])
+    projected = project(data, BASE_SCHEMAS[action])
     result = cast(JSONObject, projected)
     required = cast(list[str], output_schema(action).get("required", []))
-    if not complete or "provider_details_json" in required:
+    if not local_extras:
         result["provider_details_json"] = json.dumps(data, ensure_ascii=False, separators=(",", ":"), allow_nan=False)
     if any(key not in result for key in required):
         raise ValueError("Upwork response is missing required result fields.")

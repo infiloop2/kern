@@ -60,7 +60,7 @@ from host.session_options import session_config_error
 # workspace_admin_api imports this module back to dispatch through route().
 # The cycle is safe with plain module imports: each side binds the module
 # object and reads its attributes only at request time, never during import.
-from host.runtime.admin_api import auto_approvals
+from host.runtime.admin_api import auto_approvals, github_push_reviews
 from host.runtime.memory_monitor import monitor as memory_monitor
 from host.runtime.admin_api import approvals as approvals_admin_api
 from host.runtime.admin_api import admin_auth, admin_passkeys, workspace_api as workspace_admin_api, workspace_proxy, github_credential, github_repo_audit, tools_client as tools_admin_api, upgrade_check
@@ -2053,6 +2053,7 @@ def main() -> int:
     threading.Thread(target=maintenance_loop, args=(interrupted,), daemon=True).start()
     threading.Thread(target=orchestrator.turn_retries.run, args=(retry_failed_turn,), name="turn-retries", daemon=True).start()
     threading.Thread(target=auto_approvals.run, name="auto-approvals", daemon=True).start()
+    threading.Thread(target=github_push_reviews.run, args=(resolve_pending_push,), name="github-push-reviews", daemon=True).start()
     threading.Thread(target=memory_monitor.run, name="memory-monitor", daemon=True).start()
     threading.Thread(target=embedding_index_loop, daemon=True).start()
     threading.Thread(target=upgrade_check.poll, daemon=True).start()

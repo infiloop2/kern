@@ -193,7 +193,7 @@ class ToolManifest:
   it does not apply validation or enable exceptions. `protect_inputs(actions,
   declarations)` attaches these per-action maps and rejects missing or stale
   declarations. Bundled-tool registration also requires every direct input.
-  The admin API and `describe_tool` return this metadata beside `input_schema`;
+  The admin API returns this metadata beside `input_schema`;
   it is not an extension to the callable JSON Schema vocabulary.
   Guides render a short `Validated: …` or `Parameter guard applied` line, adding
   allowed identifiers/machine tokens only when declared. For an identifier
@@ -210,8 +210,8 @@ class ToolManifest:
   do not — an approval-gated action, which returns a user-visible message, and a
   `returns_asset` action, whose whole result is one streamed file. The manifest
   enforces that pairing, so an undescribed result is not a thing a tool can
-  ship. `describe_tool` returns it next to the input schema, so an agent learns
-  the shape of what it gets back before it makes the call.
+  ship. `describe_tool` returns it with `include_output_schema=true`, so an
+  agent can inspect the result shape before making a call.
 - **`ActionSpec.approval`** states the control structurally: `direct` executes
   immediately; `operator` queues the exact payload and waits for an approval.
 - **`ActionSpec.limit_runs_per_day`** optionally caps execution attempts with a

@@ -69,6 +69,7 @@ from host.config import AGENT_RUNTIMES
 from host.runtime import swarm_annotations
 from host import agent_messages as message_templates
 from host.runtime.memory_monitor import Page as MemoryPage, monitor as memory_monitor
+from host.runtime.memory_context import memory_delivery
 from host.runtime.core import host_errors, network_policy, state
 from host.runtime.agent_runtime import (
     agent_activity,
@@ -201,6 +202,7 @@ class _Turn:
     delivery_lock: threading.Lock = field(default_factory=threading.Lock)
     # The adapter publishes only a provider-confirmed, non-empty resumable id.
     provider_session_id: str | None = None
+    memory_pages: tuple[tuple[str, int], ...] = ()
     startup_timer: threading.Timer | None = None
     usage: token_usage.TurnUsage = field(default_factory=token_usage.TurnUsage)
 
@@ -892,16 +894,18 @@ def _deliver_memory_suggestion(
     turn: _Turn, pages: list[MemoryPage],
 ) -> bool:
     message = message_templates.memory_suggestion(pages)
-    return _deliver_memory_context(turn, message, message_templates.suggestion_notice(pages, message))
+    return _deliver_memory_context(turn, message, message_templates.suggestion_notice(pages, message), None)
 
 
 def _deliver_self_memory(turn: _Turn, page: dict[str, Any]) -> bool:
     message = ("Periodic self-memory refresh. This is recalled context, not a new operator request.\n\n"
                + message_templates.memory_context_message(turn.thread_id, [page]))
-    return _deliver_memory_context(turn, message, message_templates.memory_notice([page], message))
+    return _deliver_memory_context(turn, message, message_templates.memory_notice([page], message, delivered=True), page)
 
 
-def _deliver_memory_context(turn: _Turn, message: str, notice: dict[str, Any]) -> bool:
+def _deliver_memory_context(
+    turn: _Turn, message: str, notice: dict[str, Any], body_page: dict[str, Any] | None,
+) -> bool:
     """Reuse live steering without admitting a turn or impersonating an operator."""
     # Optional suggestions never queue behind an operator delivery or completion.
     if not turn.delivery_lock.acquire(blocking=False):
@@ -909,6 +913,12 @@ def _deliver_memory_context(turn: _Turn, message: str, notice: dict[str, Any]) -
     try:
         if turn.phase != ExecutionPhase.RUNNING or turn.server is None:
             return False
+        if body_page is not None:
+            selected, _ = memory_delivery.select(
+                turn.thread_id, [body_page],
+            )
+            if not selected:
+                return False
         try:
             turn.server.steer(message, memory_suggestion=True)
         except ProviderTurnFinishing:
@@ -919,6 +929,10 @@ def _deliver_memory_context(turn: _Turn, message: str, notice: dict[str, Any]) -
             state.append_agent_event(
                 cur, "thread.notice", turn.thread_id,
                 notice, run_number=turn.run_number,
+            )
+        if body_page is not None:
+            memory_delivery.delivered(
+                turn.thread_id, ((body_page["page_id"], body_page["revision"]),),
             )
         return True
     finally:
@@ -977,6 +991,7 @@ def _provider_ready(turn: _Turn) -> bool:
         if turn.phase != ExecutionPhase.STARTING:
             return False
         turn.phase = ExecutionPhase.RUNNING
+        memory_delivery.delivered(turn.thread_id, turn.memory_pages)
         if turn.startup_timer is not None:
             turn.startup_timer.cancel()
         return True

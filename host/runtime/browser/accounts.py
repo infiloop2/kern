@@ -9,8 +9,9 @@ from typing import Any
 from host.runtime.browser_network.relay import Network
 from host.runtime.browser.providers import PROVIDERS, x
 from host.runtime.browser.actions import ACTIONS
-from host.runtime.browser.browser import Browser, WIDTH, HEIGHT
-from host.runtime.browser.client import BrowserError
+from host.runtime.browser.browser import Browser, WIDTH, HEIGHT, permitted_url
+from host.runtime.browser.client import BrowserError, Screenshot
+from host.runtime.browser.screenshot import capture
 from host.runtime.browser.storage import Store, AccountData
 
 LEASE_SECONDS = 600
@@ -144,23 +145,31 @@ class Profile:
 
 class Accounts:
     """Database-backed accounts; unfinished operator logins exist only in memory."""
-    def __init__(self, store: Store | None = None, factory: Any = None) -> None:
+    def __init__(self, store: Store | None = None, factory: Any = None, *,
+                 network: Network | None = None, debug_port: int | None = None) -> None:
         self.store = store if store is not None else Store()
-        self.network = Network(self.store)
+        self.network = network if network is not None else Network(self.store)
+        self.debug_port = debug_port
         self.factory = factory if factory is not None else self.launch_browser
         self.profiles: dict[str, Profile] = {}
         self.pending: dict[str, Profile] = {}
-        # Load account metadata lazily, so database recovery does not require a restart.
-        self.loaded = False
 
     def load(self) -> None:
-        if not self.loaded:
-            self.profiles = {key: Profile(key, provider, self.factory, self.store, data)
-                             for key, (provider, data) in self.store.accounts().items()}
-            self.loaded = True
+        # Tool workers may have updated state since the operator's last request.
+        # Only a live popup keeps its in-memory profile and unsaved login state.
+        saved = self.store.accounts()
+        for key in list(self.profiles):
+            if key not in saved and not self.profiles[key].browser and not self.profiles[key].lease:
+                del self.profiles[key]
+        for key, (provider, data) in saved.items():
+            profile = self.profiles.get(key)
+            if profile is None:
+                self.profiles[key] = Profile(key, provider, self.factory, self.store, data)
+            elif not profile.browser and not profile.lease:
+                profile.data = data
 
     def launch_browser(self, auth: dict[str, Any] | None, site: str, *, block_media: bool = False) -> Browser:
-        return Browser(auth, site, self.network.dispatch("get", {}), block_media=block_media)
+        return Browser(auth, site, self.network.dispatch("get", {}), block_media=block_media, debug_port=self.debug_port)
 
     def expire(self) -> None:
         for key, profile in list(self.pending.items()):
@@ -171,6 +180,21 @@ class Accounts:
             if profile.lease and time.monotonic() > profile.expires:
                 profile.lease = ""
                 profile.close()
+
+    def screenshot(self, body: dict[str, Any]) -> Screenshot:
+        # Input/content policy belongs to the tool. Retain only the service's
+        # ordinary URL/shape checks and existing browser admission boundary.
+        url = body.get("url")
+        if set(body) != {"url"} or not isinstance(url, str) or len(url) > 4096 or not permitted_url(url):
+            raise BrowserError("Screenshot requires one public HTTPS URL.")
+        self.expire()
+        if any(p.browser or p.lease for p in [*self.profiles.values(), *self.pending.values()]):
+            raise BrowserError("Save and close or cancel the browser popup before taking a screenshot.")
+        browser = self.factory(None, "about:blank")
+        try:
+            return capture(browser, url)
+        finally:
+            browser.close()
 
     def dispatch(self, operation: str, body: dict[str, Any], *, agent_action: bool = False) -> dict[str, Any]:
         self.expire()

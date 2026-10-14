@@ -46,21 +46,13 @@ _NO_ARGUMENTS: JSONObject = {
 LIST_BUNDLED_TOOLS_TOOL: JSONObject = {
     "name": "list_bundled_tools",
     "description": (
-        "List tools bundled with this Kern host: their tool_id, whether the operator "
-        "has enabled them, and a one-line tool description. Omit tool_ids for the cheap "
-        "capability catalog, or pass known ids to include those tools' actions and agent_notes. "
-        "Start here, then call "
-        "describe_tool for the schemas of the actions you intend to use and call_tool to "
-        "run one. An action marked approval=operator queues for operator approval instead "
-        "of running immediately. A tool listed here but not enabled exists on the host but "
-        "cannot run until the operator enables it (and, for OAuth tools, connects it) under "
-        "Home > Integrations in the admin UI — ask the operator instead of building a "
-        "replacement. A capability with no entry here has no bundled tool at all. "
-        "OAuth tools also return connected_accounts with stable connection_id values. "
-        "When more than one account is connected, choose the intended account and pass "
-        "its connection_id to call_tool. "
-        "agent_notes adds to a tool's description: how to use it correctly, including what to do "
-        "when no action covers what you need; follow it. Empty means there is nothing to add."
+        "List bundled tools and enablement. Omit tool_ids for the capability catalog; pass "
+        "known ids for actions, agent_notes, and OAuth connected_accounts. Follow agent_notes; "
+        "empty means no extra guidance. With multiple accounts, pass the intended connection_id "
+        "to call_tool. Disabled tools require operator enablement (and OAuth connection) under "
+        "Home > Integrations; ask instead of building a replacement. Only absence from the "
+        "full catalog means a capability is not bundled. approval=operator queues approval. "
+        "Fetch tool_ids for notes/accounts, then describe_tool for needed schemas and call_tool to run."
     ),
     "input_schema": {
         "type": "object",
@@ -81,15 +73,10 @@ LIST_BUNDLED_TOOLS_TOOL: JSONObject = {
 DESCRIBE_TOOL_TOOL: JSONObject = {
     "name": "describe_tool",
     "description": (
-        "Return one bundled tool's agent usage notes and callable actions with their full "
-        "JSON input schemas, "
-        "and the output schema of every action that returns a JSON result. "
-        "Pass action_ids from focused list_bundled_tools discovery to load only needed "
-        "actions; omit it for all actions. Reuse schemas already in context. "
-        "Call this after list_bundled_tools, for the tool you are about to use; the "
-        "schemas are not in your context until you ask for them. An action with no "
-        "output_schema returns no JSON result: an approval-gated one returns an approval "
-        "outcome, and the rest write a file into your workspace."
+        "Return a bundled tool's action input schemas and returns kind: json, approval, or asset "
+        "(a workspace file). Output schemas are available on request with include_output_schema=true. "
+        "Pass action_ids for needed actions; omit for all. Reuse schemas already in context. "
+        "First fetch list_bundled_tools with tool_ids for usage notes, or set include_notes=true here."
     ),
     "input_schema": {
         "type": "object",
@@ -98,6 +85,8 @@ DESCRIBE_TOOL_TOOL: JSONObject = {
                 "type": "string",
                 "description": "Bundled tool id from list_bundled_tools, e.g. gmail.",
             },
+            "include_output_schema": {"type": "boolean", "default": False},
+            "include_notes": {"type": "boolean", "default": False},
             "action_ids": {
                 "type": "array",
                 "items": {"type": "string", "minLength": 1},

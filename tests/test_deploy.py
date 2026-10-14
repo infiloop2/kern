@@ -2182,13 +2182,15 @@ class DeployUnitTests(unittest.TestCase):
         self.assertNotIn("configure_agent_root_quota", bootstrap)
 
     def test_bootstrap_renders_shared_port_constants(self) -> None:
-        from host.constants import PROXY_PORT
+        from host.constants import PROXY_PORT, BROWSER_DEBUG_PORT, BROWSER_DEBUG_PORT_LAST
 
         bootstrap = render._render_bootstrap()
         # No placeholders left unrendered, and the rendered ports are the shared
         # constants — so a port change in one place cannot silently drift.
         self.assertNotIn("@PROXY_PORT@", bootstrap)
         self.assertNotIn("@ADMIN_PORT@", bootstrap)
+        self.assertNotIn("@BROWSER_DEBUG_PORT", bootstrap)
+        self.assertIn(f'tcp dport {BROWSER_DEBUG_PORT}-{BROWSER_DEBUG_PORT_LAST} meta skuid "kern-browser" accept', bootstrap)
         self.assertIn(f"PROXY_PORT={PROXY_PORT}", bootstrap)
         self.assertIn(f'oif lo tcp dport {PROXY_PORT} meta skuid "kern-agent" accept', bootstrap)
         helper = (Path("host/bootstrap/helpers/run-codex-app-server.sh").read_text()).replace(

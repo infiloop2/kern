@@ -137,7 +137,7 @@ MANIFEST = ToolManifest(
     ),
     actions=protect_inputs((
         ActionSpec(id="read_events",
-            description="Read events in a time range.",
+            description="Read up to 10 events from the connected account's primary calendar in a time range, earliest first with recurring events expanded.",
             data_policy=(
                 "Reads events from your primary calendar; only the requested time range and fixed listing options "
                 "go to Google. Runs directly with no approval."
@@ -146,7 +146,7 @@ MANIFEST = ToolManifest(
             output_schema=READ_EVENTS_OUTPUT_SCHEMA,
         ),
         ActionSpec(id="event_change",
-            description="Queue approval to create, update, or delete an event.",
+            description="Queue approval to create, update, or delete an event on the connected account's primary calendar; select operation.",
             data_policy=(
                 "Creates, updates, or deletes one event on your primary calendar. Nothing reaches Google before "
                 "your approval of the exact change."

@@ -31,6 +31,13 @@ def run(page, url, log_in, open_home_integration):
     expect(diagnostic).to_contain_text('runs directly')
     for field in ('pages_after', 'instagram_after', 'user_pages_after', 'user_pages', 'user_tasks_state', 'launch_task_check_passes', 'instagram_accounts', 'error_code'):
         expect(diagnostic).to_contain_text(field)
+    performance = guide.locator('.guide-capability').filter(has=page.locator('h4 code', has_text='get_performance'))
+    performance.locator('.guide-action-contract > summary').click()
+    expect(performance).to_contain_text('Meta-attributed Instagram profile visits and follows when available')
+    expect(performance).to_contain_text('runs directly')
+    expect(guide).to_contain_text('a reported zero stays zero')
+    expect(guide).to_contain_text("Reports use each ad set's unified attribution setting")
+    expect(guide).to_contain_text('The profile-visits goal optimizes visits, not follows')
     expect(page.locator('#tool-config-instagram_ads-INSTAGRAM_ADS_APP_SECRET')).to_have_attribute('type', 'password')
     capability = guide.locator('.guide-capability').filter(has=page.locator('h4 code', has_text='launch_campaign'))
     capability.locator('.guide-action-contract > summary').click()

@@ -34,7 +34,7 @@ def permitted_url(url: str) -> bool:
 
 class Browser:
     """Temporary Chromium with private authentication snapshots; no agent cookie access."""
-    def __init__(self, storage_state: dict[str, Any] | None, site: str, settings: dict[str, Any], *, block_media: bool = False) -> None:
+    def __init__(self, storage_state: dict[str, Any] | None, site: str, settings: dict[str, Any], *, block_media: bool = False, debug_port: int | None = None) -> None:
         from playwright.sync_api import sync_playwright  # type: ignore[import-not-found]
         self.site = site
         self.block_media = block_media
@@ -44,7 +44,7 @@ class Browser:
         self.runtime = sync_playwright().start()
         try:
             self.display = Display()
-            self.process = Chromium(self.runtime, self.display.environment, settings)
+            self.process = Chromium(self.runtime, self.display.environment, settings, debug_port=debug_port)
             self.context = self.process.context
             if storage_state is not None:
                 self.context.set_storage_state(cast("StorageState", storage_state))

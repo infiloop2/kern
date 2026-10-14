@@ -18,6 +18,8 @@ another host implementation of the same contract.
 
 - [Outbound parameter filtering](outbound-request-filtering.md) describes the
   shared input guard, its exceptions, and its limits.
+- [Prolific REST contract](prolific.md) documents the compact native research action
+  mapping, spending approvals, cost reservations and secret boundaries.
 - [X image and DM contract](x.md) documents approved media publication, bounded
   private DM reads and exact text sends.
 - [WhatsApp media contract](whatsapp.md) documents private staging, approved

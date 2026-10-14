@@ -409,6 +409,7 @@ class StageToolChecks:
                 "google_search": (
                     ("search", {"query": "Kern", "country": "us", "language": "en", "limit": "1"}),
                 ),
+                "prolific": (("get_account", {}), ("get_filters", {"search": "age", "limit": 1}), ("list_studies", {"page_size": 1})),
                 "web_fetch": tuple((action, {"url": "https://example.com/"}) for action in ("fetch_page", "fetch_page_file", "head_url")),
             }[tool_id]
         for action_id, arguments in calls:

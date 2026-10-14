@@ -29,3 +29,20 @@ class MemoryStore(Store):
     def delete_account(self, account_id):
         self.saved.pop(account_id)
         self.snapshots.pop(account_id)
+
+
+class DispatchSessions:
+    """Immediate dispatch for socket-only tests; slot behavior has separate tests."""
+    def __init__(self, profiles):
+        self.profiles = profiles
+
+    def submit(self, operation, body, *, agent_action=False):
+        from concurrent.futures import Future
+        future = Future()
+        try:
+            result = (self.profiles.screenshot(body) if operation == "screenshot_url" else
+                      self.profiles.dispatch(operation, body, agent_action=agent_action))
+            future.set_result(result)
+        except Exception as exc:
+            future.set_exception(exc)
+        return future

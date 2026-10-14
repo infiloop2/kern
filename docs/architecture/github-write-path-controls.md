@@ -89,6 +89,23 @@ is the same — the agent pushes again, which starts a fresh gate round.
 Pending-ref cleanup is housekeeping of the proxy-private mirror. A leftover
 `refs/pending/*` ref is inert — it is never pushed anywhere.
 
+## Immediate automatic review
+
+Saving the fixed GitHub push policy in Auto-approval enables immediate review
+of unchecked held pushes when OpenAI and this gate are enabled. The admin
+service checks the queue every second, independently of tool-review schedules
+and quiet hours. The proxy never calls a model. The same root helper has a
+read-only `review` action that extracts pinned diffs and full changed-file
+contents without a token, checkout or repository-code execution. Before/after
+bases are pinned when the push is held so later remote fetches cannot change
+the evidence, and are cleaned up with the held tips.
+
+An affirmative decision is saved before calling the existing approval path;
+that path still validates held commits and remote leases. Suspicion or review
+failure leaves the push pending for manual review. Shared review history shows
+the decision separately from replay success. See
+[Auto-approval](host-ai-inference.md#auto-approval) for policy and audit semantics.
+
 ## Failure Behavior
 
 The controls fail closed. If receive-pack parsing, quarantine indexing, mirror

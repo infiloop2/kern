@@ -370,6 +370,17 @@ class GateResult:
         that tells the agent the push is queued."""
         try:
             quarantine_pending(self._mirror, self._commands, push_id)
+            # Pin the exact review bases while the proxy still holds the lock.
+            # Later fetches and GC must not change a new branch's review context.
+            for index, (old, new, _ref) in enumerate(self._commands):
+                if new == ZERO_OID:
+                    continue
+                bases = _remote_ancestor_bases(self._mirror, old, new)
+                # A tip already on the remote introduces nothing; diff it against itself.
+                for number, base in enumerate(bases if bases is not None else [new]):
+                    if base == EMPTY_TREE:
+                        _run_git(self._mirror, ["hash-object", "-w", "-t", "tree", "--stdin"], stdin=b"")
+                    _run_git(self._mirror, ["update-ref", f"refs/pending/{push_id}/base-{index}-{number}", base])
             report = build_report_status(self.refs, f"queued for approval as push-{push_id}", side_band=self._side_band)
             return build_http_response(report)
         except Exception:

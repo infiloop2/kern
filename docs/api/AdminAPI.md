@@ -1995,3 +1995,20 @@ be at least 360 minutes; equal times and shorter intervals return HTTP 400.
 Success returns `{"saved": true}` and wakes the scheduler to recompute its
 next review. Configuration is stored durably; an already running review may
 finish. Both routes require an operator session and are unavailable to agents.
+
+
+### Fixed GitHub push auto-approval
+
+`GET /v1/auto-approvals` includes catalog action `tool_id: "github"`,
+`action_id: "push"`, with a display `name` and `fixed_instructions`.
+`PUT /v1/auto-approvals/policy` accepts that pair and the exact fixed text in
+`instructions`; altered text returns 400. DELETE with the same pair removes it.
+Both writes require the operator session. GitHub push reviews are independent
+of the tool sleep settings and `next_review_at`.
+
+Shared history adds `kind` (`tool` or `github_push`). Push rows have a
+`push-<id>` approval identity and `request` containing `push_id`, `ref_updates`
+and `changed_paths`. Push status `approved` means the replay succeeded;
+`outcome: "approved"` only records the model decision. `approval_error` remains
+separate from both. Ordinary GitHub approval summaries include `has_auto_policy`
+and `auto_review`, as tool summaries do.

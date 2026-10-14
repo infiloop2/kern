@@ -122,8 +122,7 @@ MANIFEST = ToolManifest(
         "Keep the selected version: dr3 and dr4 are not interchangeable history. retrieved_at is retrieval time, not index freshness. "
         "Whenever displaying or publishing a score, place visible adjacent 'Domain Rating by Ahrefs' attribution linked to https://ahrefs.com/. "
         "Respect the returned license; do not repackage a competing data product or harvest competitively in bulk. "
-        "Only the queried domain, version, fixed output format and authentication leave the host for the fixed Ahrefs endpoint. "
-        "Do not work around parameter-guard denials or loop on rate limits."
+        "Do not loop on rate limits."
     ),
 )
 

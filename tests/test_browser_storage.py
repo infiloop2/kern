@@ -3,11 +3,14 @@ from __future__ import annotations
 
 from copy import deepcopy
 import json
+import threading
 import unittest
 from unittest.mock import patch
 
 import pg_harness
 from host.runtime.browser.accounts import Accounts
+from host.runtime.browser.actions import ACTIONS
+from host.runtime.browser.sessions import Sessions
 from host.runtime.browser.storage import Store
 from host.runtime.browser.client import BrowserError
 from host.runtime.core import db, secretbox
@@ -23,6 +26,38 @@ class BrowserStorageTests(unittest.TestCase):
     def setUp(self):
         pg_harness.reset_database()
         self.store = Store()
+
+    def test_parallel_slots_preserve_account_usage_and_fresh_auth(self):
+        keys = ["acct_" + char * 32 for char in "abc"]
+        for key in keys:
+            self.store.save_account(key, "x", DATA, AUTH)
+        sessions = Sessions(self.store, FakeBrowser)
+        barrier = threading.Barrier(3)
+        def action(profile, body):
+            count = profile.data["usage"].get("x_post_tweet", {}).get("count", 0)
+            if count == 0:
+                barrier.wait(timeout=10)
+            profile.data["usage"]["x_post_tweet"] = {"day": "2026-10-14", "count": count + 1}
+            snapshot = profile.store.auth(profile.account_id)
+            self.assertEqual(snapshot["cookies"][0]["value"], "updated" if count else "private-cookie")
+            snapshot["cookies"][0]["value"] = "updated"
+            profile.store.save_account(profile.account_id, "x", profile.data, snapshot)
+            return {"ok": True}
+        try:
+            sessions.submit("list", {}).result(timeout=10)  # Prime operator metadata.
+            with patch.dict(ACTIONS, {"post_tweet": action}):
+                calls = [sessions.submit("post_tweet", {"account_id": key}, agent_action=True) for key in keys]
+                for call in calls:
+                    call.result(timeout=15)
+                for key in keys:
+                    sessions.submit("post_tweet", {"account_id": key}, agent_action=True).result(timeout=10)
+            sessions.submit("list", {}).result(timeout=10)
+            for key in keys:
+                self.assertEqual(Store().accounts()[key][1]["usage"]["x_post_tweet"]["count"], 2)
+                self.assertEqual(sessions.operator.profiles[key].data["usage"]["x_post_tweet"]["count"], 2)
+                self.assertEqual(Store().auth(key)["cookies"][0]["value"], "updated")
+        finally:
+            sessions.close()
 
     def test_encrypted_settings_and_auth_round_trip_and_direct_erases_credentials(self):
         self.store.save_settings(DECODO)

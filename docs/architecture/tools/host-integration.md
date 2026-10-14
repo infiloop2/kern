@@ -133,16 +133,13 @@ context instead of rewriting its prefix:
   request), instead of inferring from an empty list. Focused responses include
   `unknown_tool_ids`, so a known dependency can be checked without loading
   unrelated actions and notes.
-- **`describe_tool`** takes a `tool_id` and returns that tool's actions with
-  their full input schemas, the tool's agent-only usage notes, and the output
-  schema of every action that returns a JSON result — fetched once the agent
-  has committed to using the tool, rather than carried in every prompt. This
-  keeps the broad-discovery → describe path self-contained; a focused catalog
-  response carries the same short note so a caller can plan before requesting
-  schemas. The output schema is what makes the result
-  plannable: it names each field the agent gets back and what it means, so the
-  agent knows which id to carry into the next call without running the action to
-  find out. An action with no `output_schema` returns no JSON result at all.
+- **`describe_tool`** takes a `tool_id` and optional `action_ids` and returns
+  full input schemas plus each action's `returns` kind (`json`, `approval`, or
+  `asset`). Output schemas are included only with `include_output_schema=true`;
+  only JSON actions have one. Agent notes are included only with
+  `include_notes=true`. Fetch focused `list_bundled_tools` entries first for
+  notes/accounts, or request notes here if starting from the broad catalog.
+  Input-protection metadata belongs to the operator API and is not returned.
 - **`call_tool`** takes `tool_id`, `action_id`, optional `connection_id`, and
   `input` and runs the action. One connected account is selected implicitly for
   compatibility; with multiple accounts the agent must pass a listed

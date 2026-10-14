@@ -117,9 +117,40 @@ are no rule names, enabled flags, priorities, account selectors, or policy
 version states. The operator may restrict accounts and other conditions in
 the policy text. Tool/action scope is enforced by the host; textual conditions
 are model judgments, not deterministic spending limits or verified external facts.
-GitHub pushes are outside this feature.
+The catalog also includes GitHub / Push changing `.github/`. Its policy text is
+fixed by the host and read-only in the same editor; the API rejects altered text.
+Saving activates it and deleting removes it, with no separate switch. A separate
+serial admin worker checks the held-push queue every second, including during
+tool quiet hours. It checks the saved policy, enabled/configured OpenAI and the
+existing enabled `.github/` push gate before inference. It never creates a hold
+when that gate is off. Each push is checked once, including no-policy and failed
+checks; saving later does not retry previously checked pushes. Existing reviews
+may finish after policy deletion or provider/gate changes.
 
-The admin service starts one serial review loop after binding its listener.
+The proxy only inspects, pins review bases and holds pushes. The admin calls the
+existing root helper's read-only `review` action for bounded diffs and complete
+before/after contents of every changed `.github/` file, including deletions,
+with repository, refs and commit IDs. Bases and proposed tips come from pinned
+quarantine objects, not the agent worktree or later remote state. Binary,
+unsupported, oversized or missing evidence leaves the push pending; evidence is
+never silently truncated. Held pushes predating pinned bases need manual review.
+The fixed policy checks for malicious exploitation of pull-request Actions running without human review,
+including credential theft and untrusted code gaining privileges. References
+to scripts outside the supplied files are not alone grounds to withhold approval.
+This deliberately does not audit the entire repository or external dependencies.
+
+Push reviews use the same system instructions, Sol settings, generic inference
+client and credential redactor as tools. GitHub-specific review criteria live
+only in the fixed policy. They record the fixed policy, timestamp, model, reason and
+decision in the shared audit before calling the ordinary push approval/replay
+path. Replays retain exact-SHA validation, remote leases, serialization and
+origin-thread outcome notifications. A failed replay is distinct from an AI
+approval; a crash after saving does not automatically retry the approval.
+Suspicious or failed reviews leave manual approval available. Push review
+history follows pending-push retention; tool review history follows tool approval
+retention.
+
+For tools, the admin service starts one serial review loop after binding its listener.
 It schedules checks 25 to 35 minutes apart, after the previous run finishes,
 and pauses during a saved daily sleep window (00:00 to 08:00 UTC by default).
 Operators can set sleep and wake times in Approvals > Auto-approval. The window

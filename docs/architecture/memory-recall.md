@@ -32,6 +32,47 @@ remains as recorded, without guessing provenance from text. User messages own ta
 supporting text cannot override them. Without user messages, the supplied request
 provides task context. New notice kinds are excluded until explicitly selected.
 
+## Repeated memory bodies
+
+Admission still selects relevant pages on every new model turn. An unchanged
+self or shared page ID/revision is omitted when its full body was successfully
+injected less than 10 minutes ago in the same host thread.
+At elapsed time >=600 seconds it is eligible again if selected. For example,
+a body injected at 12:00 is skipped at 12:09:59 and eligible at 12:10. A skipped
+selection never renews that timestamp, and a changed revision is immediately
+eligible. Nothing is injected just because time elapsed; existing recall and
+periodic self-memory opportunities remain the only triggers. Selection is not
+refilled when bodies are omitted. Immutable identity is always included. When no
+bodies are included, the model receives only a short immutable identity message without the memory preamble.
+
+One bounded in-process map holds thread ID → page ID → latest revision and
+monotonic injection time. It retains at most 128 threads and 64 pages per thread,
+pruning expired entries on delivery and evicting oldest entries at capacity.
+Startup delivery is recorded at provider readiness without waiting for a session
+ID; session publication and completion do not participate in bookkeeping.
+Preparation, rejected admission and failed startup before readiness cannot record
+delivery. Periodic self-memory uses the same map, updated only after successful
+steering. Same-thread runtime/session changes and failed-resume recovery retain
+suppression until expiry; provider session lifecycle behavior is unchanged.
+Explicit context clearing drops that thread's cache after the existing clear
+transaction succeeds. Cache loss/restart or eviction favors sending.
+There are no new turn/message counters, history queries, storage schema, service,
+configuration or provider-specific probes.
+
+Mid-turn ID/description suggestions stay enabled with their existing dedupe and
+cadence. They never mark a full body injected or refresh its timestamp. The
+monitor still seeds its suggestion dedupe with the full admission selection;
+its suggestion-only bookkeeping stays separate from the full-body cache.
+
+This is a repeat-suppression heuristic, not knowledge of provider context
+contents. Hidden compaction may discard a suppressed page before it is sent again.
+The operator notice counts and lists only bodies actually prepared for injection;
+bounded recall details store selected/prepared/suppressed counts and each selected
+page's ID, revision, decision, reason and elapsed seconds when known. Admission
+records preparation as pending readiness, not confirmed delivery. These diagnostics
+are stored in the existing notice details for UI/history, never in model input.
+Timestamped fixture byte measurements establish payload savings, not model quality.
+
 ## Mid-turn suggestions
 
 Initial recall stays synchronous at admission. If shared recall fails or returns
@@ -47,8 +88,8 @@ read; otherwise it attempts the direct fallback and retains valid shared pages.
 
 Steerable model turns seed a small admin-process cache with the initial query,
 known page IDs/revisions, and independent timers and event counts. Shared
-suggestions require both 60 seconds and five qualifying events; full self-memory
-requires both 300 seconds and 25 qualifying events, starting from admission.
+suggestions require both 60 seconds and five qualifying events; self-memory reads
+require both 300 seconds and 25 qualifying events, starting from admission.
 Completed operations, assistant messages and selected incoming messages count
 toward both thresholds. Streaming/log updates and the monitor's own notices do
 not count. The single serial worker selects the oldest due turn whose event
@@ -60,8 +101,11 @@ Message content remains in existing history rather than another activity buffer.
 
 Every self-memory refresh reads the current full page, even if its revision and
 the task query have not changed. It runs independently of shared search, query
-building and the shared-page dedupe budget. Full contents use the existing host
-context envelope and `memory_injection` notice, labeled as a periodic refresh,
+building and the shared-page dedupe budget. The delivery path applies the same
+10-minute revision/timestamp suppression as admission; an unchanged read at five
+minutes does not refresh the last injection time. Changed revisions can
+be delivered at the next existing opportunity. When eligible, full contents use
+the existing host context envelope and `memory_injection` notice, labeled as a periodic refresh,
 with the same optional-context runtime hint as suggestions. No summary or
 read-it-yourself reminder replaces the contents.
 
@@ -131,7 +175,7 @@ semantic results. Recall excludes graph-only suggestions, takes up to 20
 candidates, and retains hybrid order without additional keyword boosting or a
 forced-best override. Candidate channels still have their existing internal
 limits (50 exact, 200 keyword, 200 semantic). Up to six relevant pages are
-loaded, separately from self-memory. Admission carries all six plus self-memory;
+loaded, separately from self-memory. Admission selects up to six plus self-memory;
 mid-turn suggestions retain their existing limit of three.
 
 ## Optional Jev and Luna reranking

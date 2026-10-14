@@ -636,7 +636,7 @@ class UpworkTests(unittest.TestCase):
 
     def test_structured_results_preserve_long_text_and_redact_decoded_secrets(self):
         body = "🙂" * 5000 + "PRIVATE_ACCESS_TOKEN PRIVATE_REFRESH_TOKEN"
-        data = {"accounts": [{"name": body, "org_uid": "123", "role": "TALENT", "role_label": "Freelancer"}]}
+        data = {"accounts": [{"name": body, "org_uid": "123", "role": "TALENT", "role_label": "Freelancer", "new_provider_field": "PRIVATE_REFRESH_TOKEN"}]}
         text = json.dumps(data).replace("PRIVATE_ACCESS_TOKEN", "\\u0050RIVATE_ACCESS_TOKEN")
         self.client.call.return_value = {"content": [{"type": "text", "text": text},
             {"type": "resource_link", "name": "Untrusted", "uri": "https://evil.test/secret"}]}
@@ -647,6 +647,8 @@ class UpworkTests(unittest.TestCase):
         self.assertNotIn("result_text", result.result)
         self.assertNotIn("provider_details_json", result.result)
         self.assertNotIn("evil.test", json.dumps(result.result))
+        self.assertEqual(json.loads(result.result["accounts"][0]["provider_extra_fields_json"]),
+                         {"new_provider_field": "[redacted]"})
 
     def test_approved_json_result_is_complete_and_redacts_decoded_credentials(self):
         pending = self.propose()

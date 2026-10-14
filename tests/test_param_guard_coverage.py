@@ -31,6 +31,12 @@ from test_tools import FakeHostAPI
 # (tool_id, action_id, field) -> guarded free-text parameter. The tool's
 # package test and the behavioral tests below exercise each.
 GUARDED_FIELDS = {
+    ('prolific', 'get_filters', 'search'),
+    ('prolific', 'get_eligibility_count', 'filters'),
+    ('prolific', 'list_studies', 'search'),
+    ('prolific', 'export_demographics', 'filters'),
+    ('prolific', 'create_study', 'study'),
+    ("browser", "screenshot_url", "url"),
     *(("instagram_ads", action, "after") for action in (
         "list_accounts", "list_identities", "list_posts", "lookup_targeting",
         "list_campaigns", "get_campaign", "get_performance",
@@ -174,6 +180,32 @@ APPROVAL_GATED = "approval-gated content: the operator approval is the control"
 TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning"
 
 EXEMPT_FIELDS = {
+    ('prolific', 'get_filters', 'limit'): TYPED,
+    ('prolific', 'get_filters', 'workspace_id'): TYPED,
+    ('prolific', 'get_eligibility_count', 'workspace_id'): TYPED,
+    ('prolific', 'get_eligibility_count', 'study_type'): TYPED,
+    ('prolific', 'list_studies', 'state'): TYPED,
+    ('prolific', 'list_studies', 'page'): TYPED,
+    ('prolific', 'list_studies', 'page_size'): TYPED,
+    ('prolific', 'get_study', 'study_id'): TYPED,
+    ('prolific', 'list_submissions', 'study_id'): TYPED,
+    ('prolific', 'list_submissions', 'limit'): TYPED,
+    ('prolific', 'list_submissions', 'offset'): TYPED,
+    ('prolific', 'export_demographics', 'study_id'): TYPED,
+    ('prolific', 'list_collections', 'workspace_id'): TYPED,
+    ('prolific', 'list_collections', 'limit'): TYPED,
+    ('prolific', 'list_collections', 'offset'): TYPED,
+    ('prolific', 'get_collection', 'collection_id'): TYPED,
+    ('prolific', 'export_collection', 'collection_id'): TYPED,
+    ('prolific', 'get_collection_export_status', 'collection_id'): TYPED,
+    ('prolific', 'get_collection_export_status', 'export_id'): TYPED,
+    ('prolific', 'save_collection', 'collection_id'): APPROVAL_GATED,
+    ('prolific', 'save_collection', 'collection'): APPROVAL_GATED,
+    ('prolific', 'save_collection_export', 'collection_id'): TYPED,
+    ('prolific', 'save_collection_export', 'export_id'): TYPED,
+    ('prolific', 'start_study', 'study_id'): APPROVAL_GATED,
+    ('prolific', 'halt_study', 'study_id'): APPROVAL_GATED,
+    ('prolific', 'approve_submissions', 'submission_ids'): APPROVAL_GATED,
     **{("instagram_ads", action, field): TYPED for action, fields in (
         ("list_accounts", ("limit",)),
         ("get_account", ("account_id",)),
@@ -837,6 +869,16 @@ class BehavioralDenialTest(unittest.TestCase):
                 connected_api(),
             )
         self.assert_denied(result, "credential")
+
+    def test_browser_screenshot_url_denied_before_capture(self) -> None:
+        from host.tools.browser import BUNDLED_TOOL
+
+        for url in ("https://example.com/?token=AKIAIOSFODNN7EXAMPLE",
+                    "https://example.com/#token=AKIAIOSFODNN7EXAMPLE"):
+            with self.subTest(url=url), patch("host.tools.browser.screenshot.client.screenshot") as capture:
+                result = BUNDLED_TOOL.execute("screenshot_url", {"url": url}, FakeHostAPI())
+                self.assert_denied(result, "credential")
+                capture.assert_not_called()
 
     def test_web_fetch_url_denied(self) -> None:
         from host.tools.web_fetch import BUNDLED_TOOL

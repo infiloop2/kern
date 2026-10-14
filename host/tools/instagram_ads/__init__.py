@@ -1021,9 +1021,17 @@ def _launch(graph: _Graph, proposal: JSONObject, api: HostAPI) -> ApprovalResult
             "No automatic retry, cleanup or resume was attempted.", reconnect_required=mapped.reconnect_required)
 
 
+def _configuration_result(value: JSONObject, fields: tuple[str, ...]) -> JSONObject:
+    result: JSONObject = {key: str(value.get(key) or "") for key in fields}
+    # Preserve absent/null/changed-type semantics in the provider configuration;
+    # remove only values already represented exactly by a typed sibling.
+    result["configuration_json"] = _json({key: item for key, item in value.items()
+                                          if key not in result or item == "" or item != result[key]})
+    return result
+
+
 def _campaign_result(value: JSONObject) -> JSONObject:
-    return {**{key: str(value.get(key) or "") for key in ("id", "account_id", "name", "objective", "status", "effective_status")},
-            "configuration_json": _json(value)}
+    return _configuration_result(value, ("id", "account_id", "name", "objective", "status", "effective_status"))
 
 
 def _report_dates(value: JSONObject) -> tuple[date, date]:
@@ -1097,22 +1105,23 @@ def _read(graph: _Graph, action: str, value: JSONObject, api: HostAPI) -> JSONOb
             # unavailable ads as null, rather than claiming an empty inventory.
             ads = _object(row["ads"], "ad-set ads page") if row.get("ads") is not None else None
             configuration = {key: item for key, item in row.items() if key != "ads"}
-            rows.append({**{key: str(row.get(key) or "") for key in ("id", "name", "status", "effective_status")},
-                "configuration_json": _json(configuration), "ads": [{**{key: str(ad.get(key) or "") for key in ("id", "name", "status", "effective_status")},
-                    "configuration_json": _json(ad)} for ad in _rows(ads, maximum=10)] if ads is not None else None,
+            rows.append({**_configuration_result(configuration, ("id", "name", "status", "effective_status")),
+                "ads": [_configuration_result(ad, ("id", "name", "status", "effective_status"))
+                        for ad in _rows(ads, maximum=10)] if ads is not None else None,
                 "ads_next_cursor": _cursor(ads) if ads is not None else None})
         return {"campaign": _campaign_result(campaign), "adsets": cast(list[JSONValue], rows), "next_cursor": _cursor(listing)}
     elif action == "get_performance":
         _campaign(graph, account_id, _id(value["campaign_id"], "campaign_id"))
         start, end = _report_dates(value)
-        listing = graph.get("/" + str(value["campaign_id"]) + "/insights", "date_start,date_stop,account_currency,spend,impressions,reach,clicks,inline_link_clicks,actions,video_thruplay_watched_actions",
-            time_range=_json({"since": start.isoformat(), "until": end.isoformat()}), time_increment="1", **params)
+        listing = graph.get("/" + str(value["campaign_id"]) + "/insights", "date_start,date_stop,account_currency,spend,impressions,reach,clicks,inline_link_clicks,instagram_profile_visits,instagram_profile_follow,actions,video_thruplay_watched_actions",
+            time_range=_json({"since": start.isoformat(), "until": end.isoformat()}), time_increment="1",
+            use_unified_attribution_setting="true", **params)
         rows = []
         for row in _rows(listing, maximum=int(params["limit"])):
             actions = row.get("actions")
             video = row.get("video_thruplay_watched_actions")
             rows.append({**{key: str(row.get(key) or "") for key in ("date_start", "date_stop", "account_currency")},
-                **{key: str(row[key]) if row.get(key) is not None else None for key in ("spend", "impressions", "reach", "clicks", "inline_link_clicks")},
+                **{key: str(row[key]) if row.get(key) is not None else None for key in ("spend", "impressions", "reach", "clicks", "inline_link_clicks", "instagram_profile_visits", "instagram_profile_follow")},
                 "actions": [{"action_type": str(item.get("action_type") or ""), "value": str(item["value"])} for item in actions if isinstance(item, dict) and item.get("value") is not None] if isinstance(actions, list) else None,
                 "video_thruplay": str(video[0]["value"]) if isinstance(video, list) and video and isinstance(video[0], dict) and "value" in video[0] else None})
     else:

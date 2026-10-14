@@ -428,15 +428,14 @@ class ActionListingTests(ToolsApiTestCase):
 
     def test_describe_tool_exposes_every_bundled_action_contract(self) -> None:
         for tool_id, tool in tools_host.BUNDLED_TOOLS.items():
-            described = tools_api.call_action("describe_tool", {"tool_id": tool_id}, origin_thread_id=None)
+            described = tools_api.call_action("describe_tool", {"tool_id": tool_id, "include_output_schema": True}, origin_thread_id=None)
             self.assertEqual(described["status"], "executed")
             by_id = {entry["id"]: entry for entry in described["result"]["actions"]}
             for action in tool.manifest.actions:
                 with self.subTest(tool_id=tool_id, action=action.id):
                     self.assertEqual(by_id[action.id]["description"], action.description)
                     self.assertEqual(by_id[action.id]["input_schema"], action.input_schema)
-                    from dataclasses import asdict
-                    self.assertEqual(by_id[action.id]["input_protections"], {name: asdict(protection) for name, protection in action.input_protections.items()})
+                    self.assertNotIn("input_protections", by_id[action.id])
                     self.assertEqual(by_id[action.id]["approval"], action.approval)
                     # The result shape travels with the call shape, and only
                     # for the actions that return a JSON result at all.
@@ -445,7 +444,7 @@ class ActionListingTests(ToolsApiTestCase):
                     )
 
         def described_action(tool_id: str, action_id: str) -> dict[str, Any]:
-            result = tools_api.call_action("describe_tool", {"tool_id": tool_id}, origin_thread_id=None)["result"]
+            result = tools_api.call_action("describe_tool", {"tool_id": tool_id, "include_output_schema": True}, origin_thread_id=None)["result"]
             return {entry["id"]: entry for entry in result["actions"]}[action_id]
 
         self.assertIn("individual tradable questions", described_action("polymarket", "list_markets")["description"])
@@ -495,9 +494,8 @@ class ActionListingTests(ToolsApiTestCase):
         self.assertIn("post_tweet", catalog["twitter"]["agent_notes"])
         self.assertIn("x.com/messages/compose", catalog["twitter"]["agent_notes"])
 
-        # Broad discovery goes directly to describe_tool, so the described tool
-        # repeats its one short note to make that documented path self-contained.
-        described = tools_api.call_action("describe_tool", {"tool_id": "twitter"}, origin_thread_id=None)["result"]
+        # Notes can be requested explicitly when focused discovery was skipped.
+        described = tools_api.call_action("describe_tool", {"tool_id": "twitter", "include_notes": True}, origin_thread_id=None)["result"]
         self.assertEqual(described["agent_notes"], catalog["twitter"]["agent_notes"])
         for action in described["actions"]:
             with self.subTest(action=action["id"]):
@@ -958,6 +956,26 @@ class ToolsSocketTests(ToolsApiTestCase):
                 })
         spool = Path(socket_path).parent / "assets"
         self.assertFalse(spool.exists() and any(spool.iterdir()))
+
+    def test_browser_screenshot_uses_existing_file_pipeline(self) -> None:
+        from host.runtime.browser.client import Screenshot
+        from test_browser_screenshot import png
+
+        socket_path = self.start_server()
+        image = Screenshot(png(), 2, 3, False, "https://final.example/")
+        with state.mutation() as cur:
+            state.set_tool_enabled(cur, "browser", True)
+        with tempfile.TemporaryDirectory() as directory:
+            with patch("host.tools.browser.screenshot.client.screenshot", return_value=image) as capture, patch.dict(os.environ, {"HOME": directory}):
+                response = tools_mcp_shim._tools_action_request(
+                    {"name": "browser_screenshot_url", "input": {"url": "https://example.com"}}, socket_path,
+                )
+            result = response["result"]
+            self.assertRegex(result["path"], r"^/tool_assets/asset-[0-9a-f]{32}\.png$")
+            self.assertEqual(Path(result["filesystem_path"]).read_bytes(), image.png)
+            self.assertEqual(result["media_type"], "image/png")
+            self.assertIn(image.url, result["summary"])
+            capture.assert_called_once_with("https://example.com")
 
     def test_elevenlabs_generation_saves_actual_tool_response_through_bridge(self) -> None:
         from host.tools import elevenlabs
