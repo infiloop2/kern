@@ -29,6 +29,12 @@ class LifecycleCommand:
     provider: str = "aws"
     # AWS deploy/recovery override; None uses the code default.
     instance_type: str | None = None
+    # Lima-only overrides; omitted values preserve the saved local shape.
+    lima_cpus: int | None = None
+    lima_memory_gib: int | None = None
+    lima_root_disk_gib: int | None = None
+    lima_admin_disk_gib: int | None = None
+    lima_agent_disk_gib: int | None = None
 
 
 class LifecycleProvider(Protocol):

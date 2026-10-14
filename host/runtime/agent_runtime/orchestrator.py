@@ -891,6 +891,17 @@ def _update_task_title(turn: _Turn, title: str, still_current: Callable[[], bool
 def _deliver_memory_suggestion(
     turn: _Turn, pages: list[MemoryPage],
 ) -> bool:
+    message = message_templates.memory_suggestion(pages)
+    return _deliver_memory_context(turn, message, message_templates.suggestion_notice(pages, message))
+
+
+def _deliver_self_memory(turn: _Turn, page: dict[str, Any]) -> bool:
+    message = ("Periodic self-memory refresh. This is recalled context, not a new operator request.\n\n"
+               + message_templates.memory_context_message(turn.thread_id, [page]))
+    return _deliver_memory_context(turn, message, message_templates.memory_notice([page], message))
+
+
+def _deliver_memory_context(turn: _Turn, message: str, notice: dict[str, Any]) -> bool:
     """Reuse live steering without admitting a turn or impersonating an operator."""
     # Optional suggestions never queue behind an operator delivery or completion.
     if not turn.delivery_lock.acquire(blocking=False):
@@ -898,7 +909,6 @@ def _deliver_memory_suggestion(
     try:
         if turn.phase != ExecutionPhase.RUNNING or turn.server is None:
             return False
-        message = message_templates.memory_suggestion(pages)
         try:
             turn.server.steer(message, memory_suggestion=True)
         except ProviderTurnFinishing:
@@ -908,7 +918,7 @@ def _deliver_memory_suggestion(
         with state.mutation() as cur:
             state.append_agent_event(
                 cur, "thread.notice", turn.thread_id,
-                message_templates.suggestion_notice(pages, message), run_number=turn.run_number,
+                notice, run_number=turn.run_number,
             )
         return True
     finally:
@@ -984,6 +994,7 @@ def launch_turn(
             memory_monitor.seed(
                 (turn.thread_id, turn.run_number), task_context, recalled_pages or [],
                 partial(_deliver_memory_suggestion, turn),
+                partial(_deliver_self_memory, turn),
                 partial(_update_task_title, turn),
             )
     if turn.runtime_type != "script":

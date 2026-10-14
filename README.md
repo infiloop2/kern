@@ -68,9 +68,13 @@ account or credentials are needed.
 
 **You need:**
 
-- macOS or Linux with hardware virtualization enabled. Kern uses 2 CPUs,
-  2 GiB of RAM, and 48 GiB of disk.
-- [Lima](https://lima-vm.io/docs/installation/). On macOS:
+- macOS or Linux with hardware virtualization enabled. Kern defaults to 2 CPUs,
+  2 GiB of RAM, and 16 GiB each for root, admin and agent disks. Set
+  `--lima-cpus`, `--lima-memory-gib` and `--lima-root-disk-gib` to change compute;
+  fresh deploy also accepts `--lima-admin-disk-gib` and `--lima-agent-disk-gib`.
+  Omitted options preserve saved settings on subsequent lifecycle operations.
+  Durable disk sizes apply only when creating disks; they do not resize existing data.
+- [Lima](https://lima-vm.io/docs/installation/) >=2.2 and <3. On macOS:
   `brew install lima`.
 - Python 3.11+ and OpenSSH (present by default on macOS and mainstream
   Linux). Every Kern command is plain standard-library Python with **zero

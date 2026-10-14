@@ -84,7 +84,7 @@ class FakeLimactl:
     def __init__(
         self,
         *,
-        version: str = "limactl version 1.0.4",
+        version: str = "limactl version 2.2.1",
         instance: dict[str, object] | None = None,
         disks: list[dict[str, object]] | None = None,
     ) -> None:
@@ -322,7 +322,7 @@ class LimaVmDefinitionTests(unittest.TestCase):
         self.assertIn('f"LIMA_CIDATA_DISK_{index}_NAME"', definition)
         self.assertIn('f"LIMA_CIDATA_DISK_{index}_DEVICE"', definition)
         self.assertNotIn('f"LIMA_CIDATA_DISKS_{index}_NAME"', definition)
-        # Lima v2.1.1 emits bare virtio basenames (for example "vdb") in
+        # Lima emits bare virtio basenames (for example "vdb") in
         # cidata. The handoff validates that exact grammar and records the
         # actual guest block-device path; the live smoke exercises this with
         # real additional disks on every PR.
@@ -408,19 +408,6 @@ class LimaInspectTests(unittest.TestCase):
         self.assertEqual(set(inventory.disks), {"admin", "agent"})
         self.assertEqual(inventory.disks["agent"].instance, "")
 
-    def test_inspect_accepts_legacy_field_spellings(self) -> None:
-        instance_name = lima._instance_name("kern-test")
-        fake = FakeLimactl(
-            instance={"Name": instance_name, "Status": "Stopped", "SSHLocalPort": 0},
-            disks=[{"Name": lima._disk_name("kern-test", "admin"), "Instance": ""}],
-        )
-        with patch.object(lima, "_limactl", fake):
-            inventory = lima._inspect(_sample_config())
-        assert inventory.instance is not None
-        self.assertEqual(inventory.instance.status, "Stopped")
-        self.assertIsNone(inventory.instance.ssh_local_port)
-        self.assertEqual(set(inventory.disks), {"admin"})
-
     def test_inspect_rejects_disk_attached_to_foreign_instance(self) -> None:
         fake = FakeLimactl(
             disks=[{"name": lima._disk_name("kern-test", "admin"), "instance": "someone-else"}],
@@ -457,7 +444,7 @@ class LimaInspectTests(unittest.TestCase):
                 lima._inspect(_sample_config())
 
     def test_preflight_rejects_out_of_range_limactl(self) -> None:
-        for version in ("limactl version 0.23.2", "limactl version 3.0.0"):
+        for version in ("limactl version 1.0.4", "limactl version 2.1.1", "limactl version 3.0.0"):
             with self.subTest(version=version):
                 fake = FakeLimactl(version=version)
                 with patch.object(lima, "_limactl", fake), patch.object(
@@ -596,6 +583,56 @@ class LimaLifecycleFlowTests(unittest.TestCase):
         self.deliver = deliver
         self.provision = provision
         return exit_code, stdout.getvalue(), fake.calls
+
+    def test_custom_resources_survive_recovery_without_recreating_data(self) -> None:
+        fake = FakeLimactl()
+        command = LifecycleCommand(
+            mode="deploy", agent_name="kern-test", provider="lima",
+            admin_password_sha256=SAMPLE_ADMIN_PASSWORD_SHA256,
+            operator_ssh_public_key=SAMPLE_SSH_PUBLIC_KEY,
+            lima_cpus=6, lima_memory_gib=28, lima_root_disk_gib=32,
+            lima_admin_disk_gib=32, lima_agent_disk_gib=320,
+        )
+        with tempfile.TemporaryDirectory() as home:
+            code, _, calls = self._run_lifecycle(command, fake, home)
+            self.assertEqual(code, 0)
+            for role, size in (("admin", 32), ("agent", 320)):
+                self.assertIn(("disk", "create", lima._disk_name("kern-test", role), f"--size={size}GiB"), calls)
+            fake.calls.clear()
+            code, _, calls = self._run_lifecycle(LifecycleCommand(
+                mode="recover", agent_name="kern-test", provider="lima",
+            ), fake, home)
+            self.assertEqual(code, 0)
+            self.assertFalse(any(call[:2] == ("disk", "create") for call in calls))
+            assert fake.instance is not None
+            definition = (Path(str(fake.instance["dir"])) / "lima.yaml").read_text()
+            self.assertIn("cpus: 6", definition)
+            self.assertIn('memory: "28GiB"', definition)
+            self.assertIn('disk: "32GiB"', definition)
+            with patch.object(lima.Path, "home", return_value=Path(home)), patch.object(lima, "_limactl", fake), patch.object(lima.shutil, "which", return_value="/usr/bin/limactl"), patch("sys.stdout", io.StringIO()):
+                self.assertEqual(lima.main_for_power("start", "kern-test"), 0)
+
+    def test_missing_metadata_does_not_silently_replace_custom_compute_with_defaults(self) -> None:
+        instance_name = lima._instance_name("kern-test")
+        fake = FakeLimactl(
+            instance=_existing_instance_record(stored_version=repo_version()),
+            disks=[{"name": lima._disk_name("kern-test", role), "instance": instance_name}
+                   for role in ("admin", "agent")],
+        )
+        assert fake.instance is not None
+        definition = Path(str(fake.instance["dir"])) / "lima.yaml"
+        definition.write_text(definition.read_text().replace("cpus: 2", "cpus: 6"))
+        with tempfile.TemporaryDirectory() as home:
+            command = LifecycleCommand(mode="recover", agent_name="kern-test", provider="lima")
+            code, _, calls = self._run_lifecycle(command, fake, home)
+            self.assertEqual(code, 2)
+            self.assertFalse(any(call[0] in {"stop", "delete", "create"} for call in calls))
+            fake.calls.clear()
+            command = LifecycleCommand(mode="recover", agent_name="kern-test", provider="lima", lima_cpus=6)
+            code, _, calls = self._run_lifecycle(command, fake, home)
+            self.assertEqual(code, 0)
+            self.assertIn(("delete", "--force", "--tty=false", instance_name), calls)
+            self.assertFalse(any(call[:2] == ("disk", "create") for call in calls))
 
     def test_deploy_happy_path(self) -> None:
         fake = FakeLimactl()
@@ -852,6 +889,25 @@ class LimaLifecycleFlowTests(unittest.TestCase):
                     self.assertFalse(any(call[0] in {"stop", "delete", "create"} for call in calls))
                     self.assertIsNotNone(fake.instance)
 
+    def test_explicit_recovery_replaces_broken_compute_and_preserves_disks(self) -> None:
+        instance_name = lima._instance_name("kern-test")
+        for version, accepted in ((repo_version(), True), ("999.0.0", False)):
+            with self.subTest(version=version):
+                fake = FakeLimactl(
+                    instance=_existing_instance_record(status="Broken", stored_version=version),
+                    disks=[{"name": lima._disk_name("kern-test", role), "instance": instance_name}
+                           for role in ("admin", "agent")],
+                )
+                fake.fail_on["stop"] = subprocess.CalledProcessError(1, ["limactl", "stop"])
+                with tempfile.TemporaryDirectory() as home:
+                    code, _, calls = self._run_lifecycle(
+                        LifecycleCommand(mode="recover", agent_name="kern-test", provider="lima"), fake, home)
+                self.assertEqual(code, 0 if accepted else 2)
+                self.assertFalse(any(call[:2] in {("disk", "create"), ("disk", "delete")} for call in calls))
+                self.assertEqual(("delete", "--force", "--tty=false", instance_name) in calls, accepted)
+                if not accepted:
+                    self.assertFalse(any(call[0] in {"stop", "delete", "create"} for call in calls))
+
     def test_replacement_validation_failure_preserves_working_instance(self) -> None:
         instance_name = lima._instance_name("kern-test")
         fake = FakeLimactl(
@@ -1023,8 +1079,18 @@ class LimaPowerTests(unittest.TestCase):
         exit_code, _stdout, _calls = self._run_power("start", fake)
         self.assertEqual(exit_code, 2)
 
+    def test_supported_lima_restarts_broken_instance_after_validating_definition(self) -> None:
+        fake = self._fake_with_instance("Broken")
+        code, _, calls = self._run_power("start", fake)
+        self.assertEqual(code, 0)
+        self.assertTrue(any(call[0] == "start" for call in calls))
+        fake = self._fake_with_instance("Broken", definition="mounts: [~]")
+        code, _, calls = self._run_power("start", fake)
+        self.assertEqual(code, 2)
+        self.assertFalse(any(call[0] == "start" for call in calls))
+
     def test_power_rejects_unknown_state(self) -> None:
-        exit_code, _stdout, calls = self._run_power("start", self._fake_with_instance("Broken"))
+        exit_code, _stdout, calls = self._run_power("start", self._fake_with_instance("Installing"))
         self.assertEqual(exit_code, 2)
         self.assertFalse(any(call[0] in {"start", "stop"} for call in calls))
 
@@ -1168,17 +1234,22 @@ class LimaCliWiringTests(unittest.TestCase):
         )
         self.assertEqual(command.provider, "lima")
 
-    def test_vm_shape_flags_no_longer_exist(self) -> None:
-        # The Lima VM shape is pinned like the EC2 instance type; the flags
-        # were removed rather than left as silent no-ops.
-        with patch("sys.stderr", io.StringIO()) as stderr:
-            with self.assertRaises(SystemExit) as raised:
-                deploy._parse_args(
-                    "upgrade",
-                    ["--agent-name", "kern-test", "--provider", "lima", "--lima-cpus", "8"],
-                )
-        self.assertEqual(raised.exception.code, 2)
-        self.assertIn("unrecognized arguments", stderr.getvalue())
+    def test_resource_options_are_lima_only_and_validate_bounds(self) -> None:
+        command = deploy._parse_args("upgrade", [
+            "--agent-name", "kern-test", "--provider", "lima",
+            "--lima-cpus", "6", "--lima-memory-gib", "28", "--lima-root-disk-gib", "32",
+        ])
+        self.assertEqual((command.lima_cpus, command.lima_memory_gib, command.lima_root_disk_gib), (6, 28, 32))
+        for mode, provider, option, value in (
+            ("upgrade", "aws", "--lima-cpus", "6"),
+            ("upgrade", "lima", "--lima-cpus", "0"),
+            ("upgrade", "lima", "--lima-memory-gib", "-1"),
+            ("upgrade", "lima", "--lima-root-disk-gib", "15"),
+            ("recover", "lima", "--lima-agent-disk-gib", "320"),
+        ):
+            with self.subTest(option=option, value=value, provider=provider), patch("sys.stderr", io.StringIO()):
+                with self.assertRaises(SystemExit):
+                    deploy._parse_args(mode, ["--agent-name", "kern-test", "--provider", provider, option, value])
 
     def test_provider_defaults_to_aws(self) -> None:
         command = deploy._parse_args(

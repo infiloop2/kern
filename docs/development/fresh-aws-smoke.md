@@ -121,9 +121,8 @@ Actions. Add these repository secrets:
 | `KERN_SMOKE_AWS_ACCESS_KEY_ID` | Access key id for the smoke IAM user. |
 | `KERN_SMOKE_AWS_SECRET_ACCESS_KEY` | Secret access key for the smoke IAM user. |
 
-A push to `main` runs the smoke automatically. A repository admin can also run
-it manually with `workflow_dispatch` by selecting a branch or tag in the GitHub
-Run workflow UI. Any requester can run an open, ready, same-repository PR to
+The smoke runs on request. A repository admin can run it manually with
+`workflow_dispatch` by selecting a branch or tag in the GitHub Run workflow UI. Any requester can run an open, ready, same-repository PR to
 `main` after it receives a current-head Codex approval stamp; repository admins
 can also request a PR smoke without that stamp. Comment either exact command:
 
@@ -140,8 +139,8 @@ execution jobs use `authorize-admin-or-codex-stamp` to check the active GitHub
 Actions approval on the exact current PR head before executing checkout code.
 Without that stamp, the action calls `authorize-repo-admin` to check the current
 requester, including on reruns. A newer commit or dismissed stamp removes
-non-admin authority; this gate does not re-parse Codex review comments. Pushes to `main` need no separate
-authorization. Every trigger rejects immediately if another `kern-smoke` run
+non-admin authority; this gate does not re-parse Codex review comments.
+Every trigger rejects immediately if another `kern-smoke` run
 is already queued or running, while the smoke job's singleton concurrency group
 closes the race between simultaneous authorization checks. The authorize job
 reports the active run and asks the operator to retry after it completes. The

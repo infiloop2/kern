@@ -1,5 +1,6 @@
 """Task-focused recall and its diagnostic evidence."""
 from contextlib import ExitStack, contextmanager
+from http import HTTPStatus
 import json
 from itertools import product
 import os
@@ -30,6 +31,88 @@ def row(page_id):
 
 
 class MemoryRecallDiagnosticsTests(unittest.TestCase):
+    def test_admission_recovers_complete_self_memory_after_shared_timeout(self):
+        page = {'page_id': 'thread-1', 'description': 'Current decisions',
+                'content': 'Full saved notes. ' * 1000, 'revision': 7, 'deleted': False}
+        def proxy(method, path, query, body, **kwargs):
+            if path == '/memory/recall':
+                raise threads.ApiError(HTTPStatus.GATEWAY_TIMEOUT, 'shared recall timed out')
+            self.assertEqual((method, path, query, body), ('GET', '/memory/pages/thread-1', {}, None))
+            self.assertEqual(kwargs['timeout_seconds'], 3)
+            return {'page': page}
+        with (patch.object(threads.workspace_proxy, '_proxy', side_effect=proxy) as calls,
+              patch.object(threads.host_errors, 'report_warning')):
+            pages, details = threads._recalled_memory_pages('thread-1', 'Task')
+        self.assertEqual(calls.call_count, 2)
+        self.assertEqual(pages[0]['content'], page['content'])
+        self.assertEqual(pages[0]['scope'], 'self')
+        self.assertEqual(pages[0]['selection'], 'self')
+        self.assertIn('Self-memory fallback: thread-1 r7', details)
+        self.assertIn(page['content'], memory_context_message('thread-1', pages))
+
+    def test_malformed_recall_response_also_uses_self_fallback(self):
+        for response in (None, {}, {'pages': None}, {'pages': [None]},
+                         {'pages': [{'page_id': 'thread-1', 'revision': 'bad'}]}):
+            with self.subTest(response=response):
+                with (patch.object(threads.workspace_proxy, 'recall_memory', return_value=response),
+                      patch.object(threads.workspace_proxy, 'self_memory', return_value={
+                          'page_id': 'thread-1', 'revision': 3, 'scope': 'self', 'selection': 'self'}) as read,
+                      patch.object(threads.host_errors, 'report_warning')):
+                    pages, _ = threads._recalled_memory_pages('thread-1', 'Task')
+                read.assert_called_once_with('thread-1')
+                self.assertEqual(pages[0]['revision'], 3)
+
+    def test_malformed_shared_pages_cannot_discard_valid_self_in_either_order(self):
+        own = {'page_id': 'thread-1', 'scope': 'self', 'content': 'Keep these notes',
+               'description': 'Preferences', 'revision': 1}
+        for bad in (None, {}, {**own, 'revision': 'bad'}):
+            for raw in ([own, bad], [bad, own]):
+                with self.subTest(raw=raw):
+                    with (patch.object(threads.workspace_proxy, 'recall_memory', return_value={'pages': raw}),
+                          patch.object(threads.workspace_proxy, 'self_memory') as fallback,
+                          patch.object(threads.host_errors, 'report_warning')):
+                        pages, _ = threads._recalled_memory_pages('thread-1', 'Task')
+                    fallback.assert_not_called()
+                    self.assertEqual(pages, [{**own, 'selection': 'self'}])
+
+    def test_malformed_self_recovers_without_discarding_valid_shared_pages(self):
+        shared = {'page_id': 'guide', 'scope': 'swarm', 'content': 'Shared notes',
+                  'description': 'Guidance', 'revision': 1, 'selection': 'relevant'}
+        own = {**shared, 'page_id': 'thread-1', 'scope': 'self', 'selection': 'self'}
+        for recovered in (own, None):
+            with self.subTest(recovered=recovered):
+                with (patch.object(threads.workspace_proxy, 'recall_memory', return_value={
+                          'pages': [{**own, 'page_id': 'thread-2'}, shared]}),
+                      patch.object(threads.workspace_proxy, 'self_memory', return_value=recovered),
+                      patch.object(threads.host_errors, 'report_warning')):
+                    pages, _ = threads._recalled_memory_pages('thread-1', 'Task')
+                self.assertEqual(pages, [own, shared] if recovered else [shared])
+
+    def test_self_fallback_missing_deleted_or_unavailable_never_blocks_admission(self):
+        for result in (threads.ApiError(HTTPStatus.NOT_FOUND, 'missing'),
+                       {'page': {'page_id': 'thread-1', 'deleted': True}},
+                       threads.ApiError(HTTPStatus.GATEWAY_TIMEOUT, 'unavailable')):
+            with self.subTest(result=result):
+                with (patch.object(threads.workspace_proxy, 'recall_memory', side_effect=threads.ApiError(HTTPStatus.GATEWAY_TIMEOUT, 'timeout')),
+                      patch.object(threads.workspace_proxy, '_proxy') as proxy,
+                      patch.object(threads.host_errors, 'report_warning')):
+                    if isinstance(result, Exception):
+                        proxy.side_effect = result
+                    else:
+                        proxy.return_value = result
+                    pages, details = threads._recalled_memory_pages('thread-1', 'Task')
+                self.assertEqual(pages, [])
+                self.assertIn('Recall unavailable', details)
+
+    def test_self_read_rejects_wrong_identity_and_malformed_page(self):
+        for response in ([], {}, {'page': None},
+                         {'page': {'page_id': 'thread-2', 'content': 'Other notes', 'description': '', 'revision': 1}},
+                         {'page': {'page_id': 'thread-1', 'content': None}}):
+            with self.subTest(response=response):
+                with patch.object(threads.workspace_proxy, '_proxy', return_value=response):
+                    with self.assertRaises(threads.ApiError):
+                        threads.workspace_proxy.self_memory('thread-1')
+
     def test_jev_recall_keeps_its_short_timeout_separate_from_task_titles(self):
         with patch.object(threads.workspace_proxy, "_proxy") as proxy:
             threads.workspace_proxy.recall_memory("thread-1", "Fix login")

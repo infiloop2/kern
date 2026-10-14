@@ -1579,6 +1579,7 @@ mkdir -p /etc/systemd/system/system.slice.d
 cat > /etc/systemd/system/system.slice.d/kern-resources.conf <<'UNIT'
 [Slice]
 MemoryLow=20%
+CPUWeight=1000
 IOWeight=100
 UNIT
 local unit low
@@ -1591,6 +1592,7 @@ for unit in kern-admin-api kern-postgres kern-cloudflared; do
   cat > "/etc/systemd/system/$unit.service.d/kern-resources.conf" <<UNIT
 [Service]
 MemoryLow=$low
+CPUWeight=1000
 IOWeight=200
 UNIT
 done
@@ -1632,7 +1634,7 @@ install_service_units() {
 # encode nesting, and a nested slice's CPUWeight would be compared against
 # its implicit parent's siblings, not against system.slice. As a top-level
 # slice it is a direct sibling of system.slice (admin API, proxy, Postgres;
-# default weight 100), so:
+# explicit weight 1000), so:
 # - CPUWeight only matters under contention: an otherwise idle host still
 #   gives the agent every core, but when host services need CPU they are
 #   favored over agent work. A hard CPUQuota would waste idle cores, so none
@@ -1696,6 +1698,7 @@ LimitNOFILE=4096
 TasksMax=2048
 Environment=PYTHONPATH=/opt/kern-host
 ExecStart=/usr/bin/python3 -m host.runtime.network_proxy.service
+CPUWeight=1000
 ExecStopPost=/usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-network-proxy
 Restart=always
 RestartSec=3
@@ -1855,8 +1858,7 @@ ProtectHome=yes
 ProtectSystem=strict
 InaccessiblePaths=/mnt/kern-agent /mnt/kern-admin
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-# Allow short rendering bursts across two cores; retain the host slice priority.
-CPUQuota=200%
+# Share every available CPU; the control plane wins contention via weights.
 CPUWeight=100
 IOWeight=25
 # Best-effort reclaim protection, not a reservation or a larger allocation.
@@ -1898,7 +1900,6 @@ Group=kern-transcription
 Slice=kern_workspace.slice
 Environment=PYTHONPATH=/opt/kern-host
 Environment=HF_HUB_OFFLINE=1
-Environment=OMP_NUM_THREADS=2
 ExecStart=/usr/local/lib/kern-transcription-venv/bin/python -m host.runtime.transcription.service
 Restart=on-failure
 RestartSec=5
@@ -1909,11 +1910,11 @@ PrivateTmp=yes
 ProtectHome=yes
 ProtectSystem=strict
 Nice=10
-CPUQuota=200%
 CPUWeight=25
 IOWeight=25
 MemoryMax=2G
-TasksMax=64
+# Allow CPU-sized inference pools, including the largest supported Lima shape.
+TasksMax=4096
 
 [Install]
 WantedBy=multi-user.target
@@ -1947,7 +1948,6 @@ Slice=kern_workspace.slice
 Environment=PYTHONPATH=/opt/kern-host
 Environment=KERN_EMBEDDING_MODEL_DIR=/usr/local/share/kern-embedding-models/bge-small-en-v1.5-onnx-Q
 Environment=HF_HUB_OFFLINE=1
-Environment=OMP_NUM_THREADS=1
 ExecStart=/usr/local/lib/kern-embedding-venv/bin/python -m host.runtime.embeddings.service
 ExecStopPost=/usr/bin/env PYTHONPATH=/opt/kern-host /usr/bin/python3 -m host.runtime.core.host_errors_service_exit kern-embedding
 NoNewPrivileges=yes
@@ -1959,7 +1959,8 @@ Nice=10
 CPUWeight=25
 IOWeight=25
 MemoryMax=1G
-TasksMax=64
+# Allow CPU-sized inference pools, including the largest supported Lima shape.
+TasksMax=4096
 
 UNIT
 
@@ -2119,15 +2120,17 @@ apply_live_resource_protection() {
 # daemon-reload updates unit definitions; explicitly realize these settings
 # on already-active cgroups as well, especially system.slice and services
 # surviving a retained-root reconfiguration. Never restart system.slice.
-systemctl set-property --runtime system.slice MemoryLow=20% IOWeight=100
+systemctl set-property --runtime system.slice MemoryLow=20% IOWeight=100 CPUWeight=1000
 systemctl set-property --runtime kern_agent.slice IOWeight=25
 systemctl set-property --runtime kern_workspace.slice MemoryLow=14% IOWeight=50
 systemctl set-property --runtime kern-workspace.service MemoryLow=4% IOWeight=200
-systemctl set-property --runtime kern-browser.service MemoryLow=10% CPUQuota=200% CPUWeight=100
-systemctl set-property --runtime kern-admin-api.service MemoryLow=8% IOWeight=200
-systemctl set-property --runtime kern-postgres.service MemoryLow=8% IOWeight=200
+systemctl set-property --runtime kern-transcription.service CPUQuota=
+systemctl set-property --runtime kern-network-proxy.service CPUWeight=1000
+systemctl set-property --runtime kern-browser.service MemoryLow=10% CPUQuota= CPUWeight=100
+systemctl set-property --runtime kern-admin-api.service MemoryLow=8% IOWeight=200 CPUWeight=1000
+systemctl set-property --runtime kern-postgres.service MemoryLow=8% IOWeight=200 CPUWeight=1000
 if [ "$cloudflare_connection_count" -gt 0 ]; then
-  systemctl set-property --runtime kern-cloudflared.service MemoryLow=4% IOWeight=200
+  systemctl set-property --runtime kern-cloudflared.service MemoryLow=4% IOWeight=200 CPUWeight=1000
 fi
 }
 

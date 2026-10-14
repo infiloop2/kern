@@ -49,7 +49,7 @@ tests/
   stage/                    # persistent, credentialed live AWS checks
   smoke-ui/                 # deterministic local admin UI mock and browser smoke
 docs/                       # API, architecture, development, and commit-scoped audits
-.github/                    # no-network CI plus main/admin-gated live host smoke workflows
+.github/                    # no-network CI plus requested live host smoke workflows
 ```
 
 Important source areas and the context that runs them:

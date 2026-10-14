@@ -78,7 +78,7 @@ Login acceptance is not guaranteed and challenges remain operator-controlled.
 
 Browser joins `kern_workspace.slice`, alongside transcription and embeddings,
 so it has lower CPU priority than the admin control plane. Its whole process
-tree has `CPUQuota=200%` (up to two cores), `CPUWeight=100`, `IOWeight=25`,
+tree can use all assigned CPUs without a hard quota, with `CPUWeight=100`, `IOWeight=25`,
 `MemoryLow=10%`, `MemoryMax=2G` and `TasksMax=256`. The workspace parent has
 `MemoryLow=14%`, covering the browser's 10% and workspace service's 4%. This gives
 active browser memory best-effort reclaim protection and more CPU share within

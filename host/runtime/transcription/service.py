@@ -17,6 +17,7 @@ import time
 from typing import Any, cast
 
 from host.constants import TRANSCRIPTION_SOCKET_PATH
+from host.runtime.core.cpu_resources import available_cpu_count
 from host.runtime.core.unix_socket_service import UnixSocketRequestHandler
 from host.runtime.transcription.client import MAX_REQUEST_BYTES, decode_audio
 from host.runtime.transcription import diagnostics
@@ -32,7 +33,7 @@ def load_model() -> None:
     from faster_whisper import WhisperModel  # type: ignore[import-not-found]
 
     _model_instance = WhisperModel(str(MODEL_DIR), device="cpu", compute_type="int8",
-                                   cpu_threads=2, num_workers=1, local_files_only=True)
+                                   cpu_threads=available_cpu_count(), num_workers=1, local_files_only=True)
 
 
 def transcribe(audio: bytes) -> str:
@@ -109,7 +110,7 @@ class Handler(UnixSocketRequestHandler):
             "request_id": request_id if re.fullmatch(r"[0-9a-f]{32}", request_id) else "",
             "audio_ms": round(len(audio) / 32),
             "model": MODEL_DIR.name,
-            "cpu_threads": 2,
+            "cpu_threads": available_cpu_count(),
         }
         try:
             text = transcribe(audio)

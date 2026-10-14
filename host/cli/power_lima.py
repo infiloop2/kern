@@ -21,6 +21,8 @@ def main_for_power(mode: str, agent_name: str) -> int:
         config = lima.build_lima_config(command)
         lima._preflight(config)
         with OperationLock("lima", config.agent_name):
+            if mode == "start":
+                config = lima._resolve_resources(command)
             inventory = lima._inspect(config)
             if inventory.instance is None:
                 raise ConfigError(
@@ -38,12 +40,14 @@ def main_for_power(mode: str, agent_name: str) -> int:
             instance_name = inventory.instance.name
 
             if mode == "start":
-                if initial_state not in {"Running", "Stopped"}:
+                # Supported Lima versions recover stale host-agent state after a crash.
+                # Validate our exact definition and both durable disks before starting.
+                if initial_state not in {"Running", "Stopped", "Broken"}:
                     raise ConfigError(
                         f"cannot start Kern Lima instance {instance_name} from state {initial_state}"
                     )
                 lima._check_stored_definition(config, inventory.instance)
-                if initial_state == "Stopped":
+                if initial_state != "Running":
                     lima._limactl(config, "start", "--tty=false", instance_name, timeout=lima._START_TIMEOUT_SECONDS)
                 instance = lima._launched_instance(config, instance_name)
                 final_state = "running"

@@ -36,7 +36,7 @@ import sys
 import tempfile
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 from host.bootstrap.render import (
@@ -72,7 +72,7 @@ from host.version import compare_versions, repo_version
 # schemas this module consumes are stable across it. Outside the range,
 # preflight fails with an upgrade instruction instead of parsing unknown
 # output.
-LIMA_MIN_VERSION = (1, 0, 0)
+LIMA_MIN_VERSION = (2, 2, 0)
 LIMA_MAX_VERSION_EXCLUSIVE = (3, 0, 0)
 # The local shape is pinned like the AWS adapter's instance type. Keeping it
 # here makes resource sizing an adapter concern rather than a shared-CLI knob.
@@ -115,6 +115,72 @@ _LIVE_PROGRESS_INTERVAL_SECONDS = 10
 @dataclass(frozen=True)
 class LimaConfig:
     agent_name: str
+    cpus: int = LIMA_VM_CPUS
+    memory_gib: int = LIMA_VM_MEMORY_GIB
+    root_disk_gib: int = ROOT_VOLUME_SIZE_GB
+    admin_disk_gib: int = ADMIN_VOLUME_SIZE_GB
+    agent_disk_gib: int = AGENT_VOLUME_SIZE_GB
+
+
+def _resource_path(agent_name: str) -> Path:
+    # Our metadata lives outside disposable instance directories. Names are
+    # scoped by Lima home, just like the disks and VM; no cloud secrets live here.
+    home = Path(os.environ.get("LIMA_HOME", str(Path.home() / ".lima"))).expanduser()
+    # Lima lists every non-hidden/non-underscore directory as an instance.
+    return home / ".kern-config" / f"{_local_key(agent_name)}.json"
+
+
+def _resolve_resources(command: LifecycleCommand) -> LimaConfig:
+    """Read under the lifecycle lock, validating every persisted/explicit value."""
+    config = build_lima_config(command)
+    path = _resource_path(config.agent_name)
+    if path.exists():
+        try:
+            saved = json.loads(path.read_text())
+        except (OSError, ValueError) as exc:
+            raise ConfigError(f"cannot read Lima resource configuration {path}: {exc}") from exc
+        if not isinstance(saved, dict) or set(saved) != set(asdict(config)) or saved.get("agent_name") != config.agent_name:
+            raise ConfigError(f"invalid Lima resource configuration {path}")
+        config = LimaConfig(**saved)
+    overrides = {}
+    for name in ("cpus", "memory_gib", "root_disk_gib", "admin_disk_gib", "agent_disk_gib"):
+        value = getattr(command, f"lima_{name}")
+        if value is not None:
+            if name in {"admin_disk_gib", "agent_disk_gib"} and command.mode != "deploy":
+                raise ConfigError("durable Lima disk sizes can only be set on deploy")
+            overrides[name] = value
+    config = replace(config, **overrides)
+    for name, value in asdict(config).items():
+        if name == "agent_name":
+            continue
+        minimum = 16 if "disk" in name else 1
+        maximum = 1024 if name == "cpus" else 65536
+        if type(value) is not int or not minimum <= value <= maximum:
+            raise ConfigError(f"Lima {name} must be an integer between {minimum} and {maximum}")
+    return config
+
+
+def _save_resources(config: LimaConfig) -> None:
+    """Atomically record replacement intent before destroying any compute."""
+    path = _resource_path(config.agent_name)
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    fd, temporary = tempfile.mkstemp(prefix=".resources-", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as stream:
+            json.dump(asdict(config), stream, sort_keys=True)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        # Persist both the renamed file and a newly created kern-config entry.
+        for parent in (path.parent, path.parent.parent):
+            directory = os.open(parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -228,15 +294,6 @@ def _parse_json_lines(output: str, *, source: str) -> list[dict[str, Any]]:
     return records
 
 
-def _record_field(record: dict[str, Any], *names: str) -> Any:
-    """Read one logical field that limactl has spelled differently across
-    releases (e.g. ``sshLocalPort`` / ``SSHLocalPort``)."""
-    for name in names:
-        if name in record:
-            return record[name]
-    return None
-
-
 def _preflight(config: LimaConfig) -> None:
     """Validate the limactl installation and JSON schemas without changing
     any resource."""
@@ -273,23 +330,23 @@ def _inspect(config: LimaConfig) -> LimaInventory:
     )
     instance: LimaInstance | None = None
     for record in instances:
-        name = _record_field(record, "name", "Name")
+        name = record.get("name")
         if not isinstance(name, str):
             raise ConfigError("limactl list returned an instance without a name")
         if name != instance_name:
             continue
         if instance is not None:
             raise ConfigError(f"limactl list returned duplicate records for instance {instance_name}")
-        status = _record_field(record, "status", "Status")
+        status = record.get("status")
         if not isinstance(status, str) or not status:
             raise ConfigError(f"limactl list returned no status for instance {instance_name}")
-        port_value = _record_field(record, "sshLocalPort", "SSHLocalPort")
+        port_value = record.get("sshLocalPort")
         ssh_local_port: int | None = None
         if port_value is not None:
             if not isinstance(port_value, int) or isinstance(port_value, bool) or port_value < 0:
                 raise ConfigError(f"limactl list returned an invalid SSH port for {instance_name}")
             ssh_local_port = port_value or None
-        dir_value = _record_field(record, "dir", "Dir")
+        dir_value = record.get("dir")
         instance_dir = dir_value if isinstance(dir_value, str) and dir_value else None
         instance = LimaInstance(
             name=name, status=status, ssh_local_port=ssh_local_port, dir=instance_dir
@@ -303,7 +360,7 @@ def _inspect(config: LimaConfig) -> LimaInventory:
         wanted = _disk_name(config.agent_name, role)
         matches = []
         for record in disk_records:
-            name = _record_field(record, "name", "Name")
+            name = record.get("name")
             if not isinstance(name, str):
                 raise ConfigError("limactl disk list returned a disk without a name")
             if name == wanted:
@@ -312,7 +369,7 @@ def _inspect(config: LimaConfig) -> LimaInventory:
             continue
         if len(matches) > 1:
             raise ConfigError(f"limactl disk list returned duplicate records for disk {wanted}")
-        instance_value = _record_field(matches[0], "instance", "Instance")
+        instance_value = matches[0].get("instance")
         if instance_value is None:
             instance_value = ""
         if not isinstance(instance_value, str):
@@ -340,10 +397,13 @@ def _validate_lima_preflight(command: LifecycleCommand, inventory: LimaInventory
                 f"{', '.join(stale_attachments)}; wait for detachment or detach them before "
                 f"running {command.mode}"
             )
-    if inventory.instance is not None and inventory.instance.status not in {
-        "Running",
-        "Stopped",
-    }:
+    allowed_states = {"Running", "Stopped"}
+    if command.mode == "recover":
+        # Explicit recovery replaces compute via delete --force. It does not
+        # boot the broken definition, and still validates disks/version before
+        # deletion. Upgrade/reconfigure must not silently recover broken hosts.
+        allowed_states.add("Broken")
+    if inventory.instance is not None and inventory.instance.status not in allowed_states:
         raise ConfigError(
             f"Kern Lima instance {inventory.instance.name} has unsupported state "
             f"{inventory.instance.status!r}; resolve it with limactl before running "
@@ -460,9 +520,9 @@ minimumLimaVersion: "1.0.0"
 plain: true
 images:
 {image_lines}
-cpus: {LIMA_VM_CPUS}
-memory: "{LIMA_VM_MEMORY_GIB}GiB"
-disk: "{ROOT_VOLUME_SIZE_GB}GiB"
+cpus: {config.cpus}
+memory: "{config.memory_gib}GiB"
+disk: "{config.root_disk_gib}GiB"
 mounts: []
 containerd:
   system: false
@@ -509,7 +569,7 @@ def _ensure_storage_disks(
     every mode but deploy. Replacement modes fail closed if a preserved disk
     disappears after preflight. Returns role -> exact disk name."""
     disks: dict[str, str] = {}
-    for role, size_gib in (("admin", ADMIN_VOLUME_SIZE_GB), ("agent", AGENT_VOLUME_SIZE_GB)):
+    for role, size_gib in (("admin", config.admin_disk_gib), ("agent", config.agent_disk_gib)):
         name = _disk_name(config.agent_name, role)
         if role in inventory.disks:
             _log(f"reusing {role} storage disk {name}")
@@ -792,8 +852,11 @@ def main_for_lifecycle(command: LifecycleCommand) -> int:
                     "before running Kern lifecycle commands"
                 )
         with OperationLock("lima", config.agent_name):
+            config = _resolve_resources(command)
             inventory = _inspect(config)
             _validate_lima_preflight(command, inventory)
+            if inventory.instance is not None:
+                _check_missing_resource_metadata(command, config, inventory.instance)
             with tempfile.TemporaryDirectory() as workdir_name:
                 workdir = Path(workdir_name)
                 # Disk names are deterministic, so the complete candidate can
@@ -832,6 +895,8 @@ def main_for_lifecycle(command: LifecycleCommand) -> int:
 
                 if inventory.instance is not None:
                     _check_stored_version_hint(command, inventory.instance, target_version)
+                _save_resources(config)
+                if inventory.instance is not None:
                     _delete_instance(config, inventory.instance.name)
                     inventory = _inspect(config)
                 disks = _ensure_storage_disks(
@@ -945,6 +1010,34 @@ def _check_stored_version_hint(
             f"reconfigure requires preserved state to match target VERSION {target_version}; "
             "run upgrade first, or target the version matching the preserved state"
         )
+
+
+def _check_missing_resource_metadata(command: LifecycleCommand, config: LimaConfig, instance: LimaInstance) -> None:
+    """Missing resource settings must not silently change existing compute.
+
+    Replacement may intentionally change the definition, so check omitted
+    shape fields rather than requiring the whole old file to match new code.
+    Explicit overrides are authoritative and version checks still apply.
+    """
+    if _resource_path(config.agent_name).exists():
+        return
+    _, text = _read_stored_definition(instance)
+    defaults = LimaConfig(config.agent_name)
+    fields = (
+        ("cpus", "cpus", str(defaults.cpus)),
+        ("memory_gib", "memory", f'"{defaults.memory_gib}GiB"'),
+        ("root_disk_gib", "disk", f'"{defaults.root_disk_gib}GiB"'),
+    )
+    for option, key, expected in fields:
+        if getattr(command, f"lima_{option}") is not None:
+            continue
+        values = re.findall(rf"^{key}: ([^\n]+)$", text, re.MULTILINE)
+        if values != [expected]:
+            raise ConfigError(
+                f"missing Lima resource metadata for custom or unknown {key}; restore its backup "
+                "or explicitly supply --lima-cpus, --lima-memory-gib and --lima-root-disk-gib "
+                "before replacement"
+            )
 
 
 def _check_stored_definition(config: LimaConfig, instance: LimaInstance) -> None:

@@ -437,11 +437,15 @@ class OrchestratorTests(unittest.TestCase):
                 self.assertTrue(started.wait(5))
                 key = ('thread-1', state.thread_session_config('thread-1')['run_number'])
                 self.assertEqual(monitor.turns[key].known['ui'], 1)
-                self.assertEqual(monitor.turns[key].count, 2)
+                self.assertEqual(monitor.turns[key].suggestion_events, 2)
+                self.assertEqual(monitor.turns[key].self_events, 2)
+                deadline = monitor.turns[key].next_suggestion
                 orchestrator.steer_live_turn('thread-1', 'codex', 'Investigate only',
                                              operator_sent_message=True, input_notice={'kind': 'operator'})
                 self.assertEqual(monitor.turns[key].generation, 1)
-                self.assertGreaterEqual(monitor.turns[key].count, 5)
+                self.assertEqual(monitor.turns[key].suggestion_events, 3)
+                self.assertEqual(monitor.turns[key].self_events, 3)
+                self.assertEqual(monitor.turns[key].next_suggestion, deadline)
             finally:
                 release.set()
                 self.wait_until_idle('thread-1')

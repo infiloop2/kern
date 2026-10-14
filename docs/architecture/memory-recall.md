@@ -34,28 +34,57 @@ provides task context. New notice kinds are excluded until explicitly selected.
 
 ## Mid-turn suggestions
 
-Initial recall stays synchronous at admission. Steerable model turns seed a small
-admin-process cache with the initial query and known page IDs/revisions.
-Event hooks count completed operations, assistant messages and selected incoming messages;
-they do no search, inference or extra database I/O. Operation text and logs never
-enter the query. Reasoning, streaming updates and the monitor's own notices are
-ignored. Message content remains in the
-existing event history rather than a second activity buffer.
+Initial recall stays synchronous at admission. If shared recall fails or returns
+an invalid response, admission separately reads the thread's self-memory through
+the existing Workspace page route, without search or inference. That read has its
+own three-second socket timeout. Missing or deleted self-memory is omitted; a
+failed fallback is reported without preventing the turn from starting. This can
+recover from shared search/ranking failure, but cannot guarantee delivery when
+Workspace itself is unavailable.
+Malformed entries do not discard valid pages from the original response. If that
+response already supplied valid self-memory, admission keeps it without another
+read; otherwise it attempts the direct fallback and retains valid shared pages.
 
-Five events make a turn eligible; incoming operator/allowed notice messages make
-it immediately eligible. One serial worker selects the highest count (capped at 20),
-with longest-waiting ties. Checks start at least ten seconds apart globally. Counts
-are consumed before the check, so messages arriving during it count toward the next
-check. The cache holds at most 128 active turns and 64 known pages per turn. Excess
-monitoring can be dropped; actual messages are never dropped. There is no durable
-queue, replay or automatic retry.
+Steerable model turns seed a small admin-process cache with the initial query,
+known page IDs/revisions, and independent timers and event counts. Shared
+suggestions require both 60 seconds and five qualifying events; full self-memory
+requires both 300 seconds and 25 qualifying events, starting from admission.
+Completed operations, assistant messages and selected incoming messages count
+toward both thresholds. Streaming/log updates and the monitor's own notices do
+not count. The single serial worker selects the oldest due turn whose event
+threshold is met, and performs either or both eligible checks. Checks start at
+least ten seconds apart globally. Incoming direction invalidates titles in
+flight but does not bypass either threshold. Event hooks do no search,
+inference or extra database I/O; operation text and logs never enter the query.
+Message content remains in existing history rather than another activity buffer.
 
-The worker reads the shared conversation context. An empty or unchanged query skips
-search and titles. A changed query goes directly to Workspace recall: local hybrid
+Every self-memory refresh reads the current full page, even if its revision and
+the task query have not changed. It runs independently of shared search, query
+building and the shared-page dedupe budget. Full contents use the existing host
+context envelope and `memory_injection` notice, labeled as a periodic refresh,
+with the same optional-context runtime hint as suggestions. No summary or
+read-it-yourself reminder replaces the contents.
+
+The cache holds at most 128 active turns and 64 known pages per turn. Event counts
+are capped at their respective thresholds. Each attempt advances only its own
+timer and resets only its own count, including skipped, failed or busy attempts;
+events arriving during I/O count toward the next attempt. Missed intervals never
+accumulate, and another attempt needs both the time and event thresholds again.
+Without enough events the worker sleeps until activity arrives, even if a timer
+has expired. Global load or slow I/O can delay both intervals. Excess monitoring
+can be dropped; actual messages are never dropped. There is no durable queue or
+catch-up replay.
+
+For shared suggestions, the worker reads the conversation context. An empty or
+unchanged query skips search and titles, while self-memory refresh still runs
+when due. A changed query goes directly to Workspace recall: local hybrid
 search and the same optional Jev/Luna selection with existing fallbacks. Up to three new page revisions are suggested as IDs and purposes,
 never bodies, through same-run live steering. Central `agent_messages` helpers build
 the message and `thread.notice` payload. Only accepted suggestions enter the dedupe
 map; this records delivery, not reading.
+An unsuccessful recall or suggestion delivery leaves the query eligible for the
+next eligible batch, so a transient failure or busy turn does not permanently lose
+those pages. Only successful recall records the query as checked.
 
 Only on-demand agents also use Luna to generate a task title from this same context
 and the same prompt as initial title generation. Apps, Standing and Spawned agents
@@ -74,8 +103,9 @@ the only follow-up is an empty final response to the optional context. Actual
 incoming requests or subsequent work still invalidate the previous answer.
 If ordinary input duplicates a suggestion's exact text, that text is treated as
 ordinary input for the rest of the turn; the adapter does not guess delivery order.
-Failures consume a batch; new messages can trigger later work. Checks, capacity skips,
-failures and accepted suggestions have cache counters; provider usage stays in Host AI.
+Failures wait for both thresholds again; unchanged queries still skip shared search.
+Checks, capacity skips, failures, accepted self-memory refreshes and suggestions
+have cache counters; provider usage stays in Host AI.
 This is optional discovery: it can miss short phases, be skipped under load, or be
 ignored by the receiving agent.
 

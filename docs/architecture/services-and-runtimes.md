@@ -13,8 +13,8 @@
 | `kern-cloudflared.service` | `cloudflared` | Optional Cloudflare Tunnel connector for Cloudflare Tunnel operator endpoints. Installed only when `operator_connections` contains `cloudflare_tunnel`. |
 | `kern-embedding.socket`, `kern-embedding.service` | `kern-embedding` | Socket-activated local text embeddings; no network or database access, with a five-minute idle exit. |
 | `kern-transcription.socket`, `kern-transcription.service` | `kern-transcription` | Resident local speech recognition on an admin-only socket; starts at boot, no network or database access. |
-| `kern_agent.slice` | — | Top-level cgroup slice holding every agent runtime scope (underscore, not dash: dashes in slice names encode nesting, and the weight must compare against `system.slice` directly). `CPUWeight=50` guarantees the host services CPU time under contention while leaving idle cores to the agent; aggregate `MemoryHigh=75%`/`MemoryMax=80%`/`MemorySwapMax=5G` protect the host, while lower per-scope limits contain one busy thread before it stalls its peers; `TasksMax=4096` stops a slice-wide fork bomb from exhausting kernel PIDs. |
-| `kern_workspace.slice` | — | Cgroup slice for Workspace, browser, and inference workloads. `CPUWeight=50`, `IOWeight=50`, and `MemoryLow=14%`; memory protection covers 4% for Workspace and 10% for the browser. CPU priority remains below `system.slice`, whose default weight is 100. |
+| `kern_agent.slice` | — | Top-level cgroup slice holding every agent runtime scope (underscore, not dash: dashes in slice names encode nesting, and the weight must compare against `system.slice` directly). `CPUWeight=50` gives the host services higher CPU priority under contention while leaving idle cores to the agent; aggregate `MemoryHigh=75%`/`MemoryMax=80%`/`MemorySwapMax=5G` protect the host, while lower per-scope limits contain one busy thread before it stalls its peers; `TasksMax=4096` stops a slice-wide fork bomb from exhausting kernel PIDs. |
+| `kern_workspace.slice` | — | Cgroup slice for Workspace, browser, and inference workloads. `CPUWeight=50`, `IOWeight=50`, and `MemoryLow=14%`; memory protection covers 4% for Workspace and 10% for the browser. CPU priority remains below `system.slice`, whose configured CPU weight is 1000. |
 | `kern-io-control.service` | root | Boot-time oneshot enabling the kernel I/O-cost controller on the root, admin, and agent disks so I/O weights are enforced with the default NVMe scheduler. |
 
 ## Process Inventory
@@ -62,7 +62,7 @@
 | Workspace agent socket handler threads | Workspace service | Peer-authenticated before allocation, with 128 connection slots and 64 active-call slots; calls use bounded explicit Workspace routes. |
 | Maintenance thread | admin API | Periodically prunes bounded state and event history. |
 | Embedding index thread | admin API | Sends bounded missing-message batches to the local encoder and commits derived vectors between inference calls. |
-| Embedding request loop | embedding service | Handles one bounded query or passage batch at a time; systemd activates it on demand and it exits after five idle minutes. The unit runs one inference thread at nice level 10 with `CPUWeight=25`, `IOWeight=25`, `MemoryMax=1G`, and `TasksMax=64`, so indexing yields to the Workspace and host control plane under contention. |
+| Embedding request loop | embedding service | Handles one bounded query or passage batch at a time; systemd activates it on demand and it exits after five idle minutes. The unit uses the available CPU affinity for inference threads at nice level 10 with `CPUWeight=25`, `IOWeight=25`, `MemoryMax=1G`, and `TasksMax=4096`, so indexing yields to the Workspace and host control plane under contention. |
 | Journal follower | host-diagnostics collector | Follows new trusted-unit `KERN_HOST_DIAGNOSTIC=1` records without a replay cursor. |
 | Runtime status poller | admin API/orchestrator | Rechecks provider health, including Hermes's Bedrock connection. |
 | Turn threads | admin API/orchestrator | One daemon thread per admitted turn; at most fifty turns run per runtime, and a message past that cap is rejected rather than queued. Each turn spawns and closes its own runtime process. |
@@ -73,7 +73,7 @@ Agent runtimes are spawned through fixed sudo helpers that demote them to
 `kern-agent`, each inside a transient systemd scope under
 `kern_agent.slice`. Without the scope they would inherit the admin API's
 service cgroup and compete with the host services for resources. The slice's
-`CPUWeight=50` versus `system.slice`'s default 100 favors the admin API, proxy,
+`CPUWeight=50` versus `system.slice`'s configured 1000 favors the admin API, proxy,
 and Postgres while an agent build or test run saturates the cores. Workspace
 also competes with weight 50. Every agent scope explicitly sets `CPUWeight=100`,
 which enables systemd's CPU controller below the agent slice. Busy turns and

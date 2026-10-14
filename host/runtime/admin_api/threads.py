@@ -413,6 +413,18 @@ def _memory_task_query(thread_id: str, message: str, notice: dict[str, str] | No
     })
 
 
+def _self_memory_fallback(thread_id: str) -> tuple[list[dict[str, Any]], str]:
+    details = "Recall unavailable; see Host diagnostics."
+    try:
+        page = workspace_proxy.self_memory(thread_id)
+    except ApiError as exc:
+        _report_degraded_recall(thread_id, exc)
+        return [], details + "\nSelf-memory fallback unavailable."
+    if page is None:
+        return [], details + "\nNo self-memory page."
+    return [page], details + f"\nSelf-memory fallback: {thread_id} r{page['revision']}."
+
+
 def _recalled_memory_pages(
     thread_id: str,
     query: str,
@@ -422,35 +434,27 @@ def _recalled_memory_pages(
         response = workspace_proxy.recall_memory(thread_id, query)
     except ApiError as exc:
         _report_degraded_recall(thread_id, exc)
-        return [], "Recall unavailable; see Host diagnostics."
+        return _self_memory_fallback(thread_id)
     if not isinstance(response, dict):
         _report_degraded_recall(
             thread_id,
             "Workspace returned a non-object recall response",
         )
-        return [], "Recall unavailable; see Host diagnostics."
+        return _self_memory_fallback(thread_id)
     pages = response.get("pages")
     if not isinstance(pages, list):
         _report_degraded_recall(
             thread_id,
             "Workspace returned an invalid recall page list",
         )
-        return [], "Recall unavailable; see Host diagnostics."
-    recalled = [
-        page for page in pages[:RECALLED_MEMORY_PAGE_LIMIT]
-        if isinstance(page, dict)
-    ]
-    if len(recalled) != min(len(pages), RECALLED_MEMORY_PAGE_LIMIT):
-        _report_degraded_recall(
-            thread_id,
-            "Workspace returned a malformed recall page",
-        )
-        return [], "Recall unavailable; see Host diagnostics."
+        return _self_memory_fallback(thread_id)
     normalized: list[dict[str, Any]] = []
-    for page in recalled:
+    for page in pages[:RECALLED_MEMORY_PAGE_LIMIT]:
         if not (
-            isinstance(page.get("page_id"), str)
+            isinstance(page, dict)
+            and isinstance(page.get("page_id"), str)
             and page.get("scope") in {"self", "swarm"}
+            and (page["scope"] != "self" or page["page_id"] == thread_id)
             and isinstance(page.get("description"), str)
             and isinstance(page.get("content"), str)
             and isinstance(page.get("revision"), int)
@@ -470,6 +474,13 @@ def _recalled_memory_pages(
                 ),
             }
         )
+    fallback_details = ""
+    if len(normalized) != min(len(pages), RECALLED_MEMORY_PAGE_LIMIT):
+        _report_degraded_recall(thread_id, "Workspace returned an invalid recall page")
+        fallback_details = "Invalid recall pages omitted."
+        if not any(page["scope"] == "self" for page in normalized):
+            recovered, fallback_details = _self_memory_fallback(thread_id)
+            normalized.extend(recovered)
     # Keep relevance order within the middle group; popular context goes last.
     normalized.sort(
         key=lambda page: 0 if page["selection"] == "self"
@@ -477,6 +488,8 @@ def _recalled_memory_pages(
     )
     details = response.get("diagnostics")
     details = details[:12000] if isinstance(details, str) else "No retrieval details recorded."
+    if fallback_details:
+        details = (fallback_details + "\n" + details)[:12000]
     details = (
         f"Admission recall: {round((time.monotonic() - started) * 1000)} ms.\n"
         f"{details}"

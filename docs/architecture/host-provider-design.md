@@ -190,7 +190,7 @@ The lifecycle commands take:
 
 `aws` is the default. AWS requires `AWS_REGION` and its existing credentials
 (`InputConfig` carries `agent_name` plus `aws_region`). Lima requires no
-cloud configuration: `LimaConfig` carries only the validated `agent_name`,
+cloud configuration: `LimaConfig` carries the validated `agent_name` and resource settings,
 and `--bootstrap-from-github` and the AWS environment variables are rejected
 or ignored respectively.
 
@@ -199,7 +199,18 @@ for EC2 and `LIMA_VM_CPUS` / `LIMA_VM_MEMORY_GIB` (2 CPUs / 2 GiB) for Lima.
 AWS deploy and recovery accept `--instance-type` to override the EC2 default
 for that operation; CPU and RAM both follow the selected type. Omitting it
 uses the code default. AWS upgrade and reconfiguration keep the existing type.
-Lima's rendered compute shape remains fixed and rejects this AWS-only option.
+Lima rejects this AWS-only option. Its lifecycle commands accept `--lima-cpus`,
+`--lima-memory-gib` and `--lima-root-disk-gib`. Fresh deploy also accepts
+`--lima-admin-disk-gib` and `--lima-agent-disk-gib`; these never resize existing
+disks. CPU/RAM minimum is 1 and disk minimum is 16 GiB. Defaults remain 2 CPUs,
+2 GiB RAM and 16 GiB per disk. Overrides are recorded atomically under
+`$LIMA_HOME/.kern-config/<identity>.json` (default `~/.lima`). Omitted options
+preserve saved settings across start, upgrade, reconfigure and recovery. Back
+up this metadata with the durable disks. Configuration is validated before
+any replacement and full generated-definition validation still applies.
+A failed replacement retains its intended resource configuration for recovery.
+If metadata is lost, explicit CPU/RAM/root options on recover reconstruct the
+compute shape; neither durable disk is recreated or resized.
 
 Kern runs `limactl` with the parent environment unchanged, so an ambient
 `LIMA_HOME` selects a non-default Lima home exactly as it would for direct
@@ -216,7 +227,7 @@ runtime.
 | --- | --- | --- | --- |
 | `deploy` | none | none | Create both disks and one compute host; initialize state. |
 | `upgrade` | exactly one | both | Destroy compute, preserve disks, create current root, require older durable version. |
-| `recover` | none | both | Create current root, require equal durable version unless `--allow-upgrade`. |
+| `recover` | absent or one existing host (including Lima `Broken`) | both | Replace existing compute when present, preserve both disks, create current root; require equal durable version unless `--allow-upgrade`. |
 | `reconfigure` | exactly one | both | Destroy compute, preserve disks, create current root, replace operator access/password. |
 | `start` | exactly one stopped | both | Provider start only; no bootstrap. |
 | `stop` | exactly one running | both | Provider stop only; no bootstrap. |
@@ -402,10 +413,12 @@ validated again before every mutating call.
 The Lima provider performs these read-only checks before any mutation:
 
 1. `limactl` exists and its version is within the tested range pinned in the
-   module (`>= 1.0.0`, `< 3.0.0`); outside it, preflight fails with an
+   module (`>= 2.2.0`, `< 3.0.0`); outside it, preflight fails with an
    upgrade instruction rather than parsing an unknown JSON schema.
 2. `limactl list --format=json` and `limactl disk list --json` return
-   accepted schemas.
+   accepted schemas. Start accepts `Running`, `Stopped` or `Broken` only after
+   validating the generated VM definition and both durable disks; Lima handles
+   stale host-agent state after a crash. Kern does not automatically redeploy.
 3. `ssh`, `scp`, and `ssh-keygen` exist on `PATH`, so a missing transport
    tool cannot surface only after a working VM has been deleted.
 4. The resolved instance and disk names contain only the expected prefix and
@@ -697,7 +710,7 @@ token, Lima internal paths, or the raw VM definition. The full schema is in
   deploy only, and UUID mounts.
 - The runtime, app, and tool test suites are provider-neutral and run once; a
   new feature above the provider boundary is not tested per provider.
-- `tests/smoke/smoke_lima.py` runs automatically on a GitHub-hosted Linux
+- `tests/smoke/smoke_lima.py` runs on request on a GitHub-hosted Linux
   runner. It boots real Lima compute and disks, provisions the complete guest,
   exercises SSH/admin access and network enforcement, runs every Lima lifecycle
   operation, rotates credentials, proves durable state survives replacement,
