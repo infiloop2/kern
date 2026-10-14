@@ -32,10 +32,10 @@ class InputNoticeTests(TestCase):
             self.assertEqual(event["payload"], payload)
 
     def test_all_context_preambles_keep_their_trust_and_message_boundaries(self):
-        context = messages.memory_context_message("thread-1", [])
+        context = messages.memory_context_message("thread-1", [{"page_id": "guide", "revision": 1, "content": "Notes"}])
         self.assertIn('"identity": {"thread_id": "thread-1"}', context)
         self.assertIn("instruction_authority none", context)
-        self.assertEqual(messages.memory_notice([], "diagnostics")["message"], "Self identity and 0 memories injected.")
+        self.assertEqual(messages.memory_notice([], "diagnostics", delivered=False)["message"], "Self identity and 0 memories prepared for injection.")
         pages = [("guide", 2, "When to use this")]
         suggestion = messages.memory_suggestion(pages)
         self.assertIn("- guide: When to use this", suggestion)

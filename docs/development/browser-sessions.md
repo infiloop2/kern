@@ -8,9 +8,11 @@ for an operator login, a login check, readiness probe, or a coded action.
 
 ## Code layout
 
-- `service.py`: socket authorization and serialized request dispatch.
+- `service.py`: socket authorization and bounded response handling.
+- `sessions.py`: four thread-owned slots and per-account admission.
 - `accounts.py`: saved accounts, login state, operator leases and action counts.
 - `browser.py`: Chromium lifecycle, auth snapshots, screenshots and operator input.
+- `screenshot.py`: bounded anonymous page rendering and PNG capture.
 - `display.py`: private authenticated Xvfb lifecycle for windowed Chromium.
 - `browser_network/`: in-process public HTTPS relay, private connection settings and verified Decodo TLS transport.
 - `providers/__init__.py`: provider contract and explicit supported-provider registry.
@@ -79,7 +81,7 @@ Login acceptance is not guaranteed and challenges remain operator-controlled.
 Browser joins `kern_workspace.slice`, alongside transcription and embeddings,
 so it has lower CPU priority than the admin control plane. Its whole process
 tree can use all assigned CPUs without a hard quota, with `CPUWeight=100`, `IOWeight=25`,
-`MemoryLow=10%`, `MemoryMax=2G` and `TasksMax=256`. The workspace parent has
+`MemoryLow=10%`, `MemoryMax=2G` and `TasksMax=1024`. The workspace parent has
 `MemoryLow=14%`, covering the browser's 10% and workspace service's 4%. This gives
 active browser memory best-effort reclaim protection and more CPU share within
 the workspace slice; it does not reserve RAM or guarantee UI latency.
@@ -89,13 +91,49 @@ The IPC client also uses a plain 240-second timeout, allowing for launch,
 navigation, submission and snapshot work. This is not a request deadline;
 a stalled worker or lost response can still leave publication unconfirmed.
 
-The private transport is JSON over HTTP POST on
+The private transport uses HTTP POST with JSON requests on
 `/run/kern-browser/browser.sock`. The server checks kernel-supplied `SO_PEERCRED`
 before allocating a request thread, admitting only `kern-admin` and `kern-tools`.
 It then checks the caller UID against the route namespace on every request.
 Neither the agent nor Chromium can call these interfaces. The tools process
 cannot use operator routes, and the admin process cannot submit tool actions.
-Screens, typed input, passwords, and cookies never enter agent tool results.
+Saved-account screens, typed input, passwords, and cookies never enter agent tool results.
+Responses are JSON except for the anonymous screenshot action's binary PNG.
+
+## Anonymous URL screenshots
+
+`browser.screenshot_url` accepts exactly `{url}` and runs without approval when
+Browser is enabled. The tool validates a public HTTPS URL of at most 200 ASCII
+characters and applies the parameter guard to that initial URL. Redirects and
+page-generated requests do not repeat this input guard; existing Browser URL,
+relay and firewall restrictions still apply. Rendering uses the configured
+Browser connection, including its location settings. Public-address enforcement
+uses the existing boundary described above: the host firewall for Direct;
+trusted provider-side DNS/routing for Decodo. This action adds no DNS pinning
+or independent enforcement of the residential proxy's internal destinations.
+
+The tools UID calls `/actions/screenshot_url` over the existing socket. The
+service opens a fresh profile without reading any saved account authentication,
+renders JavaScript and normal page resources, captures the page and closes the
+browser without saving state. Capture uses one of three tool slots and can run
+while the operator uses the reserved login slot.
+Popups are closed; the requested page remains the capture target. There are no
+agent inputs for scripts, interaction, credentials, sessions or output paths.
+
+Capture uses a fixed 1100 × 760 viewport, a short rendering wait and a bounded
+scroll pass for lazy content. The PNG is capped at 1100 × 16000 pixels and
+20 MiB. A 60-second watchdog after startup terminates that temporary Chromium
+process group if navigation or capture stalls; the usual launch and cleanup
+bounds still apply. Larger documents are clipped, infinite/lazy pages may be
+incomplete, and login walls or challenges are captured as displayed.
+
+Success returns `image/png` with an exact `Content-Length`, bounded final-URL
+metadata and a clipping flag. A dedicated binary client validates the size,
+PNG header and dimensions. The Browser tool returns `StreamingAsset` through
+the existing tools-to-agent file pipeline, which saves the file in the agent
+workspace. Errors remain bounded JSON. Browser needs no shared filesystem,
+public download route or asset-token store. Existing JSON calls retain their
+3 MiB limit. Screenshot content is untrusted page data.
 
 ## Connected accounts
 
@@ -216,7 +254,7 @@ use Chromium's native implementation through the same HTTPS relay as page traffi
 Close also dismisses a popup whose Open failed or whose control expired, without
 cancelling another window's browser. Save is enabled only while the popup has
 control; Close during startup waits for Open and releases any acquired control.
-Cancel queues in the service's single worker even while a screenshot is busy,
+Cancel queues in the operator slot's worker even while a screenshot is busy,
 then validates its lease and closes the browser when the active operation ends.
 
 ## LinkedIn Browser contract
@@ -293,6 +331,7 @@ Only `kern-tools` can call these private routes:
 | Route | Body | Response |
 | --- | --- | --- |
 | `/actions/list` | `{}` | `{accounts: Account[]}`; reads saved metadata without browsing. |
+| `/actions/screenshot_url` | `{url}` | Binary PNG from a fresh anonymous profile, with bounded capture metadata. |
 | `/actions/post_tweet` | `{account_id, provider_identifier, text, in_reply_to_tweet_id?}` | `{status: "posted", url}`; executes the already-approved proposal. |
 
 The X agent-facing tool actions are `browser.x_connection_status` and
@@ -438,14 +477,25 @@ reaches the Browser service and does not count. Validation and preparation
 failures also do not count. A new day resets that action's count on its next submission. Disconnect
 deletes all usage with the account.
 
-All service operations run on one worker, with a request-wide busy lock. The
-limit check and count update happen within the serialized action. Tools do not
-read a count and later claim a slot. Requests wait up to one second for brief
-expiry maintenance to finish; longer contention returns busy without a retry
-queue. The admin bulk-approval UI serializes Browser decisions. The
-auto-approval worker already executes its whole batch sequentially through the
-synchronous tools client, so it needs no Browser-specific queue. Overlapping
-manual and automatic calls can still fail busy before submission.
+The service has four Chromium slots: one reserved for operator control and three
+for tool calls. Each slot owns a single worker thread and control port, preserving
+Playwright thread affinity. Only one operator login is active; a fresh Connect
+replaces abandoned control. Tool calls acquire a free tool slot, load current
+account metadata and authentication, perform the action and close Chromium before
+releasing the slot. Anonymous captures never load saved authentication. A full
+pool returns busy before starting work, with no action queue or automatic retry.
+
+An account can belong to only one active call or operator popup. Its reservation
+covers preparation, submission, usage updates, auth persistence and cleanup;
+other accounts remain independent. Metadata is refreshed between requests so an
+operator's cached profile cannot overwrite a tool's newer state. Limits and
+counts are checked inside the account reservation. The admin bulk-approval UI
+and automatic approval batches retain their existing sequential execution.
+
+All four browsers share the service's 2 GiB memory limit, 1,024-task budget and
+network configuration. The task budget includes Chromium threads and Xvfb. Saving global network settings still closes relay tunnels;
+it can interrupt in-flight tools. Login sessions and ordinary tool calls do not
+change network settings or block each other's slots.
 
 The X adapter verifies the live handle, prepares the composer or exact reply
 target, waits for the target and enabled submit button, and scopes editing
@@ -544,7 +594,8 @@ cookies/localStorage/IndexedDB. Kern starts the managed Chromium executable
 with a private temporary profile, then attaches Playwright over CDP to its
 original context. It does not use Playwright's launch defaults or create a new
 incognito context. Chromium's sandbox stays enabled. CDP binds loopback port
-7448; nftables permits only the Browser UID to connect or answer on that port.
+7448–7451, one per slot; nftables permits only the Browser UID to connect or
+answer on these ports.
 Deployment probes verify this boundary. Closing the browser stops its process
 group and removes the temporary profile; encrypted snapshots remain the only
 saved authentication state. No random fingerprint,
@@ -565,7 +616,7 @@ the Browser UID firewall still denies private, loopback and metadata egress
 outside its private relay/control exceptions. WebSocket payloads remain opaque
 inside website TLS, just like HTTPS payloads; the relay does not inspect them.
 
-Settings are operator-only and serialized with Browser actions. Finish the
+Settings are operator-only and run on the operator worker. Finish the
 login popup before saving/testing. Changing settings closes existing tunnels;
 Direct removes proxy credentials while keeping saved account logins. Blank
 password retains the secret only for the same username. Public responses omit

@@ -182,7 +182,7 @@ MANIFEST = ToolManifest(
     actions=protect_inputs((
         ActionSpec(
             id="fetch_page",
-            description="Fetch one public web page over HTTPS and return its response text.",
+            description="Fetch one public HTTPS page and return raw text, including HTML markup, inline. Does not render JavaScript; use fetch_page_file for saved source.",
             data_policy=(
                 "Fetches one public web page and returns its response text. Only the agent-supplied "
                 "page URL leaves the host, as an anonymous GET request with no cookies or "
@@ -361,7 +361,9 @@ MANIFEST = ToolManifest(
         "agent-shell domain rules."
         " Use head_url to inspect response headers/status and the redirect destination without "
         "downloading the body; HEAD "
-        "may be unsupported by a site even when GET works."
+        "may be unsupported by a site even when GET works. "
+        "Web Fetch does not execute JavaScript. For a screenshot of a rendered page, use Browser screenshot_url, "
+        "which uses a fresh anonymous profile. If Browser is disabled, ask the operator to enable it in Home > Integrations."
     ),
 )
 

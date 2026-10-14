@@ -129,6 +129,7 @@ class NetworkIntrospectionTests(unittest.TestCase):
             self.assertIn("fetch_page", denial["guidance"])
             self.assertIn("download_media", denial["guidance"])
             self.assertIn("head_url", denial["guidance"])
+            self.assertIn("browser screenshot_url", denial["guidance"])
             self.assertIn("does not need agent-shell custom-domain rules", denial["guidance"])
         self.assertIn("custom-domain rule", denials[1]["guidance"])
         self.assertIn("write repositories", denials[2]["guidance"])

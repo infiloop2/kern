@@ -345,7 +345,7 @@ class MemoryMonitorTests(unittest.TestCase):
             self.monitor.check_once()
         save.assert_not_called()
 
-    def test_full_self_memory_repeats_every_five_minutes_with_unchanged_query_and_revision(self):
+    def test_self_memory_is_read_every_five_minutes_with_unchanged_query_and_revision(self):
         self.query.return_value = 'User: Change arrows'
         current = {**page('thread-1'), 'scope': 'self', 'content': 'Complete notes. ' * 1000}
         self.self_read.return_value = current
@@ -428,6 +428,8 @@ class MemoryMonitorTests(unittest.TestCase):
 
 class SuggestionDeliveryTests(unittest.TestCase):
     def setUp(self):
+        self.memory_delivery = mm.memory_context.MemoryDelivery()
+        self.enterContext(patch.object(orch, 'memory_delivery', self.memory_delivery))
         self.turn = orch._Turn('codex', 'thread-1', 'gpt-6.1-sol', 'low', 1, retry_attempt=0)
         self.turn.phase = orch.ExecutionPhase.RUNNING
         self.turn.server = Mock()
@@ -487,6 +489,7 @@ class SuggestionDeliveryTests(unittest.TestCase):
             if not orch.harness_adapter(runtime).steerable:
                 continue
             with self.subTest(runtime=runtime):
+                self.memory_delivery.clear(self.turn.thread_id)
                 self.turn.runtime_type = runtime
                 with (patch.object(orch.state, 'mutation'),
                       patch.object(orch.state, 'append_agent_event') as append):

@@ -37,11 +37,13 @@ class UpworkResponseTests(unittest.TestCase):
                     self.assertNotIn("message_count", result)
                     self.assertEqual(json.loads(result["provider_details_json"])["message_count"], value)
 
-    def test_unknown_nested_fields_preserve_complete_provider_json(self):
+    def test_unknown_nested_fields_stay_with_their_record_without_repeating_known_fields(self):
         data = {"jobs": [{"id": "123", "new_requirements": {"text": "x" * 20000}}], "hasMore": False}
         result = self.result(data, "search_jobs")
-        self.assertEqual(result["jobs"], [{"id": "123"}])
-        self.assertEqual(json.loads(result["provider_details_json"]), data)
+        self.assertEqual(result["jobs"][0]["id"], "123")
+        self.assertEqual(json.loads(result["jobs"][0]["provider_extra_fields_json"]),
+                         {"new_requirements": data["jobs"][0]["new_requirements"]})
+        self.assertNotIn("provider_details_json", result)
 
     def test_changed_types_are_not_coerced_or_lost(self):
         data = {"data": {"marketplaceJobPosting": {"id": "123", "content": {"title": "Engineer", "description": "Project"}}}, "connects_cost": "unknown", "can_apply": None, "connects_balance": 12}
@@ -49,7 +51,8 @@ class UpworkResponseTests(unittest.TestCase):
         self.assertNotIn("can_apply", result)
         self.assertNotIn("connects_cost", result)
         self.assertEqual(result["connects_balance"], 12)
-        self.assertEqual(json.loads(result["provider_details_json"]), data)
+        self.assertEqual(json.loads(result["provider_extra_fields_json"]),
+                         {"connects_cost": "unknown", "can_apply": None})
 
     def test_unknown_section_shape_is_preserved_in_account_contract(self):
         data = {"new_dashboard_section": {"unread": 3}}
@@ -101,3 +104,52 @@ class UpworkResponseTests(unittest.TestCase):
                              ("get_dashboard", {"trace_id": "trace", "status": "ok"})):
             with self.subTest(action=action, data=data), self.assertRaises(ValueError):
                 self.result(data, action)
+
+
+    def test_nested_extras_round_trip_with_mixed_arrays_and_reserved_keys(self):
+        # Restore only typed objects; provider JSON is already an opaque value.
+        def restore(value):
+            if isinstance(value, list):
+                return [restore(child) for child in value]
+            if isinstance(value, dict):
+                result = {key: restore(child) for key, child in value.items()
+                          if key != "provider_extra_fields_json"}
+                result.update(json.loads(value.get("provider_extra_fields_json", "{}")))
+                return result
+            return value
+
+        data = {"jobs": [
+            {"id": "first", "title": "Full title", "skills": ["Python", None, {"new": True}],
+             "client": {"rating": "not rated", "country": "UK", "new": [None, {}, []]},
+             "provider_extra_fields_json": "provider-owned field", "provider_details_json": {"original": True}},
+            {"id": "second", "title": "Other job", "skills": [], "unknown": False},
+        ], "next_cursor": "cursor-2", "hasMore": True, "unknown": {"key": None}}
+        result = self.result(data, "search_jobs")
+        self.assertEqual(restore(result), data)
+        self.assertEqual([job["id"] for job in result["jobs"]], ["first", "second"])
+        self.assertEqual(result["next_cursor"], "cursor-2")
+        self.assertNotIn("skills", result["jobs"][0])
+        self.assertEqual(result["jobs"][1]["skills"], [])
+
+    def test_local_extras_redact_keys_and_values_before_projection(self):
+        result = self.result({"jobs": [{"id": "123", "client": {
+            "PRIVATE_ACCESS_TOKEN": "PRIVATE_REFRESH_TOKEN"}}]}, "search_jobs")
+        self.assertEqual(json.loads(result["jobs"][0]["client"]["provider_extra_fields_json"]),
+                         {"[redacted]": "[redacted]"})
+        with self.assertRaises(ValueError):
+            self.result({"jobs": [{"id": "123", "PRIVATE_ACCESS_TOKEN": 1,
+                                   "PRIVATE_REFRESH_TOKEN": 2}]}, "search_jobs")
+
+    def test_unknown_job_field_does_not_repeat_complete_description(self):
+        description = "Full requirements with Unicode 🙂. " * 1000
+        data = {"data": {"marketplaceJobPosting": {"id": "123", "content": {
+            "title": "Engineer", "description": description, "screening_questions": ["Experience?"]}}},
+            "can_apply": True, "connects_cost": 21}
+        result = self.result(data, "get_job")
+        content = result["data"]["marketplaceJobPosting"]["content"]
+        self.assertEqual(content["description"], description)
+        self.assertEqual(json.loads(content["provider_extra_fields_json"]),
+                         {"screening_questions": ["Experience?"]})
+        self.assertEqual(result["connects_cost"], 21)
+        self.assertTrue(result["can_apply"])
+        self.assertEqual(json.dumps(result, ensure_ascii=False).count(description), 1)

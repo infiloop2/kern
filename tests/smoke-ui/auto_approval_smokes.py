@@ -3,6 +3,8 @@ from urllib.parse import parse_qs, urlparse
 
 from playwright.sync_api import expect
 
+from host.runtime.admin_api.github_push_prompt import POLICY as PUSH_POLICY
+
 
 def auto_approval_smoke(browser, url, screenshot_dir=None):
     context = browser.new_context(viewport={"width": 1440, "height": 1100})
@@ -33,15 +35,15 @@ def auto_approval_smoke(browser, url, screenshot_dir=None):
             route.fulfill(json={"saved": True})
         elif path.endswith("/policy"):
             if route.request.method == "DELETE":
-                policies.clear()
+                policies[:] = [p for p in policies if (p["tool_id"], p["action_id"]) != (body["tool_id"], body["action_id"])]
             else:
-                policies[:] = [body]
+                policies[:] = [p for p in policies if (p["tool_id"], p["action_id"]) != (body["tool_id"], body["action_id"])] + [body]
             route.fulfill(json={"saved": True})
         else:
             selected = parse_qs(urlparse(route.request.url).query).get("outcome", [""])[0]
             rows = [row for row in checks if not selected or row["outcome"] == selected]
             route.fulfill(json={"settings": settings, "policies": policies, "available": availability[0], "quiet": False, "next_review_at": 1788961800,
-                                "catalog": [{"tool_id": "gmail", "name": "Gmail", "actions": [{"id": "send_email", "description": "Send an email from a connected account."}]}],
+                                "catalog": [{"tool_id": "gmail", "name": "Gmail", "actions": [{"id": "send_email", "description": "Send an email from a connected account."}]}, {"tool_id": "github", "name": "GitHub", "actions": [{"id": "push", "name": "Push changing .github/", "description": "Reviews immediately when a push is held; ignores the tool-review schedule and quiet hours.", "fixed_instructions": PUSH_POLICY}]}],
                                 "history": {"items": rows, "total": len(rows), "page": 1, "pages": 1}})
 
     def tool_route(route):
@@ -139,5 +141,52 @@ def auto_approval_smoke(browser, url, screenshot_dir=None):
     page.locator("#auto-policy-delete").click()
     expect(page.locator(".auto-policy-row")).to_have_count(0)
     expect(page.get_by_role("button", name="Create your first policy")).to_be_visible()
+    # GitHub uses the same add/save/view/delete flow, with fixed server-owned text.
+    page.get_by_role("button", name="Add policy", exact=True).click()
+    page.locator("#auto-policy-tool").select_option("github")
+    page.locator("#auto-policy-action").select_option("push")
+    expect(page.locator("#auto-policy-instructions")).to_have_value(PUSH_POLICY)
+    expect(page.locator("#auto-policy-instructions")).to_have_attribute("readonly", "")
+    expect(page.locator("#auto-policy-timing-hint")).to_contain_text("quiet hours")
+    expect(page.locator("#auto-policy-timing-hint")).to_contain_text("OpenAI")
+    page.get_by_role("button", name="Save policy", exact=True).click()
+    expect(page.locator(".auto-policy-row")).to_contain_text("Push changing .github/")
+    expect(page.locator(".auto-policy-row .auto-edit-label")).to_contain_text("View")
+    checks.append({"id": 3, "kind": "github_push", "tool_id": "github", "action_id": "push", "summary": "Push to owner/repo", "checked_at": 1788960000,
+                   "policy": PUSH_POLICY, "reason": "Routine CI change.", "model": "gpt-6.1-sol", "outcome": "approved", "status": "approved", "result": "",
+                   "approval_id": "push-abc123", "request": {"push_id": "abc123", "ref_updates": [{"old": "abc", "new": "def", "ref": "refs/heads/topic"}], "changed_paths": [".github/workflows/ci.yml"]}})
+    page.locator('[data-action="approval-refresh"]').click()
+    push_row = page.locator(".auto-history-row").filter(has_text="Push to owner/repo")
+    push_row.locator("summary").click()
+    expect(push_row).to_contain_text("Push succeeded")
+    push_row.get_by_role("button", name="View held push").click()
+    expect(push_row.locator("pre")).to_contain_text("refs/heads/topic")
+    checks[-1].update(status="pending", approval_error="remote moved")
+    page.locator('[data-action="approval-refresh"]').click()
+    push_row.locator("summary").click()
+    expect(push_row).to_contain_text("Pending")
+    expect(push_row).not_to_contain_text("Push succeeded")
+    expect(push_row).to_contain_text("remote moved")
+    for width in (1440, 390, 320):
+        page.set_viewport_size({"width": width, "height": 1000})
+        page.locator(".auto-policy-row").click()
+        expect(page.locator("#auto-policy-instructions")).to_have_attribute("readonly", "")
+        assert page.locator("#auto-policy-dialog").evaluate("el => el.scrollWidth <= el.clientWidth"), "push editor overflow"
+        if screenshot_dir:
+            page.screenshot(path=str(screenshot_dir / f"github-push-policy-{width}.png"))
+        page.locator('[data-auto-action="close"]').first.click()
+    page.locator(".auto-policy-row").click()
+    page.once("dialog", lambda dialog: dialog.accept())
+    page.locator("#auto-policy-delete").click()
+    expect(page.locator(".auto-policy-row")).to_have_count(0)
+    # Switching back to a tool restores the editable policy and schedule copy.
+    page.get_by_role("button", name="Add policy", exact=True).click()
+    page.locator("#auto-policy-tool").select_option("github")
+    page.locator("#auto-policy-action").select_option("push")
+    page.locator("#auto-policy-tool").select_option("gmail")
+    page.locator("#auto-policy-action").select_option("send_email")
+    expect(page.locator("#auto-policy-instructions")).to_be_editable()
+    expect(page.locator("#auto-policy-timing-hint")).to_contain_text("next scheduled review")
+    page.locator('[data-auto-action="close"]').first.click()
     assert not executed and not errors, errors
     context.close()

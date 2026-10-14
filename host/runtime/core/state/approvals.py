@@ -32,7 +32,10 @@ _APPROVAL_ROWS = """
            EXTRACT(EPOCH FROM COALESCE(resolved_at, requested_at)::timestamptz)::bigint,
            jsonb_build_object(
                'owner', owner, 'repo', repo, 'ref_updates', ref_updates,
-               'changed_paths', changed_paths, 'result', COALESCE(detail, '')
+               'changed_paths', changed_paths, 'result', COALESCE(detail, ''),
+               'has_auto_policy', EXISTS (SELECT 1 FROM auto_approval_policies WHERE tool_id = 'github' AND action_id = 'push'),
+               'auto_review', (SELECT jsonb_build_object('outcome', r.outcome, 'reason', r.reason, 'checked_at', r.checked_at, 'approval_error', r.approval_error)
+                               FROM auto_approval_reviews r WHERE r.push_id = pending_pushes.id ORDER BY r.id DESC LIMIT 1)
            )
     FROM pending_pushes
 """

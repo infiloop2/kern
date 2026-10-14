@@ -46,7 +46,7 @@
 | `read-agent-file` helper | starts as root, then `kern-agent` | admin API via sudo | Lists agent-home directories, returns a bounded text preview, or streams one bounded regular file for authenticated preview/download without giving admin general agent-home access. |
 | `mint-github-app-token` helper | root | admin API via sudo | Mints installation-wide GitHub App tokens through root egress because the admin service has none; the proxy repo guard is the per-repository boundary. |
 | `audit-github-repo` helper | root | admin API via sudo | Reads GitHub repository/security facts with the working token and returns facts without storing secrets. |
-| `approve-github-push` helper | root | admin API via sudo | Replays or cleans up a push held by the `.github` approval gate using the proxy-state quarantine mirror and a working GitHub token piped on stdin. |
+| `approve-github-push` helper | root | admin API via sudo | Reads bounded review context, replays or cleans up a push held by the `.github` approval gate using the proxy-state quarantine mirror and a working GitHub token piped on stdin. |
 | `run-agent-script` helper | starts as root, then `kern-agent` | admin API via sudo | Runs one scheduled bash script from the agent home in the ordinary agent scope, with a scope `RuntimeMaxSec` backstop behind the 15-minute turn timeout. |
 | `stop-agent-thread` helper | root | admin API via sudo | Frees a thread's transient agent scope after a stop: SIGKILLs the scope's cgroup, stops the unit, and clears any failed remnant. |
 | `reboot-host` helper | root | admin API via sudo | Requests a host reboot. |

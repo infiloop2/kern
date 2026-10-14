@@ -1,10 +1,82 @@
 """Shared conversation input for admission, mid-turn recall and task titles."""
 from __future__ import annotations
 
+from collections import OrderedDict
+import json
+import threading
+import time
 from typing import Any
 
 from host.memory_recall import conversation_query
 from host.runtime.core import host_errors, pgclient, state
+
+MEMORY_BODY_TTL_SECONDS = 600
+
+
+class MemoryDelivery:
+    """Bounded ten-minute body-delivery cache, not a provider context inventory.
+
+    Each thread retains only page IDs, latest revisions and monotonic times.
+    Explicit context clearing, restart and eviction favor sending again.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._threads: OrderedDict[str, dict[str, tuple[int, float]]] = OrderedDict()
+
+    def select(
+        self, thread_id: str, pages: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], str]:
+        now = time.monotonic()
+        with self._lock:
+            known = self._threads.get(thread_id, {})
+            selected, decisions = [], []
+            for page in pages:
+                last = known.get(page['page_id'])
+                elapsed = now - last[1] if last is not None else None
+                recent = (last is not None and last[0] == page['revision']
+                          and elapsed is not None and 0 <= elapsed < MEMORY_BODY_TTL_SECONDS)
+                reason = ('new' if last is None else 'changed' if last[0] != page['revision']
+                          else 'recent' if recent else 'expired')
+                if not recent:
+                    selected.append(page)
+                decisions.append({
+                    'page_id': page['page_id'], 'revision': page['revision'],
+                    'decision': 'suppressed' if recent else 'prepared', 'reason': reason,
+                    'seconds_since_injection': round(elapsed, 3) if elapsed is not None else None,
+                })
+        detail = {
+            'delivery_status': 'pending_readiness', 'ttl_seconds': MEMORY_BODY_TTL_SECONDS,
+            'selected_count': len(pages), 'prepared_injection_count': len(selected),
+            'suppressed_count': len(pages) - len(selected), 'pages': decisions,
+        }
+        return selected, 'Memory injection preparation: ' + json.dumps(detail, separators=(',', ':')) + '\n'
+
+    def delivered(
+        self, thread_id: str, pages: tuple[tuple[str, int], ...],
+    ) -> None:
+        now = time.monotonic()
+        if not pages:
+            return
+        with self._lock:
+            known = {page: last for page, last in self._threads.get(thread_id, {}).items()
+                     if 0 <= now - last[1] < MEMORY_BODY_TTL_SECONDS}
+            for page_id, revision in pages:
+                known.pop(page_id, None)
+                known[page_id] = (revision, now)
+            while len(known) > 64:
+                del known[next(iter(known))]
+            self._threads[thread_id] = known
+            self._threads.move_to_end(thread_id)
+            while len(self._threads) > 128:
+                self._threads.popitem(last=False)
+
+    def clear(self, thread_id: str) -> None:
+        with self._lock:
+            self._threads.pop(thread_id, None)
+
+
+memory_delivery = MemoryDelivery()
 
 
 def load_query(thread_id: str, incoming: dict[str, Any] | None = None) -> str:

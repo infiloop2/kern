@@ -306,11 +306,12 @@ export const MANAGED_INTEGRATIONS = {
       { title: "Store the credential", description: "Enable GitHub, expand the row, select the credential type, enter its values, and choose Set credential. Stored secret values are never read back into the UI." },
       { title: "Add write repositories", description: "Under Write repositories, add each owner/repository that may receive a push or mutating REST API call. Repositories not listed remain read-only." },
       { title: "Keep direct main pushes blocked", description: "Kern enables Block direct pushes to main by default. Agents can still push feature branches and merge pull requests, but the proxy rejects a Git push transaction that updates refs/heads/main." },
-      { title: "Keep .github push approval enabled", description: "Kern enables Require approval for .github pushes when GitHub is first turned on. Keep it enabled so workflow and other .github path changes are held for an operator decision; GitHub Actions workflows can execute arbitrary code with network access and repository credentials." },
+      { title: "Keep .github push approval enabled", description: "Kern enables Require approval for .github pushes when GitHub is first turned on. Keep it enabled so workflow and other .github path changes are held for review. To automate that review, save the fixed GitHub push policy in Approvals > Auto-approval and enable OpenAI Host AI inference. GitHub Actions workflows can execute arbitrary code with network access and repository credentials." },
     ],
     capabilities: [
       { name: "Git and REST reads", description: "Clone, fetch, inspect releases and raw files, and use read-only GitHub REST endpoints wherever the credential has access." },
       { name: "Scoped Git and REST writes", description: "Push and call mutating repository REST endpoints only for configured write repositories." },
+      { name: "Held push auto-approval", description: "Optionally review .github changes for malicious exploitation of pull-request workflows using the fixed policy in Auto-approval. Reviews run immediately, including during tool quiet hours; suspicious changes or review failures stay pending." },
     ],
     dataSummary: {
       items: [
@@ -488,7 +489,7 @@ export const HOST_INFERENCE_INTEGRATIONS = {
     apiKeyPlaceholder: "sk-...",
     featureSettings: [],
     label: "OpenAI API",
-    summary: "Name agent tasks, compare memory rankings, and review tool requests.",
+    summary: "Name agent tasks, compare memory rankings, and review tool requests and held GitHub pushes.",
     protections: [
       "The key stays encrypted in host state and is used only by the dedicated kern-host-inference service. Agents and agent-facing tools cannot read it or call this provider.",
       "Kern uses GPT-6 Luna for task titles and diagnostic memory ranking comparisons, and GPT-6.1 Sol for auto-approval policy reviews.",
@@ -500,7 +501,7 @@ export const HOST_INFERENCE_INTEGRATIONS = {
       { title: "Check Swarm", description: "New turns receive short task titles when this connection is enabled. Without it, Task stays unavailable." },
     ],
     capabilities: [
-      { name: "Auto-approval", description: "Reviews pending tool requests against policies you save in Approvals. Clear matches are approved automatically; other requests stay pending with an explanation." },
+      { name: "Auto-approval", description: "Reviews pending tool requests against policies you save in Approvals. Clear matches are approved automatically; other requests stay pending with an explanation. Save the fixed GitHub push policy to review held .github/ pushes immediately, including during tool quiet hours." },
       { name: "Swarm task titles", description: "Names each new on-demand agent task and refreshes its title when ongoing work changes." },
       { name: "Memory ranking comparison", description: "Runs Luna Decisions alongside Jev and records its proposed memory order in recall diagnostics. Jev continues to control selection; Luna results are for comparison only." },
     ],
@@ -508,7 +509,7 @@ export const HOST_INFERENCE_INTEGRATIONS = {
       items: [
         {
           title: "What leaves this host",
-          description: "All data in Kern can leave this host for OpenAI when Host AI features use this connection. Task titles use bounded user and assistant messages, peer messages, scheduled requests and approval-outcome summaries. Memory ranking comparisons send the same bounded task context and up to 20 candidate descriptions, without page contents or page IDs. Auto-approval sends your policy and the exact request, including action, account, summary and payload, through the shared credential redactor.",
+          description: "All data in Kern can leave this host for OpenAI when Host AI features use this connection. Task titles use bounded user and assistant messages, peer messages, scheduled requests and approval-outcome summaries. Memory ranking comparisons send the same bounded task context and up to 20 candidate descriptions, without page contents or page IDs. Auto-approval sends your policy and the exact request, including action, account, summary and payload, through the shared credential redactor. GitHub push reviews send repository, refs, commits, diffs and complete before/after contents of changed .github/ files through the same redactor.",
           links: [
             { label: "OpenAI API data controls", url: "https://platform.openai.com/docs/guides/your-data" },
           ],

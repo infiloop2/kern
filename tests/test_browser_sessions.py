@@ -26,7 +26,8 @@ from host.runtime.admin_api import browser as admin_browser
 from host.runtime.admin_api.errors import ApiError
 from host.tools.browser import BUNDLED_TOOL, MANIFEST
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ApprovalExecuted
-from browser_fakes import MemoryStore
+from browser_fakes import DispatchSessions, MemoryStore
+from host.runtime.browser.sessions import Sessions
 from test_tools import FakeHostAPI, assert_matches_output_schema
 
 
@@ -487,11 +488,11 @@ class BrowserSessionsTests(unittest.TestCase):
         for protocol in ("udp", "tcp"):
             self.assertLess(bootstrap.index(f'meta skuid "kern-browser" {protocol} dport 53 accept'), private_drop)
         self.assertNotIn("kern-browser-network", bootstrap)
-        debug_allow = bootstrap.index('tcp dport @BROWSER_DEBUG_PORT@ meta skuid "kern-browser" accept')
-        debug_drop = bootstrap.index('oif lo tcp dport @BROWSER_DEBUG_PORT@ drop')
+        debug_allow = bootstrap.index('tcp dport @BROWSER_DEBUG_PORT@-@BROWSER_DEBUG_PORT_LAST@ meta skuid "kern-browser" accept')
+        debug_drop = bootstrap.index('oif lo tcp dport @BROWSER_DEBUG_PORT@-@BROWSER_DEBUG_PORT_LAST@ drop')
         self.assertLess(debug_allow, debug_drop)
         self.assertLess(debug_drop, private_drop)
-        self.assertLess(bootstrap.index('oif lo tcp sport @BROWSER_DEBUG_PORT@ drop'), private_drop)
+        self.assertLess(bootstrap.index('oif lo tcp sport @BROWSER_DEBUG_PORT@-@BROWSER_DEBUG_PORT_LAST@ drop'), private_drop)
 
     def test_input_and_origin_validation(self):
         for url in ["file:///etc/passwd", "http://x.com", "https://127.0.0.1", "https://[::1]", "https://169.254.169.254", "https://user:password@x.com", "https://x.com:7443"]:
@@ -623,9 +624,7 @@ class BrowserSessionsTests(unittest.TestCase):
     def test_real_socket_rejects_forbidden_peer_before_dispatch(self):
         socket_path = str(self.root / "browser.sock")
         server = UnixSocketServer(socket_path, Handler)
-        server.busy = threading.Lock()
-        server.worker = ThreadPoolExecutor(max_workers=1)
-        server.profiles = SimpleNamespace(dispatch=lambda operation, body, *, agent_action=False: {"operation": operation, "agent_action": agent_action, "body": body})
+        server.sessions = DispatchSessions(SimpleNamespace(dispatch=lambda operation, body, *, agent_action=False: {"operation": operation, "agent_action": agent_action, "body": body}))
         thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
         thread.start()
         try:
@@ -638,9 +637,6 @@ class BrowserSessionsTests(unittest.TestCase):
                 with patch("host.runtime.browser.service.pwd.getpwnam", side_effect=user):
                     connection = UnixHTTPConnection(socket_path)
                     try:
-                        if path == "/operator/input":
-                            server.busy.acquire()
-                            threading.Timer(0.05, server.busy.release).start()
                         body = {"kind": "text", "text": "😀" * 4096} if path == "/operator/input" else {}
                         connection.request("POST", path, json.dumps(body) if body else None, {"Content-Type": "application/json"})
                         response = connection.getresponse()
@@ -657,7 +653,6 @@ class BrowserSessionsTests(unittest.TestCase):
             server.shutdown()
             thread.join(timeout=5)
             server.server_close()
-            server.worker.shutdown()
 
     def test_busy_admission_reports_no_submission_through_approved_tool(self):
         api = FakeHostAPI()
@@ -667,10 +662,8 @@ class BrowserSessionsTests(unittest.TestCase):
         approved = api.approvals.approve(pending.approval_id)
         socket_path = str(self.root / "busy.sock")
         server = UnixSocketServer(socket_path, Handler)
-        server.busy = threading.Lock()
-        server.worker = ThreadPoolExecutor(max_workers=1)
         dispatch = Mock()
-        server.profiles = SimpleNamespace(dispatch=dispatch)
+        server.sessions = DispatchSessions(SimpleNamespace(dispatch=dispatch))
         thread = threading.Thread(target=lambda: server.serve_forever(poll_interval=0.01), daemon=True)
         thread.start()
 
@@ -682,16 +675,17 @@ class BrowserSessionsTests(unittest.TestCase):
                 browser_client, "Connection", side_effect=lambda: UnixHTTPConnection(socket_path),
             ):
                 # Busy during the account check: no worker task, let alone a post.
-                server.busy.acquire()
+                submit = server.sessions.submit
+                server.sessions.submit = Mock(side_effect=browser_client.BrowserActionNotStarted())
                 result = BUNDLED_TOOL.execute_approved(approved, api)
                 self.assertIsInstance(result, ActionFailed)
                 self.assertIn("No post or message was submitted by this attempt", result.error)
                 dispatch.assert_not_called()
-                server.busy.release()
+                server.sessions.submit = submit
 
                 # Account check succeeds; posting itself is rejected at admission.
                 def hold_after_list(operation, body, *, agent_action):
-                    server.busy = Mock(acquire=Mock(return_value=False))
+                    server.sessions.submit = Mock(side_effect=browser_client.BrowserActionNotStarted())
                     return selected
                 dispatch.side_effect = hold_after_list
                 result = BUNDLED_TOOL.execute_approved(approved, api)
@@ -701,7 +695,7 @@ class BrowserSessionsTests(unittest.TestCase):
                 self.assertEqual(dispatch.call_args.args[0], "list")
 
                 # The same text after dispatch is not evidence of non-execution.
-                server.busy = threading.Lock()
+                server.sessions.submit = submit
                 dispatch.reset_mock()
                 dispatch.side_effect = [selected, BrowserError("Browser is busy. Wait for the current action to finish.")]
                 result = BUNDLED_TOOL.execute_approved(approved, api)
@@ -713,7 +707,6 @@ class BrowserSessionsTests(unittest.TestCase):
             server.shutdown()
             thread.join(timeout=5)
             server.server_close()
-            server.worker.shutdown()
 
     def test_busy_client_and_unapproved_calls_do_not_require_approval(self):
         connection = Mock()
@@ -790,13 +783,12 @@ class BrowserSessionsTests(unittest.TestCase):
 
         socket_path = str(self.root / "cancel.sock")
         server = UnixSocketServer(socket_path, Handler)
-        server.busy = threading.Lock()
-        server.worker = ThreadPoolExecutor(max_workers=1)
-        server.profiles = accounts
-        submit = server.worker.submit
+        server.sessions = Sessions(self.store, FakeBrowser)
+        server.sessions.operator = accounts
+        submit = server.sessions.workers[0].submit
 
-        def observe_submit(function, operation, body, **kwargs):
-            future = submit(function, operation, body, **kwargs)
+        def observe_submit(function, slot, operation, body, agent_action):
+            future = submit(function, slot, operation, body, agent_action)
             if operation == "cancel":
                 cancel_queued.set()
             return future
@@ -814,14 +806,14 @@ class BrowserSessionsTests(unittest.TestCase):
         thread.start()
         clients = ThreadPoolExecutor(max_workers=2)
         try:
-            with patch.object(profile.browser, "frame", side_effect=frame), patch.object(server.worker, "submit", side_effect=observe_submit), patch(
+            with patch.object(profile.browser, "frame", side_effect=frame), patch.object(server.sessions.workers[0], "submit", side_effect=observe_submit), patch(
                 "host.runtime.browser.service.pwd.getpwnam", return_value=SimpleNamespace(pw_uid=os.getuid()),
             ):
                 captured = clients.submit(request, "frame")
                 self.assertTrue(frame_started.wait(3), "frame never acquired the worker")
                 cancelled = clients.submit(request, "cancel")
                 self.assertTrue(cancel_queued.wait(3), "Cancel was rejected instead of queued behind the busy frame")
-                self.assertTrue(server.busy.locked())
+                self.assertGreater(server.sessions.busy[0], 0)
                 self.assertFalse(cancelled.done())
                 self.assertEqual(profile.lease, lease)
                 release_frame.set()
@@ -836,7 +828,7 @@ class BrowserSessionsTests(unittest.TestCase):
             server.shutdown()
             thread.join(timeout=5)
             server.server_close()
-            server.worker.shutdown()
+            server.sessions.close()
 
     def test_admin_routes_complete_new_login_through_real_account_service(self):
         from host.runtime.admin_api import service as admin_api

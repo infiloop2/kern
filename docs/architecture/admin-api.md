@@ -317,7 +317,7 @@ The admin service validates and compares the result, then exposes it through
 `/v1/health`. A failed check preserves the last successful advisory result,
 does not degrade host health, and is retried from scratch on the next poll.
 
-## Automatic tool approvals
+## Automatic approvals
 
 Operator-only routes, using the ordinary authenticated admin session and CSRF
 header:
@@ -336,6 +336,15 @@ model, timestamp, original approval identity, current execution result and
 Ordinary approval summaries include `has_auto_policy` and the latest
 `auto_review` with its outcome, reason and check timestamp. No check is represented
 by an absent `auto_review`, not a persisted lifecycle state.
+
+The catalog includes the built-in `github` / `push` action with a display `name`
+and `fixed_instructions`. PUT requires that exact fixed text; edits return 400.
+DELETE removes activation. Push reviews run immediately (a one-second queue
+check) independently of tool schedule/quiet hours. History rows have `kind`
+(`tool` or `github_push`); push rows carry `approval_id` prefixed `push-` and
+`request` metadata (`push_id`, `ref_updates`, `changed_paths`). For pushes,
+status `approved` means replay succeeded; for tools it can precede execution.
+Both kinds include review annotations on ordinary approval summaries.
 
 The auto-approver calls the same tools decision path as manual approval and
 records its decision before that call. Call errors are stored separately from

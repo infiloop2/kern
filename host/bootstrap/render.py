@@ -20,6 +20,7 @@ from host.constants import (
     ADMIN_API_PORT,
     BROWSER_NETWORK_PORT,
     BROWSER_DEBUG_PORT,
+    BROWSER_DEBUG_PORT_LAST,
     AGENT_PREVIEW_PORT_BASE,
     AGENT_PREVIEW_PORT_COUNT,
     WORKSPACE_ADMIN_GROUP_GID,
@@ -192,6 +193,7 @@ def _render_bootstrap() -> str:
         .replace("@ADMIN_PORT@", str(ADMIN_API_PORT))
         .replace("@BROWSER_NETWORK_PORT@", str(BROWSER_NETWORK_PORT))
         .replace("@BROWSER_DEBUG_PORT@", str(BROWSER_DEBUG_PORT))
+        .replace("@BROWSER_DEBUG_PORT_LAST@", str(BROWSER_DEBUG_PORT_LAST))
         .replace("@PROXY_PORT@", str(PROXY_PORT))
         .replace("@GITHUB_REPOSITORY@", PUBLIC_GITHUB_REPOSITORY)
         .replace("@AGENT_PREVIEW_NFTABLES_RULES@", _agent_preview_nftables_rules())

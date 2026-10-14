@@ -110,7 +110,7 @@ class StateStorageTests(unittest.TestCase):
             assistant = state.append_agent_event(cur, "thread.message", "thread-1", {
                 "source": "agent", "message": "The release is ready",
             })
-            context = state.append_agent_event(cur, "thread.notice", "thread-1", messages.memory_notice([], "Recall diagnostics"))
+            context = state.append_agent_event(cur, "thread.notice", "thread-1", messages.memory_notice([], "Recall diagnostics", delivered=False))
             action = state.append_agent_event(cur, "thread.notice", "thread-1", {"notice": {
                 "kind": "app_ui_published", "summary": "Published Portfolio UI", "details": "Tool request and result",
             }})

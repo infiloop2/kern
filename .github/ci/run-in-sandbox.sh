@@ -22,9 +22,12 @@ trap cleanup EXIT
 mkdir -p "${host_sandbox_root}/home"
 chmod -R 0777 "${host_sandbox_root}"
 
+# Headed Chromium slots share this private tmpfs; Docker's 64 MiB default
+# is too small for concurrent renderers. Keep the IPC namespace isolated.
 docker run \
   --rm \
   --network none \
+  --shm-size=1g \
   --cap-drop ALL \
   --security-opt no-new-privileges:true \
   --mount "type=bind,src=${workspace_root},dst=/src,readonly" \

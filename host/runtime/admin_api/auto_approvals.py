@@ -7,6 +7,7 @@ import time
 from typing import Any
 
 from host.runtime.admin_api.errors import ApiError
+from host.runtime.admin_api import github_push_prompt
 from host.runtime.admin_api import tools_client, auto_approval_prompt as auto_approval
 from host.runtime.core import host_errors, state
 from host.runtime.host_inference import client, json_contract
@@ -49,7 +50,12 @@ def catalog() -> list[dict[str, Any]]:
              "actions": [{"id": action.id, "description": action.description}
                          for action in tool.manifest.actions if action.approval == "operator"]}
             for tool in sorted(tools_host.BUNDLED_TOOLS.values(), key=lambda tool: tool.manifest.display_name)
-            if any(action.approval == "operator" for action in tool.manifest.actions)]
+            if any(action.approval == "operator" for action in tool.manifest.actions)] + [{
+                "tool_id": github_push_prompt.TOOL_ID, "name": "GitHub", "actions": [{
+                    "id": github_push_prompt.ACTION_ID, "name": "Push changing .github/",
+                    "description": "Reviews immediately when a push is held; ignores the tool-review schedule and quiet hours. Requires the GitHub .github/ push gate and enabled, configured OpenAI.",
+                    "fixed_instructions": github_push_prompt.POLICY,
+                }]}]
 
 
 def page(query: dict[str, list[str]]) -> dict[str, Any]:
@@ -69,6 +75,10 @@ def page(query: dict[str, list[str]]) -> dict[str, Any]:
 def policy_input(body: Any) -> tuple[str, str, str]:
     if not isinstance(body, dict) or not all(isinstance(body.get(k), str) for k in ("tool_id", "action_id", "instructions")):
         raise ApiError(HTTPStatus.BAD_REQUEST, "tool, action and instructions are required")
+    if (body["tool_id"], body["action_id"]) == (github_push_prompt.TOOL_ID, github_push_prompt.ACTION_ID):
+        if body["instructions"] != github_push_prompt.POLICY:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "The GitHub push review policy is fixed and cannot be edited")
+        return github_push_prompt.TOOL_ID, github_push_prompt.ACTION_ID, github_push_prompt.POLICY
     tool = tools_host.BUNDLED_TOOLS.get(body["tool_id"])
     action = tool.manifest.action(body["action_id"]) if tool else None
     if action is None or action.approval != "operator":

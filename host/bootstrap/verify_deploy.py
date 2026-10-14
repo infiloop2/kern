@@ -51,6 +51,7 @@ from host.constants import (
     BROWSER_SOCKET_PATH,
     BROWSER_NETWORK_PORT,
     BROWSER_DEBUG_PORT,
+    BROWSER_DEBUG_PORT_LAST,
 )
 
 Runner = Callable[[list[str]], "subprocess.CompletedProcess[str]"]
@@ -401,8 +402,10 @@ def enforced_probes() -> list[Probe]:
     return [
         ("kern-browser", "127.0.0.1", BROWSER_NETWORK_PORT, "reachable", "browser to HTTPS relay"),
         ("kern-agent", "127.0.0.1", BROWSER_NETWORK_PORT, "blocked", "agent to Browser relay"),
-        ("kern-browser", "127.0.0.1", BROWSER_DEBUG_PORT, "reachable", "browser to Chromium control"),
-        *((user, "127.0.0.1", BROWSER_DEBUG_PORT, "blocked", f"{user} to Chromium control")
+        *(("kern-browser", "127.0.0.1", port, "reachable", "browser to Chromium control")
+          for port in range(BROWSER_DEBUG_PORT, BROWSER_DEBUG_PORT_LAST + 1)),
+        *((user, "127.0.0.1", port, "blocked", f"{user} to Chromium control")
+          for port in range(BROWSER_DEBUG_PORT, BROWSER_DEBUG_PORT_LAST + 1)
           for user in ("kern-agent", "kern-tools", "kern-proxy", "kern-admin", "kern-host-inference", "cloudflared")),
         ("kern-browser", "127.0.0.1", ADMIN_API_PORT, "blocked", "browser to admin API"),
         ("kern-browser", "169.254.169.254", 80, "blocked", "browser to instance metadata"),
@@ -568,7 +571,7 @@ def check_resource_protection(
         except OSError as exc:
             failures.append(f"resources: cannot read {group} io.weight: {exc}")
     browser = cgroup_root / "kern_workspace.slice/kern-browser.service"
-    for filename, expected in (("cpu.weight", 100), ("memory.max", 2 * 1024**3)):
+    for filename, expected in (("cpu.weight", 100), ("memory.max", 2 * 1024**3), ("pids.max", 1024)):
         try:
             if int((browser / filename).read_text()) != expected:
                 failures.append(f"resources: browser {filename} must be {expected}")

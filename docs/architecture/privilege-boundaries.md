@@ -123,7 +123,7 @@ the root volume as root-owned code.
 - `audit-github-repo` — fetches the per-repository facts behind the operator
   warnings with a token piped on stdin, the same shape as the mint helper:
   root for the egress, facts on stdout, no state.
-- `approve-github-push` — replays or cleans up a push held by the `.github`
+- `approve-github-push` — reads bounded review context, replays or cleans up a push held by the `.github`
   approval gate. The admin service passes the reviewed push id, ref updates,
   and working GitHub token on stdin; the helper uses root egress and the
   proxy-state quarantine mirror, then reports JSON success or failure.

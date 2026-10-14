@@ -13,6 +13,8 @@ Input (stdin JSON):
 ``{"action": "approve", "owner": "...", "repo": "...", "push_id": "...",
    "token": "...",
    "ref_updates": [{"old": "<oid>", "new": "<oid>", "ref": "refs/heads/..."}, ...]}``
+or ``{"action": "review", "owner": ..., "repo": ..., "push_id": ..., "ref_updates": [...]}``
+to read bounded evidence without a token or any replay;
 or ``{"action": "cleanup", "owner": ..., "repo": ..., "push_id": ...}`` to
 delete pending refs after rejection (cleanup lists the pending refs itself, so
 it takes no ref_updates).
@@ -51,8 +53,8 @@ def main() -> None:
     token = payload.get("token")
     ref_updates = payload.get("ref_updates")
     action = payload.get("action", "approve")
-    if action not in ("approve", "cleanup"):
-        _fail("action must be approve or cleanup")
+    if action not in ("approve", "cleanup", "review"):
+        _fail("action must be approve, cleanup or review")
     if not isinstance(owner, str) or not OWNER_RE.fullmatch(owner):
         _fail("owner is not a valid GitHub owner")
     if not isinstance(repo, str) or not REPO_RE.fullmatch(repo):
@@ -90,6 +92,14 @@ def _resolve_locked(
             _delete_pending_ref(mirror, pending)
         _gc_mirror(mirror)
         _ok()
+        return
+    if action == "review":
+        from host.network_integrations.github.push_gate.review import context
+        try:
+            evidence = context(mirror, push_id, ref_updates)
+        except (ValueError, engine.GateError) as exc:
+            _fail(str(exc))
+        print(json.dumps({"owner": owner, "repo": repo, "push_id": push_id, "updates": evidence}, ensure_ascii=False))
         return
     if token_value is None:
         _fail("token is required")

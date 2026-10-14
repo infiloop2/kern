@@ -168,7 +168,9 @@ class MetaFixture:
         elif path == '/' + ADSET + '/ads':
             return {'data': [{'id': AD}]}
         elif path.endswith('/insights'):
-            result = {'data': deepcopy(self.insights)}
+            requested = set(fields['fields'].split(','))
+            result = {'data': [{key: deepcopy(value) for key, value in row.items() if key in requested}
+                               for row in self.insights]}
         elif path[1:] in self.resources:
             row = deepcopy(self.resources[path[1:]])
             if path[1:] in (ADSET, CAMPAIGN, CREATIVE):
@@ -1845,18 +1847,38 @@ class InstagramAdsTests(unittest.TestCase):
                 adset = result.result['adsets'][0]
                 self.assertEqual(adset['id'], ADSET)
                 self.assertEqual(adset['status'], 'PAUSED')
-                self.assertEqual(json.loads(adset['configuration_json'])['lifetime_budget'], '100')
+                self.assertEqual(json.loads(adset['configuration_json']), {'lifetime_budget': '100'})
                 if state in ('missing', 'null'):
                     self.assertIsNone(adset['ads'])
                 elif state == 'empty':
                     self.assertEqual(adset['ads'], [])
                 else:
                     self.assertEqual(adset['ads'][0]['id'], AD)
+                    self.assertEqual(json.loads(adset['ads'][0]['configuration_json']), {'creative': {'id': CREATIVE}})
                 self.assertEqual(adset['ads_next_cursor'], 'child-cursor' if state == 'populated' else None)
                 self.assertEqual(result.result['next_cursor'], 'adset-cursor')
                 self.assertEqual(len(calls), 5)
                 self.assertTrue(all(method == 'GET' for method, _ in calls))
                 self.assertFalse(self.meta.writes)
+
+    def test_campaign_configuration_removes_only_exact_typed_duplicates(self):
+        raw = {'id': CAMPAIGN, 'account_id': ACCOUNT, 'name': 'Campaign',
+               'status': 'PAUSED', 'effective_status': None, 'objective': 7,
+               'lifetime_budget': '2500', 'issues_info': [{'message': 'Review pending'}],
+               'configuration_json': 'provider-owned field'}
+        result = ads._campaign_result(raw)
+        details = json.loads(result['configuration_json'])
+        self.assertEqual(details, {key: raw[key] for key in (
+            'effective_status', 'objective', 'lifetime_budget', 'issues_info', 'configuration_json')})
+        self.assertEqual(result['id'], CAMPAIGN)
+        self.assertEqual(result['status'], 'PAUSED')
+        self.assertEqual(result['objective'], '7')
+        self.assertEqual(result['effective_status'], '')
+        for original in ('', None, False, 0, [], {}):
+            with self.subTest(original=original):
+                result = ads._campaign_result({'id': CAMPAIGN, 'name': original})
+                self.assertEqual(json.loads(result['configuration_json']), {'name': original})
+        self.assertEqual(json.loads(ads._campaign_result({'id': CAMPAIGN})['configuration_json']), {})
 
     def test_campaign_details_do_not_hide_malformed_or_oversized_ads_edges(self):
         for edge in ('invalid', {}, {'data': None}, {'data': [None]}, {'data': [{}] * 11}):
@@ -2029,6 +2051,62 @@ class InstagramAdsTests(unittest.TestCase):
         self.assertEqual(result.result['items'][0]['actions'][0]['value'], '0')
         values['start_date'] = '20260101'
         self.assertIsInstance(ads.BUNDLED_TOOL.execute('get_performance', values, self.api), ActionFailed)
+
+    def test_profile_insights_requests_and_returns_live_v26_dedicated_fields(self):
+        fixture = json.loads((Path(__file__).parent / 'fixtures/instagram_ads/profile_visit_insights_v26.json').read_text())
+        self.meta.insights = fixture['data']
+        self.meta.page_cursor = 'report-next-cursor'
+        values = {'account_id': ACCOUNT, 'campaign_id': CAMPAIGN,
+                  'start_date': '2026-10-13', 'end_date': '2026-10-14',
+                  'limit': 1, 'after': 'report-previous-cursor'}
+        result = ads.BUNDLED_TOOL.execute('get_performance', values, self.api)
+        self.assertIsInstance(result, ActionExecuted, result)
+        assert_matches_output_schema(self, ads.MANIFEST, 'get_performance', result)
+        row = result.result['items'][0]
+        for key, value in fixture['data'][0].items():
+            self.assertEqual(row[key], value)
+        self.assertIsNone(row['actions'])
+        self.assertIsNone(row['inline_link_clicks'])
+        self.assertEqual(result.result['next_cursor'], 'report-next-cursor')
+        report_calls = [call for call in self.meta.calls if call[1].endswith('/insights')]
+        self.assertEqual(len(report_calls), 1)
+        request = report_calls[0][2]
+        self.assertTrue({'instagram_profile_visits', 'instagram_profile_follow'}.issubset(request['fields'].split(',')))
+        self.assertEqual(json.loads(request['time_range']), {'since': '2026-10-13', 'until': '2026-10-14'})
+        self.assertEqual(request['time_increment'], '1')
+        self.assertEqual(request['use_unified_attribution_setting'], 'true')
+        self.assertNotIn('action_attribution_windows', request)
+        self.assertNotIn('use_account_attribution_setting', request)
+        self.assertEqual((request['limit'], request['after']), ('1', 'report-previous-cursor'))
+        self.assertTrue(all(call[0] == 'GET' for call in self.meta.calls))
+        self.assertFalse(self.meta.writes)
+
+    def test_profile_insights_preserves_missing_null_zero_and_independent_counts(self):
+        cases = [({}, (None, None)),
+                 ({'instagram_profile_visits': None, 'instagram_profile_follow': None}, (None, None)),
+                 ({'instagram_profile_visits': '0', 'instagram_profile_follow': 0}, ('0', '0')),
+                 ({'instagram_profile_visits': 116, 'instagram_profile_follow': '3'}, ('116', '3')),
+                 ({'instagram_profile_visits': '116'}, ('116', None)),
+                 ({'instagram_profile_follow': '0'}, (None, '0'))]
+        for metrics, expected in cases:
+            with self.subTest(metrics=metrics):
+                self.meta.insights = [{'date_start': '2026-10-13', 'date_stop': '2026-10-13',
+                    'account_currency': 'USD', 'spend': '0.24', 'impressions': '1510',
+                    'reach': '1503', 'clicks': '26', 'inline_link_clicks': '27',
+                    'actions': [{'action_type': 'link_click', 'value': '27'},
+                                {'action_type': 'post_engagement', 'value': '453'}],
+                    'video_thruplay_watched_actions': [{'action_type': 'video_view', 'value': '136'}],
+                    **metrics}]
+                result = ads.BUNDLED_TOOL.execute('get_performance', {'account_id': ACCOUNT,
+                    'campaign_id': CAMPAIGN, 'start_date': '2026-10-13', 'end_date': '2026-10-13'}, self.api)
+                self.assertIsInstance(result, ActionExecuted, result)
+                assert_matches_output_schema(self, ads.MANIFEST, 'get_performance', result)
+                row = result.result['items'][0]
+                self.assertEqual((row['instagram_profile_visits'], row['instagram_profile_follow']), expected)
+                for key in ('account_currency', 'spend', 'impressions', 'reach', 'clicks', 'inline_link_clicks', 'actions'):
+                    self.assertEqual(row[key], self.meta.insights[0][key])
+                self.assertEqual(row['video_thruplay'], '136')
+                self.assertFalse(self.meta.writes)
 
     def test_revoked_provider_token_requires_reconnect_without_erasing_a_new_grant(self):
         for reconnected in (False, "token", "lifetime"):

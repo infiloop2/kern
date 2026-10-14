@@ -39,6 +39,14 @@ class ChromiumTests(unittest.TestCase):
         self.child.wait.assert_called_once_with(timeout=5)
         self.assertFalse(Path(process.directory.name).exists())
 
+    def test_slot_control_port_used_for_launch_probe_and_attachment(self):
+        process = Chromium(self.runtime, {}, {}, debug_port=7451)
+        self.assertIn("--remote-debugging-port=7451", self.launch.call_args.args[0])
+        self.sockets.return_value.__enter__.return_value.bind.assert_called_once_with(("127.0.0.1", 7451))
+        self.sockets.return_value.__enter__.return_value.connect_ex.assert_called_once_with(("127.0.0.1", 7451))
+        self.assertEqual(self.runtime.chromium.connect_over_cdp.call_args.args[0], "http://127.0.0.1:7451")
+        process.close()
+
     def test_startup_timeout_and_early_exit_clean_up(self):
         for exited in (False, True):
             with self.subTest(exited=exited):

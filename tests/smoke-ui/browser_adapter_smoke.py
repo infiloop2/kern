@@ -48,8 +48,8 @@ def native_fixture(playwright, fixture=None, *, pattern="https://x.com/**"):
         if command[0] == playwright.chromium.executable_path:
             command = [*command[:1], "--no-sandbox", *command[1:]]
         return real_popen(command, **options)
-    def launch(runtime, environment, settings):
-        process = Chromium(runtime, environment, settings)
+    def launch(runtime, environment, settings, **options):
+        process = Chromium(runtime, environment, settings, **options)
         processes.append(process)
         if fixture:
             process.context.route(pattern, fixture)
@@ -533,7 +533,135 @@ def check_reply_diagnostics(page):
     print("Hostile page scripts cannot inject raw fields or trap snapshot execution; original locator facts survive.", flush=True)
 
 
+def check_anonymous_screenshot(playwright):
+    from host.runtime.browser.screenshot import capture
+
+    requests = []
+    html = '''<!doctype html><style>body {margin:0;background:#fff} #page {height:2200px}
+      h1 {margin:0;padding:30px;background:#184ca0;color:white} #lazy {position:absolute;top:1500px}</style>
+      <div id="page"><h1 id="title">Waiting for JavaScript</h1><h2 id="lazy">Waiting for scroll</h2></div>
+      <script>
+      window.previousStorage = localStorage.getItem('capture');
+      localStorage.setItem('capture', 'temporary'); document.cookie='capture=temporary';
+      setTimeout(() => document.getElementById('title').textContent='JavaScript rendered', 100);
+      addEventListener('scroll', () => document.getElementById('lazy').textContent='Lazy content rendered');
+      </script>'''
+    def fixture(route):
+        requests.append(route.request.url)
+        if route.request.url.endswith('/start'):
+            route.fulfill(content_type='text/html', body="<script>location.replace('https://fixture.example/final')</script>")
+        else:
+            route.fulfill(content_type='text/html', body=html)
+
+    displays = []
+    with native_fixture(playwright, fixture, pattern='https://fixture.example/**'):
+        for _attempt in range(2):
+            browser = Browser(None, 'about:blank', {})
+            displays.append(browser.display)
+            try:
+                assert browser.context.cookies() == []
+                result = capture(browser, 'https://fixture.example/start')
+                assert result.url == 'https://fixture.example/final'
+                assert 1000 <= result.width <= 1100 and result.height == 2200 and not result.clipped, (result.width, result.height, result.clipped)
+                assert struct.unpack('>II', result.png[16:24]) == (result.width, 2200)
+                assert browser.page.evaluate('window.previousStorage') is None
+                assert browser.page.locator('#title').inner_text() == 'JavaScript rendered'
+                assert browser.page.locator('#lazy').inner_text() == 'Lazy content rendered'
+                # Decode the actual returned PNG in Chromium, proving it is a
+                # complete image rather than merely a plausible header.
+                import base64
+                assert browser.page.evaluate('''async value => {
+                    const image = new Image(); image.src = 'data:image/png;base64,' + value;
+                    await image.decode();
+                    const canvas = document.createElement('canvas'); canvas.width=20; canvas.height=20;
+                    const ctx = canvas.getContext('2d'); ctx.drawImage(image, 0, 0);
+                    return [image.naturalWidth, image.naturalHeight, ...ctx.getImageData(10, 10, 1, 1).data];
+                }''', base64.b64encode(result.png).decode()) == [result.width, 2200, 24, 76, 160, 255]
+            finally:
+                browser.close()
+    assert requests.count('https://fixture.example/start') == 2
+    assert requests.count('https://fixture.example/final') == 2
+    assert all(display.process.poll() is not None and not Path(display.directory.name).exists() for display in displays)
+    print('Anonymous screenshot passed: redirects, JavaScript, scrolling, PNG decode, fresh cookies/storage and process/display cleanup.', flush=True)
+
+
+def check_parallel_sessions(playwright):
+    from tests.browser_fakes import MemoryStore
+    import os
+    from host.runtime.browser.client import BrowserActionNotStarted
+    from host.runtime.browser.sessions import Sessions
+    from host.runtime.browser.screenshot import capture
+    import threading
+
+    processes, displays = [], []
+    ready = threading.Barrier(4)
+    release = threading.Event()
+    real_popen = subprocess.Popen
+    def popen(command, **options):
+        if command[0] == playwright.chromium.executable_path:
+            command = [command[0], "--no-sandbox", *command[1:]]
+        return real_popen(command, **options)
+    def launch(runtime, environment, settings, **options):
+        process = Chromium(runtime, environment, settings, **options)
+        processes.append(process)
+        process.context.route("**/*", lambda route: route.fulfill(content_type="text/html", body="<h1>Isolated slot</h1>"))
+        return process
+    def held_capture(browser, url):
+        displays.append(browser.display)
+        assert browser.context.cookies() == []
+        browser.context.add_cookies([{"name": "slot", "value": str(threading.get_ident()), "domain": "fixture.example", "path": "/"}])
+        ready.wait(timeout=30)
+        assert release.wait(30)
+        return capture(browser, url)
+
+    # Each Browser starts Playwright on its own slot thread. Do not share the
+    # main fixture's sync runtime across threads.
+    with (patch("host.runtime.browser.sessions.BROWSER_DEBUG_PORT", 8008),
+          patch("host.runtime.browser.chromium.subprocess.Popen", side_effect=popen),
+          patch("host.runtime.browser.browser.Chromium", side_effect=launch)):
+        sessions = Sessions(MemoryStore())
+        try:
+            login = sessions.submit("create", {"provider": "x"}).result(timeout=30)
+            opened = sessions.submit("open", login).result(timeout=30)
+            control = {**login, "lease": opened["lease"]}
+            displays.append(sessions.operator.pending[login["login_id"]].browser.display)
+            with patch("host.runtime.browser.accounts.capture", side_effect=held_capture):
+                calls = [sessions.submit("screenshot_url", {"url": "https://fixture.example/"}, agent_action=True) for _ in range(3)]
+                ready.wait(timeout=30)
+                assert len(processes) == 4 and all(process.child.poll() is None for process in processes)
+                shared = os.statvfs("/dev/shm")
+                print(f"Four Chromium slots ready; shared memory available={shared.f_bavail * shared.f_frsize} bytes.", flush=True)
+                try:
+                    sessions.submit("screenshot_url", {"url": "https://fixture.example/"}, agent_action=True)
+                except BrowserActionNotStarted:
+                    pass
+                else:
+                    raise AssertionError("A fifth browser was admitted")
+                assert sessions.submit("frame", control).result(timeout=10)["image"]
+                release.set()
+                results = [call.result(timeout=30) for call in calls]
+                assert all(result.png.startswith(b"\x89PNG") for result in results)
+            sessions.submit("cancel", control).result(timeout=10)
+            assert all(process.child.poll() is not None for process in processes)
+            # Reusing a slot starts another clean profile, not the last site's cookies.
+            def clean_capture(browser, url):
+                displays.append(browser.display)
+                assert browser.context.cookies() == []
+                return capture(browser, url)
+            with patch("host.runtime.browser.accounts.capture", side_effect=clean_capture):
+                sessions.submit("screenshot_url", {"url": "https://fixture.example/"}, agent_action=True).result(timeout=30)
+        finally:
+            release.set()
+            sessions.close()
+    assert len({process.directory.name for process in processes}) == 5
+    assert all(process.child.poll() is not None and not Path(process.directory.name).exists() for process in processes)
+    assert all(display.process.poll() is not None and not Path(display.directory.name).exists() for display in displays)
+    print("Four headed Chromiums: reserved login, concurrent captures, fifth rejected, fresh slot reuse and cleanup passed.", flush=True)
+
+
 def run(playwright):
+    check_parallel_sessions(playwright)
+    check_anonymous_screenshot(playwright)
     check_post_resources(playwright)
     calls = []
     user_agents = []

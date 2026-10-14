@@ -87,7 +87,7 @@ class ResourceProtectionVerificationTests(unittest.TestCase):
             (path / "memory.low").write_text(str((self.memory * percent // 100) // 4096 * 4096))
             (path / "io.weight").write_text(f"default {weight}\n")
         browser = self.root / "kern_workspace.slice/kern-browser.service"
-        for filename, value in (("cpu.max", "max 100000"), ("cpu.weight", "100"), ("memory.max", str(2 * 1024**3))):
+        for filename, value in (("cpu.max", "max 100000"), ("cpu.weight", "100"), ("memory.max", str(2 * 1024**3)), ("pids.max", "1024")):
             (browser / filename).write_text(value)
         (self.root / "io.cost.qos").write_text("259:2 enable=1 ctrl=auto rpct=0.00\n259:0 enable=1 ctrl=auto\n")
         (self.root / "io.cost.model").write_text("259:2 ctrl=auto model=linear\n259:0 ctrl=auto model=linear\n")
@@ -109,6 +109,7 @@ class ResourceProtectionVerificationTests(unittest.TestCase):
             "kern_workspace.slice/kern-browser.service/memory.low": "0",
             "kern_workspace.slice/kern-browser.service/cpu.max": "100000 100000",
             "kern_workspace.slice/kern-browser.service/cpu.weight": "25",
+            "kern_workspace.slice/kern-browser.service/pids.max": "256",
         }
         for name, value in paths.items():
             with self.subTest(name=name):
@@ -158,7 +159,7 @@ class BootstrapProtectionTests(unittest.TestCase):
     def test_browser_limits_persist_across_boot_with_matching_parent_protection(self):
         bootstrap = render._render_bootstrap()
         browser = bootstrap.split("cat > /etc/systemd/system/kern-browser.service", 1)[1].split("\nUNIT", 1)[0]
-        for setting in ("CPUWeight=100", "MemoryLow=10%", "MemoryMax=2G", "TimeoutStopSec=240"):
+        for setting in ("CPUWeight=100", "MemoryLow=10%", "MemoryMax=2G", "TasksMax=1024", "TimeoutStopSec=240"):
             self.assertIn(setting, browser)
         workspace = bootstrap.split("cat > /etc/systemd/system/kern_workspace.slice", 1)[1].split("\nUNIT", 1)[0]
         self.assertIn("MemoryLow=14%", workspace)

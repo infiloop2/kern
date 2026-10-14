@@ -27,6 +27,7 @@ import urllib.request
 import pg_harness
 
 from host.agent_messages import memory_context_message
+from host.runtime.memory_context import MemoryDelivery
 from host.config import parse_network_controls
 from host.network_integrations.github.push_gate import pending as github_pending_push
 from host.runtime.admin_api import workspace_proxy as workspace_api_proxy, workspace_api as workspace_admin_api, service as admin_api, threads as admin_threads, github_credential, tools_client as tools_admin_api
@@ -701,8 +702,7 @@ class ThreadAdmissionHelpersTests(unittest.TestCase):
 
     def test_identity_is_included_without_any_recalled_memories(self) -> None:
         context = memory_context_message("app-7", [])
-        self.assertIn('"identity": {"thread_id": "app-7"}', context)
-        self.assertIn('"memories": []', context)
+        self.assertEqual(context, 'Kern immutable thread identity: {"thread_id": "app-7"}')
 
     def test_memory_context_carries_the_immutable_thread_identity(self) -> None:
         context = memory_context_message(
@@ -760,6 +760,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with orchestrator._LIVE_LOCK:
             orchestrator._LIVE.clear()
         self.addCleanup(orchestrator._LIVE.clear)
+        memory_delivery = MemoryDelivery()
+        self.enterContext(patch.object(admin_threads, "memory_delivery", memory_delivery))
+        self.enterContext(patch.object(orchestrator, "memory_delivery", memory_delivery))
         self.enterContext(patch.object(orchestrator.turn_retries, "_pending", {}))
         self.reconcile_patch = patch(
             "host.runtime.admin_api.service.orchestrator.reconcile_runtime_status_after_policy_change"
@@ -2325,7 +2328,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         launch.assert_called_once()
         turn = launch.call_args.args[0]
         self.assertEqual((turn.runtime_type, turn.thread_id), ("codex", "thread-t1"))
-        self.assertIn('"identity": {"thread_id": "thread-t1"}', launch.call_args.args[1])
+        self.assertIn('Kern immutable thread identity: {"thread_id": "thread-t1"}', launch.call_args.args[1])
         self.assertTrue(launch.call_args.args[1].endswith("first turn"))
 
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
@@ -2404,8 +2407,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(notice["event_type"], "thread.notice")
         self.assertIn("memory_recall_details", notice["payload"])
         self.assertEqual({key: value for key, value in notice["payload"].items() if key != "memory_recall_details"}, {
-            "message": "Self identity and 2 memories injected.",
-            "notice": {"kind": "memory_injection", "summary": "Self identity and 2 memories injected."},
+            "message": "Self identity and 2 memories prepared for injection.",
+            "notice": {"kind": "memory_injection", "summary": "Self identity and 2 memories prepared for injection."},
             "memory_page_ids": ["thread-t1", "playwright-browser"],
         })
 
@@ -2447,8 +2450,8 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(len(events["events"]), 2)
         self.assertEqual({key: value for key, value in events["events"][-1]["payload"].items() if key != "memory_recall_details"}, {
-            "message": "Self identity and 1 memory injected.",
-            "notice": {"kind": "memory_injection", "summary": "Self identity and 1 memory injected."},
+            "message": "Self identity and 1 memory prepared for injection.",
+            "notice": {"kind": "memory_injection", "summary": "Self identity and 1 memory prepared for injection."},
             "memory_page_ids": ["thread-t1"],
         })
 
@@ -2467,7 +2470,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "POST", "/v1/threads/thread-t1/messages", {"message": "continue"}
             )
 
-        self.assertIn('"identity": {"thread_id": "thread-t1"}', launch.call_args.args[1])
+        self.assertIn('Kern immutable thread identity: {"thread_id": "thread-t1"}', launch.call_args.args[1])
         self.assertTrue(launch.call_args.args[1].endswith("continue"))
         self.mock_memory_recall.assert_called_once()
         warning.assert_called_once()
@@ -2475,7 +2478,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual([e["event_type"] for e in events["events"]], ["thread.message", "thread.notice"])
-        self.assertEqual(events["events"][-1]["payload"]["message"], "Self identity and 0 memories injected.")
+        self.assertEqual(events["events"][-1]["payload"]["message"], "Self identity and 0 memories prepared for injection.")
         self.assertEqual(events["events"][-1]["payload"]["memory_page_ids"], [])
 
     def test_message_steers_running_turn_without_a_host_mailbox(self) -> None:
@@ -2876,7 +2879,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # Short handoffs are shown in full, exactly as sent to the provider.
         self.assertEqual(
             notice["payload"]["historical_context"],
-            launch_message.split("--- END KERN HOST CONTEXT ---\n\n", 1)[1],
+            launch_message[launch_message.index("You are a new agent session"):],
         )
 
     def test_session_handoff_reserves_100k_for_newest_conversation(self) -> None:
@@ -3014,7 +3017,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             events["events"][-2]["payload"]["historical_context"],
-            launch_message.split("--- END KERN HOST CONTEXT ---\n\n", 1)[1],
+            launch_message[launch_message.index("You are a new agent session"):],
         )
 
     def test_a_schedule_thread_runs_the_script_runtime_on_the_ordinary_path(self) -> None:
@@ -3518,7 +3521,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         # The missing provider session would normally trigger a replay. The
         # cleared floor excludes history; current host identity is still injected.
         self.assertTrue(launch_message.endswith("fresh start"))
-        self.assertIn('"identity":', launch_message)
+        self.assertIn('Kern immutable thread identity:', launch_message)
         self.assertNotIn("new agent session continuing", launch_message)
         self.assertNotIn("secret plan", launch_message)
 
@@ -3563,7 +3566,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, launch_message, provider_session_id = launch.call_args.args
         self.assertIsNone(provider_session_id)
         self.assertTrue(launch_message.endswith("fresh start"))
-        self.assertIn('"identity":', launch_message)
+        self.assertIn('Kern immutable thread identity:', launch_message)
         self.assertNotIn("continuing a thread", launch_message)
         self.assertNotIn("old plan", launch_message)
 

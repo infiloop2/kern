@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 from host import agent_messages as message_templates
 from host.config import AGENT_RUNTIMES
-from host.runtime.memory_context import load_query
+from host.runtime.memory_context import load_query, memory_delivery
 from host.memory_recall_rules import RELEVANT_PAGE_LIMIT
 from host.runtime.agent_runtime import agent_activity, orchestrator, turn_retries
 from host.runtime.admin_api import workspace_proxy
@@ -353,8 +353,13 @@ def send_thread_message(
                 if handoff_events:
                     handoff_message = _session_handoff_message(handoff_events, message)
                     launch_message = handoff_message
+                injected_pages = recalled_pages
                 if agent_runtime != SCRIPT_RUNTIME:
-                    memory_context_message = message_templates.memory_context_message(thread_id, recalled_pages)
+                    injected_pages, suppression_details = memory_delivery.select(
+                        thread_id, recalled_pages,
+                    )
+                    recall_details = (suppression_details + recall_details)[:12000]
+                    memory_context_message = message_templates.memory_context_message(thread_id, injected_pages)
                     launch_message = f"{memory_context_message}\n\n{launch_message}"
                 turn = orchestrator.admit_turn(
                     cur,
@@ -380,11 +385,14 @@ def send_thread_message(
                         run_number=turn.run_number,
                     )
                 if agent_runtime != SCRIPT_RUNTIME:
+                    turn.memory_pages = tuple(
+                        (page["page_id"], page["revision"]) for page in injected_pages
+                    )
                     state.append_agent_event(
                         cur,
                         "thread.notice",
                         thread_id,
-                        message_templates.memory_notice(recalled_pages, recall_details),
+                        message_templates.memory_notice(injected_pages, recall_details, delivered=False),
                         run_number=turn.run_number,
                     )
             orchestrator.launch_turn(turn, launch_message, provider_session_id,
@@ -597,6 +605,7 @@ def clear_thread_memory(thread_id: str) -> dict[str, str]:
                     HTTPStatus.CONFLICT,
                     "working memory can be cleared only while the thread is idle",
                 ) from exc
+        memory_delivery.clear(thread_id)
         turn_retries.cancel(thread_id)
     return {"status": "cleared"}
 
