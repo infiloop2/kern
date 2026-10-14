@@ -20,6 +20,7 @@ import time
 from typing import Any, cast
 
 from host.constants import EMBEDDING_SOCKET_PATH
+from host.runtime.core.cpu_resources import available_cpu_count
 from host.runtime.core.unix_socket_service import UnixSocketRequestHandler
 from host.runtime.embeddings.client import (
     MAX_JSON_EXPANSION,
@@ -76,7 +77,7 @@ def _model() -> Any:
             _model_instance = TextEmbedding(
                 model_name=MODEL_NAME,
                 specific_model_path=str(MODEL_DIR),
-                threads=1,
+                threads=available_cpu_count(),
             )
         return _model_instance
 

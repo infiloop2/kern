@@ -42,7 +42,7 @@ The smoke verifies:
 - direct VM deletion followed by recover from the two preserved disks.
 
 The GitHub workflow `.github/workflows/test-lima-host.yml` runs this smoke
-automatically on every push to `main`. Comment exactly `/lima-smoke` or
+on request. Comment exactly `/lima-smoke` or
 `lima-smoke` on a same-repository PR. Repository admins can run it directly;
 other requesters require an open, ready PR to `main` with a clean Codex approval
 stamp for its current head. `authorize-admin-or-codex-stamp` checks the active

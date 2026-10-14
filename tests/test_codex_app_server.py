@@ -579,7 +579,7 @@ class CodexAppServerTests(unittest.TestCase):
                 ])
                 server.call.reset_mock(side_effect=True)
                 codex_app_server_module.delete_session(server, session_id)
-                server.call.assert_called_once_with("thread/delete", {"threadId": session_id}, timeout=10)
+                server.call.assert_called_once_with("thread/delete", {"threadId": session_id}, timeout=60)
 
     def test_delete_session_accepts_only_the_requested_missing_rollout(self) -> None:
         session_id = "01900000-0000-7000-8000-000000000001"
@@ -590,13 +590,14 @@ class CodexAppServerTests(unittest.TestCase):
                     f"no rollout found for thread id {session_id}"
                 )
                 codex_app_server_module.delete_session(server, session_id)
-                server.call.assert_called_once_with("thread/delete", {"threadId": session_id}, timeout=10)
+                server.call.assert_called_once_with("thread/delete", {"threadId": session_id}, timeout=60)
 
         for error in (
             CodexAppServerError("no rollout found for thread id 01900000-0000-7000-8000-000000000002"),
             CodexAppServerError(f"no rollout found for thread id {session_id}: permission denied"),
             CodexAppServerError("failed to delete rollout: permission denied"),
             CodexAppServerError("Codex app-server request timed out"),
+            codex_app_server_module.CodexTimeout("timed out waiting for Codex app-server"),
             TimeoutError(f"no rollout found for thread id {session_id}"),
         ):
             with self.subTest(error=error):

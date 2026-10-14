@@ -8,7 +8,7 @@ import json
 import os
 import socket
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from host.constants import (
     MAX_REQUEST_BODY_BYTES,
@@ -69,6 +69,29 @@ def recall_memory(
         },
         timeout_seconds=RECALL_TIMEOUT_SECONDS,
     )
+
+
+def self_memory(thread_id: str) -> dict[str, Any] | None:
+    """Read only this thread's page, without search or inference."""
+    try:
+        response = _proxy("GET", f"/memory/pages/{quote(thread_id, safe='')}", {}, None,
+                          timeout_seconds=RECALL_TIMEOUT_SECONDS)
+    except ApiError as exc:
+        if exc.status == HTTPStatus.NOT_FOUND:
+            return None
+        raise
+    page = response.get("page") if isinstance(response, dict) else None
+    if not isinstance(page, dict) or page.get("page_id") != thread_id:
+        raise ApiError(HTTPStatus.BAD_GATEWAY, "Workspace returned an invalid self-memory page")
+    if page.get("deleted"):
+        return None
+    if not (isinstance(page.get("content"), str)
+            and isinstance(page.get("description"), str)
+            and isinstance(page.get("revision"), int)):
+        raise ApiError(HTTPStatus.BAD_GATEWAY, "Workspace returned an invalid self-memory page")
+    return {key: page[key] for key in ("page_id", "content", "description", "revision")} | {
+        "scope": "self", "selection": "self",
+    }
 
 
 def route_request(

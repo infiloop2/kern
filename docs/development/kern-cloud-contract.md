@@ -41,7 +41,7 @@ consumer contract is useful.
 ## CI behavior and limits
 
 The existing `test-all-host.yml` workflow discovers this test with the rest of
-`tests/` on every PR and push to main, without path filtering. It runs inside the
+`tests/` on every PR, without path filtering. It runs inside the
 usual no-network test sandbox and participates in **Run all host tests**. No
 separate workflow, checker framework, credentials or Infiverse checkout is needed.
 

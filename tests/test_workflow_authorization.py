@@ -79,13 +79,10 @@ print(os.environ['FAKE_STATUS'], end='')
                 self.assertIn('authorize-admin-or-codex-stamp' if name != 'kern-stage' else 'authorize-repo-admin', gate)
                 self.assertNotIn('continue-on-error', gate)
                 self.assertTrue(later)
+                self.assertNotIn('if:', gate)
                 if name in ('kern-smoke', 'test-lima-host'):
-                    self.assertIn("if: ${{ github.event_name != 'push' }}", source)
-                    condition = "if: ${{ github.event_name != 'push' }}"
-                    self.assertIn(condition, gate)
-                    self.assertIn("  push:\n    branches:\n      - main\n", source)
-                else:
-                    self.assertNotIn('if:', gate)
+                    self.assertNotIn('  push:', source)
+                    self.assertNotIn("github.event_name == 'push'", source)
                 if name == 'kern-stage':
                     cleanup = block.split('      - name: Stop stage instance', 1)[1].split('\n      - name:', 1)[0]
                     self.assertIn("always() && steps.authorize_requester.outcome == 'success'", cleanup)

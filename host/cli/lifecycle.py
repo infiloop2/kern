@@ -106,7 +106,26 @@ def _parse_args(mode: str, argv: list[str] | None) -> LifecycleCommand:
                 "for recovery after losing passkey access or changing the public hostname."
             ),
         )
+    for name in ("cpus", "memory-gib", "root-disk-gib", "admin-disk-gib", "agent-disk-gib"):
+        parser.add_argument(f"--lima-{name}", type=int, help=(
+            "Lima resource override; omitted values preserve the saved shape. "
+            "Admin/agent disk sizes apply only to fresh deploys."
+        ))
     args = parser.parse_args(argv)
+    lima_values = {
+        name: getattr(args, name)
+        for name in ("lima_cpus", "lima_memory_gib", "lima_root_disk_gib", "lima_admin_disk_gib", "lima_agent_disk_gib")
+    }
+    if any(value is not None for value in lima_values.values()):
+        if args.provider != "lima":
+            parser.error("--lima-* resource options require --provider lima")
+        for name, value in lima_values.items():
+            minimum = 16 if "disk" in name else 1
+            maximum = 1024 if name == "lima_cpus" else 65536
+            if value is not None and not minimum <= value <= maximum:
+                parser.error(f"--{name.replace('_', '-')} must be between {minimum} and {maximum}")
+        if mode != "deploy" and any(lima_values[name] is not None for name in ("lima_admin_disk_gib", "lima_agent_disk_gib")):
+            parser.error("durable Lima disk sizes can only be set on deploy; existing disks are never resized")
     instance_type = getattr(args, "instance_type", None)
     if instance_type is not None:
         if args.provider != "aws":
@@ -142,6 +161,7 @@ def _parse_args(mode: str, argv: list[str] | None) -> LifecycleCommand:
         reset_admin_passkeys=bool(getattr(args, "reset_admin_passkeys", False)),
         provider=args.provider,
         instance_type=instance_type,
+        **lima_values,
     )
 
 

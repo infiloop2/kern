@@ -575,9 +575,9 @@ def check_resource_protection(
         except (OSError, ValueError) as exc:
             failures.append(f"resources: cannot read browser {filename}: {exc}")
     try:
-        quota, period = map(int, (browser / "cpu.max").read_text().split())
-        if period <= 0 or quota != 2 * period:
-            failures.append("resources: browser cpu.max must allow two cores")
+        quota, period = (browser / "cpu.max").read_text().split()
+        if int(period) <= 0 or quota != "max":
+            failures.append("resources: browser cpu.max must have no CPU quota")
     except (OSError, ValueError) as exc:
         failures.append(f"resources: cannot read browser cpu.max: {exc}")
     try:

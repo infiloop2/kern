@@ -2461,6 +2461,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with (
             patch.object(orchestrator, "launch_turn") as launch,
             patch.object(admin_threads.host_errors, "report_warning") as warning,
+            patch.object(workspace_api_proxy, "self_memory", return_value=None),
         ):
             self.request(
                 "POST", "/v1/threads/thread-t1/messages", {"message": "continue"}

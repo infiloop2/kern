@@ -1391,7 +1391,9 @@ def delete_session(server: CodexAppServer, session_id: str) -> None:
     """Retire the session and native children; an absent rollout is already gone."""
     UUID(session_id)
     try:
-        server.call("thread/delete", {"threadId": session_id}, timeout=10)
+        # Native file and metadata cleanup can outlast the former ten-second
+        # window. Give it the normal app-server request allowance.
+        server.call("thread/delete", {"threadId": session_id}, timeout=60)
     except CodexAppServerError as exc:
         # Older app-servers reject deletion of a rollout that is already gone.
         # Match the requested id exactly; other delete/transport failures must

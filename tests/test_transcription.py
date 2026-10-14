@@ -66,7 +66,7 @@ class TranscriptionTests(unittest.TestCase):
     def test_bootstrap_model_and_service_are_offline_and_pinned(self):
         script = (Path(__file__).parents[1] / "host/bootstrap/bootstrap.sh").read_text()
         unit = script.split("cat > /etc/systemd/system/kern-transcription.service", 1)[1].split("\nUNIT", 1)[0]
-        for setting in ("PrivateNetwork=yes", "ProtectSystem=strict", "MemoryMax=2G", "CPUQuota=200%", "HF_HUB_OFFLINE=1"):
+        for setting in ("PrivateNetwork=yes", "ProtectSystem=strict", "MemoryMax=2G", "HF_HUB_OFFLINE=1"):
             self.assertIn(setting, unit)
         self.assertIn("TRANSCRIPTION_MODEL_TAG=model-faster-whisper-base.en-1", script)
         from host.bootstrap.render import _render_bootstrap

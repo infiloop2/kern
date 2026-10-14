@@ -14,10 +14,13 @@ def page(name='pr-guidance', revision=1):
 
 class MemoryMonitorTests(unittest.TestCase):
     def setUp(self):
+        self.clock = self.enterContext(patch.object(mm.time, 'monotonic', return_value=0.0))
         self.monitor = mm.Monitor()
         self.key = ('thread-1', 1)
         self.deliver = Mock(return_value=True)
-        self.monitor.seed(self.key, 'User: Change arrows', [page('ui')], self.deliver)
+        self.deliver_self = Mock(return_value=True)
+        self.monitor.seed(self.key, 'User: Change arrows', [page('ui')], self.deliver, self.deliver_self)
+        self.self_read = self.enterContext(patch.object(mm.workspace_proxy, 'self_memory', return_value=None))
         self.query = self.enterContext(patch.object(mm.memory_context, 'load_query',
             return_value='User: Change arrows\n\nAssistant: Preparing a PR'))
         self.model = self.enterContext(patch.object(mm.swarm_annotations, 'task_title', return_value='Publish arrows'))
@@ -25,8 +28,12 @@ class MemoryMonitorTests(unittest.TestCase):
             'pages': [page('ui'), page(), {**page('self'), 'scope': 'self'}]}))
 
     def ready(self, key=None):
-        for n in range(mm.BATCH_SIZE):
-            self.monitor.observe(key or self.key, f'Action {n}')
+        self.activity(5, key)
+        self.clock.return_value += mm.SUGGESTION_INTERVAL
+
+    def activity(self, count, key=None):
+        for _ in range(count):
+            self.monitor.observe(key or self.key, dict(kind='tool', phase='completed'))
 
     def redirect(self):
         self.monitor.observe(self.key, 'Investigate only', incoming=True)
@@ -48,66 +55,132 @@ class MemoryMonitorTests(unittest.TestCase):
         self.assertEqual([p[0] for p in self.deliver.call_args.args[0]],
                          ['guide-0', 'guide-1', 'guide-2'])
         self.redirect()
+        self.ready()
         self.monitor.next_check = 0
         self.monitor.check_once()
         self.assertEqual([p[0] for p in self.deliver.call_args.args[0]],
                          ['guide-3', 'guide-4', 'guide-5'])
         self.assertNotIn('self', self.monitor.turns[self.key].known)
 
-    def test_threshold_and_global_rate_bound(self):
-        self.monitor.observe(self.key, 'one')
+    def test_minute_interval_is_not_bypassed_by_events_or_incoming_direction(self):
+        for _ in range(30):
+            self.monitor.observe(self.key, 'completed')
+        self.redirect()
+        self.clock.return_value = 59
         self.assertFalse(self.monitor.check_once())
         self.query.assert_not_called()
-        self.redirect()
+        self.clock.return_value = 60
         self.assertTrue(self.monitor.check_once())
-        self.ready()
+        self.redirect()
+        self.activity(4)
+        self.clock.return_value = 119
         self.assertFalse(self.monitor.check_once())
         self.assertEqual(self.search.call_count, 1)
+        self.clock.return_value = 120
+        self.assertTrue(self.monitor.check_once())
 
-    def test_highest_count_then_oldest_waiting(self):
+    def test_oldest_due_turn_and_global_rate_bound(self):
         second = ('thread-2', 1)
-        self.monitor.seed(second, 'Second', [], self.deliver)
-        with patch.object(mm.time, 'monotonic', return_value=1):
-            for n in range(30):
-                self.monitor.observe(self.key, f'A{n}')
-        with patch.object(mm.time, 'monotonic', return_value=2):
-            for n in range(30):
-                self.monitor.observe(second, f'B{n}')
-        self.assertEqual(self.monitor.turns[self.key].count, mm.PRIORITY_CAP)
+        self.clock.return_value = 1
+        self.monitor.seed(second, 'Second', [], self.deliver, self.deliver_self)
+        self.activity(5)
+        self.activity(5, second)
+        self.clock.return_value = 61
         self.monitor.check_once()
         self.assertEqual(self.search.call_args.args[0], 'thread-1')
-        self.monitor.next_check = 0
+        self.clock.return_value = 70
+        self.assertFalse(self.monitor.check_once())
+        self.clock.return_value = 71
         self.monitor.check_once()
         self.assertEqual(self.search.call_args.args[0], 'thread-2')
 
-    def test_only_completed_operations_messages_and_selected_notices_count(self):
+    def test_shared_check_requires_five_new_events_even_after_timer_expires(self):
+        self.activity(4)
+        self.clock.return_value = 60
+        self.assertFalse(self.monitor.check_once())
+        self.monitor.observe(self.key, 'Assistant progress')
+        self.assertTrue(self.monitor.check_once())
+        self.clock.return_value = 120
+        self.assertFalse(self.monitor.check_once())
+        self.activity(4)
+        self.assertFalse(self.monitor.check_once())
+        self.activity(1)
+        self.assertTrue(self.monitor.check_once())
+        # The unchanged-query skip consumes this batch without another search.
+        self.search.assert_called_once()
+        self.assertEqual(self.monitor.turns[self.key].suggestion_events, 0)
+        self.assertEqual(self.monitor.turns[self.key].self_events, 10)
+
+    def test_self_threshold_and_counter_reset_are_independent_of_shared_checks(self):
+        self.self_read.return_value = {**page('thread-1'), 'content': 'Notes', 'scope': 'self'}
+        self.ready()
+        self.monitor.check_once()
+        self.activity(19)
+        self.clock.return_value = 300
+        self.assertTrue(self.monitor.check_once())
+        self.self_read.assert_not_called()
+        self.assertEqual(self.monitor.turns[self.key].self_events, 24)
+        self.activity(1)
+        self.clock.return_value = 310
+        self.assertTrue(self.monitor.check_once())
+        self.deliver_self.assert_called_once()
+        self.assertEqual(self.query.call_count, 2)
+        self.assertEqual(self.monitor.turns[self.key].self_events, 0)
+        self.assertEqual(self.monitor.turns[self.key].suggestion_events, 1)
+        self.clock.return_value = 610
+        self.assertFalse(self.monitor.check_once())
+
+    def test_self_event_threshold_does_not_bypass_five_minutes(self):
+        self.activity(30)
+        self.clock.return_value = 299
+        self.assertTrue(self.monitor.check_once())  # Shared check only.
+        self.self_read.assert_not_called()
+        self.assertEqual(self.monitor.turns[self.key].self_events, 25)
+        self.clock.return_value = 309  # The global ten-second limit also applies.
+        self.assertTrue(self.monitor.check_once())
+        self.self_read.assert_called_once()
+
+    def test_old_timer_without_enough_events_cannot_block_an_eligible_turn(self):
+        second = ('thread-2', 1)
+        self.clock.return_value = 1
+        self.monitor.seed(second, 'Second', [], self.deliver, self.deliver_self)
+        self.activity(5, second)
+        self.clock.return_value = 600
+        self.assertTrue(self.monitor.check_once())
+        self.search.assert_called_once_with('thread-2', self.query.return_value)
+        self.self_read.assert_not_called()
+
+    def test_only_incoming_messages_and_selected_notices_invalidate_titles(self):
         for kind in ('reasoning', 'wait', 'status'):
             self.monitor.observe(self.key, dict(kind=kind, phase='completed', output='log'))
         for kind in ('memory_injection', 'memory_suggestion', 'agent_message_sent', 'restart', 'automated'):
             self.monitor.observe(self.key, dict(event_type='thread.notice', payload={
                 'source': 'user', 'message': 'ignore', 'notice': {'kind': kind, 'summary': 'ignore'}}), incoming=True)
-        self.assertEqual(self.monitor.turns[self.key].count, 0)
+        self.assertEqual(self.monitor.turns[self.key].generation, 0)
         self.monitor.observe(self.key, dict(kind='command', phase='started'))
         self.monitor.observe(self.key, dict(kind='command', phase='completed', append_output=True))
-        self.assertEqual(self.monitor.turns[self.key].count, 0)
+        self.assertEqual(self.monitor.turns[self.key].generation, 0)
+        self.assertEqual(self.monitor.turns[self.key].suggestion_events, 0)
         self.monitor.observe(self.key, dict(kind='command', phase='completed', output='PRIVATE TOOL LOG'))
-        self.assertEqual(self.monitor.turns[self.key].count, 1)
+        self.assertEqual(self.monitor.turns[self.key].generation, 0)
+        self.assertEqual(self.monitor.turns[self.key].suggestion_events, 1)
         self.monitor.observe(self.key, dict(event_type='thread.notice', payload={
             'source': 'user', 'message': 'Publish changes',
             'notice': {'kind': 'agent_message', 'summary': 'From peer'}}), incoming=True)
-        self.assertEqual(self.monitor.turns[self.key].count, mm.BATCH_SIZE)
+        self.assertEqual(self.monitor.turns[self.key].next_suggestion, 60)
         self.assertEqual(self.monitor.turns[self.key].generation, 1)
+        self.assertEqual(self.monitor.turns[self.key].self_events, 2)
 
     def test_capacity_drops_new_turns_and_finish_releases_slot(self):
         with patch.object(mm, 'MAX_TURNS', 1):
-            self.monitor.seed(('thread-2', 1), 'new', [], self.deliver)
+            self.monitor.seed(('thread-2', 1), 'new', [], self.deliver, self.deliver_self)
             self.assertEqual(len(self.monitor.turns), 1)
             self.assertEqual(self.monitor.stats['capacity_skips'], 1)
             self.monitor.finish(self.key)
-            self.monitor.seed(('thread-2', 1), 'new', [], self.deliver)
+            self.monitor.seed(('thread-2', 1), 'new', [], self.deliver, self.deliver_self)
             self.assertIn(('thread-2', 1), self.monitor.turns)
 
-    def test_events_arriving_during_search_count_without_blocking(self):
+    def test_incoming_direction_during_search_does_not_block_or_advance_timer(self):
         entered, release = threading.Event(), threading.Event()
         def search(*args):
             entered.set()
@@ -119,8 +192,11 @@ class MemoryMonitorTests(unittest.TestCase):
         worker.start()
         try:
             self.assertTrue(entered.wait(2))
-            self.monitor.observe(self.key, 'New assistant message')
-            self.assertEqual(self.monitor.turns[self.key].count, 1)
+            self.redirect()
+            self.assertEqual(self.monitor.turns[self.key].generation, 1)
+            self.assertEqual(self.monitor.turns[self.key].next_suggestion, 120)
+            self.assertEqual(self.monitor.turns[self.key].suggestion_events, 1)
+            self.assertEqual(self.monitor.turns[self.key].self_events, 6)
         finally:
             release.set()
             worker.join(2)
@@ -145,12 +221,12 @@ class MemoryMonitorTests(unittest.TestCase):
                                                      ('pr-guidance', 1, 'When publishing a PR')])
                 self.model.assert_not_called()
                 self.monitor.turns[self.key].update_task.assert_not_called()
-                self.assertEqual(self.monitor.turns[self.key].count, mm.BATCH_SIZE)
+                self.assertEqual(self.monitor.turns[self.key].next_suggestion, self.clock.return_value + 60)
 
     def test_finished_turn_drops_late_result_and_cannot_affect_new_run(self):
         def search(*args):
             self.monitor.finish(self.key)
-            self.monitor.seed(('thread-1', 2), 'New run', [], self.deliver)
+            self.monitor.seed(('thread-1', 2), 'New run', [], self.deliver, self.deliver_self)
             return {'pages': [page()]}
         self.search.side_effect = search
         self.ready()
@@ -181,7 +257,7 @@ class MemoryMonitorTests(unittest.TestCase):
         self.search.assert_not_called()
         self.model.assert_not_called()
 
-    def test_failure_consumes_batch_without_retry(self):
+    def test_failure_waits_for_next_interval_without_retry(self):
         self.search.side_effect = OSError('busy')
         self.ready()
         with patch.object(mm.host_errors, 'report_warning'):
@@ -189,6 +265,14 @@ class MemoryMonitorTests(unittest.TestCase):
         self.monitor.next_check = 0
         self.assertFalse(self.monitor.check_once())
         self.assertEqual(self.monitor.stats['failures'], 1)
+        self.search.side_effect = None
+        self.ready()
+        self.monitor.check_once()
+        self.assertEqual(self.search.call_count, 2)
+        self.deliver.assert_called_once()
+        self.ready()
+        self.monitor.check_once()
+        self.assertEqual(self.search.call_count, 2)
 
     def test_failed_delivery_does_not_mark_page_known_and_revisions_can_be_suggested(self):
         self.deliver.return_value = False
@@ -199,9 +283,26 @@ class MemoryMonitorTests(unittest.TestCase):
         self.search.return_value = {'pages': [page('ui', revision=2)]}
         self.query.return_value += '\n\nAssistant: Validate review'
         self.monitor.next_check = 0
+        self.ready()
         self.redirect()
         self.monitor.check_once()
         self.assertEqual(self.monitor.turns[self.key].known['ui'], 2)
+
+    def test_busy_suggestion_delivery_retries_unchanged_query_at_next_interval_only(self):
+        self.deliver.return_value = False
+        self.ready()
+        self.monitor.check_once()
+        self.assertFalse(self.monitor.check_once())
+        self.deliver.assert_called_once()
+        self.assertNotIn('pr-guidance', self.monitor.turns[self.key].known)
+        self.deliver.return_value = True
+        self.ready()
+        self.monitor.check_once()
+        self.assertEqual(self.deliver.call_count, 2)
+        self.assertIn('pr-guidance', self.monitor.turns[self.key].known)
+        self.ready()
+        self.monitor.check_once()
+        self.assertEqual(self.deliver.call_count, 2)
 
     def test_only_on_demand_titles_call_luna_with_the_same_query(self):
         for task in (None, {'task_title': 'Edit arrows'}):
@@ -210,6 +311,7 @@ class MemoryMonitorTests(unittest.TestCase):
             self.monitor.turns[self.key].last_query = ''
             self.monitor.next_check = 0
             self.redirect()
+            self.ready()
             with patch.object(mm.state, 'swarm_task_context', return_value=task):
                 self.monitor.check_once()
             if task is None:
@@ -242,6 +344,86 @@ class MemoryMonitorTests(unittest.TestCase):
               patch.object(orch.state, 'save_swarm_task') as save):
             self.monitor.check_once()
         save.assert_not_called()
+
+    def test_full_self_memory_repeats_every_five_minutes_with_unchanged_query_and_revision(self):
+        self.query.return_value = 'User: Change arrows'
+        current = {**page('thread-1'), 'scope': 'self', 'content': 'Complete notes. ' * 1000}
+        self.self_read.return_value = current
+        for minute in range(1, 11):
+            self.ready()
+            self.monitor.check_once()
+            self.assertEqual(self.deliver_self.call_count, minute // 5)
+        self.search.assert_not_called()
+        self.assertEqual(self.self_read.call_count, 2)
+        self.assertEqual(self.deliver_self.call_args.args[0], current)
+
+    def test_missing_or_failed_self_read_does_not_block_shared_suggestions(self):
+        for result in (None, OSError('unavailable')):
+            with self.subTest(result=result):
+                self.clock.return_value += 300
+                self.activity(25)
+                self.monitor.turns[self.key].known = {}
+                self.monitor.turns[self.key].last_query = ''
+                self.self_read.side_effect = result
+                self.deliver.reset_mock()
+                with patch.object(mm.host_errors, 'report_warning'):
+                    self.monitor.check_once()
+                self.deliver_self.assert_not_called()
+                self.deliver.assert_called_once()
+
+    def test_self_refresh_survives_shared_context_failure(self):
+        self.activity(25)
+        self.clock.return_value = 300
+        self.self_read.return_value = {**page('thread-1'), 'content': 'Current notes', 'scope': 'self'}
+        self.query.side_effect = OSError('context unavailable')
+        with patch.object(mm.host_errors, 'report_warning'):
+            self.monitor.check_once()
+        self.deliver_self.assert_called_once_with(self.self_read.return_value)
+
+    def test_self_refresh_reads_latest_page_without_catchup_or_busy_retry(self):
+        self.activity(25)
+        self.clock.return_value = 1800
+        self.self_read.return_value = {**page('thread-1', 2), 'content': 'Updated notes', 'scope': 'self'}
+        self.deliver_self.return_value = False
+        self.monitor.check_once()
+        self.deliver_self.assert_called_once_with(self.self_read.return_value)
+        self.clock.return_value = 1810
+        self.assertFalse(self.monitor.check_once())
+        self.assertEqual(self.monitor.turns[self.key].next_self, 2100)
+
+    def test_finished_self_read_cannot_deliver_to_replacement_run(self):
+        def read(_):
+            self.monitor.finish(self.key)
+            self.monitor.seed(('thread-1', 2), 'New run', [], self.deliver, self.deliver_self)
+            return {**page('thread-1'), 'content': 'Old notes', 'scope': 'self'}
+        self.self_read.side_effect = read
+        self.activity(25)
+        self.clock.return_value = 300
+        self.monitor.check_once()
+        self.deliver_self.assert_not_called()
+        self.assertEqual(self.monitor.turns[('thread-1', 2)].next_self, 600)
+
+    def test_worker_waits_for_events_then_timer_and_sleeps_when_idle(self):
+        class StopWorker(Exception):
+            pass
+        self.monitor.wake = Mock()
+        self.monitor.wake.wait.side_effect = StopWorker
+        self.clock.return_value = 1800
+        with self.assertRaises(StopWorker):
+            self.monitor.run()
+        self.monitor.wake.wait.assert_called_once_with(None)
+        self.clock.return_value = 0
+        self.activity(5)
+        self.monitor.wake.set.assert_called()
+        self.monitor.wake.wait.reset_mock()
+        with self.assertRaises(StopWorker):
+            self.monitor.run()
+        self.monitor.wake.wait.assert_called_once_with(60)
+        self.monitor.finish(self.key)
+        self.monitor.wake.wait.reset_mock()
+        with self.assertRaises(StopWorker):
+            self.monitor.run()
+        self.monitor.wake.wait.assert_called_once_with(None)
 
 
 class SuggestionDeliveryTests(unittest.TestCase):
@@ -296,6 +478,29 @@ class SuggestionDeliveryTests(unittest.TestCase):
         with patch.object(orch.state, 'mutation') as mutate:
             self.assertFalse(orch._deliver_memory_suggestion(self.turn, []))
         mutate.assert_not_called()
+
+    def test_full_self_refresh_is_optional_context_in_all_steerable_runtimes(self):
+        import json
+        notes = 'Remember current constraints. ' * 600
+        current = {**page('thread-1'), 'content': notes, 'scope': 'self', 'selection': 'self'}
+        for runtime in orch.INTERACTIVE_RUNTIMES:
+            if not orch.harness_adapter(runtime).steerable:
+                continue
+            with self.subTest(runtime=runtime):
+                self.turn.runtime_type = runtime
+                with (patch.object(orch.state, 'mutation'),
+                      patch.object(orch.state, 'append_agent_event') as append):
+                    self.assertTrue(orch._deliver_self_memory(self.turn, current))
+                call = self.turn.server.steer.call_args
+                self.assertEqual(call.kwargs, {'memory_suggestion': True})
+                self.assertIn('not a new operator request', call.args[0])
+                context = json.loads(call.args[0].split('--- KERN HOST CONTEXT ---\n')[1].split('\n--- END')[0])
+                self.assertEqual(context['memories'][0]['content'], notes)
+                notice = append.call_args.args[3]
+                self.assertEqual(notice['notice']['kind'], 'memory_injection')
+                self.assertEqual(notice['memory_page_ids'], ['thread-1'])
+        self.turn.phase = orch.ExecutionPhase.FINISHING
+        self.assertFalse(orch._deliver_self_memory(self.turn, current))
 
     def test_title_saves_under_turn_lock_and_finished_turns_are_skipped(self):
         def current():
