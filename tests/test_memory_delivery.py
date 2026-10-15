@@ -3,7 +3,7 @@ import json
 import unittest
 from unittest.mock import Mock, patch
 
-from host.agent_messages import memory_context_message
+from host.agent_messages import memory_context_message, memory_notice
 from host.runtime import memory_context
 from host.runtime.memory_context import MemoryDelivery
 from host.runtime.agent_runtime import orchestrator as runtime
@@ -112,6 +112,53 @@ class MemoryDeliveryTests(unittest.TestCase):
         runtime._publish_provider_session(replacement, 'replacement-session')
         self.assertTrue(runtime._provider_ready(replacement))
         self.assertEqual(self.select([page()]), [])
+
+    def test_injection_notice_is_recorded_once_at_readiness_with_exact_message(self):
+        for pages in ([page()], []):
+            with self.subTest(pages=bool(pages)):
+                turn = runtime._Turn('codex', 'thread-1', 'model', 'high', 3, 0)
+                message = memory_context_message(turn.thread_id, pages)
+                notice = memory_notice(pages, 'Selection diagnostics', message=message)
+                turn.memory_notice = notice
+                turn.memory_pages = tuple((p['page_id'], p['revision']) for p in pages)
+                with patch.object(runtime.state, 'mutation') as mutation, \
+                        patch.object(runtime.state, 'append_agent_event') as append:
+                    # Learning a session id alone is not delivery.
+                    runtime._publish_provider_session(turn, 'session')
+                    append.assert_not_called()
+                    self.assertTrue(runtime._provider_ready(turn))
+                    self.assertFalse(runtime._provider_ready(turn))
+                    append.assert_called_once_with(
+                        mutation.return_value.__enter__.return_value,
+                        'thread.notice', 'thread-1', notice, run_number=3,
+                    )
+                    self.assertEqual(notice['notice']['details'], message)
+                    self.assertIn('injected.', notice['message'])
+                    self.assertIsNone(turn.memory_notice)
+
+    def test_startup_failure_or_stop_never_emits_injection_notice(self):
+        for phase in (runtime.ExecutionPhase.FINISHING, runtime.ExecutionPhase.CLOSED):
+            with self.subTest(phase=phase):
+                turn = runtime._Turn('codex', 'thread-1', 'model', 'high', 1, 0)
+                turn.memory_pages = (('guide', 1),)
+                turn.memory_notice = memory_notice([page()], '', message='Exact message')
+                turn.phase = phase
+                with patch.object(runtime.state, 'mutation') as mutation:
+                    self.assertFalse(runtime._provider_ready(turn))
+                    mutation.assert_not_called()
+                self.assertEqual(self.select([page()]), [page()])
+
+    def test_receipt_commit_failure_does_not_mark_delivery_or_running(self):
+        turn = runtime._Turn('codex', 'thread-1', 'model', 'high', 1, 0)
+        turn.memory_pages = (('guide', 1),)
+        turn.memory_notice = memory_notice([page()], '', message='Exact message')
+        with patch.object(runtime.state, 'mutation') as mutation:
+            mutation.return_value.__exit__.side_effect = RuntimeError('commit failed')
+            with patch.object(runtime.state, 'append_agent_event'), self.assertRaises(RuntimeError):
+                runtime._provider_ready(turn)
+        self.assertEqual(turn.phase, runtime.ExecutionPhase.STARTING)
+        self.assertIsNotNone(turn.memory_notice)
+        self.assertEqual(self.select([page()]), [page()])
 
     def test_periodic_self_delivery_and_suggestions_share_no_body_timestamps(self):
         turn = runtime._Turn('codex', 'thread-1', 'model', 'high', 1, 0)

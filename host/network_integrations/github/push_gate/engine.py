@@ -163,9 +163,11 @@ def _run_git(
     stdin: bytes | None = None,
     env: dict[str, str] | None = None,
 ) -> bytes:
+    # Review runs as root against the proxy-owned quarantine mirror. Trust
+    # only this mirror for this invocation, as the approval helper does.
     try:
         proc = subprocess.run(
-            [GIT_BIN, "-C", str(mirror), *args],
+            [GIT_BIN, "-c", f"safe.directory={mirror}", "-C", str(mirror), *args],
             input=stdin,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,

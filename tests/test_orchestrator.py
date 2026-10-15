@@ -472,7 +472,12 @@ class OrchestratorTests(unittest.TestCase):
                 self.assertEqual("shared body" in message, number in (1, 7))
                 self.assertEqual("self body" in message, number in (1, 7))
                 self.assertIn('"thread_id": "thread-1"', message)
+                notices = [e for e in read_agent_events() if e["thread_id"] == "thread-1" and e["event_type"] == "thread.notice"]
+                self.assertEqual(len(notices), number - 1)
+                self.assertTrue(orchestrator._provider_ready(turn))
+                self.assertFalse(orchestrator._provider_ready(turn))
                 notice = [e for e in read_agent_events() if e["thread_id"] == "thread-1" and e["event_type"] == "thread.notice"][-1]
+                self.assertEqual(notice["payload"]["notice"]["details"], message.removesuffix("\n\ncontinue"))
                 self.assertEqual(notice["payload"]["memory_page_ids"], expected)
                 with db.transaction() as cur:
                     cur.execute("SELECT run_number FROM agent_events WHERE seq = %s", (notice["seq"],))
@@ -488,7 +493,7 @@ class OrchestratorTests(unittest.TestCase):
                                  ['new' if number == 1 else 'expired' if number == 7 else 'recent'] * 2)
                 self.assertEqual([p['seconds_since_injection'] for p in diagnostic['pages']],
                                  [None if number == 1 else timestamp] * 2)
-                self.assertIn('prepared for injection', notice['payload']['message'])
+                self.assertIn('injected.', notice['payload']['message'])
                 self.assertNotIn('pending_readiness', message)
                 # Monitor still seeds with the complete selection (IDs/revisions).
                 self.assertEqual(launch.call_args.kwargs["recalled_pages"], pages)

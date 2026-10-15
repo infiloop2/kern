@@ -388,12 +388,10 @@ def send_thread_message(
                     turn.memory_pages = tuple(
                         (page["page_id"], page["revision"]) for page in injected_pages
                     )
-                    state.append_agent_event(
-                        cur,
-                        "thread.notice",
-                        thread_id,
-                        message_templates.memory_notice(injected_pages, recall_details, delivered=False),
-                        run_number=turn.run_number,
+                    # Keep the exact payload until the provider accepts it. A
+                    # prepared or failed launch is not an injection receipt.
+                    turn.memory_notice = message_templates.memory_notice(
+                        injected_pages, recall_details, message=memory_context_message,
                     )
             orchestrator.launch_turn(turn, launch_message, provider_session_id,
                                      task_context=task_context, recalled_pages=recalled_pages)

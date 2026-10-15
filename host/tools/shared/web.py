@@ -145,13 +145,15 @@ def provider_warning(
 ) -> ProviderWarning:
     """Create a provider warning with a curated agent-facing message."""
 
-    return ProviderWarning(
+    warning = ProviderWarning(
         provider,
         operation,
         message,
         status=exc.status,
         body=exc.body,
     )
+    warning.body_truncated = exc.body_truncated
+    return warning
 
 
 class _NoRedirectHandler(urllib.request.HTTPRedirectHandler):

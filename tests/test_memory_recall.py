@@ -654,7 +654,7 @@ class RecallRerankingTests(unittest.TestCase):
             self.assertIsNotNone(candidate["luna"]["score"])
         for page in admitted:
             self.assertIn(f"Selected {page['page_id']} r{page['revision']}", details)
-        notice = threads.message_templates.memory_notice(admitted, details, delivered=False)
+        notice = threads.message_templates.memory_notice(admitted, details, message="Injected context")
         self.assertEqual(notice["memory_page_ids"], [p["page_id"] for p in admitted])
         cursor = MagicMock()
         cursor.fetchone.return_value = (1,)

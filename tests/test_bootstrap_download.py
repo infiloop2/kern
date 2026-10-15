@@ -44,20 +44,23 @@ class BootstrapDownloadTests(unittest.TestCase):
                 continue
         else:
             self.fail("No test port available in 8000–8015")
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True)
         thread.start()
         try:
             bootstrap = _render_bootstrap()
             helpers = bootstrap.split("bootstrap_log() {", 1)[1].split(
                 "\ninstall_system_packages() {", 1,
             )[0]
-            # Exercise the real helper and curl, shortening only deadlines for
-            # timeout tests. The normal HTTP tests use the production policy.
-            curl_override = ""
+            # Keep real rendered shell + curl + HTTP, including production's
+            # retry count/status handling and output file behavior. A fixed 1s
+            # test-only delay avoids curl's default 1+2+4s exponential waits.
+            # curl owns its own clock, so Python fake time cannot shorten it.
+            overrides = "--retry-delay 1"
             if stalled:
-                curl_override = 'curl() { command curl "$@" --max-time 0.1; }\n'
+                overrides += " --max-time 0.1"
             elif retry_after:
-                curl_override = 'curl() { command curl "$@" --retry-max-time 1; }\n'
+                overrides += " --retry-max-time 1"
+            curl_override = f'curl() {{ command curl "$@" {overrides}; }}\n'
             script = (
                 "set -euo pipefail\nbootstrap_log() {" + helpers + "\n"
                 + curl_override + 'bootstrap_download "$1" "$2"\necho continued\n'

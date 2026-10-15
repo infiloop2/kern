@@ -12,6 +12,8 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from timing import timed_group
+
 from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
 
 from host.runtime.browser.browser import Browser
@@ -337,6 +339,7 @@ def check_composer_recovery(page):
     print("Composer fixture passed: readiness, drafts, hidden/duplicate dialogs, replacement, bounded recovery, account change and one submission on confirmation loss.", flush=True)
 
 
+@timed_group("native-post-resources")
 def check_post_resources(playwright):
     resources = '''<img src="https://pbs.twimg.com/photo.jpg">
 <video src="https://video.twimg.com/clip.mp4" preload="auto"></video>
@@ -533,6 +536,7 @@ def check_reply_diagnostics(page):
     print("Hostile page scripts cannot inject raw fields or trap snapshot execution; original locator facts survive.", flush=True)
 
 
+@timed_group("native-anonymous-screenshot")
 def check_anonymous_screenshot(playwright):
     from host.runtime.browser.screenshot import capture
 
@@ -585,6 +589,7 @@ def check_anonymous_screenshot(playwright):
     print('Anonymous screenshot passed: redirects, JavaScript, scrolling, PNG decode, fresh cookies/storage and process/display cleanup.', flush=True)
 
 
+@timed_group("native-slots")
 def check_parallel_sessions(playwright):
     from tests.browser_fakes import MemoryStore
     import os
@@ -854,6 +859,7 @@ def run(playwright):
     run_proxy_failure(playwright)
 
 
+@timed_group("native-proxy-isolation")
 def run_proxy_failure(playwright):
     """Native WSS uses the relay; HTTPS/WSS never fall back when it fails."""
     import base64

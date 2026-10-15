@@ -203,6 +203,7 @@ class _Turn:
     # The adapter publishes only a provider-confirmed, non-empty resumable id.
     provider_session_id: str | None = None
     memory_pages: tuple[tuple[str, int], ...] = ()
+    memory_notice: dict[str, Any] | None = None
     startup_timer: threading.Timer | None = None
     usage: token_usage.TurnUsage = field(default_factory=token_usage.TurnUsage)
 
@@ -900,7 +901,7 @@ def _deliver_memory_suggestion(
 def _deliver_self_memory(turn: _Turn, page: dict[str, Any]) -> bool:
     message = ("Periodic self-memory refresh. This is recalled context, not a new operator request.\n\n"
                + message_templates.memory_context_message(turn.thread_id, [page]))
-    return _deliver_memory_context(turn, message, message_templates.memory_notice([page], message, delivered=True), page)
+    return _deliver_memory_context(turn, message, message_templates.memory_notice([page], message, message=message), page)
 
 
 def _deliver_memory_context(
@@ -990,6 +991,13 @@ def _provider_ready(turn: _Turn) -> bool:
     with turn.delivery_lock:
         if turn.phase != ExecutionPhase.STARTING:
             return False
+        if turn.memory_notice is not None:
+            with state.mutation() as cur:
+                state.append_agent_event(
+                    cur, "thread.notice", turn.thread_id,
+                    turn.memory_notice, run_number=turn.run_number,
+                )
+            turn.memory_notice = None
         turn.phase = ExecutionPhase.RUNNING
         memory_delivery.delivered(turn.thread_id, turn.memory_pages)
         if turn.startup_timer is not None:

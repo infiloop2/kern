@@ -147,7 +147,7 @@ def attach_recording_steer_server(
     *, task_context: str, recalled_pages: list[dict[str, object]] | None = None,
 ) -> None:
     turn.server = RecordingSteerServer()
-    turn.phase = orchestrator.ExecutionPhase.RUNNING
+    orchestrator._provider_ready(turn)
 
 
 # The zeroed live-usage payload every accounts read carries when Bedrock has
@@ -2334,7 +2334,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [(event["event_type"], event["thread_id"]) for event in events["events"]],
-            [("thread.message", "thread-t1"), ("thread.notice", "thread-t1")],
+            [("thread.message", "thread-t1")],
         )
         self.assertEqual(events["events"][0]["payload"], {"message": "first turn", "source": "user", "notice": {"kind": "operator"}})
 
@@ -2396,6 +2396,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertIn('"page_id": "playwright-browser"', launch_message)
         self.assertTrue(launch_message.endswith("Take mobile screenshots"))
 
+        orchestrator._provider_ready(launch.call_args.args[0])
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(len(events["events"]), 2)
         self.assertEqual(
@@ -2407,8 +2408,9 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(notice["event_type"], "thread.notice")
         self.assertIn("memory_recall_details", notice["payload"])
         self.assertEqual({key: value for key, value in notice["payload"].items() if key != "memory_recall_details"}, {
-            "message": "Self identity and 2 memories prepared for injection.",
-            "notice": {"kind": "memory_injection", "summary": "Self identity and 2 memories prepared for injection."},
+            "message": "Self identity and 2 memories injected.",
+            "notice": {"kind": "memory_injection", "summary": "Self identity and 2 memories injected.",
+                       "details": launch_message.removesuffix("\n\nTake mobile screenshots")},
             "memory_page_ids": ["thread-t1", "playwright-browser"],
         })
 
@@ -2447,11 +2449,13 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with patch.object(orchestrator, "launch_turn") as launch:
             self.request("POST", "/v1/threads/thread-t1/messages", {"message": "go"})
         self.assertNotIn("outside-cap", launch.call_args.args[1])
+        orchestrator._provider_ready(launch.call_args.args[0])
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(len(events["events"]), 2)
         self.assertEqual({key: value for key, value in events["events"][-1]["payload"].items() if key != "memory_recall_details"}, {
-            "message": "Self identity and 1 memory prepared for injection.",
-            "notice": {"kind": "memory_injection", "summary": "Self identity and 1 memory prepared for injection."},
+            "message": "Self identity and 1 memory injected.",
+            "notice": {"kind": "memory_injection", "summary": "Self identity and 1 memory injected.",
+                       "details": launch.call_args.args[1].removesuffix("\n\ngo")},
             "memory_page_ids": ["thread-t1"],
         })
 
@@ -2476,9 +2480,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
         warning.assert_called_once()
         self.assertEqual(warning.call_args.kwargs["kind"], "memory_recall_timeout")
 
+        orchestrator._provider_ready(launch.call_args.args[0])
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual([e["event_type"] for e in events["events"]], ["thread.message", "thread.notice"])
-        self.assertEqual(events["events"][-1]["payload"]["message"], "Self identity and 0 memories prepared for injection.")
+        self.assertEqual(events["events"][-1]["payload"]["message"], "Self identity and 0 memories injected.")
         self.assertEqual(events["events"][-1]["payload"]["memory_page_ids"], [])
 
     def test_message_steers_running_turn_without_a_host_mailbox(self) -> None:
@@ -2854,7 +2859,6 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "thread.activity",
                 "thread.message",
                 "thread.notice",
-                "thread.notice",
             ],
         )
         change = events["events"][3]["payload"]["activity"]
@@ -2874,7 +2878,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(accepted["thread"]["agent_runtime"], "claude_code")
 
-        notice = events["events"][-2]
+        notice = events["events"][-1]
         self.assertIn("Historical context transferred", notice["payload"]["message"])
         # Short handoffs are shown in full, exactly as sent to the provider.
         self.assertEqual(
@@ -3013,10 +3017,10 @@ class AdminApiIntegrationTests(unittest.TestCase):
         )
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["thread.message", "thread.message", "thread.notice", "thread.notice"],
+            ["thread.message", "thread.message", "thread.notice"],
         )
         self.assertEqual(
-            events["events"][-2]["payload"]["historical_context"],
+            events["events"][-1]["payload"]["historical_context"],
             launch_message[launch_message.index("You are a new agent session"):],
         )
 
@@ -3408,7 +3412,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["thread.message", "thread.notice", "thread.stopped"],
+            ["thread.message", "thread.stopped"],
         )
 
         # The thread stays fenced until the owning turn thread releases it, so
@@ -3426,7 +3430,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(
             [event["event_type"] for event in events["events"]],
-            ["thread.message", "thread.notice", "thread.stopped"],
+            ["thread.message", "thread.stopped"],
         )
         config = state.thread_session_config("thread-t1")
         self.assertIsNotNone(config)
@@ -6338,7 +6342,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
             [event["event_type"] for event in resumed_events["events"]],
             [
                 "thread.message", "thread.error", "thread.notice",
-                "thread.notice", "thread.notice",
+                "thread.notice",
             ],
         )
         self.assertEqual(resumed_events["events"][2]["payload"], {

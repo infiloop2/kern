@@ -13,7 +13,8 @@ ARG PGVECTOR_VERSION=0.8.6
 ARG PGVECTOR_SHA256=10bf9938906e5d643bbc4a7eea104b6f57ba4898e5b76b20e60484ea1d5a7f8f
 
 # The runtime is Python standard library only; the tests additionally need
-# openssl (proxy certificate tests), bash and jq (workflow gate tests), rsync
+# openssl (proxy certificate tests), git (selector merge-base tests),
+# bash and jq (workflow gate tests), rsync
 # (sandbox workspace copy), a PostgreSQL server (admin-state tests start a
 # scratch cluster on a Unix socket, so --network none still holds), and
 # libnss-wrapper (initdb needs a passwd entry for the arbitrary uid the
@@ -37,6 +38,7 @@ RUN sed -i \
     build-essential \
     ca-certificates \
     curl \
+    git \
     jq \
     libnss-wrapper \
     openssl \

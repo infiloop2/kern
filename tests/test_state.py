@@ -110,7 +110,7 @@ class StateStorageTests(unittest.TestCase):
             assistant = state.append_agent_event(cur, "thread.message", "thread-1", {
                 "source": "agent", "message": "The release is ready",
             })
-            context = state.append_agent_event(cur, "thread.notice", "thread-1", messages.memory_notice([], "Recall diagnostics", delivered=False))
+            context = state.append_agent_event(cur, "thread.notice", "thread-1", messages.memory_notice([], "Recall diagnostics", message="Identity"))
             action = state.append_agent_event(cur, "thread.notice", "thread-1", {"notice": {
                 "kind": "app_ui_published", "summary": "Published Portfolio UI", "details": "Tool request and result",
             }})
@@ -2101,6 +2101,18 @@ class HostErrorStorageTests(unittest.TestCase):
             "boot_id": "boot-1",
             "pid": 4321,
         }
+
+    def test_provider_response_round_trips_above_old_context_storage_limit(self) -> None:
+        # Escape-heavy content exercises JSONB's serialized size as well as
+        # the provider's raw 8 KiB budget; migration 0092 is required.
+        response = "\\" * 8100 + "payment_options at end"
+        event = self.event(service="kern-tools")
+        event["context"] = {"provider_response": response}
+        diagnostic_id = state.ingest_host_diagnostic(1_800_000_000_000_000, event)
+        detail = state.host_diagnostic(diagnostic_id)
+        assert detail is not None
+        self.assertEqual(detail["context"]["provider_response"], response)
+        self.assertNotIn("context", state.page_host_diagnostics_before(None)[0])
 
     def test_ingest_coalesces_brief_repeats_and_rotates_ordering(self) -> None:
         first_usec = 1_800_000_000_000_000

@@ -495,6 +495,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("export_demographics", {"study_id": "645e4403bdd06d5f66d8fbde"}),
     ),
     "upwork": (
+        ("get_proposal_requirements", {}),
         ('list_accounts', {}),
         ('get_account', {'section': 'profile', 'org_uid': 'smoke'}),
         ('search_jobs', {'org_uid': 'smoke'}),

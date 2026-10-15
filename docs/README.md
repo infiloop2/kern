@@ -22,7 +22,11 @@ and small references for [Web Apps](../host/bootstrap/agent-home/references/web-
 [memory](../host/bootstrap/agent-home/references/memory.md),
 [schedules](../host/bootstrap/agent-home/references/schedules.md), and
 [agent messaging](../host/bootstrap/agent-home/references/agent-messaging.md).
-These describe the agent-facing contract; the operator API is a separate surface.
+The host instructions keep discovery routes and recurring invariants available.
+Their operation-specific read triggers load reference schemas and limits only
+when needed. Simple discovery and incoming replies need no feature manuals;
+receiving a trigger alone needs no schedule reference. Tool descriptions own
+call arguments and delivery mechanics. The operator API is a separate surface.
 
 ## Keeping documentation current
 

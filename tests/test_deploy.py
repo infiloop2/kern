@@ -3150,6 +3150,20 @@ class DeployUnitTests(unittest.TestCase):
         self.assertFalse(any("__pycache__" in name for name in names))
 
 
+class _DeadlineClock:
+    """Advance only when a mocked probe or wait explicitly consumes time."""
+    def __init__(self) -> None:
+        self.now = 100.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
 class RunBootstrapDeadlineTests(unittest.TestCase):
     def test_hung_bootstrap_is_terminated_at_the_deadline(self) -> None:
         # A remote hang with a live SSH connection produces no output and no
@@ -3178,32 +3192,50 @@ class RunBootstrapDeadlineTests(unittest.TestCase):
                 self.actions.append("kill")
 
         fake = FakeProcess()
+        clock = _DeadlineClock()
+
+        def wait_for_output(readers, writers, errors, timeout):
+            clock.now += timeout
+            return [], [], []
+
         with patch.object(lifecycle_bootstrap.subprocess, "Popen", return_value=fake), \
-                patch.object(lifecycle_bootstrap, "BOOTSTRAP_TIMEOUT_SECONDS", 0.2), \
+                patch.object(lifecycle_bootstrap, "time", clock), \
+                patch.object(lifecycle_bootstrap.select, "select", side_effect=wait_for_output) as select, \
                 patch("sys.stderr", _StringOutput()):
             with self.assertRaises(ConfigError) as ctx:
                 lifecycle_bootstrap._run_bootstrap(["ssh"], "kern-operator@host")
         self.assertIn("did not finish", str(ctx.exception))
-        self.assertIn("terminate", fake.actions)
+        self.assertEqual(fake.actions, ["terminate", "wait"])
+        self.assertEqual(clock.now - 100, lifecycle_bootstrap.BOOTSTRAP_TIMEOUT_SECONDS)
+        self.assertTrue(all(0 < c.args[3] <= 30 for c in select.call_args_list))
 
     def test_hanging_ssh_probe_is_bounded_and_retried(self) -> None:
         # A daemon that accepts the connection but never answers must not
         # stall readiness polling; each probe is bounded and retried.
         from host.cli import lifecycle_bootstrap
 
-        with patch.object(
-            lifecycle_bootstrap.subprocess,
-            "run",
-            side_effect=[
-                subprocess.TimeoutExpired(["ssh"], timeout=1),
-                subprocess.CompletedProcess(["ssh"], 0),
-            ],
-        ) as run:
+        clock = _DeadlineClock()
+        attempts = 0
+
+        def probe(command, **options):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                clock.now += options["timeout"]
+                raise subprocess.TimeoutExpired(command, timeout=options["timeout"])
+            if attempts == 2:
+                return subprocess.CompletedProcess(command, 255)
+            return subprocess.CompletedProcess(command, 0)
+
+        with patch.object(lifecycle_bootstrap, "time", clock), \
+                patch.object(lifecycle_bootstrap.subprocess, "run", side_effect=probe) as run:
             lifecycle_bootstrap._wait_for_ssh(["ssh"], "kern-operator@host")
-        self.assertEqual(run.call_count, 2)
-        for call in run.call_args_list:
+        self.assertEqual(run.call_count, 3)
+        self.assertEqual(clock.sleeps, [lifecycle_bootstrap.SSH_WAIT_SECONDS])
+        self.assertEqual(clock.now - 100, lifecycle_bootstrap.SSH_PROBE_TIMEOUT_SECONDS + lifecycle_bootstrap.SSH_WAIT_SECONDS)
+        for attempt in run.call_args_list:
             self.assertLessEqual(
-                call.kwargs["timeout"], lifecycle_bootstrap.SSH_PROBE_TIMEOUT_SECONDS
+                attempt.kwargs["timeout"], lifecycle_bootstrap.SSH_PROBE_TIMEOUT_SECONDS
             )
 
     def test_ssh_wait_enforces_one_overall_deadline(self) -> None:
@@ -3211,12 +3243,45 @@ class RunBootstrapDeadlineTests(unittest.TestCase):
         # monotonic deadline governs, however each attempt spends its time.
         from host.cli import lifecycle_bootstrap
 
-        with patch.object(lifecycle_bootstrap, "SSH_WAIT_ATTEMPTS", 0), \
-                patch.object(lifecycle_bootstrap.subprocess, "run") as run:
+        # Exercise real attempts and a final partial probe budget. A zero-
+        # attempt test never reached the deadline/capping behavior at all.
+        clock = _DeadlineClock()
+
+        def hanging_probe(command, **options):
+            clock.now += options["timeout"]
+            raise subprocess.TimeoutExpired(command, timeout=options["timeout"])
+
+        with patch.object(lifecycle_bootstrap, "SSH_WAIT_ATTEMPTS", 3), \
+                patch.object(lifecycle_bootstrap, "SSH_WAIT_SECONDS", 7), \
+                patch.object(lifecycle_bootstrap, "SSH_PROBE_TIMEOUT_SECONDS", 10), \
+                patch.object(lifecycle_bootstrap, "time", clock), \
+                patch.object(lifecycle_bootstrap.subprocess, "run", side_effect=hanging_probe) as run:
             with self.assertRaises(ConfigError) as ctx:
                 lifecycle_bootstrap._wait_for_ssh(["ssh"], "kern-operator@host")
-        run.assert_not_called()
+        self.assertEqual([attempt.kwargs["timeout"] for attempt in run.call_args_list], [10, 10, 1])
+        self.assertEqual(clock.now, 121)
+        self.assertEqual(clock.sleeps, [])
         self.assertIn("could not reach", str(ctx.exception))
+
+    def test_failed_ssh_backoff_stops_at_overall_deadline(self) -> None:
+        from host.cli import lifecycle_bootstrap
+
+        clock = _DeadlineClock()
+
+        def failing_probe(command, **options):
+            clock.now += min(2, options["timeout"] / 2)  # Stay within each probe timeout.
+            return subprocess.CompletedProcess(command, 255)
+
+        with patch.object(lifecycle_bootstrap, "SSH_WAIT_ATTEMPTS", 2), \
+                patch.object(lifecycle_bootstrap, "SSH_WAIT_SECONDS", 3), \
+                patch.object(lifecycle_bootstrap, "time", clock), \
+                patch.object(lifecycle_bootstrap.subprocess, "run", side_effect=failing_probe) as run, \
+                patch("sys.stderr", _StringOutput()):
+            with self.assertRaisesRegex(ConfigError, "could not reach"):
+                lifecycle_bootstrap._wait_for_ssh(["ssh"], "kern-operator@host")
+        self.assertEqual([attempt.kwargs["timeout"] for attempt in run.call_args_list], [6, 1])
+        self.assertEqual(clock.sleeps, [3, 0.5])
+        self.assertEqual(clock.now, 106)
 
     def test_archive_transfer_is_bounded(self) -> None:
         from host.cli import lifecycle_bootstrap

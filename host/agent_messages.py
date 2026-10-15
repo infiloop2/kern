@@ -90,13 +90,12 @@ def memory_suggestion(pages: list[tuple[str, int, str]]) -> str:
     )
 
 
-def memory_notice(pages: list[dict[str, Any]], details: str, *, delivered: bool) -> dict[str, Any]:
+def memory_notice(pages: list[dict[str, Any]], details: str, *, message: str) -> dict[str, Any]:
     count = len(pages)
-    action = "injected" if delivered else "prepared for injection"
-    summary = f"Self identity and {count} {'memory' if count == 1 else 'memories'} {action}."
+    summary = f"Self identity and {count} {'memory' if count == 1 else 'memories'} injected."
     return {
         "message": summary,
-        "notice": {"kind": "memory_injection", "summary": summary},
+        "notice": {"kind": "memory_injection", "summary": summary, "details": message},
         "memory_page_ids": [page["page_id"] for page in pages],
         "memory_recall_details": details,
     }

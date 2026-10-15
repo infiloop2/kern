@@ -1037,11 +1037,11 @@ it is never handed to a provider, and a conversation-only view that drops
 |---|---|---|
 | `notice.kind` | enum | Specific input, context, or action kind from the [notice catalog](../architecture/agent-messages.md#event-contract). No generic kind. |
 | `notice.summary` | string | One display line, at most 100 characters. |
-| `notice.details` | string, when recorded | Action outcome and request details, bounded to 20 KB of JSON-encoded text with an explicit truncation marker. |
+| `notice.details` | string, when recorded | Exact injected identity/memory message for confirmed memory injections. Action outcome and request details are bounded to 20 KB of JSON-encoded text with an explicit truncation marker. |
 | `source` | `user`, when delivered | Present only on input actually delivered to the provider. Context and action receipts omit it. |
 | `message` | string, when recorded | Exact provider text for delivered input, including its preamble; compact summary for context notices. Action receipts omit it. |
 | `memory_page_ids` | string array, when recorded | Selected page ids on memory injection or suggestion notices. An empty array means no pages were selected. |
-| `memory_recall_details` | string, when recorded | Memory retrieval or suggestion details for the expanded notice. |
+| `memory_recall_details` | string, when recorded | Memory retrieval/selection diagnostics or suggestion text; injection notices show their exact `notice.details` message when expanded. |
 | `historical_context` | string, when recorded | Bounded beginning/end preview of transferred history, at most 24 KiB. |
 
 Clients must include `thread.notice` in explicit event filters even when hiding
