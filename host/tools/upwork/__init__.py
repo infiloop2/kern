@@ -206,9 +206,9 @@ def _parameters(action: str, value: object, api: HostAPI) -> JSONObject:
         if "payment_mode" in params and not cast(str, params["payment_mode"]).strip():
             raise ValueError("Choose an explicit Upwork payment_mode.")
         milestones = cast(list[JSONObject], params.get("milestones", []))
-        if params.get("payment_mode") == "milestone" and not milestones:
+        if params.get("payment_mode") == "by_milestone" and not milestones:
             raise ValueError("Milestone payment requires explicit milestones before approval.")
-        if params.get("payment_mode") == "project" and milestones:
+        if params.get("payment_mode") == "by_project" and milestones:
             raise ValueError("Project payment cannot include milestone terms.")
         for milestone in milestones:
             if not cast(str, milestone["description"]).strip():

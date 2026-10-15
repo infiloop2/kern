@@ -5,6 +5,7 @@ import sys
 import tempfile
 import threading
 import time
+from typing import Callable
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -31,6 +32,7 @@ class HermesSessionTests(unittest.TestCase):
         *,
         session_id: str | None = None,
         input_message: str = "initial",
+        on_ready: Callable[[], bool] | None = None,
     ) -> tuple[str, str, list[str], list[str]]:
         delivered: list[str] = []
         streamed: list[str] = []
@@ -40,7 +42,9 @@ class HermesSessionTests(unittest.TestCase):
         try:
             with tempfile.TemporaryDirectory() as tmp:
                 hermes_agent.AGENT_CWD = tmp
-                server = hermes_agent.HermesSession([sys.executable, "-u", "-c", script])
+                server = hermes_agent.HermesSession(
+                    [sys.executable, "-u", "-c", script], on_ready=on_ready,
+                )
                 server.start()
                 with patch.object(state, "read_bedrock_region", return_value="us-east-1"):
                     result_session_id, output = hermes_agent.run_turn(
@@ -101,6 +105,33 @@ class HermesSessionTests(unittest.TestCase):
         self.assertEqual(session_id, "hermes-session-7")
         payload = json.loads(output)
         self.assertEqual(payload["args"][payload["args"].index("--resume") + 1], "hermes-session-7")
+
+    def test_early_stdin_close_preserves_output_without_marking_ready(self) -> None:
+        # A prompt larger than the pipe capacity forces a write failure when
+        # the child closes stdin, without depending on thread scheduling.
+        script = r"""
+import os, sys
+os.close(0)
+print("session_id: hermes-session-1", file=sys.stderr)
+print("answer before reading stdin")
+"""
+        ready = MagicMock(return_value=True)
+        session_id, output, _delivered, streamed = self.run_turn(
+            script, input_message="x" * (1024 * 1024), on_ready=ready,
+        )
+        self.assertEqual(session_id, "hermes-session-1")
+        self.assertEqual(output, "answer before reading stdin")
+        self.assertEqual(streamed, [output])
+        ready.assert_not_called()
+
+    def test_ready_callback_errors_are_not_treated_as_pipe_errors(self) -> None:
+        for error in (BrokenPipeError("callback pipe"), OSError("callback IO"), ValueError("callback value")):
+            with self.subTest(error=error):
+                ready = MagicMock(side_effect=error)
+                with self.assertRaises(type(error)) as raised:
+                    self.run_turn(CHAT_SCRIPT, on_ready=ready)
+                self.assertIs(raised.exception, error)
+                ready.assert_called_once_with()
 
     def test_a_leading_dash_prompt_is_delivered_verbatim_over_stdin(self) -> None:
         _sid, output, _delivered, _streamed = self.run_turn(
@@ -187,7 +218,7 @@ print("API call failed after 3 retries: Connection error.", file=sys.stderr)
 sys.exit(1)
 """
         with self.assertRaisesRegex(hermes_agent.HermesAgentError, "Connection error"):
-            self.run_turn(script)
+            self.run_turn(script, input_message="x" * (1024 * 1024))
 
     def test_missing_session_id_fails_the_turn(self) -> None:
         script = r"""
@@ -209,6 +240,7 @@ print("session_id: hermes-session-1", file=sys.stderr)
     # real wrapper does.
     _MARKER_PREAMBLE = (
         "import sys\n"
+        "sys.stdin.read()\n"
         "argv = sys.argv[1:]\n"
         "nonce = argv[argv.index('--activity-nonce') + 1] if '--activity-nonce' in argv else ''\n"
         "marker = '\\x1ekern-activity ' + nonce + ' '\n"

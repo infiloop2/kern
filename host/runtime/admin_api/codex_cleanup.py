@@ -15,8 +15,11 @@ ORPHAN_GRACE_SECONDS = 7 * 24 * 3600
 CLEANUP_INIT_TIMEOUT_SECONDS = 45
 
 
-def _ineligible_reason(thread: dict[str, Any], runtime: str, before: float) -> str | None:
-    if thread.get("originator") != "kern-host":
+def _ineligible_reason(
+    thread: dict[str, Any], runtime: str, before: float, *, allow_missing_originator: bool = False,
+) -> str | None:
+    originator = thread.get("originator")
+    if originator != "kern-host" and not (allow_missing_originator and originator is None):
         return "foreign_origin"
     if thread.get("cwd") != codex_app_server.AGENT_CWD:
         return "wrong_cwd"
@@ -175,7 +178,9 @@ def reconcile_codex_sessions() -> int:
                 if session_id in referenced:
                     counts["skip_referenced"] += 1
                     continue
-                reason = _ineligible_reason(thread, runtime, before)
+                # Older roots can omit originator in thread/list even though
+                # thread/read returns it. Require verified ownership below.
+                reason = _ineligible_reason(thread, runtime, before, allow_missing_originator=True)
                 if reason is not None:
                     counts[f"skip_{reason}"] += 1
                     continue

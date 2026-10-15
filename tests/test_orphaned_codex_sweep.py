@@ -65,6 +65,62 @@ class OrphanedCodexSweepTests(unittest.TestCase):
         self.assertGreaterEqual(context["elapsed_seconds"], 0)
         self.warning.assert_not_called()
 
+    def test_missing_list_originator_is_verified_before_retirement(self):
+        for runtime in ("codex", "codex-2", "codex-3"):
+            for missing_key in (False, True):
+                with self.subTest(runtime=runtime, missing_key=missing_key):
+                    self.delete.reset_mock()
+                    self.server.call.reset_mock()
+                    listed = session(1, runtime=runtime, originator=None)
+                    if missing_key:
+                        del listed["originator"]
+                    self.use(listed)
+                    self.server.call.side_effect = None
+                    self.server.call.return_value = {"thread": session(1, runtime=runtime)}
+                    with patch.object(codex_app_server, "CODEX_RUNTIME_TYPES", (runtime,)):
+                        self.assertEqual(cleanup.reconcile_codex_sessions(), 1)
+                    self.server.call.assert_called_once_with(
+                        "thread/read", {"threadId": listed["id"], "includeTurns": False}, timeout=5,
+                    )
+                    self.delete.assert_called_once_with(self.server, listed["id"])
+                    self.assertEqual(self.info.call_args.kwargs["context"]["retired_orphan"], 1)
+
+    def test_missing_list_originator_does_not_weaken_fresh_metadata_checks(self):
+        for overrides in (
+            {"originator": None}, {"originator": "codex_cli_rs"},
+            {"originator": ""}, {"cwd": "/tmp"}, {"parentThreadId": session(2)["id"]},
+            {"updatedAt": 2_000_000}, {"status": {"type": "active"}},
+            {"ephemeral": True}, {"path": "/etc/rollout.jsonl"},
+        ):
+            with self.subTest(overrides=overrides):
+                self.use(session(1, originator=None))
+                self.server.call.side_effect = None
+                self.server.call.return_value = {"thread": session(1, **overrides)}
+                self.assertEqual(cleanup.reconcile_codex_sessions(), 0)
+        self.delete.assert_not_called()
+        self.report.assert_not_called()
+
+    def test_missing_list_originator_cannot_use_stale_metadata_after_read_failure(self):
+        for message in (f"thread not loaded: {session(1)['id']}",
+                        f"no rollout found for thread id {session(1)['id']}"):
+            with self.subTest(message=message):
+                self.use(session(1, originator=None))
+                self.server.call.side_effect = codex_app_server.CodexAppServerError(message)
+                self.assertEqual(cleanup.reconcile_codex_sessions(), 0)
+        self.delete.assert_not_called()
+        self.report.assert_not_called()
+
+    def test_missing_list_originator_still_skips_protected_roots_before_reading(self):
+        roots = [session(1, originator=None), session(2, originator=None),
+                 session(3, originator=None, updatedAt=2_000_000),
+                 session(4, originator=None, path="/etc/rollout.jsonl")]
+        self.use(*roots)
+        self.references.return_value = {roots[0]["id"]}
+        self.live.return_value = {roots[1]["id"]}
+        self.assertEqual(cleanup.reconcile_codex_sessions(), 0)
+        self.server.call.assert_not_called()
+        self.delete.assert_not_called()
+
     def test_summary_counts_protected_roots_and_reasons(self):
         roots = [session(1), session(2), session(3, updatedAt=2_000_000),
                  session(4, originator="other"), session(5, path=None),

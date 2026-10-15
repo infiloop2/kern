@@ -101,10 +101,10 @@ OPERATIONS = {row.spec.id: row for row in (
         # Keep the supported arrangements closed so every accepted mode has
         # conditional milestone validation. Verify compatibility using the
         # provider help read; an unfamiliar mode needs an adapter update.
-        "payment_mode": {"type": "string", "enum": ["project", "milestone"], "description": "Required for fixed-price jobs. Read get_proposal_requirements and verify these supported values against current provider documentation first. project pays the whole bid on delivery; milestone requires milestones. Never infer or default the choice."},
+        "payment_mode": {"type": "string", "enum": ["by_project", "by_milestone"], "description": "Required for fixed-price jobs. Read get_proposal_requirements and verify these supported values against current provider documentation first. by_project pays the whole bid on delivery; by_milestone requires milestones. Never infer or default the choice."},
         "milestones": {"description": "Explicit ordered fixed-price milestones when requested by the selected payment mode. Amounts must total charged_amount. Dates are optional, never invented.", "type": "array", "minItems": 1, "maxItems": 20, "items": schema({
-            "description": {**outputs.text("Deliverable and acceptance terms."), "minLength": 1, "maxLength": 5000},
-            "amount": {**outputs.number("Milestone amount in the proposal currency."), "minimum": 0.01},
+            "description": {**outputs.text("Deliverable and acceptance terms, at most 200 characters."), "minLength": 1, "maxLength": 200},
+            "amount": {**outputs.number("Milestone amount in the proposal currency, from 5 to 50,000."), "minimum": 5, "maximum": 50000},
             "due_date": outputs.text("Optional agreed date, YYYY-MM-DD."),
         }, ["description", "amount"])},
         "answers": {"description": "Answers to every required screening question.", "type": "array", "maxItems": 20, "items": schema({"question": outputs.text("Screening question."), "answer": outputs.text("Your answer.")}, ["question", "answer"])},
