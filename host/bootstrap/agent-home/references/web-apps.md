@@ -1,127 +1,90 @@
 # Web Apps Workspace reference
 
-Read before App API operations. For writing or debugging generated UI, also
-read [web-app-ui.md](web-app-ui.md). Data-only operations need only this file.
+Read when the host guide directs: App creation, `/agent/apps/{app_id}/...`
+operations or diagnosis. For generated UI, also read [web-app-ui.md](web-app-ui.md).
 
-Web Apps have immutable ids such as `app-1`, separate from editable display
-names. `GET /agent/apps` lists active and archived apps, including each App's short `purpose` (up to 100 characters) and
-complete `agent_settings` (`agent_runtime`, `model`, and `effort`) and
-`agent_updates_locked` state. Any agent may read an App by id. Only the App’s own agent may update its
-active, unlocked App through agent tools; archived and agent-locked Apps are read-only. Use the id
-the operator gives you, or list Apps and confirm the immutable id; never choose
-an App from its editable name alone.
+Use immutable `app-N` ids. Any agent may read Apps; only the owner may change
+its active, unlocked App. Archived or agent-locked Apps are read-only.
 
-To change another App, use `send_agent_message` addressed to its `app-N` identity.
-The App agent owns its interface, data, collections, name, purpose and settings.
-It may delegate work, but applies the resulting App changes itself. The operator
-can edit Apps. Ownership uses the authenticated thread identity.
+## Create and configure
 
-Create a new App with `POST /agent/apps` without a request body, but only when
-the operator explicitly asks you to create one. App creation never accepts an
-agent configuration from the browser or an agent. The backend selects and
-persists the first active runtime, its named default model, and High effort (or
-Codex when none is active). The response contains the new immutable `app_id`
-and complete `agent_settings`; use the id for subsequent reads and message that App agent to build or configure
-it. The creator does not gain write access to the new App.
+- `POST /agent/apps` takes no body and requires an explicit operator request.
+  It returns `app_id` and the host-selected `agent_settings`. Message that
+  App agent to build/configure it; creation gives you no write access.
+- `PUT /agent/apps/{app_id}/name` takes `{"name":"Research desk"}` and optionally
+  `"purpose":"Review company research"`. Name is nonblank, at most 100
+  characters. Purpose is one line, at most 100 characters; omit to preserve,
+  or use an empty string to clear. List summaries include name, purpose,
+  `archived`, `agent_updates_locked` and `agent_settings`.
+- `GET /agent/apps/session-options` returns `session_options` (runtime → model
+  → supported efforts) and `active_runtimes`. Use these choices, not guessed
+  model names.
+- `PUT /agent/apps/{app_id}/agent-settings` requires all three fields:
+  `{"agent_runtime":"codex","model":"gpt-6.1-sol","effort":"high"}`.
+  Use a currently supported combination. Saving does not start a turn;
+  the current turn and its follow-ups keep their configuration, and the next
+  turn uses the new settings.
 
-## App name and agent settings
+Both PUTs return `{"app":...}` including name/settings; neither takes
+`expected_revision` nor advances the UI/data revision.
 
-- `PUT /agent/apps/{app_id}/name` with `{"name":"Marketing HQ"}` renames the
-  App without changing its immutable id. Names must be nonblank and at most
-  100 characters.
-- `GET /agent/apps/session-options` returns `session_options` (runtime keys
-  mapping to model keys and their supported effort lists) and `active_runtimes`.
-  Read these choices before configuring an App; do not guess model names.
-- `PUT /agent/apps/{app_id}/agent-settings` with
-  `{"agent_runtime":"codex","model":"gpt-6.1-sol","effort":"high"}` saves the
-  complete configuration for the App's next turn. All three fields
-  are required and validated against the session options. This does not start
-  an agent turn. The owner can save settings while running; its current turn
-  and follow-up messages keep the current configuration until that turn ends.
-  Operator UI controls remain locked while running and show the stop-first warning.
+For all App writes, inspect 409 errors: archived Apps are read-only (check
+`archived` in `GET /agent/apps`); only revision conflicts call for re-reading
+relevant state and retrying. Stop on an archived App or a 423 lock.
 
-Both PUT routes return `{"app":...}` with the App summary, including `name`
-and `agent_settings`. They reject archived Apps (409) and agent-locked Apps
-(423). These metadata changes do not take `expected_revision` or advance the
-UI/data revision.
+## Read state
 
-## State reads
-
-For an App id `{app_id}`, read only what the task needs:
-
-- `GET /agent/apps/{app_id}/state/meta` — revision, update time, byte sizes, and
+- `GET /agent/apps/{app_id}/state/meta`: revision, update time, byte sizes and
   `agent_updates_locked`.
-- `GET /agent/apps/{app_id}/state/ui` — `revision`, HTML, CSS, and JavaScript.
-- `GET /agent/apps/{app_id}/state/data` — `revision` and full JSON data.
-- `GET /agent/apps/{app_id}/state/data/shape` — data keys, types, and per-branch
-  `bytes` without values. Object keys are path segments. An array's `items`
-  describes its elements rather than naming a segment, so
-  `leads.items.status` maps to `["leads",0,"status"]`. Repeated short strings
-  may appear as `enum`; `truncated` or `sampled` means the map is partial;
-  `addressable: false` means no narrow path can reach the key, so fetch that
-  branch with a full data read. Shape is derived on every call and is never
-  written.
-- `POST /agent/apps/{app_id}/state/data/read` with
-  `{"path":["projects",0]}` reads one branch. Use
-  `{"paths":[["config"],["next_id"]],"missing":"null"}` to read up to 16
-  branches from one consistent revision; `missing` defaults to `"error"`.
+- `GET /agent/apps/{app_id}/state/ui`: revision, HTML, CSS and JavaScript.
+- `GET /agent/apps/{app_id}/state/data`: revision and full JSON data.
+- `GET /agent/apps/{app_id}/state/data/shape`: keys, types and branch `bytes`
+  without values, except possible `enum` samples of repeated short strings.
+  `truncated` or `sampled` means partial coverage. Object keys are path
+  segments; array `items` describes elements, so `leads.items.status` maps to
+  `["leads",0,"status"]`. `addressable: false` means no narrow path reaches
+  that key; use a full data read. Shape is derived, never written.
+- `POST /agent/apps/{app_id}/state/data/read` with `{"path":["projects",0]}`
+  reads a branch. `{"paths":[["config"],["next_id"]],"missing":"null"}` reads
+  up to 16 branches at one revision; `missing` defaults to `"error"`.
 
-## State writes
+## Write state
 
-Write with `POST /agent/apps/{app_id}/actions`:
+`POST /agent/apps/{app_id}/actions` accepts:
 
-- `{"action":"publish_ui","expected_revision":7,"html":"...","css":"...","javascript":"...","data_operations":[...]}` replaces the full UI and may apply 0–32 targeted data operations atomically.
+- `{"action":"publish_ui","expected_revision":7,"html":"...","css":"...","javascript":"...","data_operations":[...]}`: replace the full UI with optional 0–32 atomic data operations.
 - `{"action":"set","expected_revision":7,"path":["projects",0,"status"],"value":"done"}`
 - `{"action":"delete","expected_revision":7,"path":["projects",0]}`
 - `{"action":"append","expected_revision":7,"path":["activity"],"value":{...}}`
-- `{"action":"batch","expected_revision":7,"operations":[...]}` applies
-  1–32 data operations atomically. Every nested operation uses `action`, never
-  `op`.
+- `{"action":"batch","expected_revision":7,"operations":[...]}`: 1–32 atomic
+  data operations, each using `action`, never `op`.
 
-Every successful request increments the one App `revision` exactly once and
-preserves unmentioned data. Carry the returned revision forward rather than
-re-reading. A 409 means another writer changed the App: read the relevant
-resource and retry. A 423 means the operator temporarily locked agent updates:
-stop, tell them the App is locked, and retry only after they unlock it.
+Success increments the shared App revision once and preserves unmentioned
+data. Carry its returned revision forward. Paths contain 1–16 object keys or
+non-negative array indexes; parents must exist. `set` cannot append an array
+item: use `append`.
 
-Paths are object keys and non-negative numeric array indexes, 1–16 segments.
-The parent path must exist. `set` replaces an existing array index and does not
-append at index equal to the array length; use `append` for a new item. Limits:
-128 KiB HTML, 64 KiB CSS, 128 KiB JavaScript, and 10 MiB total data. Individual
-agent requests remain capped at 256 KiB, so grow large documents through
-targeted operations.
+Limits: 128 KiB HTML, 64 KiB CSS, 128 KiB JavaScript, 10 MiB document data,
+and 256 KiB per agent request. Grow large documents with targeted operations.
 
 ## Collections
 
-Use collections for repeated records that the UI must filter or page without
-loading the whole App document:
+Keep small configuration/cohesive state in the document; use collections for
+repeated records that need filtering or paging.
 
-- `GET /agent/apps/{app_id}/collections` lists collection names, row counts,
-  byte sizes, and the App's current `revision`.
-- `POST /agent/apps/{app_id}/collections/leads/query` accepts optional
-  `filters` (up to 8 `eq`, `ne`, `exists`, or `missing` operations on top-level
-  fields), `ids`, one `sort`, `limit` (1–100), and `offset`. It returns matching
-  rows, `total`, and `next_offset`.
+- `GET /agent/apps/{app_id}/collections`: names, row counts, byte sizes and
+  current App revision.
+- `POST /agent/apps/{app_id}/collections/leads/query`: optional `filters`
+  (up to 8 `eq`, `ne`, `exists` or `missing` operations on top-level fields),
+  `ids`, one `sort`, `limit` (1–100) and `offset`. Returns rows, `total` and
+  `next_offset`.
 - `POST /agent/apps/{app_id}/collections/leads/actions` with
   `{"expected_revision":3,"operations":[{"action":"upsert","id":"lead-1","value":{"status":"new"}},{"action":"delete","id":"lead-2"}]}`
-  applies up to 100 row operations atomically. It advances the same App
-  revision used by UI and document writes; on 409, read the relevant state and
-  retry.
+  applies up to 100 row operations atomically and advances the same revision
+  as UI/document writes. The same archived/locked/conflict rules apply.
 
-Collection names and row ids are stable identifiers. Collection changes are
-part of the App's one combined revision, and retained recovery points include
-all collection rows. An App may retain 64 collections, 100,000 rows, and 50
-MiB of collection data; one row is capped at 128 KiB. Keep small configuration
-and cohesive state in the App document, and put queryable repeated records in
-collections.
+Collection names and row ids are stable. Limits per App: 64 collections,
+100,000 rows and 50 MiB of collection data; 128 KiB per row. Recovery points
+include collection rows.
 
-## Discovery purpose
-
-Apps have an optional, single-line `purpose` of at most 100 characters. It is
-returned in App lists, separate from the name and data. Set it with
-`PUT /agent/apps/{app_id}/name`, using
-`{"name":"Research desk","purpose":"Review company research"}`. Omitting
-`purpose` preserves it; an empty string clears it. The App details dialog
-edits both fields. Archived and agent-locked Apps reject agent updates.
-
-For cross-thread requests and replies, see [agent messaging](agent-messaging.md).
+Before initiating work with the owner, read [agent-messaging.md](agent-messaging.md).

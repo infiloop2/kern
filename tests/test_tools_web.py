@@ -47,6 +47,18 @@ def _serving(body: bytes) -> object:
 
 
 class WebResponseCapTests(unittest.TestCase):
+    def test_transport_truncation_reaches_copied_diagnostic_context(self) -> None:
+        from host.runtime.tools.tools_host import _provider_warning_context
+        from host.runtime.core.host_errors import _safe_context
+        for truncated in (False, True):
+            transport = WebRequestError("HTTP error", status=400, body=b"x" * 4096, body_truncated=truncated)
+            warning = web.provider_warning("Example", "write", transport, "Provider failed")
+            context = _safe_context(_provider_warning_context("example", "write", warning))
+            self.assertEqual(warning.body_truncated, truncated)
+            self.assertEqual(context.get("provider_response_truncated", False), truncated)
+            self.assertEqual(context["provider_response"], "x" * 4096)
+            self.assertNotIn("x" * 100, str(warning))
+
     def test_json_http_error_body_limit_is_explicit_and_overridable(self) -> None:
         body = b'{"error": {"message": "' + b"x" * 10000 + b'"}}'
         for limit, truncated in ((4096, True), (256 * 1024, False), (100, True)):

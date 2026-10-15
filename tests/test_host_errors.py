@@ -74,6 +74,42 @@ class HostErrorReporterTests(unittest.TestCase):
         self.assertRegex(record["fingerprint"], r"^[0-9a-f]{64}$")
         self.assertIn("test_exception_record_is_bounded", record["traceback"])
 
+    def test_provider_response_survives_reporter_and_collector_beyond_512_bytes(self):
+        from host.runtime.tools.tools_host import _provider_warning_context
+        from host.tools.shared.web import ProviderWarning
+        body = json.dumps({"next_step": "explanation " * 100, "payment_options": ["example"]})
+        warning = ProviderWarning("Upwork", "create_proposal_preview", "Missing terms", body=body.encode())
+        record = host_errors._exception_record("tools.provider_request_approved", warning,
+            _provider_warning_context("upwork", "submit_proposal", warning), severity="warning", kind="provider_failure")
+        _, event = collector.parse_journal_record(journal_row(record))
+        self.assertEqual(event["context"]["provider_response"], body)
+        self.assertNotIn("diagnostic_context_truncated", event["context"])
+
+    def test_diagnostic_truncation_is_explicit_and_escaped_context_stays_bounded(self):
+        for body in ("x" * 9000, "\\" * 9000, "界" * 9000):
+            context = host_errors._safe_context({"provider_response": body, "provider_response_truncated": False})
+            self.assertTrue(context["diagnostic_context_truncated"])
+            self.assertTrue(context["provider_response_truncated"])
+            self.assertLessEqual(len(context["provider_response"].encode()), 8192)
+            self.assertLessEqual(len(json.dumps(context).encode()), host_errors.MAX_CONTEXT_BYTES)
+        context = host_errors._safe_context({str(i): "x" * 512 for i in range(200)})
+        self.assertTrue(context["diagnostic_context_truncated"])
+        self.assertLessEqual(len(json.dumps(context).encode()), host_errors.MAX_CONTEXT_BYTES)
+
+    def test_aggregate_eviction_preserves_provider_truncation_markers(self):
+        for body, upstream_truncated in (("\\" * 9000, False), ("partial", True)):
+            for provider_first in (True, False):
+                with self.subTest(upstream=upstream_truncated, provider_first=provider_first):
+                    provider = {"provider_response": body, "provider_response_truncated": upstream_truncated}
+                    other = {str(i): "x" * 512 for i in range(200)}
+                    raw = {**provider, **other} if provider_first else {**other, **provider}
+                    context = host_errors._safe_context(raw)
+                    self.assertTrue(context["provider_response_truncated"])
+                    self.assertTrue(context["diagnostic_context_truncated"])
+                    self.assertLessEqual(len(json.dumps(context).encode()), host_errors.MAX_CONTEXT_BYTES)
+                    if provider_first:
+                        self.assertEqual(context["provider_response"], body[:8192])
+
     @patch("host.runtime.core.host_errors.subprocess.run")
     def test_emit_record_uses_structured_journal_field(self, run: Mock) -> None:
         host_errors.emit_record({"kind": "service_exit", "summary": "stopped"})

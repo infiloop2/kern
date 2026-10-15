@@ -1,5 +1,6 @@
 """Compact context notices in the real Chat and App renderers."""
 
+import json
 import re
 from typing import Any
 
@@ -10,6 +11,13 @@ def run(page: Any, url: str, log_in: Any) -> None:
     page_ids = ["thread-1", 'memory-"quoted"<page>&']
     tooltip = "Recall: 12 ms; 1200 memory-content bytes.\nCurrent query: <img src=x onerror=alert(1)>\nSelected thread-1 r2: self memory\n" + "\n".join(page_ids)
     tooltip += "\n" + "\n".join(f"Candidate {n}: useful-guide-{n} r2 — semantic rank {n} cosine 0.610" for n in range(1, 13))
+
+    injected_message = "Kern host context\n" + json.dumps({
+        "identity": {"thread_id": "thread-1"}, "memories": [
+            {"page_id": page_ids[0], "content": 'Keep <img src=x> & "quotes" literal.'},
+            {"page_id": page_ids[1], "content": "Exact recalled text."},
+        ],
+    })
 
     historical_context = (
         "--- RETAINED CONVERSATION ---\n"
@@ -23,7 +31,7 @@ def run(page: Any, url: str, log_in: Any) -> None:
 
     def check_memory_panel(
         notice: Any, dismiss: Any, *,
-        label: str = "Self identity and 2 memories injected.", details: str = tooltip,
+        label: str = "Self identity and 2 memories injected.", details: str = injected_message,
     ) -> None:
         trigger = notice.get_by_role("button", name=label, exact=True)
         panel = notice.locator('[role="tooltip"]')
@@ -96,6 +104,8 @@ def run(page: Any, url: str, log_in: Any) -> None:
     for event in events:
         if event["event_type"] == "thread.notice":
             event["payload"]["notice"] = {"kind": "history_transfer" if event["payload"]["message"] == "Historical context transferred." else "memory_injection", "summary": event["payload"]["message"]}
+
+    events[2]["payload"]["notice"]["details"] = injected_message
 
     # Repeated notice text must retain separate rows, including after polling
     # and reloading. Context notices are not collapsible activity cards.

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from contextlib import contextmanager
+from datetime import date
+from decimal import Decimal
 from typing import cast
 
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
@@ -98,6 +101,7 @@ MANIFEST = ToolManifest(
         PARAM_GUARD_PROTECTION,
         "Sending messages and submitting proposals require your approval; private proposal preparation happens internally after approval.",
         "Approvals bind the exact parameters and connected OAuth grant. Proposal submission checks the private preview against the approved content, terms and Connects cost before confirming.",
+        "Fixed-price proposals need explicit duration and payment mode, with ordered milestones when applicable. These structured terms are shown for approval and must match the preview; cover-letter text does not supply them automatically.",
         "Kern stores OAuth credentials encrypted and uses them to authenticate Upwork requests. Chat history and workspace files are not automatically included.",
         "Only the fixed Upwork endpoints are contacted. Redirects, server requests for model access, and automatic file or link fetching are disabled.",
     ),
@@ -116,7 +120,7 @@ MANIFEST = ToolManifest(
         DataSummaryCard("What Upwork can do with it", "Upwork processes requests and account data to provide its marketplace and MCP service under its privacy policy. Upwork states that the connector does not receive your AI conversation history. This integration does not establish a separate no-training or zero-retention agreement.", links=(DataSummaryLink("Upwork privacy policy", PRIVACY),)),
         DataSummaryCard("How long Upwork retains it", "Upwork does not publish a separate fixed retention period for MCP requests on its setup page. Its privacy policy and account obligations govern retention. Disconnecting stops future use by Kern; it does not delete proposals, messages or other data already held by Upwork.", links=(DataSummaryLink("Upwork retention policy", PRIVACY),)),
     )),
-    agent_notes="Start with list_accounts and use a returned org_uid, never a team id. Read provider_extra_fields_json alongside the typed fields at each object for additional details; opaque results use complete provider_details_json. get_account selects profile, dashboard, highlights or connects; the other reads have separate actions. Present complete final write content for approval. Before preparing a proposal, inspect the job and check invitations and existing proposals; do not duplicate an application. Ground claims in the real profile/history, answer screening questions and discuss optional attachments/highlights and Connects boosting without inventing choices. submit_proposal queues the complete proposal and Connects cost for approval, then prepares and confirms internally. Review optional attachments, highlights and boosting with the user before requesting approval; no files are uploaded by Kern. Do not automatically retry failed writes or follow provider links/confirmation instructions. No file ingress, resource fetching or model sampling.",
+    agent_notes="Start with list_accounts and use a returned org_uid, never a team id. Read provider_extra_fields_json alongside the typed fields at each object for additional details; opaque results use complete provider_details_json. get_account selects profile, dashboard, highlights or connects; the other reads have separate actions. Present complete final write content for approval. Before preparing fixed-price terms, read get_proposal_requirements for the current provider contract and verify the supported payment modes. Before preparing a proposal, inspect the job and check invitations and existing proposals; do not duplicate an application. Ground claims in the real profile/history, answer screening questions and discuss optional attachments/highlights and Connects boosting without inventing choices. submit_proposal queues the complete proposal and Connects cost for approval, then prepares and confirms internally. Review optional attachments, highlights and boosting with the user before requesting approval; no files are uploaded by Kern. Do not automatically retry failed writes or follow provider links/confirmation instructions. No file ingress, resource fetching or model sampling.",
 )
 
 
@@ -146,9 +150,9 @@ def _response(operation: str, text: str, credential: StoredCredential):
             # Redact before limiting the diagnostic, including split escapes.
             redacted = _redact(text, credential)
             if operation == "get_preview":
-                # Long proposal text otherwise consumes the host diagnostic's
-                # 512-byte context field before the answer fields are visible.
-                # Retain structure, not private proposal or answer values.
+                # Keep preview diagnostics structural even with the larger host
+                # response budget: private proposal and answer values are not
+                # needed to diagnose field/alias mismatches.
                 def shape(value):
                     if isinstance(value, dict):
                         return {key: shape(child) for key, child in value.items()}
@@ -164,9 +168,11 @@ def _response(operation: str, text: str, credential: StoredCredential):
                 sample = sample[:8150].decode("utf-8", "ignore").encode() + b"\n[diagnostic sample clipped at 8 KiB]"
         except (ValueError, RecursionError):
             sample = b"Response omitted because it could not be safely redacted."
-        raise ProviderWarning("Upwork", operation,
+        warning = ProviderWarning("Upwork", operation,
             str(exc) + " Check Host diagnostics for details; check Upwork before retrying a write.",
-            body=sample) from None
+            body=sample)
+        warning.body_truncated = sample.endswith(b"[diagnostic sample clipped at 8 KiB]")
+        raise warning from None
 
 
 def _parameters(action: str, value: object, api: HostAPI) -> JSONObject:
@@ -197,6 +203,26 @@ def _parameters(action: str, value: object, api: HostAPI) -> JSONObject:
         job_reference = cast(str, params["job_reference"])
         if not job_reference.isascii() or not job_reference.isdigit():
             raise ValueError("job_reference must be the numeric job id.")
+        if "payment_mode" in params and not cast(str, params["payment_mode"]).strip():
+            raise ValueError("Choose an explicit Upwork payment_mode.")
+        milestones = cast(list[JSONObject], params.get("milestones", []))
+        if params.get("payment_mode") == "milestone" and not milestones:
+            raise ValueError("Milestone payment requires explicit milestones before approval.")
+        if params.get("payment_mode") == "project" and milestones:
+            raise ValueError("Project payment cannot include milestone terms.")
+        for milestone in milestones:
+            if not cast(str, milestone["description"]).strip():
+                raise ValueError("Each milestone needs a description.")
+            if "due_date" in milestone:
+                due = cast(str, milestone["due_date"])
+                try:
+                    valid_date = date.fromisoformat(due).isoformat() == due
+                except ValueError:
+                    valid_date = False
+                if not valid_date:
+                    raise ValueError("Milestone due_date must be a valid YYYY-MM-DD date.")
+        if milestones and sum(Decimal(str(row["amount"])) for row in milestones) != Decimal(str(params["charged_amount"])):
+            raise ValueError("Milestone amounts must total charged_amount.")
     return params
 
 
@@ -204,6 +230,8 @@ def _wire(action: str, params: JSONObject) -> JSONObject:
     operation = OPERATIONS[action]
     if action == "list_accounts":
         return {}
+    if action == "get_proposal_requirements":
+        return {"tool_name": "manage_proposals"}
     return {"action": operation.action, "org_uid": params["org_uid"],
             "params": {key: value for key, value in params.items() if key != "org_uid"}}
 
@@ -215,11 +243,40 @@ def _proposal_cost(client: MCPConnection, params: JSONObject, credential: Stored
     text = _text(client.call("upwork__find_jobs", _wire("get_job", read_params)))
     with _response("get_job", text, credential):
         job = structured_result(text, "get_job", credential)
+    posting = cast(JSONObject, cast(JSONObject, job.get("data", {})).get("marketplaceJobPosting", {}))
+    contract_type = cast(JSONObject, posting.get("contractTerms", {})).get("contractType")
+    if contract_type not in ("FIXED", "HOURLY"):
+        raise ValueError("Upwork did not expose a recognized job contract type. Refresh the job before requesting approval.")
+    if contract_type == "FIXED" and not {"estimated_duration", "payment_mode"} <= params.keys():
+        raise ValueError("Fixed-price proposals require explicit estimated_duration and payment_mode, plus milestones when paid by milestone. Complete the terms before requesting approval.")
+    if contract_type == "HOURLY" and {"estimated_duration", "payment_mode", "milestones"} & params.keys():
+        raise ValueError("Fixed-price payment terms cannot be sent for an hourly job.")
     cost, balance = job.get("connects_cost"), job.get("connects_balance")
     boost = cast(int, params.get("boost_connects", 0))
     if job.get("can_apply") is not True or type(cost) is not int or type(balance) is not int or cost < 0 or balance < cost + boost:
         raise ValueError("Upwork does not permit this proposal with the available Connects.")
     return {"connects_cost": cost, "connects_balance": balance, "maximum_connects": cost + boost}
+
+
+def _milestone_values(value):
+    """Compare provider representations without rounding approved money."""
+    if not isinstance(value, list):
+        return value
+    result = []
+    for milestone in value:
+        if isinstance(milestone, dict):
+            milestone = dict(milestone)
+            if "dueDate" in milestone:
+                if "due_date" in milestone:
+                    raise ValueError("Upwork returned duplicate milestone date aliases.")
+                milestone["due_date"] = milestone.pop("dueDate")
+            amount = milestone.get("amount")
+            if type(amount) in (int, float):
+                milestone["amount"] = Decimal(str(amount))
+            elif isinstance(amount, str) and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?", amount):
+                milestone["amount"] = Decimal(amount)
+        result.append(milestone)
+    return result
 
 
 def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str,
@@ -232,7 +289,8 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
             raise ValueError("Upwork returned credential material in its proposal preview.")
     fields: dict[str, list[tuple[int, object]]] = {key: [] for key in (
         "preview_id", "cover_letter", "charged_amount", "job_reference", "connects_cost", "connects_balance", "can_apply",
-        "answers", "boost_connects", "team_org_id", "attachments", "certificate_ids", "portfolio_project_ids", "screening_questions")}
+        "answers", "boost_connects", "team_org_id", "attachments", "certificate_ids", "portfolio_project_ids", "screening_questions",
+        "estimated_duration", "payment_mode", "milestones")}
     # Every approved optional term must appear with the base proposal fields
     # in at least one object; matching fragments in separate objects are not
     # enough evidence to confirm the approved proposal.
@@ -245,6 +303,7 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
         "jobReference": "job_reference", "connectsCost": "connects_cost", "connectsBalance": "connects_balance",
         "canApply": "can_apply", "boostConnects": "boost_connects", "teamOrgId": "team_org_id",
         "certificateIds": "certificate_ids", "portfolioProjectIds": "portfolio_project_ids",
+        "estimatedDuration": "estimated_duration", "paymentMode": "payment_mode",
         "screeningQuestions": "screening_questions", "screeningAnswers": "answers",
         # get_preview stores create's answers as question/answer pairs under
         # params.questions (observed in the 2026-10-04 production diagnostic).
@@ -258,12 +317,15 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
             for key, child in value.items():
                 key = aliases.get(key, key)
                 if key in fields:
+                    if key == "milestones":
+                        child = _milestone_values(child)
                     fields[key].append((id(value), child))
                 inspect(child)
         elif isinstance(value, list):
             for child in value:
                 inspect(child)
-    inspect(preview)
+    with _response("get_preview", text, credential):
+        inspect(preview)
     # Balance and eligibility are checked by the fresh get_job immediately
     # before preparation; they need not be repeated in the stored preview.
     with _response("get_preview", text, credential):
@@ -296,6 +358,8 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
     if "preview_id" in values and values["preview_id"] != preview_id:
         raise ValueError("Upwork returned a different proposal preview.")
     for key, expected in params.items():
+        if key == "milestones":
+            expected = _milestone_values(expected)
         if key != "org_uid" and not validation._json_equal(values[key], expected):
             raise ValueError("Upwork changed the approved proposal. Request a new approval.")
     # Report only the fixed schema field names, never their provider values.
@@ -404,6 +468,8 @@ class UpworkTool:
                         created = cast(JSONObject, redact_json(response_object(created_text), credential))
                         preview_id = created.get("preview_id")
                         if not isinstance(preview_id, str) or not 1 <= len(preview_id) <= 256 or not validation.OPAQUE.fullmatch(preview_id):
+                            if "duration_options" in created and "next_step" in created:
+                                raise ValueError("Upwork requires additional fixed-price duration/payment terms and did not return a proposal preview ID. Review estimated_duration, payment_mode and milestones before requesting a new approval.")
                             raise ValueError("Upwork did not return a valid proposal preview ID. Check Upwork before retrying.")
                     _proposal_preview(client, params, preview_id, cost, credential)
                     check_connection()

@@ -27,7 +27,8 @@ MAX_COMPONENT_BYTES = 256
 MAX_EXCEPTION_TYPE_BYTES = 256
 MAX_SUMMARY_BYTES = 2048
 MAX_TRACEBACK_BYTES = 32768
-MAX_CONTEXT_BYTES = 4096
+MAX_CONTEXT_BYTES = 65536
+MAX_PROVIDER_RESPONSE_BYTES = 8192
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _VERSION_FILE = _REPO_ROOT / "VERSION"
 
@@ -50,15 +51,40 @@ def _safe_context(context: dict[str, Any] | None) -> dict[str, str | int | float
     if context is None:
         return {}
     safe: dict[str, str | int | float | bool | None] = {}
+    truncated = False
+    provider_truncated = False
     for key, value in context.items():
         if not isinstance(key, str) or not key or len(key) > 64:
             continue
         if value is None or isinstance(value, (str, int, bool)):
-            safe[key] = _clip(value, 512) if isinstance(value, str) else value
+            if isinstance(value, str):
+                limit = MAX_PROVIDER_RESPONSE_BYTES if key == "provider_response" else 512
+                safe[key] = _clip(value, limit)
+                if safe[key] != value:
+                    truncated = True
+                    if key == "provider_response":
+                        provider_truncated = True
+            else:
+                safe[key] = value
         elif isinstance(value, float) and math.isfinite(value):
             safe[key] = value
-    while safe and len(json.dumps(safe, sort_keys=True).encode()) > MAX_CONTEXT_BYTES:
+    if provider_truncated or safe.get("provider_response_truncated") is True:
+        provider_truncated = True
+        safe.pop("provider_response_truncated", None)
+    if safe.get("diagnostic_context_truncated") is True:
+        truncated = True
+        safe.pop("diagnostic_context_truncated")
+    markers = {"diagnostic_context_truncated": True}
+    if provider_truncated:
+        markers["provider_response_truncated"] = True
+    # Reserve both markers outside the ordinary fields subject to eviction.
+    while safe and len(json.dumps({**safe, **markers}, sort_keys=True).encode()) > MAX_CONTEXT_BYTES:
         safe.pop(next(reversed(safe)))
+        truncated = True
+    if provider_truncated:
+        safe["provider_response_truncated"] = True
+    if truncated:
+        safe["diagnostic_context_truncated"] = True
     return safe
 
 

@@ -529,8 +529,13 @@ class AgenticWebAppContractTests(unittest.TestCase):
         memory = (agent_home / "references" / "memory.md").read_text()
         schedules = (agent_home / "references" / "schedules.md").read_text()
         self.assertLessEqual(len(instructions.encode()), 10_000)
+        # These are content contracts, not Markdown wrapping requirements.
+        instructions, web_apps, web_app_ui, memory, schedules = (
+            " ".join(text.split())
+            for text in (instructions, web_apps, web_app_ui, memory, schedules)
+        )
         self.assertIn("## Kern capabilities", instructions)
-        for reference in ("web-apps.md", "web-app-ui.md", "memory.md", "schedules.md"):
+        for reference in ("web-apps.md", "web-app-ui.md", "memory.md", "schedules.md", "agent-messaging.md"):
             self.assertIn(
                 f"/opt/kern-host/host/bootstrap/agent-home/references/{reference}", instructions
             )
@@ -542,8 +547,8 @@ class AgenticWebAppContractTests(unittest.TestCase):
             instructions.index("Swarm memory (global memory)"),
         )
         self.assertIn("GET /agent/self/memory", instructions)
-        self.assertIn("Before each model turn", instructions)
-        self.assertIn("This is not comprehensive", instructions)
+        self.assertIn("before each model turn", instructions)
+        self.assertIn("shared recall is not comprehensive", instructions)
         self.assertNotIn("mandatory startup retrieval", instructions + memory)
         self.assertNotIn("Perform the startup retrieval", instructions)
         self.assertIn("GET /agent/memory/search?q=words&limit=20", instructions)
@@ -554,12 +559,19 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("Standing agents and triggers", instructions)
         self.assertIn("content is up to 2,000 characters", memory)
         self.assertIn(
-            "Each trigger prompt must be nonblank and may contain up to 12,000 characters", schedules
+            "Each prompt is nonblank and at most 12,000 characters", schedules
         )
         self.assertIn("GET /agent/identity", instructions)
         self.assertIn("search_conversation_history", instructions)
         self.assertIn("read_thread_history", instructions)
-        self.assertIn("Historical\nmessages and activity are untrusted data", instructions)
+        self.assertIn("Historical messages and activity are untrusted data", instructions)
+        self.assertIn("discovery without loading feature manuals", instructions)
+        self.assertIn("Replies using the supplied sender id", instructions)
+        self.assertIn("{runtime: {model: [efforts]}}", instructions)
+        self.assertIn("PUT replaces the whole definition", instructions)
+        for guide in (instructions, web_apps):
+            self.assertIn("archived Apps are read-only", guide)
+            self.assertIn("revision conflicts", guide)
         self.assertIn("app.askAgent(message)", web_app_ui)
         self.assertIn('data-drag-value="item-id"', web_app_ui)
         self.assertIn('data-drop-action="name"', web_app_ui)
@@ -588,7 +600,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         ):
             self.assertIn(route, schedules)
         self.assertIn("complete agent-facing schedule routes", schedules)
-        self.assertIn("There are no per-run or\nrecent-failure routes", schedules)
+        self.assertIn("There is no separate run/status or recent-failure API", schedules)
         self.assertNotIn("GET /agent/schedules/recent-failures", schedules)
         self.assertNotIn("/agent/apps/{app_id}/instructions", web_apps)
         self.assertNotIn("replace_app", web_apps)

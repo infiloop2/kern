@@ -18,6 +18,12 @@ if [[ "$mode" == publish ]]; then
     echo "Dependency image already published: ${image_ref}"
     exit 0
   fi
+elif docker image inspect "$image_ref" > /dev/null 2>&1; then
+  # The workflow may already have pulled with temporary credentials. Reuse
+  # only this exact dependency hash; fallback builds run after credentials die.
+  docker tag "$image_ref" kern-ci:sandbox
+  echo "Using local dependency image: ${image_ref}"
+  exit 0
 elif docker pull "$image_ref"; then
   docker tag "$image_ref" kern-ci:sandbox
   echo "Using published dependency image: ${image_ref}"

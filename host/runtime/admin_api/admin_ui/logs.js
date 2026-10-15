@@ -223,8 +223,12 @@ export async function copyHostDiagnostic(button) {
   button.disabled = true;
   feedback.textContent = "Copying…";
   try {
-    await copyText(loadHostDiagnostic(button.dataset.diagnosticId).then(diagnostic => JSON.stringify(diagnostic, null, 2)));
-    feedback.textContent = "Copied to clipboard";
+    let truncated = false;
+    await copyText(loadHostDiagnostic(button.dataset.diagnosticId).then(diagnostic => {
+      truncated = diagnostic.context?.diagnostic_context_truncated === true || diagnostic.context?.provider_response_truncated === true;
+      return JSON.stringify(diagnostic, null, 2);
+    }));
+    feedback.textContent = truncated ? "Copied saved diagnostic (capture was truncated)" : "Copied to clipboard";
   } catch (error) {
     feedback.textContent = `Copy failed: ${error.message}`;
   } finally {

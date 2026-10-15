@@ -937,7 +937,9 @@ def seed_state() -> None:
                 'File "host/runtime/workspace/web_apps/backend.py", line 518, in workspace_state\n'
                 "  workspace = rows[workspace_id]"
             ),
-            "context": {"method": "GET", "route": "/workspaces/mock/state"},
+            "context": {"method": "GET", "route": "/workspaces/mock/state",
+                        "provider_response": json.dumps({"explanation": "detail " * 200, "payment_options": ["fixture-mode"]}),
+                        "provider_response_truncated": True},
             "fingerprint": "2" * 64,
             "occurrence_count": 1,
             "host_version": VERSION,

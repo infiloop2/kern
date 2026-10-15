@@ -45,3 +45,40 @@ jobs:
       - name: Remove registry credentials
         if: always()
         run: docker logout ghcr.io
+
+      - name: Retain recent dependency images
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          dependency_hash="$(sha256sum .github/ci/sandbox.Dockerfile .github/ci/requirements.txt | sha256sum | cut -d ' ' -f 1)"
+          export CURRENT_TAG="deps-$dependency_hash"
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import subprocess
+
+          endpoint = '/orgs/infiversehq/packages/container/kern-ci/versions'
+          current_tag = os.environ['CURRENT_TAG']
+          tag_pattern = re.compile(r'deps-[0-9a-f]{64}')
+          pages = json.loads(subprocess.check_output([
+              'gh', 'api', '--paginate', '--slurp', endpoint + '?per_page=100',
+          ]))
+          versions = sorted(
+              [version for page in pages for version in page],
+              key=lambda version: (version['created_at'], version['id']),
+              reverse=True,
+          )
+          owned = [version for version in versions if any(
+              tag_pattern.fullmatch(tag) for tag in version['metadata']['container']['tags']
+          )]
+          if not any(current_tag in version['metadata']['container']['tags'] for version in owned):
+              raise SystemExit('Current image missing from package listing; refusing cleanup.')
+          for version in owned[5:]:
+              tags = version['metadata']['container']['tags']
+              # Keep the current image even if old, and preserve manually tagged versions.
+              if current_tag in tags or any(not tag_pattern.fullmatch(tag) for tag in tags):
+                  continue
+              subprocess.run(['gh', 'api', '--method', 'DELETE', f'{endpoint}/{version["id"]}'], check=True)
+              print(f'Deleted old dependency image version {version["id"]}')
+          PY

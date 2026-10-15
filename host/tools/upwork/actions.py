@@ -59,6 +59,7 @@ def operation(action_id: str, tool: str, action: str, description: str,
 
 OPERATIONS = {row.spec.id: row for row in (
     operation("list_accounts", "list_accounts", "", "List your available Upwork accounts and organization IDs.", {}, organization=False),
+    operation("get_proposal_requirements", "get_tool_help", "", "Read Upwork's current proposal parameters and payment options before preparing terms. This fixed help read does not create a preview or spend Connects.", {}, organization=False),
     operation("get_profile", "get_profile", "get", "Read your freelancer profile, or a profile returned by Upwork.", {"profile_key": ID}),
     operation("get_profile_highlights", "get_profile", "list_highlights", "List your portfolio projects and certificates available for proposal highlights.", {}),
     operation("get_connects_balance", "get_profile", "connects_balance", "Read your Connects balance and recent usage. Product-specific ad credits are separate.", PAGING),
@@ -96,6 +97,16 @@ OPERATIONS = {row.spec.id: row for row in (
         "job_reference": {**ID, "description": "Numeric job id from search_jobs, not the ~02 ciphertext."},
         "cover_letter": {**outputs.text("Exact cover letter, at most 5,000 characters; shown in full for approval."), "minLength": 1, "maxLength": 5000},
         "charged_amount": {**outputs.number("Proposed rate or project amount."), "minimum": 0.01},
+        "estimated_duration": {"type": "string", "description": "Required for fixed-price jobs. Explicit project duration; cover-letter timing is not a substitute.", "enum": ["less_than_1_month", "1_to_3_months", "3_to_6_months", "more_than_6_months"]},
+        # Keep the supported arrangements closed so every accepted mode has
+        # conditional milestone validation. Verify compatibility using the
+        # provider help read; an unfamiliar mode needs an adapter update.
+        "payment_mode": {"type": "string", "enum": ["project", "milestone"], "description": "Required for fixed-price jobs. Read get_proposal_requirements and verify these supported values against current provider documentation first. project pays the whole bid on delivery; milestone requires milestones. Never infer or default the choice."},
+        "milestones": {"description": "Explicit ordered fixed-price milestones when requested by the selected payment mode. Amounts must total charged_amount. Dates are optional, never invented.", "type": "array", "minItems": 1, "maxItems": 20, "items": schema({
+            "description": {**outputs.text("Deliverable and acceptance terms."), "minLength": 1, "maxLength": 5000},
+            "amount": {**outputs.number("Milestone amount in the proposal currency."), "minimum": 0.01},
+            "due_date": outputs.text("Optional agreed date, YYYY-MM-DD."),
+        }, ["description", "amount"])},
         "answers": {"description": "Answers to every required screening question.", "type": "array", "maxItems": 20, "items": schema({"question": outputs.text("Screening question."), "answer": outputs.text("Your answer.")}, ["question", "answer"])},
         "boost_connects": {**outputs.integer("Optional additional Connects bid. Omit for no boost; never invent a bid."), "minimum": 1},
         "team_org_id": ID,

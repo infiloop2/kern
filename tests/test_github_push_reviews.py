@@ -1,7 +1,9 @@
 """Fixed push policies, exact Git evidence and once-only admin-side releases."""
 import io
 import json
+import os
 import shutil
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -168,10 +170,20 @@ class PushEvidenceTests(unittest.TestCase):
         mirror = Path(self.temp) / "owner/repo.git"
         mirror.parent.mkdir()
         _git(self.repo, "clone", "--quiet", "--mirror", str(self.repo), str(mirror))
-        with patch.object(engine, "QUARANTINE_ROOT", Path(self.temp)), patch.object(approve, "_run", wraps=approve._run) as run, patch("sys.stdout", new_callable=io.StringIO) as output:
-            approve._resolve_locked("owner", "repo", "abc123", "review", None, self.result.ref_updates)
+        # The root helper reads a proxy-owned mirror in production. Exercise
+        # Git's ownership check without requiring root or chown in the test.
+        with patch.dict(os.environ, {"GIT_TEST_ASSUME_DIFFERENT_OWNER": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}):
+            probe = subprocess.run([engine.GIT_BIN, "-C", str(mirror), "rev-parse", "HEAD"], capture_output=True)
+            self.assertNotEqual(probe.returncode, 0)
+            self.assertIn(b"dubious ownership", probe.stderr)
+            with patch.object(engine, "QUARANTINE_ROOT", Path(self.temp)), patch.object(approve, "_run", wraps=approve._run) as run, patch("sys.stdout", new_callable=io.StringIO) as output:
+                approve._resolve_locked("owner", "repo", "abc123", "review", None, self.result.ref_updates)
         run.assert_called_once()  # List pending refs only; no push or cleanup.
-        self.assertEqual(json.loads(output.getvalue())["updates"][0]["new"], self.new)
+        update = json.loads(output.getvalue())["updates"][0]
+        self.assertEqual(update["new"], self.new)
+        files = {f["path"]: f for f in update["comparisons"][0]["files"]}
+        self.assertEqual(files[".github/ci.yml"]["before"], "name: before\non: pull_request\n")
+        self.assertEqual(files[".github/ci.yml"]["after"], "name: after\non: pull_request\n")
 
 
 class PushStorageTests(unittest.TestCase):

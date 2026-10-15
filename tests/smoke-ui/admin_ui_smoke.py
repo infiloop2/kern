@@ -18,6 +18,7 @@ import urllib.request
 
 import workspace_smokes
 import approval_smokes
+from timing import timed_group
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -66,6 +67,7 @@ EXPECTED_HOME_INTEGRATION_IDS = STATIC_HOME_INTEGRATION_IDS | {
 }
 
 
+@timed_group("ui-runner-including-mock-setup")
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     port = args.port or free_port()
@@ -267,10 +269,6 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 login_error_mapping_smoke(desktop_page, url)
                 stale_password_smoke(desktop_page, url)
                 desktop_smoke(desktop_page, url)
-                import browser_adapter_smoke
-                browser_adapter_smoke.run(playwright)
-                import linkedin_adapter_smoke
-                linkedin_adapter_smoke.run(playwright)
                 import browser_smokes
                 browser_context = browser.new_context(viewport={"width": 1280, "height": 900})
                 browser_smokes.run(browser_context.new_page(), url, log_in, open_home_integration)
@@ -431,6 +429,7 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
             run_webkit_worker_startup_canary(playwright, url, headed=headed)
 
 
+@timed_group("webkit-worker-startup-and-browser-ui")
 def run_webkit_worker_startup_canary(playwright, url: str, *, headed: bool) -> None:
     """Keep the engine-specific regression narrow; Chromium owns broad UI coverage."""
     try:
@@ -851,7 +850,8 @@ def upwork_smoke(page, url: str) -> None:
     expect(guide).to_contain_text("requires approval for submissions and messages")
     expect(guide).to_contain_text("get_account")
     expect(guide).not_to_contain_text("list_contracts")
-    expect(guide.locator(".guide-capability")).to_have_count(12)
+    expect(guide.locator(".guide-capability")).to_have_count(13)
+    expect(gmail_capability(guide, "get_proposal_requirements")).not_to_contain_text("approval required")
     expect(guide).not_to_contain_text("prepare_proposal")
     expect(guide).not_to_contain_text("save_job")
     expect(guide).not_to_contain_text("unsave_job")
@@ -2536,6 +2536,17 @@ def host_diagnostics_smoke(page) -> None:
     assert copied["fingerprint"] == "3" * 64
     assert copied["boot_id"] and copied["host_version"] and copied["first_seen_at"]
     assert "traceback" in copied
+    page.locator("#host-diagnostic-component").select_option("agentic_web_app.request")
+    page.locator("#host-diagnostic-severity").select_option("warning")
+    provider = page.locator("#host-diagnostics tr").filter(has_text="agentic_web_app.request")
+    provider.get_by_role("button", name="Copy complete diagnostic").click()
+    expect(provider.locator("[data-copy-feedback]")).to_have_text("Copied saved diagnostic (capture was truncated)")
+    copied = json.loads(page.evaluate("window.__diagnosticCopy"))
+    assert len(copied["context"]["provider_response"]) > 512
+    assert json.loads(copied["context"]["provider_response"])["payment_options"] == ["fixture-mode"]
+    assert copied["context"]["provider_response_truncated"] is True
+    page.locator("#host-diagnostic-component").select_option("admin_api.codex_session_sweep")
+    page.locator("#host-diagnostic-severity").select_option("info")
     page.evaluate("""() => {
       navigator.clipboard.write = async () => { throw new Error('clipboard unavailable'); };
       navigator.clipboard.writeText = navigator.clipboard.write;

@@ -46,8 +46,14 @@ or retry, and cannot establish what blocked an action throughout its timeout.
 
 Every variable diagnostic field is bounded before journald ingestion and again
 by storage constraints where applicable: summaries are at most 2 KiB,
-tracebacks 32 KiB, and context 4 KiB. This keeps a single unusual exception
-from creating an exceptionally large row.
+tracebacks 32 KiB, and context 64 KiB including JSON escaping. Ordinary context
+strings are limited to 512 bytes; the explicitly selected `provider_response`
+may retain up to 8 KiB after the integration's redaction. Reporter truncation
+sets `diagnostic_context_truncated`; provider-body truncation also sets
+`provider_response_truncated`. The Copy button copies the entire saved detail
+and flags known truncation. Older clipped records cannot be recovered by copying
+again. These bounds keep a single unusual exception from creating an
+exceptionally large row; they do not replace integration-specific redaction.
 
 The collector follows only new records and has no replay spool. Repeats with
 the same service and fingerprint coalesce for 60 seconds. One shared retention

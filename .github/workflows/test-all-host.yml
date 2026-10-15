@@ -6,18 +6,42 @@ on:
 permissions:
   contents: read
 
+# Superseded tests for the same PR cancel independently of other workflows.
+concurrency:
+  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
+  select:
+    name: Select host test suites
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    outputs:
+      matrix: ${{ steps.select.outputs.matrix }}
+    steps:
+      - name: Checkout complete PR history
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select from the complete PR diff
+        id: select
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python3 .github/ci/select_tests.py --base "$BASE_SHA" --head "$HEAD_SHA"
+
   suites:
     name: Host tests (${{ matrix.suite }})
+    needs: select
     strategy:
       fail-fast: false
-      matrix:
-        suite: [unit, browser-core, browser-workspaces]
+      matrix: ${{ fromJSON(needs.select.outputs.matrix) }}
     permissions:
       contents: read
       packages: read
     runs-on: ubuntu-latest
-    # Independent runners keep browser CPU/memory use out of database tests.
+    # Separate runners isolate browser CPU/memory from Python/database work.
     timeout-minutes: 25
     steps:
       - name: Checkout
@@ -30,67 +54,86 @@ jobs:
         run: |
           npm ci --prefix host/npm --omit=dev --ignore-scripts --no-fund --no-audit
 
-      - name: Authenticate to GitHub Container Registry
+      - name: Pull sandbox image with temporary registry credentials
         if: github.repository == 'infiversehq/kern'
         shell: bash
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: printf '%s' "$GHCR_TOKEN" | docker login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+        run: |
+          # No checkout-controlled helper or build runs until these credentials
+          # are destroyed. A cache miss falls back in the next, credential-free step.
+          started=$SECONDS
+          echo 'TIMING start sandbox-registry-pull'
+          dependency_hash="$(sha256sum .github/ci/sandbox.Dockerfile .github/ci/requirements.txt | sha256sum | cut -d ' ' -f 1)"
+          registry_config_dir="$(mktemp -d "${RUNNER_TEMP}/kern-ci-registry.XXXXXX")"
+          cleanup() {
+            rm -rf "$registry_config_dir"
+            echo "TIMING end sandbox-registry-pull: $((SECONDS - started))s"
+          }
+          trap cleanup EXIT
+          printf '%s' "$GHCR_TOKEN" | docker --config "$registry_config_dir" login ghcr.io --username "$GITHUB_ACTOR" --password-stdin
+          unset GHCR_TOKEN
+          if ! docker --config "$registry_config_dir" pull "ghcr.io/infiversehq/kern-ci:deps-${dependency_hash}"; then
+            echo '::notice::Authenticated image pull missed; preparing dependencies without registry credentials.'
+          fi
 
-      - name: Prepare sandbox image
-        timeout-minutes: 12
+      - name: Prepare sandbox image without registry credentials
         shell: bash
-        run: bash .github/ci/prepare-sandbox.sh pull ghcr.io/infiversehq/kern-ci
-
-      - name: Remove registry credentials
-        if: always()
-        run: docker logout ghcr.io
+        run: python3 tests/scripts/time_group.py sandbox-preparation bash .github/ci/prepare-sandbox.sh pull ghcr.io/infiversehq/kern-ci
 
       - name: Compile all sources in no-network sandbox
-        if: matrix.suite == 'unit'
+        if: matrix.suite == 'python'
         shell: bash
         run: |
           .github/ci/run-in-sandbox.sh kern-ci:sandbox \
-            'python3 -m py_compile $(find host tests -name "*.py")'
+            'python3 tests/scripts/time_group.py compilation python3 -m py_compile $(find host tests -name "*.py")'
 
       - name: Run host type checks in no-network sandbox
-        if: matrix.suite == 'unit'
+        if: matrix.suite == 'python'
         shell: bash
         run: |
           .github/ci/run-in-sandbox.sh kern-ci:sandbox \
-            'python3 -m mypy --config-file mypy.ini && python3 -m pyright --project pyrightconfig.json'
+            'python3 tests/scripts/time_group.py mypy python3 -m mypy --config-file mypy.ini && python3 tests/scripts/time_group.py pyright python3 -m pyright --project pyrightconfig.json'
 
       - name: Run unit tests in no-network sandbox
-        if: matrix.suite == 'unit'
+        if: matrix.suite == 'python'
         shell: bash
         run: |
           .github/ci/run-in-sandbox.sh kern-ci:sandbox \
-            'python3 -m unittest discover -s tests -v'
+            'python3 tests/scripts/time_group.py python-unit python3 -m unittest discover -s tests -v'
 
       - name: Run admin UI core smoke in no-network sandbox
-        if: matrix.suite == 'browser-core'
+        if: matrix.suite == 'admin-ui'
         shell: bash
         run: |
           .github/ci/run-in-sandbox.sh kern-ci:sandbox \
-            'python3 tests/smoke-ui/admin_ui_smoke.py --port 3100 --scope core'
+            'python3 tests/scripts/time_group.py admin-ui python3 tests/smoke-ui/admin_ui_smoke.py --port 3100 --scope core'
 
       - name: Run admin UI workspace and WebKit smoke in no-network sandbox
-        if: matrix.suite == 'browser-workspaces'
+        if: matrix.suite == 'workspace-ui'
         shell: bash
         run: |
           .github/ci/run-in-sandbox.sh kern-ci:sandbox \
-            'python3 tests/smoke-ui/admin_ui_smoke.py --port 3100 --scope workspaces --webkit'
+            'python3 tests/scripts/time_group.py workspace-ui python3 tests/smoke-ui/admin_ui_smoke.py --port 3100 --scope workspaces --webkit'
+
+      - name: Run native browser integration in no-network sandbox
+        if: matrix.suite == 'native-browser'
+        shell: bash
+        run: |
+          .github/ci/run-in-sandbox.sh kern-ci:sandbox \
+            'python3 tests/smoke-ui/native_browser_smoke.py'
 
   test:
-    # Preserve the branch-protection check name. Skipped, cancelled, and failed
-    # suites must never turn the aggregate green.
     name: Run all host tests
-    needs: suites
+    needs: [select, suites]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:
-      - name: Require every suite to pass
+      - name: Require selection and every selected suite to pass
         env:
+          SELECT_RESULT: ${{ needs.select.result }}
           SUITES_RESULT: ${{ needs.suites.result }}
-        run: test "$SUITES_RESULT" = success
+        run: |
+          test "$SELECT_RESULT" = success
+          test "$SUITES_RESULT" = success

@@ -66,11 +66,16 @@ its suggestion-only bookkeeping stays separate from the full-body cache.
 
 This is a repeat-suppression heuristic, not knowledge of provider context
 contents. Hidden compaction may discard a suppressed page before it is sent again.
-The operator notice counts and lists only bodies actually prepared for injection;
-bounded recall details store selected/prepared/suppressed counts and each selected
-page's ID, revision, decision, reason and elapsed seconds when known. Admission
-records preparation as pending readiness, not confirmed delivery. These diagnostics
-are stored in the existing notice details for UI/history, never in model input.
+The operator sees one injection notice only after provider readiness confirms
+acceptance of the initial message. Admission emits no preparation notice, and
+failed startup or stop before readiness emits no injection notice. Its count and
+page IDs cover only the bodies sent; `notice.details` retains the exact injected
+identity/memory message for the expanded UI, including the identity-only case.
+Periodic self-memory refresh uses the same details contract after successful
+steering. Bounded `memory_recall_details` separately retains the preparation-time
+selection diagnostics (selected/prepared/suppressed counts and each selected
+page's ID, revision, decision, reason and elapsed seconds). These diagnostics
+are never part of model input; historical preparation notices remain unchanged.
 Timestamped fixture byte measurements establish payload savings, not model quality.
 
 ## Mid-turn suggestions

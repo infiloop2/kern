@@ -51,8 +51,24 @@ class UpworkTests(unittest.TestCase):
         self.assertEqual(self.api.approvals.records, {})
         self.assertNotIn("list_tools", upwork.OPERATIONS)
         self.assertNotIn("execute_tool", upwork.OPERATIONS)
-        self.assertEqual(len(upwork.MANIFEST.actions), 12)
+        self.assertEqual(len(upwork.MANIFEST.actions), 13)
         self.assertNotIn("prepare_proposal", upwork.OPERATIONS)
+
+    def test_proposal_requirements_read_has_no_arbitrary_selector_or_write(self):
+        description = "Provider reference " * 100 + "payment_mode options at the end"
+        self.client.call.return_value = {"content": [{"type": "text", "text": json.dumps({
+            "description": description, "new_field": {"options": ["example"]}})}]}
+        result = upwork.BUNDLED_TOOL.execute("get_proposal_requirements", {}, self.api)
+        self.assertIsInstance(result, ActionExecuted)
+        self.assertEqual(result.result["description"], description)
+        self.assertIn("new_field", result.result["provider_extra_fields_json"])
+        self.client.call.assert_called_once_with("upwork__get_tool_help", {"tool_name": "manage_proposals"})
+        self.assertEqual(self.api.approvals.records, {})
+        for key in ("tool_name", "action", "org_uid", "params"):
+            self.client.reset_mock()
+            result = upwork.BUNDLED_TOOL.execute("get_proposal_requirements", {key: "override"}, self.api)
+            self.assertIsInstance(result, ActionFailed)
+            self.client.call.assert_not_called()
 
     def test_write_queues_without_network_then_executes_exactly_once(self):
         result = self.propose()
@@ -165,15 +181,16 @@ class UpworkTests(unittest.TestCase):
         data["preview"].update(changes)
         return {"content": [{"type": "text", "text": json.dumps(data)}]}
 
-    def job_cost(self, **changes):
-        data = {"data": {"marketplaceJobPosting": {"id": "123", "content": {"title": "Engineer", "description": "Project"}}},
+    def job_cost(self, contract_type="HOURLY", **changes):
+        data = {"data": {"marketplaceJobPosting": {"id": "123", "content": {"title": "Engineer", "description": "Project"},
+                "contractTerms": {"contractType": contract_type}}},
                 "connects_cost": 10, "connects_balance": 20, "can_apply": True}
         data.update(changes)
         return {"content": [{"type": "text", "text": json.dumps(data)}]}
 
     def submit(self, **changes):
         self.client.call.side_effect = None
-        self.client.call.return_value = self.job_cost()
+        self.client.call.return_value = self.job_cost(contract_type="FIXED" if {"estimated_duration", "payment_mode", "milestones"} & changes.keys() else "HOURLY")
         params = {"org_uid": "org-one", "job_reference": "123", "cover_letter": "A specific proposal", "charged_amount": 50}
         params.update(changes)
         return upwork.BUNDLED_TOOL.execute("submit_proposal", params, self.api)
@@ -250,6 +267,260 @@ class UpworkTests(unittest.TestCase):
         self.assertIsInstance(result, ActionFailed)
         self.client.call.assert_called_once()
         self.assertEqual(self.client.call.call_args.args[0], "upwork__find_jobs")
+
+    def fixed_job_cost(self):
+        result = self.job_cost()
+        data = json.loads(result["content"][0]["text"])
+        data["data"]["marketplaceJobPosting"]["contractTerms"] = {"contractType": "FIXED"}
+        result["content"][0]["text"] = json.dumps(data)
+        return result
+
+    def test_unknown_contract_type_blocks_approval_and_execution(self):
+        for value in (None, "", "UNKNOWN", False, 1, [], {}, "missing_terms", "missing_type"):
+            with self.subTest(value=value):
+                pending = self.submit()
+                record = self.api.approvals.approve(pending.approval_id)
+                data = json.loads(self.job_cost(contract_type=value)["content"][0]["text"])
+                posting = data["data"]["marketplaceJobPosting"]
+                if value == "missing_terms":
+                    del posting["contractTerms"]
+                elif value == "missing_type":
+                    posting["contractTerms"] = {}
+                self.client.call.reset_mock(side_effect=True)
+                self.client.call.return_value = {"content": [{"type": "text", "text": json.dumps(data)}]}
+                count = len(self.api.approvals.records)
+                params = {"org_uid": "org-one", "job_reference": "123", "cover_letter": "Proposal", "charged_amount": 50}
+                result = upwork.BUNDLED_TOOL.execute("submit_proposal", params, self.api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("contract type", result.error)
+                self.assertEqual(len(self.api.approvals.records), count)
+                result = upwork.BUNDLED_TOOL.execute_approved(record, self.api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("contract type", result.error)
+                self.assertEqual([call.args[0] for call in self.client.call.call_args_list], ["upwork__find_jobs"] * 2)
+
+    def test_fixed_price_requires_structured_terms_before_approval_and_execution(self):
+        base = {"org_uid": "org-one", "job_reference": "123", "cover_letter": "$50 in a week", "charged_amount": 50}
+        for terms in ({}, {"estimated_duration": "less_than_1_month"}, {"payment_mode": "project"}):
+            with self.subTest(terms=terms):
+                self.client.call.reset_mock()
+                self.client.call.return_value = self.fixed_job_cost()
+                result = upwork.BUNDLED_TOOL.execute("submit_proposal", {**base, **terms}, self.api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("require explicit estimated_duration and payment_mode", result.error)
+                self.assertEqual(self.api.approvals.records, {})
+                self.client.call.assert_called_once()
+        # Approvals made before the schema change must not silently acquire terms.
+        pending = self.submit()
+        self.client.call.reset_mock()
+        self.client.call.return_value = self.fixed_job_cost()
+        result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+        self.assertIsInstance(result, ActionFailed)
+        self.client.call.assert_called_once()
+
+    def test_fixed_terms_stay_local_until_approval_and_are_forwarded_unchanged(self):
+        # Synthetic payment-mode values: the production diagnostic was clipped
+        # before payment_options. These fixtures do not establish its enum.
+        for mode, milestones in (("project", None), ("milestone", [
+                {"description": "Working path", "amount": 20, "due_date": "2026-10-20"},
+                {"description": "Tests and handover", "amount": 30}])):
+            with self.subTest(mode=mode):
+                terms = {"estimated_duration": "less_than_1_month", "payment_mode": mode}
+                if milestones is not None:
+                    terms["milestones"] = milestones
+                params = {"org_uid": "org-one", "job_reference": "123", "cover_letter": "A specific proposal", "charged_amount": 50, **terms}
+                self.client.call.reset_mock(side_effect=True)
+                self.client.call.return_value = self.fixed_job_cost()
+                pending = upwork.BUNDLED_TOOL.execute("submit_proposal", params, self.api)
+                self.assertIsInstance(pending, ActionPendingApproval)
+                self.assertEqual(self.api.approvals.records[pending.approval_id].payload["parameters"], params)
+                self.client.call.assert_called_once_with("upwork__find_jobs", {"action": "get", "org_uid": "org-one", "params": {"job_id": "123"}})
+                self.client.call.reset_mock()
+                self.client.call.side_effect = [self.fixed_job_cost(), self.preview(), self.preview(**terms),
+                    {"content": [{"type": "text", "text": "Submitted"}]}]
+                result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+                self.assertIsInstance(result, ApprovalExecuted)
+                self.assertEqual(self.client.call.call_args_list[1].args[1]["params"], {key: value for key, value in params.items() if key != "org_uid"})
+                self.assertEqual(self.client.call.call_args_list[-1].args[0], "upwork__confirm_preview")
+
+    def test_invalid_fixed_terms_never_queue_or_contact_provider(self):
+        invalid = [
+            {"estimated_duration": "tomorrow"}, {"payment_mode": " "}, {"payment_mode": "unknown"},
+            {"milestones": []}, {"milestones": [{"description": "Work", "amount": 49}]},
+            {"milestones": [{"description": " ", "amount": 50}]},
+            {"milestones": [{"description": "Work", "amount": True}]},
+            {"milestones": [{"description": "Work", "amount": 0}]},
+            {"milestones": [{"description": "Work", "amount": 50, "extra": "term"}]},
+        ]
+        invalid += [{"milestones": [{"description": "Work", "amount": 50, "due_date": due}]} for due in
+                    ("2026-02-30", "20261020", "2026-10-20T12:00:00", "", None)]
+        for terms in invalid:
+            with self.subTest(terms=terms):
+                self.client.call.reset_mock()
+                result = self.submit(**terms)
+                self.assertIsInstance(result, ActionFailed)
+                self.client.call.assert_not_called()
+        # Decimal arithmetic avoids rejecting legitimate cents totals.
+        self.assertIsInstance(self.submit(charged_amount=0.3, estimated_duration="less_than_1_month", payment_mode="milestone", milestones=[
+            {"description": "First", "amount": 0.1}, {"description": "Second", "amount": 0.2}]), ActionPendingApproval)
+
+    def test_hourly_job_does_not_accept_fixed_payment_terms(self):
+        hourly = self.fixed_job_cost()
+        data = json.loads(hourly["content"][0]["text"])
+        data["data"]["marketplaceJobPosting"]["contractTerms"]["contractType"] = "HOURLY"
+        hourly["content"][0]["text"] = json.dumps(data)
+        base = {"org_uid": "org-one", "job_reference": "123", "cover_letter": "Hourly", "charged_amount": 50}
+        for terms in ({}, {"estimated_duration": "less_than_1_month", "payment_mode": "project"}):
+            self.client.call.reset_mock()
+            self.client.call.return_value = hourly
+            result = upwork.BUNDLED_TOOL.execute("submit_proposal", {**base, **terms}, self.api)
+            self.assertIsInstance(result, ActionFailed if terms else ActionPendingApproval)
+            self.client.call.assert_called_once()
+
+    def test_fixed_preview_terms_must_be_complete_exact_and_unambiguous(self):
+        terms = {"estimated_duration": "less_than_1_month", "payment_mode": "milestone", "milestones": [
+            {"description": "First", "amount": 20, "due_date": "2026-10-20"}, {"description": "Final", "amount": 30}]}
+        for kind in ("missing", "changed_duration", "changed_mode", "reordered", "amount", "description", "date", "extra", "split", "conflicting_mirror", "identical_mirror"):
+            with self.subTest(kind=kind):
+                pending = self.submit(**terms)
+                data = json.loads(self.preview(**copy.deepcopy(terms))["content"][0]["text"])
+                returned = data["preview"]
+                if kind == "missing":
+                    del returned["payment_mode"]
+                elif kind == "changed_duration":
+                    returned["estimated_duration"] = "1_to_3_months"
+                elif kind == "changed_mode":
+                    returned["payment_mode"] = "project"
+                elif kind == "reordered":
+                    returned["milestones"].reverse()
+                elif kind in ("amount", "description", "date"):
+                    field, value = {"amount": ("amount", 21), "description": ("description", "Changed"), "date": ("due_date", "2026-10-21")}[kind]
+                    returned["milestones"][0][field] = value
+                elif kind == "extra":
+                    returned["milestones"].append({"description": "Extra", "amount": 1})
+                elif kind == "split":
+                    data["other"] = {"milestones": returned.pop("milestones")}
+                elif kind == "conflicting_mirror":
+                    data["other"] = {"payment_mode": "project"}
+                elif kind == "identical_mirror":
+                    data["other"] = copy.deepcopy(returned)
+                self.client.call.reset_mock()
+                self.client.call.side_effect = [self.fixed_job_cost(), self.preview(), {"content": [{"type": "text", "text": json.dumps(data)}]},
+                    {"content": [{"type": "text", "text": "Submitted"}]}]
+                record = self.api.approvals.approve(pending.approval_id)
+                if kind in ("missing", "split", "conflicting_mirror"):
+                    with self.assertRaises(ProviderWarning):
+                        upwork.BUNDLED_TOOL.execute_approved(record, self.api)
+                else:
+                    result = upwork.BUNDLED_TOOL.execute_approved(record, self.api)
+                    self.assertIsInstance(result, ApprovalExecuted if kind == "identical_mirror" else ActionFailed)
+                self.assertEqual(self.client.call.call_count, 4 if kind == "identical_mirror" else 3)
+
+    def test_unapproved_fixed_terms_never_confirm(self):
+        for terms in ({"estimated_duration": "less_than_1_month"}, {"payment_mode": "project"},
+                      {"milestones": [{"description": "Work", "amount": 50}]}):
+            with self.subTest(terms=terms):
+                pending = self.submit()
+                self.client.call.reset_mock()
+                self.client.call.side_effect = [self.job_cost(), self.preview(), self.preview(**terms)]
+                result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("unapproved proposal terms", result.error)
+                self.assertEqual(self.client.call.call_count, 3)
+
+    def test_fixed_preview_camelcase_terms_require_exact_unique_values(self):
+        terms = {"estimated_duration": "less_than_1_month", "payment_mode": "project"}
+        for kind in ("exact", "changed", "duplicate", "split", "unapproved"):
+            with self.subTest(kind=kind):
+                pending = self.submit(**({} if kind == "unapproved" else terms))
+                data = json.loads(self.stored_preview(estimatedDuration="less_than_1_month", paymentMode="project")["content"][0]["text"])
+                if kind == "changed":
+                    data["params"]["paymentMode"] = "milestone"
+                elif kind == "duplicate":
+                    data["params"]["payment_mode"] = "project"
+                elif kind == "split":
+                    data["other"] = {"paymentMode": data["params"].pop("paymentMode")}
+                self.client.call.reset_mock()
+                self.client.call.side_effect = [self.job_cost(contract_type="HOURLY" if kind == "unapproved" else "FIXED"), self.preview(), {"content": [{"type": "text", "text": json.dumps(data)}]},
+                    {"content": [{"type": "text", "text": "Submitted"}]}]
+                record = self.api.approvals.approve(pending.approval_id)
+                if kind in ("duplicate", "split"):
+                    with self.assertRaises(ProviderWarning):
+                        upwork.BUNDLED_TOOL.execute_approved(record, self.api)
+                else:
+                    result = upwork.BUNDLED_TOOL.execute_approved(record, self.api)
+                    self.assertIsInstance(result, ApprovalExecuted if kind == "exact" else ActionFailed)
+                self.assertEqual(self.client.call.call_count, 4 if kind == "exact" else 3)
+
+    def test_milestone_date_alias_preserves_exact_order_and_rejects_ambiguity(self):
+        terms = {"estimated_duration": "less_than_1_month", "payment_mode": "milestone",
+                 "milestones": [{"description": "Work", "amount": 50, "due_date": "2026-10-20"}]}
+        for kind in ("exact", "mirror", "changed", "missing", "duplicate", "extra"):
+            with self.subTest(kind=kind):
+                pending = self.submit(**terms)
+                data = json.loads(self.preview(**copy.deepcopy(terms))["content"][0]["text"])
+                item = data["preview"]["milestones"][0]
+                item["dueDate"] = item.pop("due_date")
+                if kind == "mirror":
+                    data["other"] = {"milestones": copy.deepcopy(terms["milestones"])}
+                elif kind == "changed":
+                    item["dueDate"] = "2026-10-21"
+                elif kind == "missing":
+                    del item["dueDate"]
+                elif kind == "duplicate":
+                    item["due_date"] = item["dueDate"]
+                elif kind == "extra":
+                    item["extra"] = "new term"
+                self.client.call.reset_mock()
+                self.client.call.side_effect = [self.fixed_job_cost(), self.preview(),
+                    {"content": [{"type": "text", "text": json.dumps(data)}]},
+                    {"content": [{"type": "text", "text": "Submitted"}]}]
+                record = self.api.approvals.approve(pending.approval_id)
+                if kind == "duplicate":
+                    with self.assertRaises(ProviderWarning):
+                        upwork.BUNDLED_TOOL.execute_approved(record, self.api)
+                else:
+                    result = upwork.BUNDLED_TOOL.execute_approved(record, self.api)
+                    self.assertIsInstance(result, ApprovalExecuted if kind in ("exact", "mirror") else ActionFailed)
+                self.assertEqual(self.client.call.call_count, 4 if kind in ("exact", "mirror") else 3)
+
+    def test_milestone_amount_strings_compare_as_exact_decimals(self):
+        terms = {"estimated_duration": "less_than_1_month", "payment_mode": "milestone",
+                 "milestones": [{"description": "Work", "amount": 0.1}]}
+        for amount in ("0.1", "0.10", "0.100000000000000001", "0.2", "$0.10", "NaN", "Infinity", "1e-1", " 0.1", "", True, None):
+            with self.subTest(amount=amount):
+                pending = self.submit(charged_amount=0.1, **terms)
+                returned = copy.deepcopy(terms)
+                returned["milestones"][0]["amount"] = amount
+                self.client.call.reset_mock()
+                self.client.call.side_effect = [self.fixed_job_cost(), self.preview(), self.preview(charged_amount=0.1, **returned),
+                    {"content": [{"type": "text", "text": "Submitted"}]}]
+                result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+                exact = amount in ("0.1", "0.10")
+                self.assertIsInstance(result, ApprovalExecuted if exact else ActionFailed)
+                self.assertEqual(self.client.call.call_count, 4 if exact else 3)
+
+    def test_payment_mode_requires_consistent_milestones_before_approval(self):
+        for terms in ({"payment_mode": "milestone"},
+                      {"payment_mode": "project", "milestones": [{"description": "Work", "amount": 50}]}):
+            self.client.reset_mock()
+            result = self.submit(estimated_duration="less_than_1_month", **terms)
+            self.assertIsInstance(result, ActionFailed)
+            self.client.call.assert_not_called()
+            self.assertEqual(self.api.approvals.records, {})
+
+    def test_fixed_terms_required_response_stops_without_retry_or_confirmation(self):
+        pending = self.submit()
+        self.client.call.reset_mock()
+        # Only the visible fields from host_diagnostic_3103; not a complete capture.
+        response = {"duration_options": "less_than_1_month, 1_to_3_months, 3_to_6_months or more_than_6_months",
+                    "next_step": "This is a fixed-price job. No draft was built."}
+        self.client.call.side_effect = [self.job_cost(), {"content": [{"type": "text", "text": json.dumps(response)}]}]
+        with self.assertRaises(ProviderWarning) as caught:
+            upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+        self.assertEqual(caught.exception.operation, "create_proposal_preview")
+        self.assertIn("requires additional fixed-price duration/payment terms", str(caught.exception))
+        self.assertEqual(self.client.call.call_count, 2)
 
     def stored_preview(self, **changes):
         # Reconstruct the params envelope and camelCase fields observed in
