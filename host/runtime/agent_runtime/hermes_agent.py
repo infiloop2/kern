@@ -282,13 +282,16 @@ class HermesSession:
                 pass
 
         def pump_stdin() -> None:
-            # Hermes reads the whole prompt from stdin before it works, so a
-            # closed pipe or a dead process (kill mid-write) is expected, not
-            # an error to surface.
             try:
-                assert proc.stdin is not None
-                proc.stdin.write(prompt)
-                proc.stdin.close()
+                try:
+                    assert proc.stdin is not None
+                    proc.stdin.write(prompt)
+                    proc.stdin.close()
+                except (BrokenPipeError, ValueError):
+                    # The child can exit or interruption can close stdin
+                    # during write/flush. Preserve its output and exit status;
+                    # incomplete prompt delivery must not mark it ready.
+                    return
                 if self._on_ready is not None and not self._on_ready():
                     ready_errors.append(HermesAgentError("Hermes execution stopped during startup"))
                     self.interrupt()
@@ -296,8 +299,9 @@ class HermesSession:
                 ready_errors.append(exc)
 
         stderr_thread = threading.Thread(target=pump_stderr, daemon=True)
-        for target in (pump_stdout, pump_stdin):
-            threading.Thread(target=target, daemon=True).start()
+        stdin_thread = threading.Thread(target=pump_stdin, daemon=True)
+        threading.Thread(target=pump_stdout, daemon=True).start()
+        stdin_thread.start()
         stderr_thread.start()
 
         plain: list[str] = []
@@ -323,6 +327,11 @@ class HermesSession:
             # exit and stderr to drain so returncode and the session-id line
             # are ready.
             proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+            # Readiness runs on the stdin worker. It must finish before we
+            # inspect its errors or let the turn return successfully.
+            stdin_thread.join(timeout=max(0.0, deadline - time.monotonic()))
+            if stdin_thread.is_alive():
+                raise subprocess.TimeoutExpired(proc.args, TURN_TIMEOUT_SECONDS)
             stderr_thread.join(timeout=5)
             if ready_errors:
                 raise ready_errors[0]

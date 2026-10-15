@@ -301,7 +301,7 @@ class UpworkTests(unittest.TestCase):
 
     def test_fixed_price_requires_structured_terms_before_approval_and_execution(self):
         base = {"org_uid": "org-one", "job_reference": "123", "cover_letter": "$50 in a week", "charged_amount": 50}
-        for terms in ({}, {"estimated_duration": "less_than_1_month"}, {"payment_mode": "project"}):
+        for terms in ({}, {"estimated_duration": "less_than_1_month"}, {"payment_mode": "by_project"}):
             with self.subTest(terms=terms):
                 self.client.call.reset_mock()
                 self.client.call.return_value = self.fixed_job_cost()
@@ -319,9 +319,9 @@ class UpworkTests(unittest.TestCase):
         self.client.call.assert_called_once()
 
     def test_fixed_terms_stay_local_until_approval_and_are_forwarded_unchanged(self):
-        # Synthetic payment-mode values: the production diagnostic was clipped
-        # before payment_options. These fixtures do not establish its enum.
-        for mode, milestones in (("project", None), ("milestone", [
+        # Mode values verified from get_proposal_requirements on 2026-10-15.
+        # Preview envelopes remain fixtures, not live submission evidence.
+        for mode, milestones in (("by_project", None), ("by_milestone", [
                 {"description": "Working path", "amount": 20, "due_date": "2026-10-20"},
                 {"description": "Tests and handover", "amount": 30}])):
             with self.subTest(mode=mode):
@@ -343,6 +343,43 @@ class UpworkTests(unittest.TestCase):
                 self.assertEqual(self.client.call.call_args_list[1].args[1]["params"], {key: value for key, value in params.items() if key != "org_uid"})
                 self.assertEqual(self.client.call.call_args_list[-1].args[0], "upwork__confirm_preview")
 
+    def test_obsolete_payment_modes_cannot_queue_or_execute_old_approvals(self):
+        for mode in ("project", "milestone"):
+            with self.subTest(mode=mode):
+                pending = self.submit(estimated_duration="less_than_1_month", payment_mode="by_project")
+                record = self.api.approvals.approve(pending.approval_id)
+                record.payload["parameters"]["payment_mode"] = mode
+                self.client.call.reset_mock()
+                count = len(self.api.approvals.records)
+                result = upwork.BUNDLED_TOOL.execute("submit_proposal", record.payload["parameters"], self.api)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(len(self.api.approvals.records), count)
+                result = upwork.BUNDLED_TOOL.execute_approved(record, self.api)
+                self.assertIsInstance(result, ActionFailed)
+                self.client.call.assert_not_called()
+
+    def test_live_milestone_limits_apply_before_approval_and_execution(self):
+        # Exact limits from manage_proposals create help, read 2026-10-15.
+        for amount, description, valid in ((5, "x" * 200, True), (50000, "Work", True),
+                (4.99, "Work", False), (50000.01, "Work", False), (50, "x" * 201, False)):
+            with self.subTest(amount=amount, length=len(description)):
+                pending = self.submit(estimated_duration="less_than_1_month", payment_mode="by_milestone",
+                                      milestones=[{"description": "Work", "amount": 50}])
+                record = self.api.approvals.approve(pending.approval_id)
+                params = record.payload["parameters"]
+                params.update(charged_amount=amount, milestones=[{"description": description, "amount": amount}])
+                self.client.call.reset_mock()
+                count = len(self.api.approvals.records)
+                result = upwork.BUNDLED_TOOL.execute("submit_proposal", params, self.api)
+                if valid:
+                    self.assertIsInstance(result, ActionPendingApproval)
+                else:
+                    self.assertIsInstance(result, ActionFailed)
+                    self.assertEqual(len(self.api.approvals.records), count)
+                    result = upwork.BUNDLED_TOOL.execute_approved(record, self.api)
+                    self.assertIsInstance(result, ActionFailed)
+                    self.client.call.assert_not_called()
+
     def test_invalid_fixed_terms_never_queue_or_contact_provider(self):
         invalid = [
             {"estimated_duration": "tomorrow"}, {"payment_mode": " "}, {"payment_mode": "unknown"},
@@ -361,8 +398,8 @@ class UpworkTests(unittest.TestCase):
                 self.assertIsInstance(result, ActionFailed)
                 self.client.call.assert_not_called()
         # Decimal arithmetic avoids rejecting legitimate cents totals.
-        self.assertIsInstance(self.submit(charged_amount=0.3, estimated_duration="less_than_1_month", payment_mode="milestone", milestones=[
-            {"description": "First", "amount": 0.1}, {"description": "Second", "amount": 0.2}]), ActionPendingApproval)
+        self.assertIsInstance(self.submit(charged_amount=10.3, estimated_duration="less_than_1_month", payment_mode="by_milestone", milestones=[
+            {"description": "First", "amount": 5.1}, {"description": "Second", "amount": 5.2}]), ActionPendingApproval)
 
     def test_hourly_job_does_not_accept_fixed_payment_terms(self):
         hourly = self.fixed_job_cost()
@@ -370,7 +407,7 @@ class UpworkTests(unittest.TestCase):
         data["data"]["marketplaceJobPosting"]["contractTerms"]["contractType"] = "HOURLY"
         hourly["content"][0]["text"] = json.dumps(data)
         base = {"org_uid": "org-one", "job_reference": "123", "cover_letter": "Hourly", "charged_amount": 50}
-        for terms in ({}, {"estimated_duration": "less_than_1_month", "payment_mode": "project"}):
+        for terms in ({}, {"estimated_duration": "less_than_1_month", "payment_mode": "by_project"}):
             self.client.call.reset_mock()
             self.client.call.return_value = hourly
             result = upwork.BUNDLED_TOOL.execute("submit_proposal", {**base, **terms}, self.api)
@@ -378,7 +415,7 @@ class UpworkTests(unittest.TestCase):
             self.client.call.assert_called_once()
 
     def test_fixed_preview_terms_must_be_complete_exact_and_unambiguous(self):
-        terms = {"estimated_duration": "less_than_1_month", "payment_mode": "milestone", "milestones": [
+        terms = {"estimated_duration": "less_than_1_month", "payment_mode": "by_milestone", "milestones": [
             {"description": "First", "amount": 20, "due_date": "2026-10-20"}, {"description": "Final", "amount": 30}]}
         for kind in ("missing", "changed_duration", "changed_mode", "reordered", "amount", "description", "date", "extra", "split", "conflicting_mirror", "identical_mirror"):
             with self.subTest(kind=kind):
@@ -390,7 +427,7 @@ class UpworkTests(unittest.TestCase):
                 elif kind == "changed_duration":
                     returned["estimated_duration"] = "1_to_3_months"
                 elif kind == "changed_mode":
-                    returned["payment_mode"] = "project"
+                    returned["payment_mode"] = "by_project"
                 elif kind == "reordered":
                     returned["milestones"].reverse()
                 elif kind in ("amount", "description", "date"):
@@ -401,7 +438,7 @@ class UpworkTests(unittest.TestCase):
                 elif kind == "split":
                     data["other"] = {"milestones": returned.pop("milestones")}
                 elif kind == "conflicting_mirror":
-                    data["other"] = {"payment_mode": "project"}
+                    data["other"] = {"payment_mode": "by_project"}
                 elif kind == "identical_mirror":
                     data["other"] = copy.deepcopy(returned)
                 self.client.call.reset_mock()
@@ -417,7 +454,7 @@ class UpworkTests(unittest.TestCase):
                 self.assertEqual(self.client.call.call_count, 4 if kind == "identical_mirror" else 3)
 
     def test_unapproved_fixed_terms_never_confirm(self):
-        for terms in ({"estimated_duration": "less_than_1_month"}, {"payment_mode": "project"},
+        for terms in ({"estimated_duration": "less_than_1_month"}, {"payment_mode": "by_project"},
                       {"milestones": [{"description": "Work", "amount": 50}]}):
             with self.subTest(terms=terms):
                 pending = self.submit()
@@ -429,15 +466,15 @@ class UpworkTests(unittest.TestCase):
                 self.assertEqual(self.client.call.call_count, 3)
 
     def test_fixed_preview_camelcase_terms_require_exact_unique_values(self):
-        terms = {"estimated_duration": "less_than_1_month", "payment_mode": "project"}
+        terms = {"estimated_duration": "less_than_1_month", "payment_mode": "by_project"}
         for kind in ("exact", "changed", "duplicate", "split", "unapproved"):
             with self.subTest(kind=kind):
                 pending = self.submit(**({} if kind == "unapproved" else terms))
-                data = json.loads(self.stored_preview(estimatedDuration="less_than_1_month", paymentMode="project")["content"][0]["text"])
+                data = json.loads(self.stored_preview(estimatedDuration="less_than_1_month", paymentMode="by_project")["content"][0]["text"])
                 if kind == "changed":
-                    data["params"]["paymentMode"] = "milestone"
+                    data["params"]["paymentMode"] = "by_milestone"
                 elif kind == "duplicate":
-                    data["params"]["payment_mode"] = "project"
+                    data["params"]["payment_mode"] = "by_project"
                 elif kind == "split":
                     data["other"] = {"paymentMode": data["params"].pop("paymentMode")}
                 self.client.call.reset_mock()
@@ -453,7 +490,7 @@ class UpworkTests(unittest.TestCase):
                 self.assertEqual(self.client.call.call_count, 4 if kind == "exact" else 3)
 
     def test_milestone_date_alias_preserves_exact_order_and_rejects_ambiguity(self):
-        terms = {"estimated_duration": "less_than_1_month", "payment_mode": "milestone",
+        terms = {"estimated_duration": "less_than_1_month", "payment_mode": "by_milestone",
                  "milestones": [{"description": "Work", "amount": 50, "due_date": "2026-10-20"}]}
         for kind in ("exact", "mirror", "changed", "missing", "duplicate", "extra"):
             with self.subTest(kind=kind):
@@ -485,24 +522,24 @@ class UpworkTests(unittest.TestCase):
                 self.assertEqual(self.client.call.call_count, 4 if kind in ("exact", "mirror") else 3)
 
     def test_milestone_amount_strings_compare_as_exact_decimals(self):
-        terms = {"estimated_duration": "less_than_1_month", "payment_mode": "milestone",
-                 "milestones": [{"description": "Work", "amount": 0.1}]}
-        for amount in ("0.1", "0.10", "0.100000000000000001", "0.2", "$0.10", "NaN", "Infinity", "1e-1", " 0.1", "", True, None):
+        terms = {"estimated_duration": "less_than_1_month", "payment_mode": "by_milestone",
+                 "milestones": [{"description": "Work", "amount": 5.1}]}
+        for amount in ("5.1", "5.10", "5.100000000000000001", "5.2", "$5.10", "NaN", "Infinity", "51e-1", " 5.1", "", True, None):
             with self.subTest(amount=amount):
-                pending = self.submit(charged_amount=0.1, **terms)
+                pending = self.submit(charged_amount=5.1, **terms)
                 returned = copy.deepcopy(terms)
                 returned["milestones"][0]["amount"] = amount
                 self.client.call.reset_mock()
-                self.client.call.side_effect = [self.fixed_job_cost(), self.preview(), self.preview(charged_amount=0.1, **returned),
+                self.client.call.side_effect = [self.fixed_job_cost(), self.preview(), self.preview(charged_amount=5.1, **returned),
                     {"content": [{"type": "text", "text": "Submitted"}]}]
                 result = upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
-                exact = amount in ("0.1", "0.10")
+                exact = amount in ("5.1", "5.10")
                 self.assertIsInstance(result, ApprovalExecuted if exact else ActionFailed)
                 self.assertEqual(self.client.call.call_count, 4 if exact else 3)
 
     def test_payment_mode_requires_consistent_milestones_before_approval(self):
-        for terms in ({"payment_mode": "milestone"},
-                      {"payment_mode": "project", "milestones": [{"description": "Work", "amount": 50}]}):
+        for terms in ({"payment_mode": "by_milestone"},
+                      {"payment_mode": "by_project", "milestones": [{"description": "Work", "amount": 50}]}):
             self.client.reset_mock()
             result = self.submit(estimated_duration="less_than_1_month", **terms)
             self.assertIsInstance(result, ActionFailed)
