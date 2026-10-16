@@ -1144,8 +1144,10 @@ PY
   chown root:root /etc/kern/cloudflare_hostname
   chmod 640 /etc/kern/cloudflared.token
   chmod 644 /etc/kern/cloudflare_hostname
+  # Tools can read the hostname without accessing tunnel credentials or exposing it to the agent.
+  install -m 0640 -o root -g kern-tools /etc/kern/cloudflare_hostname /etc/kern-tools-public-hostname
 else
-  rm -f /etc/systemd/system/kern-cloudflared.service /etc/kern/cloudflared.token /etc/kern/cloudflare_hostname
+  rm -f /etc/systemd/system/kern-cloudflared.service /etc/kern/cloudflared.token /etc/kern/cloudflare_hostname /etc/kern-tools-public-hostname
 fi
 }
 

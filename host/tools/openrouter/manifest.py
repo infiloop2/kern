@@ -1,7 +1,4 @@
 """HeyGen Video through OpenRouter, with private staged reference media."""
-from dataclasses import replace
-from typing import cast
-
 from host.param_guard import PARAM_GUARD_PROTECTION, PARAM_GUARD_TECHNICAL_DETAIL
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.manifest import (
@@ -29,22 +26,22 @@ MANIFEST = ToolManifest(
     tool_id="openrouter", display_name="OpenRouter", connection="enable_only", reports_cost=True,
     description="Connect to models from different providers through OpenRouter.",
     agent_notes=(
-        "Both creation actions select heygen/heygen-video-1. create_heygen_video uses text/images directly; "
-        "create_heygen_reference_video requires approval for audio/video references. Stage source media with "
+        "create_heygen_video selects heygen/heygen-video-1 and runs directly for all supported inputs. "
+        "Stage source media with "
         "stage_image, stage_video or stage_audio and for_tool=openrouter. Use image_asset_id for an opening frame, "
         "or reference_*_asset_ids for visual/audio guidance; never mix those modes. Reference lists are addressed "
         "independently as <Picture 1>, <Video 1>, <Audio 1>, and so on. Audio alone cannot select reference mode. "
         "HeyGen includes native audio. First-frame mode follows the image's shape; crop it before staging to change framing. "
         "Clips run 5-15 seconds at 480p or 768p. "
         "Images are at most 5 MB each; video/audio at most 16 MB each, all references at most 60 MB. "
-        "Approved or direct submission starts one paid job and returns immediately. Poll get_task about every 30 seconds, then save_video. "
-        "A conservative cost estimate is recorded internally in Kern's MTD tool usage at accepted submission, even if never polled. Do not repeat creation after an ambiguous submission: check OpenRouter activity first."
+        "Submission starts one paid job and returns immediately. Poll get_task about every 30 seconds, then save_video. "
+        "Audio/video references require a configured Cloudflare HTTPS hostname. Their links expire after at most 15 minutes, including on failed or ambiguous submissions; delayed provider fetches can fail. Staged audio/video retains its normal 26-hour staging expiry. A conservative cost estimate is recorded internally in Kern's MTD tool usage at accepted submission, even if never polled. Do not repeat creation after an ambiguous submission: check OpenRouter activity first."
     ),
     actions=protect_inputs((
         ActionSpec(
             id="create_heygen_video",
             description="Start one paid HeyGen Video 1 job from a prompt, opening frame, or multimodal references. Returns a task_id for get_task and save_video.",
-            data_policy="Sends the guarded prompt, generation settings and selected staged media bytes to OpenRouter and HeyGen. Runs directly, bills the configured OpenRouter account, and publishes nothing. Staged bytes use inline data URLs; no public source link is created.",
+            data_policy="Sends the guarded prompt, generation settings and selected staged media bytes to OpenRouter and HeyGen. Runs directly, bills the configured OpenRouter account, and publishes nothing. Images use inline data URLs. Audio/video references use unguessable HTTPS links on the configured Cloudflare hostname for at most 15 minutes. Anyone holding a link can fetch that selected file; links stay internal to the tool/provider request and are never returned to the agent.",
             cost_description="Records a conservative USD estimate in Kern's MTD usage once OpenRouter accepts the job. Uses the higher of live catalog and documented list rates, without promotional discounts: 480p/768p text or first-frame $0.02/$0.03 per output second; reference mode $0.04/$0.06 per output plus video-reference second. Video durations round up to whole seconds; unreadable video metadata counts as 60 seconds per reference. Image/audio references add no extra seconds. This is an estimate, not the provider invoice; later refunds and actual charges are not reconciled.",
             input_schema=schema({
                 "prompt": {"type": "string", "description": "Scene, camera, motion, dialogue and sound direction, up to 5120 UTF-8 bytes. Reference labels: <Picture 1>, <Video 1>, <Audio 1>."},
@@ -89,19 +86,19 @@ MANIFEST = ToolManifest(
     ),
     protections=(
         "The API key stays in write-only configuration. Creation pins HeyGen Video 1, and checks current OpenRouter capabilities before submitting.",
-        "Source files use tool-scoped staging. The direct action uses inline bytes; the reference action grants temporary HTTPS access only after approval. Inline staged copies are consumed after an accepted submission; approved HTTPS references remain until their normal staging expiry.",
+        "Source files use tool-scoped staging. Images use inline bytes; audio/video references receive temporary HTTPS access during direct execution. Inline staged copies are consumed after an accepted submission; HTTPS reference files remain staged until normal expiry; public links last at most 15 minutes.",
         "Creation runs once. Polling and saving never create another job; downloads stay on the authenticated OpenRouter endpoint and refuse redirects.",
         PARAM_GUARD_PROTECTION,
     ),
     technical_details=(
         PARAM_GUARD_TECHNICAL_DETAIL,
         "Mapped HTTP failures and ambiguous submissions record the operation, HTTP status and up to 4096 bytes of provider error response in operator-only Host diagnostics. Provider text may include echoed input; agent replies retain curated messages only. No automatic retry is performed.",
-        "Media IDs must belong to this tool and remain unexpired. JPEG/PNG/WebP inputs are at most 5 MB; MP4/MOV/MP3/WAV inputs at most 16 MB. References permit 9 images, 3 videos, 3 audio files and 12 total, at most 60 MB combined. Media duration/content constraints remain provider-validated. Images become data URLs internally. Approved audio/video references use temporary HTTPS capabilities, never model context or caller URLs.",
+        "Media IDs must belong to this tool and remain unexpired. JPEG/PNG/WebP inputs are at most 5 MB; MP4/MOV/MP3/WAV inputs at most 16 MB. References permit 9 images, 3 videos, 3 audio files and 12 total, at most 60 MB combined. Media duration/content constraints remain provider-validated. Images become data URLs internally. Audio/video references use temporary HTTPS capabilities, never model context or caller URLs.",
         "Mode conflicts fail before submission. Arbitrary provider options, callbacks, model overrides and endpoints are not accepted. First-frame aspect overrides fail rather than being ignored.",
         "Accepted submission records one estimate with a stable job charge ID, without needing a poll. MP4/MOV movie-header durations round up; unreadable metadata uses a 60-second allowance per reference, not a guaranteed upper bound. Catalog pricing falls back to verified list rates and ignores discounts. Polls/saves ignore usage.cost, so estimates remain unchanged after completion or refunds. Output index 0 uses the shared video type and 200 MB bounds.",
     ),
     data_summary=DataSummary(cards=(
-        DataSummaryCard(title="What leaves this host", description="The scene prompt, generation settings and selected source image/video/audio bytes go to OpenRouter with your API key. OpenRouter forwards them to HeyGen. Polls and downloads send the job ID. Original workspace files stay until you delete them; inline staged copies are consumed after acceptance; approved audio/video references retain their normal staging expiry."),
+        DataSummaryCard(title="What leaves this host", description="The scene prompt, generation settings and selected source image/video/audio bytes go to OpenRouter with your API key. OpenRouter forwards them to HeyGen. Polls and downloads send the job ID. Original workspace files stay until you delete them; inline staged copies are consumed after acceptance; audio/video references retain their normal staging expiry."),
         DataSummaryCard(title="Where it can go", description="Creation selects heygen/heygen-video-1 through OpenRouter. HeyGen and its subprocessors receive the data needed to render the clip. This integration uses OpenRouter's global endpoint and does not guarantee processing in a particular country.", links=(DataSummaryLink(label="OpenRouter provider policies", url="https://openrouter.ai/docs/guides/privacy/provider-logging"), DataSummaryLink(label="HeyGen subprocessors", url="https://www.heygen.com/trust-and-safety"))),
         DataSummaryCard(title="What the provider can do with it", points=(
             DataSummaryPoint(label="OpenRouter", text="Says it does not train models on inputs or outputs. Optional content logging and product-improvement use are separate, off-by-default settings. You can exclude providers that train in account settings."),
@@ -114,28 +111,4 @@ MANIFEST = ToolManifest(
             DataSummaryPoint(label="Your saved files", text="Remain in the Kern workspace until you delete them."),
         ), links=(DataSummaryLink(label="Video storage and ZDR", url="https://openrouter.ai/docs/guides/overview/multimodal/video-generation"), DataSummaryLink(label="HeyGen retention policy", url="https://www.heygen.com/privacy"), DataSummaryLink(label="OpenRouter privacy", url="https://openrouter.ai/privacy"))),
     )),
-)
-
-
-# HTTPS audio/video references require approved temporary public delivery. Keep
-# the existing private inline image/text action direct.
-_create = MANIFEST.actions[0]
-_reference_properties = dict(cast(JSONObject, _create.input_schema["properties"]))
-_reference_properties.pop("image_asset_id")
-_direct_properties = dict(cast(JSONObject, _create.input_schema["properties"]))
-for _field in ("reference_audio_asset_ids", "reference_video_asset_ids"):
-    _direct_properties.pop(_field)
-_direct = replace(
-    _create, input_schema=schema(_direct_properties, ["prompt"]),
-    description="Start one paid HeyGen Video 1 job from text or staged images. For audio/video references use create_heygen_reference_video.",
-    input_protections={k: v for k, v in _create.input_protections.items() if k in _direct_properties},
-)
-_reference = replace(
-    _create, id="create_heygen_reference_video", approval="operator", output_schema={}, input_protections={},
-    input_schema=schema(_reference_properties, ["prompt"]),
-    description="Request approval for one paid HeyGen job with audio/video references. After approval, use the job ID in the outcome with get_task and save_video.",
-    data_policy="After approval, sends the exact prompt, settings and selected media to OpenRouter/HeyGen. Audio/video references use unguessable HTTPS links on the configured Cloudflare hostname for up to 15 minutes. Anyone holding a link can fetch that selected file. Links survive submission errors because acceptance can be ambiguous. Images use inline bytes. No links or paid job before approval; no source URLs accepted.",
-)
-MANIFEST = replace(MANIFEST, actions=(_direct, _reference, *MANIFEST.actions[1:]),
-    agent_notes=MANIFEST.agent_notes + " For audio/video references use create_heygen_reference_video, which requires approval and a configured Cloudflare HTTPS hostname. Do not resubmit while approval is pending. Approval outcome supplies the job ID. Temporary reference links expire after at most 15 minutes, including on failed/ambiguous submission; delayed provider fetches can fail. Staged audio/video is no longer publicly accessible after link expiry and retains its normal 26-hour staging expiry.",
 )

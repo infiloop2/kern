@@ -7,7 +7,6 @@ ignored so authentication can never be sent to a provider-controlled host.
 from __future__ import annotations
 
 import base64
-from dataclasses import asdict
 import re
 from typing import cast
 
@@ -15,7 +14,7 @@ from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.openrouter.manifest import MANIFEST
 from host.tools.openrouter.costs import quote_usd
-from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ActionResult, ApprovalExecuted, ApprovalResult, StreamingAsset
+from host.tools.results import ActionExecuted, ActionFailed, ActionResult, ApprovalResult, StreamingAsset
 from host.tools.shared.cost_reporting import report_provider_usd
 from host.tools.shared.inputs import ToolInputValidationError, int_field
 from host.tools.shared.media import open_downloaded_video
@@ -282,17 +281,6 @@ class OpenRouterTool:
             if action == "create_heygen_video":
                 body, uploads, estimate = _generation_body(tool_input, api, headers)
                 return _submit(body, uploads, estimate, api, headers)
-            if action == "create_heygen_reference_video":
-                body, uploads, estimate = _generation_body(tool_input, api, headers)
-                if not any(kind in {"audio", "video"} for kind in uploads.values()):
-                    raise ToolInputValidationError("Use create_heygen_video for text/image-only generation.")
-                assets: JSONObject = {asset_id: cast(JSONObject, asdict(api.assets.describe(asset_id))) for asset_id in uploads}
-                approval = api.approvals.request(
-                    action_id=action,
-                    summary=f"Create one HeyGen reference video ({body['duration']}s, {body['resolution']}); expose {sum(k in {'audio', 'video'} for k in uploads.values())} selected audio/video files via HTTPS for up to 15 minutes. Estimated USD {estimate}.",
-                    payload={"input": tool_input, "body": body, "assets": assets, "estimate_usd": estimate},
-                )
-                return ActionPendingApproval(approval.approval_id, approval.summary)
             task_id = _task_id(tool_input.get("task_id"))
             result = _poll(task_id, headers)
             if action == "get_task":
@@ -312,28 +300,7 @@ class OpenRouterTool:
             return ActionFailed(str(exc))
 
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
-        try:
-            if approval.action_id != "create_heygen_reference_video":
-                raise ToolInputValidationError("Unsupported OpenRouter approval action.")
-            tool_input = approval.payload.get("input")
-            if not isinstance(tool_input, dict):
-                raise ToolInputValidationError("OpenRouter approval has no generation input.")
-            _check_fields(tool_input, approval.action_id)
-            headers = {"Authorization": f"Bearer {api.config['OPENROUTER_API_KEY']}"}
-            body, uploads, estimate = _generation_body(tool_input, api, headers)
-            if estimate != approval.payload.get("estimate_usd"):
-                raise ToolInputValidationError("OpenRouter cost estimate changed; request a new approval before submitting.")
-            assets = {asset_id: asdict(api.assets.describe(asset_id)) for asset_id in uploads}
-            if body != approval.payload.get("body") or assets != approval.payload.get("assets"):
-                raise ToolInputValidationError("OpenRouter sources or settings no longer match the approval.")
-            result = _submit(body, uploads, estimate, api, headers)
-            if isinstance(result, ActionFailed):
-                return result
-            return ApprovalExecuted(f"OpenRouter video job {result.result['task_id']}: {result.result['message']}")
-        except ProviderWarning:
-            raise
-        except (ValueError, RuntimeError) as exc:
-            return ActionFailed(str(exc))
+        return ActionFailed("OpenRouter generation now runs directly. This legacy approval cannot execute; reconcile its status before making a new request.")
 
 
 BUNDLED_TOOL = OpenRouterTool()

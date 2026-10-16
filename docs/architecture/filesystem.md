@@ -33,6 +33,7 @@ directory below. Those writable locations are not trusted code or policy inputs.
 | `/etc/systemd/system/kern*` | root-owned system config, not service-writable | Postgres, admin API, network proxy, tools, workspaces, optional Cloudflare Tunnel service units, and resource-slice definitions. |
 | `/etc/kern/cloudflared.token` | root-owned, `0640`, group `cloudflared` | Cloudflare Tunnel token for the optional `cloudflared` service. Directly readable only by root and `cloudflared`; the SSH operator can deliberately cross that boundary with unrestricted sudo. |
 | `/etc/kern/cloudflare_hostname` | root-owned, `644` | Configured Cloudflare Tunnel hostname used for bootstrap verification and operator diagnostics. |
+| `/etc/kern-tools-public-hostname` | `root:kern-tools`, `640` | Tools-only hostname copy for temporary public media URLs; unreadable by the agent. |
 | `/etc/nftables.conf` | root-owned system config, not service-writable | Host firewall rules. |
 | `/etc/codex/requirements.toml`, `/etc/codex/managed_config.toml` | root-owned, `644`, not service-writable | Managed Codex policy restricting web search and connector surfaces, disabling request compression for proxy inspection, and defining the bundled-tools MCP server. |
 | `/usr/local/share/ca-certificates/kern-network-proxy.crt` | root-owned, `644`, public certificate | Public proxy CA certificate installed in the system trust store for agent runtimes. |

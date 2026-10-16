@@ -10,7 +10,7 @@ from unittest.mock import patch
 from host.runtime.tools import tools_host
 from host.runtime.tools.tools_host import BUNDLED_TOOLS
 from host.tools import openrouter
-from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ApprovalExecuted, StreamingAsset, StreamingAssetError
+from host.tools.results import ActionExecuted, ActionFailed, StreamingAsset, StreamingAssetError
 from host.tools.shared import media, web
 from host.tools.shared.web import ProviderWarning, UnmappedProviderError, WebRequestError
 from test_tools import FakeHostAPI, assert_matches_output_schema
@@ -36,21 +36,14 @@ class OpenRouterTests(unittest.TestCase):
 
     def execute(self, action, tool_input, responses):
         with patch.object(openrouter, "json_request", side_effect=responses) as request:
-            if action == "create_heygen_video" and any(k in tool_input for k in ("reference_audio_asset_ids", "reference_video_asset_ids")):
-                try:
-                    body, uploads, estimate = openrouter._generation_body(tool_input, self.api, {})
-                    result = openrouter._submit(body, uploads, estimate, self.api, {})
-                except (ValueError, RuntimeError) as exc:
-                    result = ActionFailed(str(exc))
-            else:
-                result = self.tool.execute(action, tool_input, self.api)
+            result = self.tool.execute(action, tool_input, self.api)
         if isinstance(result, ActionExecuted):
             assert_matches_output_schema(self, self.tool.manifest, action, result)
         return result, request
 
     def test_discovered_tool_and_exact_action_schemas(self):
         self.assertIs(BUNDLED_TOOLS["openrouter"], self.tool)
-        self.assertEqual([a.id for a in self.tool.manifest.actions], ["create_heygen_video", "create_heygen_reference_video", "get_task", "save_video"])
+        self.assertEqual([a.id for a in self.tool.manifest.actions], ["create_heygen_video", "get_task", "save_video"])
         self.assertTrue(self.tool.manifest.reports_cost)
         self.assertTrue(self.tool.manifest.actions[-1].returns_asset)
         self.assertFalse(self.tool.manifest.actions[-1].output_schema)
@@ -448,7 +441,7 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class OpenRouterReferenceApprovalTests(unittest.TestCase):
+class OpenRouterReferenceDirectTests(unittest.TestCase):
     def setUp(self):
         self.api = FakeHostAPI(config={"OPENROUTER_API_KEY": "test-key"})
         self.tool = openrouter.BUNDLED_TOOL
@@ -456,90 +449,61 @@ class OpenRouterReferenceApprovalTests(unittest.TestCase):
         self.audio = self.api.assets.add("A" * 32, media_type="audio/mpeg", data=b"a" * 512)
         self.input = {"prompt": "A quiet scene", "reference_image_asset_ids": [self.image], "reference_audio_asset_ids": [self.audio]}
 
-    def queue(self):
-        with patch.object(openrouter, "json_request", return_value=CATALOG) as request, patch.object(self.api.assets, "public_asset_url") as grant:
-            result = self.tool.execute("create_heygen_reference_video", self.input, self.api)
-        self.assertIsInstance(result, ActionPendingApproval)
-        grant.assert_not_called()
-        self.assertEqual([c.args[0] for c in request.call_args_list], ["GET"])
-        self.assertFalse(self.api.costs.calls)
-        self.assertEqual(tools_host._result_kind_error(self.tool.manifest.actions[1], result), "")
-        return self.api.approvals.approve(result.approval_id)
-
-    def test_approval_binds_sources_then_returns_job_without_links(self):
-        approval = self.queue()
-        self.assertEqual(approval.payload["assets"][self.audio]["sha256"], self.api.assets.describe(self.audio).sha256)
-        self.assertNotIn("https://", str(approval.payload))
+    def test_direct_submission_returns_job_without_approval_or_links(self):
         with patch.object(openrouter, "json_request", side_effect=[CATALOG, {"id": JOB, "status": "pending"}]) as request:
-            result = self.tool.execute_approved(approval, self.api)
-        self.assertIsInstance(result, ApprovalExecuted)
-        self.assertIn(JOB, result.message)
-        self.assertNotIn("https://", result.message)
+            result = self.tool.execute("create_heygen_video", self.input, self.api)
+        self.assertIsInstance(result, ActionExecuted)
+        assert_matches_output_schema(self, self.tool.manifest, "create_heygen_video", result)
+        self.assertEqual(result.result["task_id"], JOB)
+        self.assertNotIn("https://", str(result.result))
+        self.assertFalse(self.api.approvals.records)
         self.assertEqual(request.call_count, 2)
         self.assertTrue(request.call_args.kwargs["body"]["input_references"][1]["audio_url"]["url"].startswith("https://"))
         self.assertIn(self.audio, self.api.assets.records)
         self.assertNotIn(self.image, self.api.assets.records)
         self.assertEqual(len(self.api.costs.calls), 1)
 
-    def test_reference_action_without_config_fails_before_network_or_approval(self):
-        api = FakeHostAPI()
+    def test_reference_action_without_config_fails_before_network(self):
         with patch.object(openrouter, "json_request") as request:
-            result = self.tool.execute("create_heygen_reference_video", {"prompt": "Kern smoke"}, api)
+            result = self.tool.execute("create_heygen_video", {"prompt": "Kern smoke"}, FakeHostAPI())
         self.assertIsInstance(result, ActionFailed)
         self.assertIn("not set", result.error)
         request.assert_not_called()
-        self.assertFalse(api.approvals.records)
 
-    def test_direct_action_cannot_create_https_references(self):
+    def test_removed_reference_action_fails_before_network_or_grant(self):
         with patch.object(openrouter, "json_request") as request, patch.object(self.api.assets, "public_asset_url") as grant:
-            result = self.tool.execute("create_heygen_video", self.input, self.api)
+            result = self.tool.execute("create_heygen_reference_video", self.input, self.api)
         self.assertIsInstance(result, ActionFailed)
         request.assert_not_called()
         grant.assert_not_called()
 
-    def test_changed_source_or_payload_stops_before_grant_or_post(self):
-        for mutation in ("source", "body", "unknown_field"):
-            with self.subTest(mutation=mutation):
-                approval = self.queue()
-                if mutation == "source":
-                    self.api.assets.add(self.audio, media_type="audio/mpeg", data=b"b" * 512)
-                elif mutation == "body":
-                    approval.payload["body"]["duration"] = 15
-                else:
-                    approval.payload["input"]["callback_url"] = "https://attacker.example"
-                with patch.object(openrouter, "json_request", return_value=CATALOG) as request, patch.object(self.api.assets, "public_asset_url") as grant:
-                    result = self.tool.execute_approved(approval, self.api)
-                self.assertIsInstance(result, ActionFailed)
-                grant.assert_not_called()
-                self.assertTrue(all(c.args[0] == "GET" for c in request.call_args_list))
-
-    def test_changed_catalog_price_requires_new_approval_without_grant_or_job(self):
-        approval = self.queue()
-        self.assertEqual(approval.payload["estimate_usd"], "0.300000000")
-        increased = {"data": [{**MODEL, "pricing_skus": {"reference_duration_seconds_768p": "0.12"}}]}
-        with patch.object(openrouter, "json_request", return_value=increased) as request, patch.object(self.api.assets, "public_asset_url") as grant:
-            result = self.tool.execute_approved(approval, self.api)
-        self.assertIsInstance(result, ActionFailed)
-        self.assertIn("cost estimate changed", result.error)
-        grant.assert_not_called()
-        self.assertEqual(request.call_count, 1)
-        self.assertEqual(request.call_args.args[0], "GET")
-        self.assertFalse(self.api.costs.calls)
+    def test_prompt_guard_and_unknown_fields_block_before_egress(self):
+        for change in ({"prompt": "my password is hunter2secret"}, {"public_hostname": "attacker.example"}):
+            with self.subTest(change=change), patch.object(openrouter, "json_request") as request, patch.object(self.api.assets, "public_asset_url") as grant:
+                result = self.tool.execute("create_heygen_video", self.input | change, self.api)
+            self.assertIsInstance(result, ActionFailed)
+            request.assert_not_called()
+            grant.assert_not_called()
 
     def test_expired_source_or_missing_hostname_never_submits(self):
-        approval = self.queue()
         for target, error in (("describe", "Asset id is invalid or expired"), ("public_asset_url", "Cloudflare HTTPS hostname required")):
             with self.subTest(target=target), patch.object(self.api.assets, target, side_effect=ValueError(error)), patch.object(openrouter, "json_request", return_value=CATALOG) as request:
-                result = self.tool.execute_approved(approval, self.api)
+                result = self.tool.execute("create_heygen_video", self.input, self.api)
             self.assertIsInstance(result, ActionFailed)
             self.assertIn(error, result.error)
             self.assertTrue(all(c.args[0] == "GET" for c in request.call_args_list))
 
     def test_provider_rejection_is_not_retried_and_records_no_cost(self):
-        approval = self.queue()
         with patch.object(openrouter, "json_request", side_effect=[CATALOG, WebRequestError("bad", status=400, body=b"private")]) as request:
             with self.assertRaises(ProviderWarning):
-                self.tool.execute_approved(approval, self.api)
+                self.tool.execute("create_heygen_video", self.input, self.api)
         self.assertEqual(request.call_count, 2)
         self.assertFalse(self.api.costs.calls)
         self.assertIn(self.audio, self.api.assets.records)
+
+    def test_legacy_approval_cannot_submit_after_upgrade(self):
+        with patch.object(openrouter, "json_request") as request:
+            result = self.tool.execute_approved(None, self.api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("legacy approval cannot execute", result.error)
+        request.assert_not_called()

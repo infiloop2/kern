@@ -87,11 +87,96 @@ class PublicToolMediaTests(unittest.TestCase):
         finally:
             connection.close()
 
+    def reference_call(self, *, hostname="kern.example", missing=False, inline_mode=None, read_error=None):
+        from test_tools import FakeHostAPI
+        from test_tools_openrouter import CATALOG, JOB
+        from host.tools import openrouter
+        api = FakeHostAPI(config={"OPENROUTER_API_KEY": "test-key"}, assets=HostAssets("openrouter", self.tools.asset_store))
+        image = self.tools.asset_store.stage(kind="image", tool_id="openrouter", filename="frame.png",
+            media_type="image/png", size_bytes=len(self.data), source=io.BytesIO(self.data))
+        audio = self.tools.asset_store.stage(kind="audio", tool_id="openrouter", filename="voice.mp3",
+            media_type="audio/mpeg", size_bytes=len(self.data), source=io.BytesIO(self.data))
+        inputs = {"prompt": "A quiet scene", "reference_image_asset_ids": [image.asset_id], "reference_audio_asset_ids": [audio.asset_id]}
+        if inline_mode is not None:
+            inputs = {"prompt": "A quiet scene"}
+            if inline_mode == "image":
+                inputs["image_asset_id"] = image.asset_id
+        with (patch.object(tools_host, "enabled_tool", return_value=openrouter.BUNDLED_TOOL),
+              patch.object(tools_host, "resolve_connection", return_value=tools_host.NO_CONNECTION),
+              patch.object(tools_host, "host_api_for", return_value=api),
+              patch.object(tools_host, "_audit") as audit,
+              patch.object(tools_host.Path, "read_text", side_effect=read_error or (FileNotFoundError() if missing else None), return_value=hostname),
+              patch.object(openrouter, "json_request", side_effect=[CATALOG, {"id": JOB, "status": "pending"}]) as request):
+            result = tools_host.execute_action("openrouter", "create_heygen_video", inputs, None, self.tools.asset_store)
+        return result, api, request, audit
+
+    def test_direct_reference_execution_mints_expiring_https_without_approval(self):
+        result, api, request, audit = self.reference_call()
+        self.assertEqual(result["status"], "executed")
+        self.assertFalse(api.approvals.records)
+        url = request.call_args.kwargs["body"]["input_references"][1]["audio_url"]["url"]
+        path = url.removeprefix("https://kern.example")
+        self.assertEqual(self.request(path)[0], 200)
+        self.assertNotIn(url, str(result))
+        self.assertNotIn(url, str(audit.call_args))
+        with self.assertRaisesRegex(ValueError, "not enabled"):
+            api.assets.public_asset_url(next(iter(self.tools.asset_store._public_asset_grants.values()))[1])
+        expiry = next(iter(self.tools.asset_store._public_asset_grants.values()))[2]
+        with patch("host.runtime.tools.assets.time.time", return_value=expiry):
+            self.assertEqual(self.request(path)[0], 404)
+
+    def test_direct_reference_missing_or_invalid_host_never_posts(self):
+        for hostname, missing in (("", True), ("localhost", False), ("https://attacker.example", False)):
+            with self.subTest(hostname=hostname):
+                result, api, request, _ = self.reference_call(hostname=hostname, missing=missing)
+                self.assertEqual(result["status"], "failed")
+                self.assertIn("Cloudflare HTTPS hostname", str(result))
+                self.assertEqual([c.args[0] for c in request.call_args_list], ["GET"])
+                self.assertFalse(self.tools.asset_store._public_asset_grants)
+                self.assertFalse(api.approvals.records)
+
+    def test_inline_generation_works_without_cloudflare_and_creates_no_links(self):
+        for mode in ("text", "image"):
+            with self.subTest(mode=mode):
+                result, api, request, _ = self.reference_call(read_error=PermissionError(), inline_mode=mode)
+                self.assertEqual(result["status"], "executed")
+                self.assertEqual([c.args[0] for c in request.call_args_list], ["GET", "POST"])
+                self.assertFalse(self.tools.asset_store._public_asset_grants)
+                self.assertFalse(api.approvals.records)
+                if mode == "image":
+                    self.assertTrue(request.call_args.kwargs["body"]["frame_images"][0]["image_url"]["url"].startswith("data:image/png;base64,"))
+
+    def test_other_direct_tool_execution_can_mint_only_owned_links(self):
+        from test_tools import FakeHostAPI
+        from host.tools import openrouter
+        from host.tools.results import ActionExecuted
+        from test_tools_openrouter import JOB
+        api = FakeHostAPI(assets=HostAssets("openrouter", self.tools.asset_store))
+        owned = self.tools.asset_store.stage(kind="audio", tool_id="openrouter", filename="voice.mp3",
+            media_type="audio/mpeg", size_bytes=len(self.data), source=io.BytesIO(self.data))
+        minted = []
+        def execute(*args):
+            with self.assertRaises(AssetError):
+                api.assets.public_asset_url(self.metadata.asset_id)
+            minted.append(api.assets.public_asset_url(owned.asset_id))
+            return ActionExecuted({"task_id": JOB, "task_status": "queued", "message": "queued"})
+        with (patch.object(tools_host, "enabled_tool", return_value=openrouter.BUNDLED_TOOL),
+              patch.object(tools_host, "resolve_connection", return_value=tools_host.NO_CONNECTION),
+              patch.object(tools_host, "host_api_for", return_value=api),
+              patch.object(tools_host, "_audit"),
+              patch.object(type(openrouter.BUNDLED_TOOL), "execute", side_effect=execute),
+              patch.object(tools_host.Path, "read_text", return_value="kern.example")):
+            result = tools_host.execute_action("openrouter", "get_task", {"task_id": JOB}, None)
+        self.assertEqual(self.request(minted[0].removeprefix("https://kern.example"))[0], 200)
+        self.assertNotIn(minted[0], str(result))
+        with self.assertRaisesRegex(ValueError, "not enabled"):
+            api.assets.public_asset_url(owned.asset_id)
+
     def test_openrouter_async_audio_survives_callback_but_expires(self):
         metadata = self.tools.asset_store.stage(kind="audio", tool_id="openrouter", filename="voice.mp3",
             media_type="audio/mpeg", size_bytes=len(self.data), source=io.BytesIO(self.data))
         assets = HostAssets("openrouter", self.tools.asset_store)
-        with self.assertRaisesRegex(ValueError, "approved tool action"):
+        with self.assertRaisesRegex(ValueError, "not enabled for this tool execution"):
             assets.public_asset_url(metadata.asset_id)
         import time
         started = int(time.time())
@@ -179,7 +264,7 @@ class PublicToolMediaTests(unittest.TestCase):
                 image = self.tools.asset_store.stage(kind="image", tool_id="instagram", filename="private" + suffix,
                     media_type=media_type, size_bytes=len(data), source=io.BytesIO(data))
                 assets = HostAssets("instagram", self.tools.asset_store)
-                with self.assertRaisesRegex(ValueError, "approved tool action"):
+                with self.assertRaisesRegex(ValueError, "not enabled for this tool execution"):
                     assets.public_asset_url(image.asset_id)
                     self.fail("image exposed before approval")
                 with assets._approved_execution("kern.example"):
@@ -279,7 +364,7 @@ class PublicToolMediaTests(unittest.TestCase):
             url = assets.public_asset_url(self.metadata.asset_id)
         path = url.removeprefix("https://kern.example")
         self.assertEqual(self.request(path)[0], 200)
-        with self.assertRaisesRegex(ValueError, "approved tool action"):
+        with self.assertRaisesRegex(ValueError, "not enabled for this tool execution"):
             assets.public_asset_url(self.metadata.asset_id)
         from host.runtime.tools import assets as asset_module
         expiry = next(iter(self.tools.asset_store._public_asset_grants.values()))[2]

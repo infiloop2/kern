@@ -252,7 +252,7 @@ class ToolAssetStore:
                 self._remove_locked(asset_id)
 
     def create_asset_grant(self, tool_id: str, asset_id: str) -> str:
-        """Expose one private media asset during approved execution.
+        """Expose one private media asset during host-authorized execution.
 
         A separate random capability is never the agent-visible staging id.
         Restart, timeout and deletion invalidate every grant. Callback exit
