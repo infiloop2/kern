@@ -395,7 +395,7 @@ class HostAssets:
 
     @contextmanager
     def _approved_execution(self, public_hostname: str | None) -> Iterator[None]:
-        """Host-owned lifetime: retained APIs cannot mint links after exit."""
+        """Host-authorized public access; retained APIs cannot mint links after exit."""
         with self._approval_lock:
             self._approved = True
             self._public_hostname = public_hostname
@@ -408,11 +408,11 @@ class HostAssets:
 
     def public_asset_url(self, asset_id: str) -> str:
         # The store owns every link's bounded lifetime, including asynchronous
-        # provider fetches after this approved callback has returned.
+        # provider fetches after this authorized callback has returned.
         with self._approval_lock:
             if not self._approved:
-                raise ValueError("Public asset access requires an approved tool action.")
-            # Supplied by authenticated admin delegation, never an agent.
+                raise ValueError("Public asset access is not enabled for this tool execution.")
+            # Supplied by host configuration or admin delegation, never an agent.
             hostname = self._public_hostname
             if not hostname or not _public_media_hostname(hostname):
                 raise ValueError("Public asset access requires a Cloudflare HTTPS hostname. SSH, localhost and IP addresses are not supported. Configure Home > Connections.")
@@ -666,11 +666,14 @@ def execute_action(
     audit_arguments = cast(JSONObject, json.loads(serialized_input))
     _check_run_limit(tool_id, spec, consume=spec.approval == "direct")
     try:
-        result = tool.execute(
-            action,
-            audit_arguments,
-            host_api_for(tool, connection, asset_store=asset_store, origin_thread_id=origin_thread_id, action_id=action),
-        )
+        api = host_api_for(tool, connection, asset_store=asset_store, origin_thread_id=origin_thread_id, action_id=action)
+        # Read only the public hostname; tunnel credentials remain protected.
+        try:
+            hostname = Path("/etc/kern-tools-public-hostname").read_text().strip()
+        except OSError:
+            hostname = None
+        with api.assets._approved_execution(hostname):
+            result = tool.execute(action, audit_arguments, api)
     except (
         ApprovalBackpressureError,
         ConnectionAccountChangedError,

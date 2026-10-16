@@ -51,6 +51,27 @@ class ExpectedAccountsTests(unittest.TestCase):
             any("kern-no-such-user does not exist" in failure for failure in failures)
         )
 
+class PublicHostnameTests(unittest.TestCase):
+    def test_tools_can_read_public_hostname_without_tunnel_directory_access(self):
+        calls = []
+        def run(command):
+            calls.append(command)
+            return completed(0 if command[2] == "kern-tools" else 1)
+        self.assertEqual(verify_deploy.check_public_hostname_access(run), [])
+        self.assertEqual(calls, [["runuser", "-u", user, "--", "test", "-r", "/etc/kern-tools-public-hostname"] for user in ("kern-tools", "kern-agent")])
+        self.assertIn(("/etc/kern-tools-public-hostname", "root", "kern-tools", 0o640, False), verify_deploy.CLOUDFLARE_PATH_FACTS)
+        self.assertIn(("/etc/kern/cloudflare_hostname", "root", "root", 0o644, False), verify_deploy.CLOUDFLARE_PATH_FACTS)
+        self.assertIn(("/etc/kern/cloudflared.token", "root", "cloudflared", 0o640, False), verify_deploy.CLOUDFLARE_PATH_FACTS)
+
+    def test_unreadable_hostname_fails_deploy_verification(self):
+        self.assertEqual(verify_deploy.check_public_hostname_access(lambda command: completed(1)),
+                         ["public media: kern-tools cannot read the configured Cloudflare hostname"])
+
+    def test_agent_readable_hostname_fails_deploy_verification(self):
+        self.assertEqual(verify_deploy.check_public_hostname_access(lambda command: completed(0)),
+                         ["public media: kern-agent can read the tools-only Cloudflare hostname file"])
+
+
 class PathFactTests(unittest.TestCase):
     def test_matching_facts_pass(self) -> None:
         facts = [("/mnt/x", "kern-admin", "kern-admin", 0o700, True)]

@@ -665,10 +665,12 @@ class ToolInputNormalizationTests(unittest.TestCase):
     def test_object_string_uses_normal_execution_and_audit(self) -> None:
         tool = Mock(manifest=FAKE_MANIFEST)
         tool.execute.return_value = ActionExecuted({"text": "hello"})
+        api = Mock()
+        api.assets._approved_execution.return_value = nullcontext()
         with (
             patch.object(tools_host, "enabled_tool", return_value=tool),
             patch.object(tools_host, "resolve_connection", return_value=_connection()),
-            patch.object(tools_host, "host_api_for", return_value=Mock()) as host_api,
+            patch.object(tools_host, "host_api_for", return_value=api) as host_api,
             patch.object(tools_host, "_audit") as audit,
         ):
             result = tools_host.execute_action("fake_notes", "read_note", "{}", "thread-24")

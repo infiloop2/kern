@@ -217,14 +217,15 @@ context instead of rewriting its prefix:
 
   The reusable `Assets.public_asset_url` helper issues HTTPS links for
   staged JPEG/PNG/WebP/MP4/MOV files. OpenRouter additionally supports MP3/WAV
-  for its approved audio/video reference action. Instagram accepts JPEG images
+  for audio/video references in its direct generation action. Instagram accepts JPEG images
   up to 8 MB for single posts and ordered carousels of 2–10 images, plus MP4/MOV
   for Reels. Instagram Login uses `image_url`/`video_url`, not the resumable flow
   limited to Facebook Login for Business.
 
-  During approved execution only, the host receives the configured hostname
-  through trusted admin delegation (the tools role cannot read operator
-  connections). It issues a separate 256-bit random capability for each exact
+  Approved execution receives the configured hostname through trusted admin
+  delegation. Direct tool execution reads the same hostname
+  from the root-owned `/etc/kern-tools-public-hostname` deploy file; it cannot
+  read operator connections or accept an agent-supplied hostname. It issues a separate 256-bit random capability for each exact
   staged asset at `https://<configured-hostname>/tool-media/<token>`. The admin
   API permits public HTTPS GET/HEAD on this route without a session and streams
   through an admin-peer-only tools socket route. Single byte ranges are supported;

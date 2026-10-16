@@ -167,10 +167,10 @@ class Assets(Protocol):
     def delete(self, asset_id: str) -> None: ...
 
     def public_asset_url(self, asset_id: str) -> str:
-        """Approved staged media HTTPS link; expires within 15 minutes.
+        """Host-authorized staged media HTTPS link; expires within 15 minutes.
 
         Survives callback exit for asynchronous provider retrieval. Never return
-        the URL to an agent. No grant can be minted outside approved execution.
+        the URL to an agent. Available during tool execution; action approval policies still apply.
         """
         ...
 

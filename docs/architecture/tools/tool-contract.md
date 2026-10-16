@@ -429,12 +429,17 @@ class Assets(Protocol):
 
 Tool packages receive neither a storage path nor cross-tool lookup.
 
-`public_asset_url` is available only during host-authorized approved execution.
+`public_asset_url` is available to tool implementations during execution,
+without an action-specific allowlist. Each action retains its approval policy.
+Direct execution reads the hostname from the root-owned
+`/etc/kern-tools-public-hostname` deploy file (`root:kern-tools`, mode `0640`), without database access.
+The agent cannot read this file; the existing protected hostname file and
+tunnel credentials are unchanged.
 It serves one tool-owned staged file through a separate random capability on
 the configured Cloudflare HTTPS hostname. No caller URL or hostname is accepted;
 SSH-only, localhost and IP configurations fail with an actionable error.
 JPEG/PNG/WebP/MP4/MOV are supported; OpenRouter additionally accepts MP3/WAV for
-its approved audio references. SVG, HTML and arbitrary files cannot be exposed.
+its audio references. SVG, HTML and arbitrary files cannot be exposed.
 Zoho Mail and WhatsApp retain their private authenticated upload paths.
 
 Every public link expires within 15 minutes, or sooner when its source expires,
@@ -447,8 +452,8 @@ Never return the URL to an agent or include it in approval payloads.
 
 Instagram uses this helper for Reel videos, single JPEG images and carousels;
 it still deletes staged copies after confirmed publication, invalidating links
-early. OpenRouter's approved reference action binds exact input/settings,
-cost estimate and staged metadata, then revalidates them before issuing links.
+early. OpenRouter's single `create_heygen_video` action runs directly: it validates the guarded prompt,
+settings and tool-owned staged media before issuing links and submitting once.
 It retains audio/video staged copies until normal 26-hour expiry; provider fetches
 later than the link's 15-minute expiry can fail. Text/image-only generation keeps
 its direct inline-byte path.

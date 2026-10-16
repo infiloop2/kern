@@ -178,6 +178,7 @@ PATH_FACTS: tuple[PathFact, ...] = (
 CLOUDFLARE_PATH_FACTS: tuple[PathFact, ...] = (
     ("/etc/kern/cloudflared.token", "root", "cloudflared", 0o640, False),
     ("/etc/kern/cloudflare_hostname", "root", "root", 0o644, False),
+    ("/etc/kern-tools-public-hostname", "root", "kern-tools", 0o640, False),
 )
 
 # socket path -> owning service account
@@ -599,6 +600,16 @@ def check_resource_protection(
     return failures
 
 
+def check_public_hostname_access(run: Runner = _run) -> list[str]:
+    path = "/etc/kern-tools-public-hostname"
+    failures = []
+    if run(["runuser", "-u", "kern-tools", "--", "test", "-r", path]).returncode != 0:
+        failures.append("public media: kern-tools cannot read the configured Cloudflare hostname")
+    if run(["runuser", "-u", "kern-agent", "--", "test", "-r", path]).returncode == 0:
+        failures.append("public media: kern-agent can read the tools-only Cloudflare hostname file")
+    return failures
+
+
 def run_all_checks(cloudflare_enabled: bool, run: Runner = _run) -> list[str]:
     path_facts: list[PathFact] = list(PATH_FACTS) + pgdata_path_facts()
     if cloudflare_enabled:
@@ -607,6 +618,8 @@ def run_all_checks(cloudflare_enabled: bool, run: Runner = _run) -> list[str]:
     failures: list[str] = []
     failures += check_service_accounts(expected_accounts())
     failures += check_path_facts(path_facts)
+    if cloudflare_enabled:
+        failures += check_public_hostname_access(run)
     failures += retry_until_clean(
         lambda: check_unix_sockets(SOCKET_OWNERS)
         + check_tcp_listeners()
