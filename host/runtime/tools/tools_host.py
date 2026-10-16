@@ -381,7 +381,6 @@ class HostAssets:
         self._approved = False
         self._public_hostname: str | None = None
         self._approval_lock = threading.Lock()
-        self._grants: set[str] = set()
         self._tool_id = tool_id
         self._store = store
 
@@ -396,7 +395,7 @@ class HostAssets:
 
     @contextmanager
     def _approved_execution(self, public_hostname: str | None) -> Iterator[None]:
-        """Host-owned lifetime: retained APIs/contexts lose authority on exit."""
+        """Host-owned lifetime: retained APIs cannot mint links after exit."""
         with self._approval_lock:
             self._approved = True
             self._public_hostname = public_hostname
@@ -406,28 +405,19 @@ class HostAssets:
             with self._approval_lock:
                 self._approved = False
                 self._public_hostname = None
-                for token in self._grants:
-                    self._store.revoke_asset_grant(token)
-                self._grants.clear()
 
-    @contextmanager
-    def public_asset_url(self, asset_id: str) -> Iterator[str]:
+    def public_asset_url(self, asset_id: str) -> str:
+        # The store owns every link's bounded lifetime, including asynchronous
+        # provider fetches after this approved callback has returned.
         with self._approval_lock:
             if not self._approved:
                 raise ValueError("Public asset access requires an approved tool action.")
-            # Supplied by the authenticated admin delegation, never an agent.
-            # The tools database role cannot read operator_connections.
+            # Supplied by authenticated admin delegation, never an agent.
             hostname = self._public_hostname
             if not hostname or not _public_media_hostname(hostname):
                 raise ValueError("Public asset access requires a Cloudflare HTTPS hostname. SSH, localhost and IP addresses are not supported. Configure Home > Connections.")
             token = self._store.create_asset_grant(self._tool_id, asset_id)
-            self._grants.add(token)
-        try:
-            yield f"https://{hostname}/tool-media/{token}"
-        finally:
-            with self._approval_lock:
-                self._store.revoke_asset_grant(token)
-                self._grants.discard(token)
+            return f"https://{hostname}/tool-media/{token}"
 
 
 def _approval_record(record: dict[str, Any]) -> ApprovalRecord:

@@ -252,27 +252,26 @@ class ToolAssetStore:
                 self._remove_locked(asset_id)
 
     def create_asset_grant(self, tool_id: str, asset_id: str) -> str:
-        """Expose one private image or video only during approved execution.
+        """Expose one private media asset during approved execution.
 
         A separate random capability is never the agent-visible staging id.
-        Restart, timeout, deletion and context exit all invalidate the grant.
+        Restart, timeout and deletion invalidate every grant. Callback exit
+        leaves links alive for asynchronous provider retrieval.
         """
         with self._lock:
             record = self._locked_record(tool_id, asset_id)
             if tool_id in {"zoho_mail", "whatsapp"}:
                 label = "WhatsApp" if tool_id == "whatsapp" else "Zoho Mail"
                 raise AssetError(f"{label} attachments use private authenticated uploads, not public media URLs.")
-            if record.metadata.media_type not in ALLOWED_VIDEO_TYPES and record.metadata.media_type not in ALLOWED_IMAGE_TYPES:
+            if (record.metadata.media_type not in ALLOWED_VIDEO_TYPES
+                    and record.metadata.media_type not in ALLOWED_IMAGE_TYPES
+                    and not (tool_id == "openrouter" and record.metadata.media_type in ALLOWED_AUDIO_TYPES)):
                 raise AssetError("Public media must be a supported image or video.")
             token = secrets.token_urlsafe(32)
             self._public_asset_grants[token] = (tool_id, asset_id, min(
                 record.metadata.expires_at, int(time.time()) + PUBLIC_MEDIA_TTL_SECONDS,
             ))
         return token
-
-    def revoke_asset_grant(self, token: str) -> None:
-        with self._lock:
-            self._public_asset_grants.pop(token, None)
 
     @contextmanager
     def open_asset_grant(self, token: str) -> Iterator[tuple[AssetMetadata, BinaryIO]]:

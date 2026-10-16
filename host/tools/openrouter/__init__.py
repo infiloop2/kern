@@ -7,6 +7,7 @@ ignored so authentication can never be sent to a provider-controlled host.
 from __future__ import annotations
 
 import base64
+from dataclasses import asdict
 import re
 from typing import cast
 
@@ -14,7 +15,7 @@ from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.openrouter.manifest import MANIFEST
 from host.tools.openrouter.costs import quote_usd
-from host.tools.results import ActionExecuted, ActionFailed, ActionResult, ApprovalResult, StreamingAsset
+from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ActionResult, ApprovalExecuted, ApprovalResult, StreamingAsset
 from host.tools.shared.cost_reporting import report_provider_usd
 from host.tools.shared.inputs import ToolInputValidationError, int_field
 from host.tools.shared.media import open_downloaded_video
@@ -142,7 +143,7 @@ def _staged_asset(value: JSONValue, kind: str, api: HostAPI) -> str:
         raise ToolInputValidationError(f"OpenRouter requires a staged {kind} of a supported type.")
     limit = 5_000_000 if kind == "image" else 16_000_000
     if not 1 <= metadata.size_bytes <= limit:
-        raise ToolInputValidationError(f"OpenRouter staged {kind} exceeds its inline byte limit.")
+        raise ToolInputValidationError(f"OpenRouter staged {kind} exceeds its byte limit.")
     return asset_id
 
 
@@ -217,7 +218,10 @@ def _generation_body(tool_input: JSONObject, api: HostAPI, headers: dict[str, st
 
 def _encode_media(body: JSONObject, uploads: dict[str, str], api: HostAPI) -> None:
     encoded: dict[str, str] = {}
-    for asset_id in uploads:
+    for asset_id, kind in uploads.items():
+        if kind in {"audio", "video"}:
+            encoded[asset_id] = api.assets.public_asset_url(asset_id)
+            continue
         metadata = api.assets.describe(asset_id)
         with api.assets.open(asset_id) as source:
             data = source.read(metadata.size_bytes + 1)
@@ -247,6 +251,26 @@ def _poll(task_id: str, headers: dict[str, str]) -> JSONObject:
     return _task_result(response, task_id)
 
 
+def _submit(body: JSONObject, uploads: dict[str, str], estimate: str, api: HostAPI, headers: dict[str, str]) -> ActionExecuted | ActionFailed:
+    _encode_media(body, uploads, api)
+    response = _request("POST", API_BASE, headers, body=body)
+    try:
+        task_id = _task_id(response.get("id"))
+    except ToolInputValidationError:
+        return ActionFailed("OpenRouter returned no valid video job ID. Check OpenRouter activity before submitting again; a paid job may already exist.")
+    report_provider_usd(api, estimate, charge_id=f"openrouter-video:{task_id}")
+    result = _task_result(response, task_id)
+    for asset_id, kind in uploads.items():
+        if kind in {"audio", "video"}:
+            continue
+        try:
+            api.assets.delete(asset_id)
+        except (ValueError, RuntimeError, OSError):
+            # Cleanup must never hide an already accepted paid job.
+            result["message"] = str(result["message"]) + " A staged copy could not be removed; its normal expiry still applies. Continue using this job ID."
+    return ActionExecuted(result)
+
+
 class OpenRouterTool:
     manifest = MANIFEST
     credentials = None
@@ -257,21 +281,18 @@ class OpenRouterTool:
             headers = {"Authorization": f"Bearer {api.config['OPENROUTER_API_KEY']}"}
             if action == "create_heygen_video":
                 body, uploads, estimate = _generation_body(tool_input, api, headers)
-                _encode_media(body, uploads, api)
-                response = _request("POST", API_BASE, headers, body=body)
-                try:
-                    task_id = _task_id(response.get("id"))
-                except ToolInputValidationError:
-                    return ActionFailed("OpenRouter returned no valid video job ID. Check OpenRouter activity before submitting again; a paid job may already exist.")
-                report_provider_usd(api, estimate, charge_id=f"openrouter-video:{task_id}")
-                result = _task_result(response, task_id)
-                for asset_id in uploads:
-                    try:
-                        api.assets.delete(asset_id)
-                    except (ValueError, RuntimeError, OSError):
-                        # Cleanup must never hide an already accepted paid job.
-                        result["message"] = str(result["message"]) + " A staged copy could not be removed; its normal expiry still applies. Continue using this job ID."
-                return ActionExecuted(result)
+                return _submit(body, uploads, estimate, api, headers)
+            if action == "create_heygen_reference_video":
+                body, uploads, estimate = _generation_body(tool_input, api, headers)
+                if not any(kind in {"audio", "video"} for kind in uploads.values()):
+                    raise ToolInputValidationError("Use create_heygen_video for text/image-only generation.")
+                assets: JSONObject = {asset_id: cast(JSONObject, asdict(api.assets.describe(asset_id))) for asset_id in uploads}
+                approval = api.approvals.request(
+                    action_id=action,
+                    summary=f"Create one HeyGen reference video ({body['duration']}s, {body['resolution']}); expose {sum(k in {'audio', 'video'} for k in uploads.values())} selected audio/video files via HTTPS for up to 15 minutes. Estimated USD {estimate}.",
+                    payload={"input": tool_input, "body": body, "assets": assets, "estimate_usd": estimate},
+                )
+                return ActionPendingApproval(approval.approval_id, approval.summary)
             task_id = _task_id(tool_input.get("task_id"))
             result = _poll(task_id, headers)
             if action == "get_task":
@@ -291,7 +312,28 @@ class OpenRouterTool:
             return ActionFailed(str(exc))
 
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
-        return ActionFailed("OpenRouter has no approval-gated actions.")
+        try:
+            if approval.action_id != "create_heygen_reference_video":
+                raise ToolInputValidationError("Unsupported OpenRouter approval action.")
+            tool_input = approval.payload.get("input")
+            if not isinstance(tool_input, dict):
+                raise ToolInputValidationError("OpenRouter approval has no generation input.")
+            _check_fields(tool_input, approval.action_id)
+            headers = {"Authorization": f"Bearer {api.config['OPENROUTER_API_KEY']}"}
+            body, uploads, estimate = _generation_body(tool_input, api, headers)
+            if estimate != approval.payload.get("estimate_usd"):
+                raise ToolInputValidationError("OpenRouter cost estimate changed; request a new approval before submitting.")
+            assets = {asset_id: asdict(api.assets.describe(asset_id)) for asset_id in uploads}
+            if body != approval.payload.get("body") or assets != approval.payload.get("assets"):
+                raise ToolInputValidationError("OpenRouter sources or settings no longer match the approval.")
+            result = _submit(body, uploads, estimate, api, headers)
+            if isinstance(result, ActionFailed):
+                return result
+            return ApprovalExecuted(f"OpenRouter video job {result.result['task_id']}: {result.result['message']}")
+        except ProviderWarning:
+            raise
+        except (ValueError, RuntimeError) as exc:
+            return ActionFailed(str(exc))
 
 
 BUNDLED_TOOL = OpenRouterTool()

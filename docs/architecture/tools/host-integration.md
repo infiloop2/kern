@@ -215,23 +215,28 @@ context instead of rewriting its prefix:
   sizes and full SHA256 digests. The package guide owns action inputs/setup;
   [X implementation contract](x.md) records endpoint and verification details.
 
-  The reusable `Assets.public_asset_url` context supports only the existing
-  staged JPEG, PNG, WebP, MP4 and MOV types. Instagram is its only consumer,
-  which accepts JPEG images up to 8 MB for single-image posts and ordered
-  carousels of 2–10 images, plus MP4/MOV videos for Reels.
-  Instagram Login fetches images with `image_url` and Reels with `video_url`,
-  not the resumable flow limited to Facebook Login for Business. During approved execution only, the host
-  receives only the configured hostname through the trusted admin delegation
-  (the tools role cannot read operator connections), then issues a separate
-  256-bit random capability for each exact staged asset at
-  `https://<configured-hostname>/tool-media/<token>`. The admin API
-  permits public HTTPS GET/HEAD on this one route without a session, and
-  streams through an admin-peer-only tools socket route. Single byte ranges
-  are supported; responses prohibit caching. No paths or staging ids grant
-  public access. The capability is process-local, expires within 15 minutes,
-  and is revoked on processing completion or any failure. Restart invalidates
-  it too. Existing downloads may finish after revocation. A configured public
-  hostname is required; no Facebook account or new storage service is needed.
+  The reusable `Assets.public_asset_url` helper issues HTTPS links for
+  staged JPEG/PNG/WebP/MP4/MOV files. OpenRouter additionally supports MP3/WAV
+  for its approved audio/video reference action. Instagram accepts JPEG images
+  up to 8 MB for single posts and ordered carousels of 2–10 images, plus MP4/MOV
+  for Reels. Instagram Login uses `image_url`/`video_url`, not the resumable flow
+  limited to Facebook Login for Business.
+
+  During approved execution only, the host receives the configured hostname
+  through trusted admin delegation (the tools role cannot read operator
+  connections). It issues a separate 256-bit random capability for each exact
+  staged asset at `https://<configured-hostname>/tool-media/<token>`. The admin
+  API permits public HTTPS GET/HEAD on this route without a session and streams
+  through an admin-peer-only tools socket route. Single byte ranges are supported;
+  responses prohibit caching. Paths and staging IDs never grant public access.
+
+  All links use the same lifetime: at most 15 minutes, surviving callback exit
+  and failures for asynchronous provider fetches. Callback exit still prevents
+  retained APIs from minting more links. Restart, source deletion or source expiry
+  invalidates links early; existing downloads may finish. Instagram deletes its
+  staged copies after confirmed publication. OpenRouter keeps referenced
+  audio/video until normal staging expiry. A configured public hostname is
+  required; no Facebook account or new storage service is needed.
   Instagram API failures reach Host Diagnostics with operation, HTTP status
   and numeric Meta error codes; provider text and media URLs are discarded.
 
