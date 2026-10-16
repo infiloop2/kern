@@ -127,6 +127,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
 
     def setUp(self) -> None:
         pg_harness.reset_database()
+        self.enterContext(patch.object(schedules, "call_admin_api", return_value={"thread": {"status": "idle"}}))
         self.addCleanup(db.close_pool)
         # Retrieval tests keep hybrid order; reranker tests cover Jev outcomes.
         self.enterContext(patch.object(memory, "judge", side_effect=memory.HostInferenceError("disabled", reason="provider_disabled")))

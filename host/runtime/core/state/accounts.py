@@ -2,10 +2,37 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
+from host import session_options
 from host.runtime.core import db, secretbox
 from host.runtime.core.state._base import _read, mutation
+
+
+def runtime_account_enabled(runtime_type: str, cur: Any = None) -> bool:
+    """Primary accounts follow their provider; additional accounts opt in."""
+    if runtime_type not in session_options.OPTIONAL_ACCOUNT_RUNTIMES:
+        return True
+    provider = (openai_provider_key(runtime_type) if runtime_type in OPENAI_PROVIDER_KEYS
+                else xai_provider_key(runtime_type))
+    with _read(cur) as cur:
+        cur.execute("SELECT extra_account_enabled FROM provider_accounts WHERE provider = %s", (provider,))
+        row = cur.fetchone()
+        return bool(row and row[0])
+
+
+def set_runtime_account_enabled(cur: Any, runtime_type: str, enabled: bool) -> None:
+    if runtime_type not in session_options.OPTIONAL_ACCOUNT_RUNTIMES:
+        raise ValueError("only additional runtime accounts have an enable switch")
+    provider = (openai_provider_key(runtime_type) if runtime_type in OPENAI_PROVIDER_KEYS
+                else xai_provider_key(runtime_type))
+    cur.execute(
+        "INSERT INTO provider_accounts (provider, extra_account_enabled) VALUES (%s, %s)"
+        " ON CONFLICT (provider) DO UPDATE SET extra_account_enabled = EXCLUDED.extra_account_enabled",
+        (provider, enabled),
+    )
+
 
 # -- OAuth logins -------------------------------------------------------------------
 
@@ -174,7 +201,13 @@ def _save_provider_account(provider: str, data: dict[str, Any], cur: Any = None)
     cur.execute(
         "INSERT INTO provider_accounts (provider, account_id, metadata) VALUES (%s, %s, %s)"
         " ON CONFLICT (provider) DO UPDATE SET account_id = EXCLUDED.account_id,"
-        " metadata = EXCLUDED.metadata",
+        " metadata = EXCLUDED.metadata,"
+        " training_allowed = CASE WHEN provider_accounts.account_id = EXCLUDED.account_id"
+        " THEN provider_accounts.training_allowed END,"
+        " training_checked_at = CASE WHEN provider_accounts.account_id = EXCLUDED.account_id"
+        " THEN provider_accounts.training_checked_at END,"
+        " training_attempted_at = CASE WHEN provider_accounts.account_id = EXCLUDED.account_id"
+        " THEN provider_accounts.training_attempted_at END",
         (provider, data.get("account_id"), db.jsonb(metadata)),
     )
 
@@ -191,3 +224,37 @@ def _read_provider_account(provider: str, cur: Any = None) -> dict[str, Any]:
     if row[0] is not None:
         account["account_id"] = row[0]
     return account
+
+
+TRAINING_PROVIDERS = {"claude_code": "claude", "grok": "xai", "grok-2": "xai-2"}
+
+
+def read_training_status(runtime_type: str, cur: Any = None) -> dict[str, Any]:
+    with _read(cur) as cur:
+        cur.execute(
+            "SELECT training_allowed, training_checked_at, training_attempted_at"
+            " FROM provider_accounts WHERE provider = %s",
+            (TRAINING_PROVIDERS[runtime_type],),
+        )
+        row = cur.fetchone()
+    return {
+        "allowed": row[0] if row else None,
+        "checked_at": datetime.fromisoformat(row[1]).isoformat() if row and row[1] else None,
+        "attempted_at": datetime.fromisoformat(row[2]).isoformat() if row and row[2] else None,
+    }
+
+
+def save_training_status(cur: Any, runtime_type: str, account: dict[str, Any],
+                         allowed: bool | None, attempted_at: float) -> None:
+    # A reset/relogin during the provider request must not attach its result to
+    # the replacement account. Failed reads preserve the last successful result.
+    timestamp = datetime.fromtimestamp(attempted_at, timezone.utc).isoformat()
+    cur.execute(
+        "UPDATE provider_accounts SET training_attempted_at = %s,"
+        " training_allowed = COALESCE(%s, training_allowed),"
+        " training_checked_at = CASE WHEN %s::boolean IS NOT NULL THEN %s ELSE training_checked_at END"
+        " WHERE provider = %s AND account_id = %s"
+        " AND metadata->>'access_token_sha256' = %s",
+        (timestamp, allowed, allowed, timestamp, TRAINING_PROVIDERS[runtime_type],
+         account.get("account_id"), account.get("access_token_sha256")),
+    )

@@ -618,6 +618,10 @@ def set_chat_thread_archived(
                     HTTPStatus.CONFLICT,
                     "threads can only be archived while their agent is idle",
                 )
+            if thread.get("retry"):
+                raise WorkspaceError(
+                    HTTPStatus.CONFLICT, "cancel the automatic retry before archiving this thread",
+                )
             # Recheck recency after taking both the send lock (in the sweep)
             # and row lock. A message may have finished since the list snapshot.
             if inactive_before is not None and (
@@ -667,6 +671,7 @@ def archive_idle_spawned_agents() -> int:
             not isinstance(thread_id, str)
             or thread_id not in candidates
             or summary.get("status") != "idle"
+            or summary.get("retry")
             or not summary.get("last_used_at")
             or str(summary["last_used_at"]) > cutoff
         ):

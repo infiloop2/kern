@@ -420,8 +420,8 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
                     {"agent_runtime": runtime_type},
                 )
     if deactivated:
-        _stop_runtime_processes(runtime_type, DEACTIVATED_REASON)
-        return "deactivated"
+        _stop_runtime_processes(runtime_type, _runtime_disabled_reason(runtime_type))
+        return runtime_status(runtime_type)
     if became_nonactive:
         label = RUNTIME_LABELS.get(runtime_type, runtime_type)
         reason = (
@@ -439,17 +439,51 @@ def _refresh_runtime_status_serialized(runtime_type: str, *, force_provider_prob
     if anchored is not None and login_to_close:
         anchored.close_completed_login_server(login_to_close)
     if status == "active":
+        from host.runtime.agent_runtime import training_privacy
+        try:
+            training_privacy.refresh(
+                runtime_type, account_value,
+                force=force_provider_probe or previous != "active",
+            )
+        except Exception as exc:
+            # Privacy availability must not change inference/account health.
+            host_errors.report_warning("orchestrator.training_privacy", exc,
+                                       context={"agent_runtime": runtime_type})
         if runtime_type == "claude_code":
             _backfill_claude_usage(account_value)
     return status
+
+
+def _runtime_disabled_reason(runtime_type: str) -> str:
+    if not state.runtime_account_enabled(runtime_type):
+        return "agent runtime account disabled by the operator"
+    return DEACTIVATED_REASON
+
+
+def set_runtime_account_enabled(runtime_type: str, enabled: bool) -> None:
+    after_commit: list[Callable[[], None]] = []
+    with state.mutation(after_commit=after_commit) as cur:
+        state.set_runtime_account_enabled(cur, runtime_type, enabled)
+        if enabled:
+            after_commit.append(partial(_set_runtime_status, runtime_type, "loading"))
+        else:
+            _mark_runtime_deactivated_in(cur, after_commit, runtime_type)
+        state.append_agent_event(
+            cur, "agent_runtime.account_enabled" if enabled else "agent_runtime.account_disabled", None,
+            {"agent_runtime": runtime_type},
+        )
+    if enabled:
+        threading.Thread(target=_refresh_runtimes, args=((runtime_type,),), daemon=True).start()
+    else:
+        _stop_runtime_processes(runtime_type, _runtime_disabled_reason(runtime_type))
 
 
 def _mark_runtime_deactivated(runtime_type: str) -> str:
     after_commit: list[Callable[[], None]] = []
     with state.mutation(after_commit=after_commit) as cur:
         _mark_runtime_deactivated_in(cur, after_commit, runtime_type)
-    _stop_runtime_processes(runtime_type, DEACTIVATED_REASON)
-    return "deactivated"
+    _stop_runtime_processes(runtime_type, _runtime_disabled_reason(runtime_type))
+    return runtime_status(runtime_type)
 
 
 def _mark_runtime_deactivated_in(
@@ -467,7 +501,7 @@ def _mark_runtime_deactivated_in(
     after_commit.append(partial(_close_login_flow, runtime_type))
     if runtime_type in OAUTH_RUNTIMES:
         _sync_runtime_proxy_pin_in(cur, runtime_type, None)
-    if previous != "deactivated":
+    if previous != "deactivated" and state.runtime_account_enabled(runtime_type, cur):
         state.append_agent_event(
             cur,
             "agent_runtime.deactivated",
@@ -620,8 +654,15 @@ def runtime_status_loop(runtime_type: str) -> None:
     # this loop with manual refreshes for the same provider.
     while True:
         try:
-            status = refresh_runtime_status(runtime_type)
-            delay = RUNTIME_RECHECK_SECONDS if status == "active" else RUNTIME_PENDING_RECHECK_SECONDS
+            if not state.runtime_account_enabled(runtime_type):
+                # No provider checks or repeated deactivation writes for an
+                # account that has never been enabled (or was switched off).
+                if runtime_status(runtime_type) != "deactivated":
+                    _mark_runtime_deactivated(runtime_type)
+                delay = RUNTIME_PENDING_RECHECK_SECONDS
+            else:
+                status = refresh_runtime_status(runtime_type)
+                delay = RUNTIME_RECHECK_SECONDS if status == "active" else RUNTIME_PENDING_RECHECK_SECONDS
         except Exception as exc:
             host_errors.report_warning("orchestrator.runtime_status_loop", exc)
             delay = RUNTIME_PENDING_RECHECK_SECONDS
@@ -749,7 +790,9 @@ def admit_turn(
         if not runtime_network_enabled(runtime_type):
             raise ApiError(
                 HTTPStatus.CONFLICT,
-                f"{label} runtime is deactivated; enable its provider under Home > Agent runtimes",
+                (f"{label} account is disabled; enable it under Home > Agent runtimes"
+                 if not state.runtime_account_enabled(runtime_type)
+                 else f"{label} runtime is deactivated; enable its provider under Home > Agent runtimes"),
             )
         status = runtime_status(runtime_type)
         if status != "active":
@@ -1388,6 +1431,8 @@ def runtime_network_enabled(runtime_type: str) -> bool:
     # command, so there is no runtime-level connection to enable or disable.
     if runtime_type in UNMANAGED_RUNTIMES:
         return True
+    if not state.runtime_account_enabled(runtime_type):
+        return False
     provider = _MANAGED_PROVIDER_BY_RUNTIME.get(runtime_type)
     integrations = network_policy.load_policy().get("network_integrations", {})
     if not provider or not isinstance(integrations, dict):

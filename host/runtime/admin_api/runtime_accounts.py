@@ -188,7 +188,9 @@ def _require_oauth_login_available(flow: _OAuthLoginFlow) -> None:
     if not orchestrator.runtime_network_enabled(flow.runtime_type):
         raise ApiError(
             HTTPStatus.CONFLICT,
-            f"{flow.display} OAuth login is unavailable while {flow.provider} provider access is disabled",
+            (f"{flow.display} OAuth login is unavailable while its account is disabled"
+             if not state.runtime_account_enabled(flow.runtime_type)
+             else f"{flow.display} OAuth login is unavailable while {flow.provider} provider access is disabled"),
         )
     if orchestrator.runtime_status(flow.runtime_type) not in OAUTH_LOGIN_STATUSES:
         raise ApiError(
@@ -478,6 +480,18 @@ def current_agent_accounts() -> dict[str, Any]:
     }
 
 
+def set_agent_runtime_account_enabled(body: Any) -> dict[str, Any]:
+    if not isinstance(body, dict) or set(body) != {"agent_runtime", "enabled"}:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "agent_runtime and enabled are required")
+    runtime = body["agent_runtime"]
+    if not isinstance(runtime, str) or runtime not in session_options.OPTIONAL_ACCOUNT_RUNTIMES:
+        raise ApiError(HTTPStatus.BAD_REQUEST, "agent_runtime must be one of " + ", ".join(session_options.OPTIONAL_ACCOUNT_RUNTIMES))
+    if not isinstance(body["enabled"], bool):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "enabled must be a boolean")
+    orchestrator.set_runtime_account_enabled(runtime, body["enabled"])
+    return current_agent_accounts()
+
+
 def refresh_agent_runtime_accounts(body: Any) -> dict[str, Any]:
     runtime_types: tuple[str, ...]
     if body is None:
@@ -493,6 +507,8 @@ def refresh_agent_runtime_accounts(body: Any) -> dict[str, Any]:
     else:
         raise ApiError(HTTPStatus.BAD_REQUEST, "request body must be an object")
     for runtime_type in runtime_types:
+        if not state.runtime_account_enabled(runtime_type):
+            continue
         force_probe = (
             runtime_type != "hermes"
             or orchestrator.runtime_network_enabled(runtime_type)
@@ -503,6 +519,7 @@ def refresh_agent_runtime_accounts(body: Any) -> dict[str, Any]:
 
 def _current_agent_account(statuses: dict[str, dict[str, Any]], runtime_type: str) -> dict[str, Any]:
     status = str(statuses.get(runtime_type, {}).get("status", "loading"))
+    response: dict[str, Any]
     if runtime_type == "claude_code":
         response = {"agent_runtime": "claude_code", "provider": "claude", "status": status}
         account = read_claude_account()
@@ -518,6 +535,13 @@ def _current_agent_account(statuses: dict[str, dict[str, Any]], runtime_type: st
         account = read_openai_account(runtime_type=runtime_type)
         if account.get("operator_approval") != orchestrator.OPENAI_OPERATOR_APPROVAL:
             account = {}
+    if runtime_type in session_options.OPTIONAL_ACCOUNT_RUNTIMES:
+        response["enabled"] = state.runtime_account_enabled(runtime_type)
+        if not response["enabled"]:
+            status = "deactivated"
+            response["status"] = status
+    if runtime_type in state.TRAINING_PROVIDERS and account.get("account_id") and status != "deactivated":
+        response["data_training"] = state.read_training_status(runtime_type)
     return _account_response_tail(response, account, status, runtime_type)
 
 

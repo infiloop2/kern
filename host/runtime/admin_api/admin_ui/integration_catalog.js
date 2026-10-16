@@ -12,7 +12,7 @@ export const MANAGED_INTEGRATIONS = {
     ],
     setupSteps: [
       { title: "Enable OpenAI", description: "On Home, open OpenAI under Agent runtimes and choose Enable." },
-      { title: "Connect each Codex runtime", description: "Start Codex, Codex 2, and Codex 3 login separately. Use the subscription you want for each runtime and enter its displayed device code." },
+      { title: "Connect each Codex runtime", description: "Codex follows the OpenAI switch. For Codex 2 or Codex 3, choose Enable account on its row first. Start login separately for each enabled account, using the subscription you want and its displayed device code." },
       { title: "Verify the linked account", description: "Return to Kern and wait for the row to show connected with the expected email or account id. That identity is now the operator-approved account anchor." },
     ],
     dataSummary: {
@@ -150,7 +150,7 @@ export const MANAGED_INTEGRATIONS = {
       "Kern keeps local telemetry and trace upload disabled. It never changes your account's coding-data retention choice; keep Help improve Grok set to Opt out.",
     ],
     setupSteps: [
-      { title: "Connect each Grok runtime", description: "Enable Grok on Home and open its integration. Start the Grok login and the Grok 2 login separately, completing each device login with the subscription you want for that runtime. Verify the expected account is shown on each row." },
+      { title: "Connect each Grok runtime", description: "Enable Grok on Home and open its integration. Grok follows this switch; to use Grok 2, choose Enable account on its row first. Start login for each enabled account with the subscription you want, then verify the expected account is shown." },
       { title: "Keep coding data opted out", description: "In Grok Build, use /privacy and select Opt out under Help improve Grok. Kern shows the account's reported coding-data choice. The local video-tool flag is separate and does not opt you into retention or training." },
       { title: "For videos, create a private S3 bucket", description: "In the AWS Console, open S3, choose Create bucket, use a general purpose bucket and a unique name containing lowercase letters, digits and hyphens, and note its region. Keep Block Public Access enabled and ACLs disabled. Use SSE-S3 encryption. Images work without this step. The supported setup is commercial AWS S3; custom endpoints and temporary session credentials are not supported.", linkUrl: "https://docs.aws.amazon.com/AmazonS3/latest/userguide/create-bucket-overview.html", linkLabel: "AWS bucket creation guide" },
       {

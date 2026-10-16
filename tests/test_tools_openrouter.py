@@ -304,6 +304,28 @@ class OpenRouterTests(unittest.TestCase):
                     with result.open_stream():
                         pass
 
+    def test_save_without_content_length_measures_existing_job_without_generation(self):
+        data = b"x" * 1024
+        for transfer_headers in ({}, {"transfer-encoding": "chunked"}):
+            with self.subTest(headers=transfer_headers):
+                @contextmanager
+                def stream(method, url, **kwargs):
+                    self.assertEqual(method, "GET")
+                    self.assertEqual(url, openrouter.API_BASE + "/" + JOB + "/content?index=0")
+                    self.assertEqual(kwargs["headers"], {"Authorization": "Bearer private-test-key"})
+                    yield io.BytesIO(data), {"content-type": "video/mp4", **transfer_headers}
+
+                with patch.object(media, "open_response_stream", stream):
+                    result, request = self.execute("save_video", {"task_id": JOB}, [{"id": JOB, "status": "completed"}])
+                    self.assertEqual(request.call_count, 1)
+                    self.assertEqual(request.call_args.args[0], "GET")
+                    with result.open_stream() as opened:
+                        self.assertEqual(opened.filename, "openrouter-" + JOB + ".mp4")
+                        self.assertEqual(opened.size_bytes, len(data))
+                        self.assertEqual(opened.source.read(), data)
+                    self.assertTrue(opened.source.closed)
+        self.assertFalse(self.api.costs.calls)
+
     def test_missing_config_and_mapped_errors_are_actionable_without_raw_body(self):
         result = self.tool.execute("create_heygen_video", {"prompt": "A calm coast"}, FakeHostAPI())
         self.assertIsInstance(result, ActionFailed)

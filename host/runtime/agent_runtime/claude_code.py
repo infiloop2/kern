@@ -824,6 +824,25 @@ def read_attested_identity(
     return value
 
 
+def read_training_allowed(expected_token_sha256: str) -> bool | None:
+    """Read the account preference using the same token as the trusted account."""
+    try:
+        proc = subprocess.run(
+            [*DEFAULT_ACCOUNT_COMMAND, "--training-settings", "--expected-token-sha256", expected_token_sha256],
+            check=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            timeout=ATTEST_HELPER_TIMEOUT_SECONDS,
+        )
+        if proc.returncode != 0:
+            return None
+        value = json.loads(proc.stdout)
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return None
+    if not isinstance(value, dict) or value.get("access_token_sha256") != expected_token_sha256:
+        return None
+    allowed = value.get("training_allowed")
+    return allowed if isinstance(allowed, bool) else None
+
+
 def start_oauth_login() -> ClaudeLogin:
     global _login_process
     process = ClaudeLoginProcess()

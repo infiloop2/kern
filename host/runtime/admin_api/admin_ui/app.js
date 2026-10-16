@@ -13,7 +13,7 @@ import {
 import { $, notice, runtimeLabel } from "./helpers.js";
 import {
   collapseRuntimeOverview, completeClaudeLogin, refreshHealth, refreshProviderAccounts,
-  rebootHost, runtimeRecords, startLogin, toggleRuntimeOverview,
+  rebootHost, runtimeRecords, startLogin, toggleRuntimeOverview, refreshTrainingWarning,
 } from "./health.js";
 import {
   dismissGettingStarted, refreshGettingStarted, STARTER_PROMPTS,
@@ -30,7 +30,7 @@ import {
   loadPolicy, recheckGithubAudit, removeDomainRule,
   removeGithubRepo, resetLinkedAccount, connectBedrockCredentials, setProviderWebSearch, setGithubBlockMainPushes,
   setGithubCredential, setGithubRequireApproval,
-  setIntegrationEnabled, toggleGithubCredentialMode,
+  setIntegrationEnabled, setRuntimeAccountEnabled, toggleGithubCredentialMode,
   selectIntegrationDetail, toggleGithubRepoAudit, saveHostInferenceProvider,
   enableHostInferenceProvider,
   disableHostInferenceProvider, clearHostInferenceProvider,
@@ -488,6 +488,7 @@ function showLogin() {
   $("logout-button").hidden = true;
   $("agent-name").hidden = true;
   $("runtime-overview").hidden = true;
+  $("training-warning").hidden = true;
   $("passkey-status-control").hidden = true;
   $("mobile-nav-toggle").hidden = true;
   refreshLoginPasskeyStatus();
@@ -1435,8 +1436,10 @@ document.addEventListener("click", event => {
       openHomeIntegration(button.dataset.provider);
     },
     "start-login": () => startLogin(runtime),
+    "toggle-runtime-account": () => setRuntimeAccountEnabled(button.dataset.runtime, button.dataset.enabled === "true"),
     "reset-linked-account": () => resetLinkedAccount(button.dataset.runtime),
     "complete-claude-login": () => completeClaudeLogin(),
+    "refresh-training": () => refreshTrainingWarning(),
     "toggle-runtime-overview": () => toggleRuntimeOverview(button.dataset.overviewGroup),
     "reboot-host": () => rebootHost(),
     "file-up": () => loadParentDirectory(),
@@ -1551,3 +1554,9 @@ $("policy-guard-request-content").addEventListener("change", event => {
 $("password").addEventListener("keydown", event => { if (event.key === "Enter") login(); });
 $("file-path").addEventListener("keydown", event => { if (event.key === "Enter") goToFilePath(); });
 start();
+
+// The privacy notice adds a toolbar row. Measure it so desktop workspaces and
+// sticky navigation keep their available height when the notice appears/clears.
+new ResizeObserver(([entry]) => {
+  document.documentElement.style.setProperty("--topbar-height", `${entry.target.getBoundingClientRect().height}px`);
+}).observe(document.querySelector(".topbar"));

@@ -131,6 +131,7 @@ from host.runtime.admin_api.runtime_accounts import (
     current_grok_oauth_login,
     disconnect_bedrock_credentials,
     refresh_agent_runtime_accounts,
+    set_agent_runtime_account_enabled,
     reset_linked_account,
     start_claude_oauth_login,
     start_codex_2_oauth_login,
@@ -1200,6 +1201,7 @@ _ROUTES: tuple[_Route, ...] = (
            query_keys=frozenset(), query_label="analytics"),
     _Route("GET", "/v1/agent-runtime/status", lambda request: agent_runtime_status()),
     _Route("GET", "/v1/agent-runtime/account", _agent_accounts_route),
+    _Route("PUT", "/v1/agent-runtime/account-enabled", lambda request: set_agent_runtime_account_enabled(request.body)),
     _Route("POST", "/v1/agent-runtime/refresh", lambda request: refresh_agent_runtime_accounts(request.body)),
     *(
         _Route(

@@ -153,6 +153,9 @@ def save_attested_claude_account(account_id: str, **extra: object) -> None:
 class OrchestratorTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
+        with state.mutation() as cur:
+            for runtime in ("codex-2", "codex-3", "grok-2"):
+                state.set_runtime_account_enabled(cur, runtime, True)
         self.temp_dir = tempfile.TemporaryDirectory()
         self.proxy_temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(self.temp_dir.cleanup)
@@ -1520,7 +1523,8 @@ class OrchestratorTests(unittest.TestCase):
                                           state.utc_now(), "gpt-6-astra", "high")
         with patch.object(apps, "call_admin_api", return_value={"thread": {"status": "idle"}}):
             apps.set_web_app_archived(app_id, True)
-        schedules.delete_schedule(schedule["id"], {"expected_revision": [str(schedule["revision"])]}, actor="user")
+        with patch.object(schedules, "call_admin_api", return_value={"thread": {"status": "idle"}}):
+            schedules.delete_schedule(schedule["id"], {"expected_revision": [str(schedule["revision"])]}, actor="user")
         self.assertEqual(state.codex_cleanup_candidates("codex"), [(app_id, "session-" + app_id, True)])
         with state.mutation() as cur:
             self.assertFalse(state.detach_idle_codex_session(cur, schedule_id, "codex", "session-" + schedule_id, archived=True))

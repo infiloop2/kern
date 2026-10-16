@@ -1,6 +1,6 @@
-"""H3 Max video generation through fal's asynchronous Model API.
+"""H3 Max Turbo video generation through fal's asynchronous Model API.
 
-H3 Max is fal's post-trained variant of the open-weight MiniMax H3 model. fal
+H3 Max Turbo is fal's post-trained variant of the open-weight MiniMax H3 model. fal
 states that it performs the post-training and hosts inference itself. The model
 has separate text, keyframe-image, and multimodal-reference routes; this package
 selects one of those three pinned routes from the supplied inputs and encodes the
@@ -13,7 +13,6 @@ import json
 import math
 import re
 import urllib.parse
-from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import cast
 
@@ -55,12 +54,35 @@ from host.tools.shared.web import (
 )
 
 QUEUE_BASE = "https://queue.fal.run"
-MODEL_PREFIX = "minimax/h3-max"
+MODEL_PREFIX = "minimax/h3-max-turbo"
 ROUTES = {
     "text": f"{MODEL_PREFIX}/text-to-video",
     "image": f"{MODEL_PREFIX}/image-to-video",
     "reference": f"{MODEL_PREFIX}/reference-to-video",
 }
+
+# Old ids must always resolve to the original model, including reference tasks.
+# New ids carry the Turbo variant so polls and saves cannot reinterpret old work.
+LEGACY_ROUTES = {
+    "text": "minimax/h3-max/text-to-video",
+    "image": "minimax/h3-max/image-to-video",
+    "reference": "minimax/h3-max/reference-to-video",
+}
+TASK_ROUTES = {
+    **LEGACY_ROUTES,
+    **{f"turbo_{mode}": route for mode, route in ROUTES.items()},
+}
+
+# All three Turbo routes and their exposed options were verified against fal's
+# queue OpenAPI schemas on 2026-10-16, including reference-to-video:
+# https://fal.ai/api/openapi/queue/openapi.json?endpoint_id=minimax/h3-max-turbo/reference-to-video
+# Kern retains its integer 5-15s duration/32-bit seed limits and guarded prompt cap.
+# Published base rates, checked 2026-10-16 at:
+# https://fal.ai/models/minimax/h3-max-turbo/text-to-video
+# https://fal.ai/models/minimax/h3-max-turbo/image-to-video
+# Promotion notices disagree on end dates. Use conservative base-rate estimates;
+# do not apply expired or unverified discounts, or reprice historical charges.
+BASE_USD_PER_SECOND = {"480P": "0.025", "768P": "0.04", "1080P": "0.08"}
 
 # Prompts pass through the host guard, whose hard wire limit is 1024 bytes.
 # Advertising a larger character cap would promise a value that often cannot
@@ -69,15 +91,16 @@ MAX_PROMPT_CHARS = 1_000
 MIN_DURATION_SECONDS = 5
 MAX_DURATION_SECONDS = 15
 DEFAULT_DURATION_SECONDS = 5
-RESOLUTIONS = ("480P", "768P")
+RESOLUTIONS = ("480P", "768P", "1080P")
 DEFAULT_RESOLUTION = "768P"
 TEXT_RATIOS = ("21:9", "16:9", "4:3", "1:1", "3:4", "9:16")
 REFERENCE_RATIOS = ("adaptive", *TEXT_RATIOS)
 DEFAULT_TEXT_RATIO = "16:9"
 DEFAULT_REFERENCE_RATIO = "adaptive"
-PROMPT_EXPANSION_MODES = ("balanced", "quality")
+PROMPT_EXPANSION_MODES = ("disabled", "balanced", "quality")
 DEFAULT_PROMPT_EXPANSION_MODE = "balanced"
 MAX_REFERENCE_FILES = 12
+REFERENCE_LIMITS = {"image": 9, "video": 3, "audio": 3}
 
 # fal documents UUID request ids. Requiring that grammar before interpolation
 # keeps a provider value or agent-supplied task id from walking the queue path.
@@ -85,7 +108,7 @@ REQUEST_ID_RE = re.compile(
     r"^[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$"
 )
 TASK_ID_RE = re.compile(
-    r"^(text|image|reference)_([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
+    r"^((?:turbo_)?(?:text|image|reference))_([0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-"
     r"[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12})$"
 )
 ERROR_TYPE_RE = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
@@ -101,7 +124,7 @@ QUEUE_STATUSES = frozenset({"IN_QUEUE", "IN_PROGRESS", "COMPLETED"})
 
 GENERATE_POLICY = (
     "Sends the prompt, generation settings, and selected staged reference-media bytes to fal to "
-    "generate a native-audio H3 Max video, billed to the deployment's fal account. This "
+    "generate a native-audio H3 Max Turbo video, billed to the deployment's fal account. This "
     "runs directly with no approval and publishes nothing. fal's optional safety checker is disabled; "
     "request-history storage is disabled, and the generated public CDN object expires after 24 hours."
 )
@@ -154,11 +177,11 @@ GET_TASK_OUTPUT_SCHEMA: JSONObject = outputs.obj(
 )
 
 
-def _asset_array_schema(description: str) -> JSONObject:
+def _asset_array_schema(description: str, kind: str) -> JSONObject:
     return {
         "type": "array",
         "items": {"type": "string"},
-        "maxItems": MAX_REFERENCE_FILES,
+        "maxItems": REFERENCE_LIMITS[kind],
         "description": description,
     }
 
@@ -168,19 +191,19 @@ MANIFEST = ToolManifest(
     tool_id="fal_ai",
     display_name="falAI",
     description=(
-        "Connect fal and let your agent generate fal's H3 Max native-audio video from text, "
+        "Connect fal and let your agent generate fal's H3 Max Turbo native-audio video from text, "
         "first/last frames, or multimodal references."
     ),
     connection="enable_only",
     actions=protect_inputs((
         ActionSpec(
-            id="generate_video", cost_description='Reports the published per-second charge for text and keyframe generation when fal accepts the task. Multimodal reference charges depend on unknown input sizes and are not reported.',
+            id="generate_video", cost_description='Reports a conservative estimate at published base rates for text and keyframe generation when fal accepts the task; promotions can lower the actual charge. Multimodal reference charges depend on unknown input sizes and are not reported.',
             description=(
-                "Start an async H3 Max generation. With no media it uses text-to-video; image_asset_id "
-                "selects image-to-video and optional end_image_asset_id adds a last keyframe; any "
+                "Start an async H3 Max Turbo generation. With no media it uses text-to-video; image_asset_id or "
+                "end_image_asset_id selects image-to-video with first, last, or both keyframes; any "
                 "reference_*_asset_ids list selects reference-to-video. Returns a task_id to poll. "
-                "Clips include synchronized audio, run 5-15 seconds, and are billed per second "
-                "of output. Reference inputs can add charges above fal's allowance."
+                "Clips include synchronized audio; Kern supports integer durations of 5-15 seconds, billed per second "
+                "of output. Reference mode allows at most 12 files total and can add charges above fal's allowance."
             ),
             data_policy=GENERATE_POLICY,
             input_schema={
@@ -200,28 +223,28 @@ MANIFEST = ToolManifest(
                     },
                     "end_image_asset_id": {
                         "type": "string",
-                        "description": "Optional staged final-frame image; requires image_asset_id.",
+                        "description": "Optional staged final-frame image; may be supplied alone or with image_asset_id.",
                     },
                     "reference_image_asset_ids": _asset_array_schema(
-                        "Staged subject/style image ids for reference mode, ordered as Image 1, Image 2, and so on."
+                        "Up to 9 staged subject/style image ids for reference mode, ordered as Image 1, Image 2, and so on.", "image"
                     ),
                     "reference_video_asset_ids": _asset_array_schema(
-                        "Staged motion-reference video ids for reference mode, ordered as Video 1, Video 2, and so on. Each must be 2-15 seconds; combined video length at most 15 seconds."
+                        "Up to 3 staged motion-reference video ids for reference mode, ordered as Video 1, Video 2, and so on. Each must be 2-15 seconds; combined video length at most 15 seconds.", "video"
                     ),
                     "reference_audio_asset_ids": _asset_array_schema(
-                        "Staged audio-reference ids for reference mode, ordered as Audio 1, Audio 2, and so on. Each must be 2-15 seconds; combined audio length at most 15 seconds and audio cannot be the only reference type."
+                        "Up to 3 staged audio-reference ids for reference mode, ordered as Audio 1, Audio 2, and so on. Each must be 2-15 seconds; combined audio length at most 15 seconds. Audio may be the only reference type.", "audio"
                     ),
                     "resolution": {
                         "type": "string",
                         "enum": list(RESOLUTIONS),
-                        "description": "Native output resolution: 768P (default) or 480P; rates vary by route and promotion.",
+                        "description": "480P or 768P native output (default 768P), or 1080P latent refinement from 768P. Text/keyframe base rates per second: $0.025, $0.04, $0.08; promotions may reduce actual charges.",
                     },
                     "aspect_ratio": {
                         "type": "string",
                         "enum": list(REFERENCE_RATIOS),
                         "description": (
                             "Text/reference output ratio. Text defaults 16:9; reference defaults adaptive. "
-                            "Image-to-video always follows image_asset_id and rejects this field."
+                            "Image-to-video follows the first supplied keyframe (opening, otherwise final) and rejects this field."
                         ),
                     },
                     "duration_seconds": {
@@ -231,7 +254,7 @@ MANIFEST = ToolManifest(
                     "prompt_expansion_mode": {
                         "type": "string",
                         "enum": list(PROMPT_EXPANSION_MODES),
-                        "description": "balanced (default, about 1s) or quality (may spend up to about 30s rewriting the prompt).",
+                        "description": "disabled skips rewriting; balanced (default, about 1s); quality may spend up to about 30s rewriting the prompt.",
                     },
                     "seed": {
                         "type": "string",
@@ -297,10 +320,10 @@ MANIFEST = ToolManifest(
             "seed": validated_input("Integer from 0 to 4294967295."),
         },
         "get_task": {
-            "task_id": validated_input("A text_, image_ or reference_ prefix followed by a UUID."),
+            "task_id": validated_input("A turbo_text_, turbo_image_ or turbo_reference_ prefix (or legacy text_/image_/reference_) followed by a UUID."),
         },
         "save_video": {
-            "task_id": validated_input("A text_, image_ or reference_ prefix followed by a UUID."),
+            "task_id": validated_input("A turbo_text_, turbo_image_ or turbo_reference_ prefix (or legacy text_/image_/reference_) followed by a UUID."),
         },
     }),
     config=(
@@ -324,7 +347,7 @@ MANIFEST = ToolManifest(
     technical_details=(
         PARAM_GUARD_TECHNICAL_DETAIL,
         "The tool calls fal's persistent queue with no webhooks. Its opaque task id encodes one of three "
-        "fixed H3 Max routes plus a UUID; task polling cannot select another fal model or URL. sync_mode "
+        "fixed H3 Max Turbo routes (or a legacy H3 Max route) plus a UUID; task polling cannot select another fal model or URL. sync_mode "
         "is forced off so large base64 video cannot enter model context, and enable_safety_checker is always false.",
     ),
     setup_steps=(
@@ -348,7 +371,7 @@ MANIFEST = ToolManifest(
             link_label="Open fal API keys",
         ),
         SetupStep(
-            title="Configure and enable H3 Max",
+            title="Configure and enable H3 Max Turbo",
             show_config=True,
             description=(
                 "Open falAI under Home > Integrations, save the key as FAL_API_KEY, "
@@ -453,7 +476,7 @@ MANIFEST = ToolManifest(
     agent_notes=(
         "Stage images/videos/audio with for_tool=fal_ai; source URLs are rejected. Successful submission consumes staged IDs. "
         "Use one reference mode at a time: image_asset_id/end_image_asset_id for keyframes, or reference_*_asset_ids "
-        "for identity/style/motion/audio conditioning. Poll the returned task_id unchanged. H3 Max always "
+        "for identity/style/motion/audio conditioning. New calls use H3 Max Turbo; legacy task IDs keep their original H3 Max routes. Poll the returned task_id unchanged. H3 Max Turbo always "
         "generates audio, so put dialogue, effects, ambience, music, or 'no music' directly in the prompt."
     ),
 )
@@ -513,8 +536,8 @@ def _staged_list(tool_input: JSONObject, key: str, kind: str, api: HostAPI) -> l
     value = tool_input.get(key)
     if value is None:
         return []
-    if not isinstance(value, list) or len(value) > MAX_REFERENCE_FILES:
-        raise ToolInputValidationError(f"H3 Max {key} must be a list of at most {MAX_REFERENCE_FILES} staged ids.")
+    if not isinstance(value, list) or len(value) > REFERENCE_LIMITS[kind]:
+        raise ToolInputValidationError(f"H3 Max {key} must be a list of at most {REFERENCE_LIMITS[kind]} staged ids.")
     return [fal_media.staged_asset_id(item, kind, api) for item in value]
 
 
@@ -588,10 +611,6 @@ def _generation_request(api: HostAPI, tool_input: JSONObject) -> tuple[str, JSON
             raise ToolInputValidationError(
                 f"H3 Max accepts at most {MAX_REFERENCE_FILES} reference files in total."
             )
-        if audio and not (images or videos):
-            raise ToolInputValidationError(
-                "H3 Max reference audio requires at least one reference image or video."
-            )
         if images:
             body["reference_image_asset_ids"] = cast(list[JSONValue], images)
         if videos:
@@ -607,13 +626,12 @@ def _generation_request(api: HostAPI, tool_input: JSONObject) -> tuple[str, JSON
         return "reference", body
 
     if keyframe_supplied:
-        if "image_asset_id" not in tool_input:
-            raise ToolInputValidationError("H3 Max end_image_asset_id requires image_asset_id.")
         if "aspect_ratio" in tool_input:
             raise ToolInputValidationError(
-                "H3 Max image-to-video follows image_asset_id and does not accept aspect_ratio."
+                "H3 Max image-to-video follows its keyframe image and does not accept aspect_ratio."
             )
-        body["image_asset_id"] = fal_media.staged_asset_id(tool_input["image_asset_id"], "image", api)
+        if "image_asset_id" in tool_input:
+            body["image_asset_id"] = fal_media.staged_asset_id(tool_input["image_asset_id"], "image", api)
         if "end_image_asset_id" in tool_input:
             body["end_image_asset_id"] = fal_media.staged_asset_id(tool_input["end_image_asset_id"], "image", api)
         return "image", body
@@ -645,13 +663,13 @@ def _task_parts(tool_input: JSONObject) -> tuple[str, str, str]:
     match = TASK_ID_RE.fullmatch(value.strip())
     if match is None:
         raise ToolInputValidationError("H3 Max tool_input.task_id must be a valid task id.")
-    mode, request_id = match.groups()
-    return value.strip(), mode, request_id
+    task_kind, request_id = match.groups()
+    return value.strip(), task_kind, request_id
 
 
-def _task_url(mode: str, request_id: str, suffix: str = "") -> str:
+def _task_url(task_kind: str, request_id: str, suffix: str = "") -> str:
     encoded = urllib.parse.quote(request_id, safe="")
-    return f"{_endpoint(mode)}/requests/{encoded}{suffix}"
+    return f"{QUEUE_BASE}/{TASK_ROUTES[task_kind]}/requests/{encoded}{suffix}"
 
 
 def _status(mode: str, request_id: str, headers: dict[str, str]) -> JSONObject:
@@ -721,9 +739,10 @@ def _failed_task_result(task_id: str, mode: str, status: JSONObject) -> JSONObje
 
 
 def _task_result(
-    task_id: str, mode: str, request_id: str, headers: dict[str, str]
+    task_id: str, task_kind: str, request_id: str, headers: dict[str, str]
 ) -> JSONObject:
-    status_response = _status(mode, request_id, headers)
+    mode = task_kind.removeprefix("turbo_")
+    status_response = _status(task_kind, request_id, headers)
     raw_status = status_response.get("status")
     status = raw_status.strip().upper() if isinstance(raw_status, str) else ""
     if status not in QUEUE_STATUSES:
@@ -750,7 +769,7 @@ def _task_result(
     if status_response.get("error") is not None or status_response.get("error_type") is not None:
         return _failed_task_result(task_id, mode, status_response)
 
-    response = _result(mode, request_id, headers)
+    response = _result(task_kind, request_id, headers)
     url = _video_url(response)
     result: JSONObject = {
         "task_id": task_id,
@@ -881,22 +900,20 @@ class H3MaxTool:
                 request_id = response.get("request_id")
                 # Reference inputs add charges that cannot be calculated from staged media.
                 if mode != "reference":
-                    promotional_text = mode == "text" and datetime.now(timezone.utc).date() <= date(2026, 9, 30)
-                    rates = {"480P": "0.025", "768P": "0.04"} if promotional_text else {"480P": "0.05", "768P": "0.08"}
-                    rate = rates.get(cast(str, body.get("resolution")))
+                    rate = BASE_USD_PER_SECOND.get(cast(str, body.get("resolution")))
                     duration = body.get("duration")
                     if rate and isinstance(duration, int) and not isinstance(duration, bool):
-                        charge_id = (f"task:{mode}_{request_id}" if isinstance(request_id, str)
+                        charge_id = (f"task:turbo_{mode}_{request_id}" if isinstance(request_id, str)
                                      and REQUEST_ID_RE.fullmatch(request_id) else "")
                         api.costs.record(str(Decimal(rate) * duration), charge_id=charge_id)
                 if not isinstance(request_id, str) or not REQUEST_ID_RE.fullmatch(request_id):
                     return ActionFailed("fal returned no valid H3 Max request id.")
                 for asset_id in uploaded:
                     api.assets.delete(asset_id)
-                task_id = f"{mode}_{request_id}"
+                task_id = f"turbo_{mode}_{request_id}"
                 return ActionExecuted(
                     {
-                        "message": "H3 Max task queued. Poll get_task until it succeeds.",
+                        "message": "H3 Max Turbo task queued. Poll get_task until it succeeds.",
                         "task_id": task_id,
                         "task_status": "queued",
                         "generation_mode": mode,

@@ -113,7 +113,7 @@ MANIFEST = ToolManifest(
     ), {action: {"task_id": validated_input("topaz_image_ or topaz_video_ followed by a UUID.")} for action in ("get_task", "save_image", "save_video")})),
     setup_steps=(
         SetupStep(title="Fund fal and create an API key", description="Topaz processing is billed by fal. Create an API-scoped key for the intended account; a Topaz desktop subscription does not cover these calls.", link_url="https://fal.ai/dashboard/keys", link_label="Open fal API keys"),
-        SetupStep(title="Configure Topaz in Kern", description="Save FAL_API_KEY under Home > Integrations > falAI, then enable the tool. H3 Max and Topaz share this falAI key.", show_config=True),
+        SetupStep(title="Configure Topaz in Kern", description="Save FAL_API_KEY under Home > Integrations > falAI, then enable the tool. H3 Max Turbo and Topaz share this falAI key.", show_config=True),
         SetupStep(title="Check usage charges", description="Kern does not calculate Topaz charges. Check fal billing and current model prices before starting batches.", link_url="https://fal.ai/dashboard/billing", link_label="Open fal billing"),
     ),
     protections=("Fixed Topaz endpoints; keys stay in write-only tool config. Settings validate before any workspace upload.",

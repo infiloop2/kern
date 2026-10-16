@@ -180,13 +180,25 @@ class TopazTests(unittest.TestCase):
                 with result.open_stream() as opened:
                     self.assertEqual(opened.source.read(), content)
                     self.assertEqual(opened.media_type, mime)
-        for headers in ({"content-length": "300000000", "content-type": "image/png"}, {"content-length": "10", "content-type": "text/html"}, {"content-type": "image/png"}):
+        for headers in ({"content-length": "300000000", "content-type": "image/png"}, {"content-length": "10", "content-type": "text/html"}, {"content-length": "", "content-type": "image/png"}):
             @contextmanager
             def invalid_stream(*args, **kwargs):
                 yield io.BytesIO(b"x" * 10), headers
             with patch.object(media, "open_response_stream", invalid_stream), self.assertRaises(StreamingAssetError):
                 with media.open_downloaded_image("https://v3.fal.media/output", provider="Topaz", filename_stem="out", map_failure=topaz._failure):
                     pass
+
+    def test_save_image_without_declared_length_uses_measured_size(self):
+        @contextmanager
+        def stream(*args, **kwargs):
+            yield io.BytesIO(b"pixels"), {"content-type": "image/png"}
+        with patch.object(topaz, "json_request", side_effect=[{"status": "COMPLETED"}, {"image": {"url": "https://v3.fal.media/output"}}]), patch.object(media, "open_response_stream", stream):
+            result = self.execute("save_image", {"task_id": "topaz_image_" + REQUEST_ID})
+            with result.open_stream() as opened:
+                self.assertEqual(opened.size_bytes, 6)
+                self.assertEqual(opened.source.read(), b"pixels")
+                self.assertEqual(opened.media_type, "image/png")
+            self.assertTrue(opened.source.closed)
 
     def test_unknown_submission_outcome_retains_asset_and_never_retries(self):
         asset = self.api.assets.add(media_type="image/png")

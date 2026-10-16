@@ -93,11 +93,11 @@ class H3MaxToolTests(unittest.TestCase):
         assert_matches_output_schema(self, h3max.MANIFEST, "generate_video", result)
         self.assertIsInstance(result, ActionExecuted)
         assert isinstance(result, ActionExecuted)
-        self.assertEqual(result.result["task_id"], f"text_{REQUEST_ID}")
+        self.assertEqual(result.result["task_id"], f"turbo_text_{REQUEST_ID}")
         self.assertEqual(result.result["generation_mode"], "text")
         self.assertEqual(result.result["model"], h3max.ROUTES["text"])
         self.assertEqual(seen["method"], "POST")
-        self.assertEqual(seen["url"], h3max._endpoint("text"))
+        self.assertEqual(seen["url"], "https://queue.fal.run/minimax/h3-max-turbo/text-to-video")
         self.assertEqual(seen["headers"]["authorization"], "Key fal-key")
         self.assertEqual(seen["headers"]["X-Fal-Store-IO"], "0")
         self.assertEqual(
@@ -139,7 +139,7 @@ class H3MaxToolTests(unittest.TestCase):
                 api_with_key(),
             )
         self.assertIsInstance(result, ActionExecuted)
-        self.assertEqual(seen["url"], h3max._endpoint("image"))
+        self.assertEqual(seen["url"], "https://queue.fal.run/minimax/h3-max-turbo/image-to-video")
         self.assertEqual(seen["body"]["image_url"], "https://v3.fal.media/" + "i" * 43)
         self.assertEqual(seen["body"]["end_image_url"], "https://v3.fal.media/" + "e" * 43)
         self.assertEqual(seen["body"]["duration"], 10)
@@ -165,7 +165,7 @@ class H3MaxToolTests(unittest.TestCase):
         with patch.object(h3max, "json_request", fake_request):
             result = H3MaxTool().execute("generate_video", tool_input, api_with_key())
         self.assertIsInstance(result, ActionExecuted)
-        self.assertEqual(seen["url"], h3max._endpoint("reference"))
+        self.assertEqual(seen["url"], "https://queue.fal.run/minimax/h3-max-turbo/reference-to-video")
         self.assertEqual(seen["body"]["reference_image_urls"], ["https://v3.fal.media/" + "i" * 43])
         self.assertEqual(seen["body"]["reference_video_urls"], ["https://v3.fal.media/" + "v" * 43])
         self.assertEqual(seen["body"]["reference_audio_urls"], ["https://v3.fal.media/" + "a" * 43])
@@ -186,30 +186,79 @@ class H3MaxToolTests(unittest.TestCase):
             {"prompt": "x", "reference_image_asset_ids": []},
             {
                 "prompt": "x",
-                "reference_audio_asset_ids": ["a" * 43],
-            },
-            {
-                "prompt": "x",
                 "reference_image_asset_ids": [
-                    "i" * 43 for index in range(13)
+                    "i" * 43 for index in range(10)
                 ],
             },
             {
                 "prompt": "x",
                 "reference_image_asset_ids": [
-                    "i" * 43 for index in range(7)
+                    "i" * 43 for index in range(9)
                 ],
                 "reference_video_asset_ids": [
-                    "v" * 43 for index in range(6)
+                    "v" * 43 for index in range(3)
                 ],
+                "reference_audio_asset_ids": ["a" * 43],
             },
         ]
+        bad_inputs.extend([
+            {"prompt": "x", "reference_video_asset_ids": ["v" * 43] * 4},
+            {"prompt": "x", "reference_audio_asset_ids": ["a" * 43] * 4},
+        ])
+        self.upload.reset_mock()
         for tool_input in bad_inputs:
             with self.subTest(tool_input=tool_input):
                 self.assertIsInstance(
                     H3MaxTool().execute("generate_video", tool_input, api_with_key()),
                     ActionFailed,
                 )
+
+        self.upload.assert_not_called()
+
+    def test_verified_turbo_options_and_reference_audio_only(self) -> None:
+        for inputs, mode, expected in (
+            ({"end_image_asset_id": "e" * 43}, "image", "end_image_url"),
+            ({"reference_audio_asset_ids": ["a" * 43]}, "reference", "reference_audio_urls"),
+            ({}, "text", "aspect_ratio"),
+        ):
+            with self.subTest(mode=mode), patch.object(h3max, "json_request", return_value={"request_id": REQUEST_ID}) as request:
+                result = H3MaxTool().execute("generate_video", {
+                    "prompt": "waves", "resolution": "1080P", "prompt_expansion_mode": "disabled", **inputs,
+                }, api_with_key())
+                self.assertIsInstance(result, ActionExecuted, result)
+                assert_matches_output_schema(self, h3max.MANIFEST, "generate_video", result)
+                self.assertEqual(result.result["task_id"], f"turbo_{mode}_{REQUEST_ID}")
+                self.assertEqual(request.call_args.kwargs["body"]["resolution"], "1080P")
+                self.assertEqual(request.call_args.kwargs["body"]["prompt_expansion_mode"], "disabled")
+                self.assertIn(expected, request.call_args.kwargs["body"])
+                if mode == "image":
+                    self.assertNotIn("image_url", request.call_args.kwargs["body"])
+                    self.assertNotIn("aspect_ratio", request.call_args.kwargs["body"])
+
+    def test_task_variant_pins_poll_and_save_routes_without_repricing(self) -> None:
+        for prefix, model in (("", "h3-max"), ("turbo_", "h3-max-turbo")):
+            for mode in ("text", "image", "reference"):
+                for action in ("get_task", "save_video"):
+                    with self.subTest(prefix=prefix, mode=mode, action=action):
+                        api = api_with_key()
+                        task_id = f"{prefix}{mode}_{REQUEST_ID}"
+                        calls: list[tuple[str, str, dict[str, str]]] = []
+
+                        def response(method: str, url: str, **kwargs: Any) -> JSONObject:
+                            calls.append((method, url, kwargs["headers"]))
+                            return ({"status": "COMPLETED"} if url.endswith("/status") else
+                                    {"video": {"url": "https://v3b.fal.media/files/video.mp4"}})
+                        with patch.object(h3max, "json_request", side_effect=response):
+                            result = H3MaxTool().execute(action, {"task_id": task_id}, api)
+                        self.assertIsInstance(result, ActionExecuted if action == "get_task" else StreamingAsset)
+                        if action == "get_task":
+                            assert_matches_output_schema(self, h3max.MANIFEST, action, result)
+                            self.assertEqual(result.result["generation_mode"], mode)
+                            self.assertEqual(result.result["task_id"], task_id)
+                        endpoint = f"https://queue.fal.run/minimax/{model}/{mode}-to-video/requests/{REQUEST_ID}"
+                        self.assertEqual([call[1] for call in calls], [endpoint + "/status", endpoint])
+                        self.assertTrue(all(call[0] == "GET" and call[2]["X-Fal-Store-IO"] == "0" for call in calls))
+                        self.assertEqual(api.costs.calls, [])
 
     def test_generation_rejects_ambiguous_and_invalid_inputs(self) -> None:
         bad_inputs = [
@@ -219,12 +268,11 @@ class H3MaxToolTests(unittest.TestCase):
             {"prompt": "x", "duration_seconds": "4"},
             {"prompt": "x", "duration_seconds": "16"},
             {"prompt": "x", "duration_seconds": "²"},
-            {"prompt": "x", "resolution": "1080P"},
+            {"prompt": "x", "resolution": "2K"},
             {"prompt": "x", "aspect_ratio": "2:1"},
             {"prompt": "x", "prompt_expansion_mode": "off"},
             {"prompt": "x", "seed": "-1"},
             {"prompt": "x", "seed": "4294967296"},
-            {"prompt": "x", "end_image_asset_id": "e" * 43},
             {
                 "prompt": "x",
                 "image_asset_id": "i" * 43,
@@ -259,7 +307,7 @@ class H3MaxToolTests(unittest.TestCase):
             )
         self.assertIsInstance(result, ActionFailed)
 
-        for task_id in ("../../escape", f"other_{REQUEST_ID}", "text_.."):
+        for task_id in ("../../escape", f"other_{REQUEST_ID}", "text_..", f"turbo_other_{REQUEST_ID}", f"turbo_text_{REQUEST_ID}/status"):
             with self.subTest(task_id=task_id), patch.object(h3max, "json_request") as request:
                 result = H3MaxTool().execute(
                     "get_task", {"task_id": task_id}, api_with_key()

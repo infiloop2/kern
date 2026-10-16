@@ -66,11 +66,29 @@ class ProviderCostTests(unittest.TestCase):
             h3max.H3MaxTool().execute('generate_video', {'prompt': 'a fox', 'image_asset_id': api.assets.add(media_type='image/png')}, api)
             h3max.H3MaxTool().execute('generate_video', {
                 'prompt': 'a fox', 'reference_image_asset_ids': [api.assets.add(media_type='image/png')]}, api)
-        self.assertEqual(api.costs.calls, [('0.40', f'task:image_{request_id}')])
+        self.assertEqual(api.costs.calls, [('0.20', f'task:turbo_image_{request_id}')])
 
+    def test_turbo_costs_use_base_rates_for_each_resolution_and_route(self):
+        request_id = '764cabcf-b745-4b3e-ae38-1200304cf45b'
+        for resolution, amount in (("480P", "0.250"), ("768P", "0.40"), ("1080P", "0.80")):
+            for mode in ("text", "image"):
+                with self.subTest(resolution=resolution, mode=mode):
+                    api = FakeHostAPI(config={'FAL_API_KEY': 'key'})
+                    inputs = {'prompt': 'a fox', 'resolution': resolution, 'duration_seconds': '10'}
+                    if mode == 'image':
+                        inputs['image_asset_id'] = api.assets.add(media_type='image/png')
+                    with patch.object(fal_media, 'upload', return_value='https://v3.fal.media/source'), patch.object(h3max, 'json_request', return_value={'request_id': request_id}):
+                        result = h3max.H3MaxTool().execute('generate_video', inputs, api)
+                    self.assertNotIsInstance(result, ActionFailed, result)
+                    self.assertEqual(api.costs.calls, [(amount, f'task:turbo_{mode}_{request_id}')])
 
-
-
+    def test_turbo_rejected_submission_does_not_report_cost(self):
+        from host.tools.shared.web import WebRequestError
+        api = FakeHostAPI(config={'FAL_API_KEY': 'key'})
+        with patch.object(h3max, 'json_request', side_effect=WebRequestError('rejected', status=422)):
+            result = h3max.H3MaxTool().execute('generate_video', {'prompt': 'a fox'}, api)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertEqual(api.costs.calls, [])
 
     def test_openai_images_requires_usage_breakdown(self):
         api = FakeHostAPI(config={'OPENAI_API_KEY': 'key'})
