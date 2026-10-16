@@ -97,7 +97,7 @@ directly and need no token attestation cache.
 
 | Status | Meaning | Recheck cadence |
 | --- | --- | --- |
-| `deactivated` | The provider is disabled in the network policy. The proxy rejects its requests, processes close, and running turns fail; new messages are rejected at admission. The operator-approved account or connected credential remains, so re-enabling can return directly to `active` with no new login. Disabling Bedrock projects `deactivated` into the Hermes runtime row and closes its live turn processes. | every 5 seconds (a backstop: enabling the provider refreshes immediately) |
+| `deactivated` | The provider is disabled in the network policy, or an additional account has not been enabled. The proxy rejects its requests, processes close, and running turns fail; new messages are rejected at admission. The operator-approved account or connected credential remains, so re-enabling can return directly to `active` with no new login. Disabling Bedrock projects `deactivated` into the Hermes runtime row and closes its live turn processes. | every 5 seconds; an account that remains off only reads its opt-in, without checks or repeated writes. Enabling an account or provider refreshes immediately. |
 | `loading` | No poll has completed yet (process start). | every 5 seconds |
 | `awaiting_login` | An OAuth runtime needs operator login, or enabled Bedrock needs its credential connected. OAuth proxy enforcement state is cleared; the anchor, if any, remains. | every 5 seconds |
 | `active` | An operator-approved OAuth credential with live validation, or an enabled Bedrock provider with a synchronously validated credential row. | every 5 minutes |
@@ -284,9 +284,10 @@ Every trigger funnels into the same provider-connection refresh:
 
 ## The refresh pipeline
 
-1. **Policy gate.** A runtime whose provider is disabled marks `deactivated`:
-   one mutation records the status, clears any pending OAuth record, clears
-   the pin; live processes close and running turns fail.
+1. **Account and policy gates.** A runtime whose account or provider is
+   disabled marks `deactivated`.
+   One mutation records the status, clears any pending OAuth record, and
+   clears the pin; live processes close and running turns fail.
 2. **Local account read.** The provider reports its own view: Claude Code via
    `claude auth status` plus the credential-file hash, Codex via
    `account/read {"refreshToken": false}` on a short-lived app-server, and
@@ -351,7 +352,7 @@ pipeline finds. Per state, the work and the provider traffic are:
 
 | State found | Local work every recheck | Provider network calls |
 | --- | --- | --- |
-| `deactivated` | Policy read; re-assert the deactivated status, cleared OAuth record, cleared pin (idempotent writes). | None. |
+| `deactivated` | An account that remains off only reads its opt-in and skips the refresh. Otherwise read policy and re-assert deactivation, cleared OAuth record, and cleared pin. | None. |
 | `awaiting_login`, no credential | Claude: `claude auth status` (reads the local credential file). Codex: `account/read {"refreshToken": false}` on the app-server (local account state); while a device login is in flight, drain its completion notifications. | None from the refresh itself. A parked Codex device login polls the provider's device-code endpoint on its own — that is the OAuth device flow the Codex CLI owns, bounded by the login's expiry, not part of the refresh. |
 | `awaiting_login`, operator login in flight | Same local reads; the poll additionally drains the parked Codex login server's completion notifications (local IPC). The pending login record backs the UI's login card. | None from the refresh. The parked Codex server polls the provider's device-code endpoint until the login is approved or its code expires (the provider-prescribed device flow); Claude's browser flow makes no provider calls until the operator submits the code. |
 | `awaiting_login`, login expired unfinished | The expired login record is dropped the next time anything reads it (the poll's login capture, or the UI's card fetch, which then shows Start login again); status is unchanged. | None; the device-code polling ends with the code's expiry. Starting a new login replaces the old parked flow. |
@@ -527,3 +528,20 @@ or redeploying discards pending retries. The existing one-shot continuation for
 turns interrupted by a host restart remains separate and starts a fresh chain
 if that continuation fails. No retry database state, recovery scan or schema
 migration is involved.
+
+## Optional additional accounts
+
+The first account follows the overall provider switch. Codex 2, Codex 3, and
+Grok 2 additionally require explicit enablement in Home > Agent runtimes.
+Unlinked slots start disabled. The upgrade enables slots with an existing
+operator-approved anchor, preserving already connected accounts.
+The admin-only `provider_accounts.extra_account_enabled` flag stores their opt-ins;
+`PUT /v1/agent-runtime/account-enabled` accepts `agent_runtime` and a boolean
+`enabled`. Primary accounts have no separate switch.
+
+Disabled accounts report `deactivated`, skip automatic and manual provider
+checks and OAuth login, and are omitted from current usage cards and provider
+connection counts. Disabling stops running work, closes pending login flows,
+and clears the proxy pin. The linked identity, credentials, sessions, and
+historical usage remain saved. Enabling starts a fresh status check; provider
+access must also be enabled. Provider off/on cycles preserve account opt-ins.

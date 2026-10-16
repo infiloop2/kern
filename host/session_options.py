@@ -51,6 +51,22 @@ RUNTIMES: dict[str, RuntimeIdentity] = {
     SCRIPT_RUNTIME: RuntimeIdentity("Script", None),
 }
 
+# The first account follows its provider switch. Additional fixed accounts
+# require their own operator opt-in, even when that provider is enabled.
+def _optional_account_runtimes() -> tuple[str, ...]:
+    providers: set[str] = set()
+    optional: list[str] = []
+    for runtime, identity in RUNTIMES.items():
+        if identity.provider is None:
+            continue
+        if identity.provider in providers:
+            optional.append(runtime)
+        providers.add(identity.provider)
+    return tuple(optional)
+
+
+OPTIONAL_ACCOUNT_RUNTIMES = _optional_account_runtimes()
+
 # The runtimes a conversation may choose. The script runtime runs a bash job
 # on a schedule and is offered only there.
 INTERACTIVE_RUNTIMES: tuple[str, ...] = tuple(

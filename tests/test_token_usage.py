@@ -130,7 +130,8 @@ class UsageStorageTests(unittest.TestCase):
         with state.mutation() as cur:
             cur.execute("UPDATE chat_threads SET archived = TRUE WHERE thread_id = 'thread-1'")
             cur.execute("UPDATE web_apps SET archived = TRUE WHERE app_id = 'app-1'")
-        schedules.delete_schedule(schedule['id'], {'expected_revision': [str(schedule['revision'])]}, actor='user')
+        with patch.object(schedules, 'call_admin_api', return_value={'thread': {'status': 'idle'}}):
+            schedules.delete_schedule(schedule['id'], {'expected_revision': [str(schedule['revision'])]}, actor='user')
         groups = state.usage_report()['groups']
         self.assertEqual(len(groups), 3)
         self.assertTrue(all(not row['active'] for row in groups))

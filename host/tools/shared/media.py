@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from collections.abc import Mapping
+from tempfile import TemporaryFile
 from typing import Callable, Iterator
 
 from host.tools.results import OpenedStreamingAsset, StreamingAssetError
@@ -147,6 +148,36 @@ def _open_downloaded_media(
         with open_response_stream(
             "GET", url, headers=headers, failure_message=failure_message, timeout=timeout
         ) as (source, response_headers):
+            media_type = (
+                response_headers.get("content-type", "").split(";", 1)[0].strip().lower()
+            )
+            suffix = suffixes.get(media_type)
+            if suffix is None:
+                raise StreamingAssetError(
+                    f"{provider} {kind} download returned an unsupported media type."
+                )
+            if "content-length" not in response_headers:
+                # Chunked responses have no declared size. Measure them on disk
+                # before handing the host its required, exact asset length.
+                with TemporaryFile(mode="w+b") as buffered:
+                    size_bytes = 0
+                    while chunk := source.read(min(64 * 1024, MAX_MEDIA_BYTES + 1 - size_bytes)):
+                        size_bytes += len(chunk)
+                        if size_bytes > MAX_MEDIA_BYTES:
+                            raise StreamingAssetError(
+                                f"{provider} {kind} download size is outside the supported range."
+                            )
+                        buffered.write(chunk)
+                    if size_bytes < min_bytes:
+                        raise StreamingAssetError(
+                            f"{provider} {kind} download size is outside the supported range."
+                        )
+                    buffered.seek(0)
+                    yield OpenedStreamingAsset(
+                        filename=f"{filename_stem}{suffix}", media_type=media_type,
+                        size_bytes=size_bytes, source=buffered,
+                    )
+                return
             raw_length = response_headers.get("content-length", "")
             if not raw_length.isascii() or not raw_length.isdecimal():
                 raise StreamingAssetError(
@@ -156,14 +187,6 @@ def _open_downloaded_media(
             if not min_bytes <= size_bytes <= MAX_MEDIA_BYTES:
                 raise StreamingAssetError(
                     f"{provider} {kind} download size is outside the supported range."
-                )
-            media_type = (
-                response_headers.get("content-type", "").split(";", 1)[0].strip().lower()
-            )
-            suffix = suffixes.get(media_type)
-            if suffix is None:
-                raise StreamingAssetError(
-                    f"{provider} {kind} download returned an unsupported media type."
                 )
             yield OpenedStreamingAsset(
                 filename=f"{filename_stem}{suffix}",

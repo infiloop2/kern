@@ -186,6 +186,64 @@ function renderProviderAccounts(response) {
   renderIntegrationAccounts();
 }
 
+let refreshingTraining = false;
+
+function trainingWarnings() {
+  return latestAccounts.filter(account => ["claude_code", "grok", "grok-2"].includes(account.agent_runtime)
+    && account.enabled !== false && account.status !== "deactivated"
+    && account.data_training?.allowed === true);
+}
+
+function renderTrainingWarning() {
+  const node = $("training-warning");
+  const accounts = trainingWarnings();
+  node.hidden = !accounts.length || !$("login").hidden;
+  if (node.hidden) { setHtml(node, ""); return; }
+  const names = accounts.map(account => {
+    const meta = RUNTIME_PROVIDERS[account.agent_runtime];
+    return `<button class="training-runtime" data-action="open-provider" data-provider="${esc(meta.provider)}">${esc(meta.label)}</button>`;
+  }).join('<span aria-hidden="true"> · </span>');
+  const stale = accounts.some(account => account.status !== "active"
+    || account.data_training.attempted_at !== account.data_training.checked_at);
+  setHtml(node, `
+    <svg class="training-warning-icon" width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true"><path d="M12 3 2.6 19.3a1.1 1.1 0 0 0 1 1.7h16.8a1.1 1.1 0 0 0 1-1.7L12 3Z" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/><path d="M12 9v5m0 3v.1" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <div class="training-warning-copy">
+      <strong>Data training is enabled</strong>
+      <p>${names}<span class="training-warning-hint">Turn it off in your provider's privacy settings.</span></p>
+      ${stale ? '<p class="training-warning-stale">Could not verify the latest setting. Showing the last confirmed result.</p>' : ""}
+    </div>
+    <button class="training-refresh" data-action="refresh-training" ${refreshingTraining ? 'disabled aria-busy="true"' : ""}>
+      <svg width="14" height="14" viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M16 7a6.5 6.5 0 1 0 .3 5M16 3v4h-4" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      ${refreshingTraining ? "Refreshing…" : "Refresh"}
+    </button>`);
+}
+
+export async function refreshTrainingWarning() {
+  if (refreshingTraining) return;
+  const accounts = trainingWarnings();
+  if (!accounts.length) return;
+  refreshingTraining = true;
+  renderTrainingWarning();
+  try {
+    const results = await Promise.allSettled(accounts.map(account => api("POST", "/v1/agent-runtime/refresh", {
+      agent_runtime: account.agent_runtime,
+    })));
+    await refreshProviderAccounts();
+    if (results.some(result => result.status === "rejected")) {
+      notice("Could not refresh data training settings. The last confirmed result remains visible.", "error");
+    }
+    if (accounts.every(previous => latestAccounts.some(current => current.agent_runtime === previous.agent_runtime
+      && current.data_training?.allowed === false && current.data_training.checked_at === current.data_training.attempted_at))) {
+      notice("Data training is off for these accounts.");
+    }
+  } catch (_error) {
+    notice("Could not refresh data training settings. The last confirmed result remains visible.", "error");
+  } finally {
+    refreshingTraining = false;
+    renderTrainingWarning();
+  }
+}
+
 let pendingRuntimeAccountRefresh = null;
 
 function refreshRuntimeAccounts() {
@@ -247,6 +305,7 @@ function runtimeRunningCount() {
 }
 
 function renderRuntimeOverview() {
+  renderTrainingWarning();
   const container = $("runtime-overview");
   if (!container) return;
   const bedrockAccount = latestAccounts.find(entry => entry.provider === "bedrock") || {};
@@ -344,6 +403,7 @@ function runtimeSummaryCard(runtime, usageHtml, usageSummaryText, extraClass) {
 // percentage rings.
 function subscriptionSummary(runtime) {
   const account = latestAccounts.find(entry => entry.agent_runtime === runtime) || {};
+  if (account.enabled === false) return "";
   const windows = usageWindows(account);
   const modelSummary = windows.fableWeekly
     ? `; ${usageSummary(`${windows.fableWeekly.label} weekly`, windows.fableWeekly)}` : "";
@@ -362,6 +422,7 @@ function subscriptionSummary(runtime) {
 // in that case the runtime status stands alone rather than showing a placeholder.
 function grokSummary(runtime) {
   const account = latestAccounts.find(entry => entry.agent_runtime === runtime) || {};
+  if (account.enabled === false) return "";
   const usage = account.grok_usage || {};
   const periods = {
     daily: { label: "day", summary: "daily" },

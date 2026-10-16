@@ -62,7 +62,7 @@ _RUNTIME_USAGE_KEYS = {
     "grok-2": "grok_usage",
     "hermes": "bedrock_usage",
 }
-_THREAD_SEND_LOCKS = tuple(threading.Lock() for _ in range(64))
+_THREAD_SEND_LOCKS = tuple(threading.RLock() for _ in range(64))
 
 
 def _optional_non_negative_int(query: dict[str, list[str]], key: str) -> int | None:
@@ -204,7 +204,7 @@ def thread_route(
         return {"events": events}
     raise ApiError(HTTPStatus.NOT_FOUND, "thread route not found")
 
-def _thread_send_lock(thread_id: str) -> threading.Lock:
+def _thread_send_lock(thread_id: str) -> threading.RLock:
     return _THREAD_SEND_LOCKS[hash(thread_id) % len(_THREAD_SEND_LOCKS)]
 
 def _account_response_metadata(account: dict[str, Any], runtime_type: str) -> dict[str, Any]:
@@ -402,12 +402,15 @@ def send_thread_message(
 
 
 def retry_failed_turn(retry: turn_retries.Retry) -> None:
-    if not turn_retries.take(retry):
-        return
-    send_thread_message(retry.thread_id, {
-        "message": message_templates.retry_message(retry.attempt, retry.error),
-        "kern_notice": message_templates.retry_notice(retry.attempt),
-    }, None, operator_sent_message=False, retry_attempt=retry.attempt)
+    # Keep status reads and Stop outside the gap between claiming a retry
+    # and admitting its turn. send_thread_message takes this same RLock.
+    with _thread_send_lock(retry.thread_id):
+        if not turn_retries.take(retry):
+            return
+        send_thread_message(retry.thread_id, {
+            "message": message_templates.retry_message(retry.attempt, retry.error),
+            "kern_notice": message_templates.retry_notice(retry.attempt),
+        }, None, operator_sent_message=False, retry_attempt=retry.attempt)
 
 
 def _memory_task_query(thread_id: str, message: str, notice: dict[str, str] | None = None) -> str:
@@ -521,29 +524,33 @@ def _report_degraded_recall(
 
 
 def get_thread(thread_id: str) -> dict[str, Any]:
-    config = state.thread_session_config(thread_id)
-    if config is None:
-        raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
-    return _public_thread(
-        thread_id,
-        config["agent_runtime"],
-        config["model"],
-        config["effort"],
-        last_used_at=config.get("last_used_at"),
-    )
+    with _thread_send_lock(thread_id):
+        config = state.thread_session_config(thread_id)
+        if config is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
+        return _public_thread(
+            thread_id,
+            config["agent_runtime"],
+            config["model"],
+            config["effort"],
+            last_used_at=config.get("last_used_at"),
+        )
+
 
 def stop_thread(thread_id: str) -> dict[str, str]:
-    config = state.thread_session_config(thread_id)
-    if config is None:
-        raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
-    stopped = orchestrator.stop_thread_turn(thread_id)
-    cancelled = turn_retries.cancel(thread_id)
-    if not stopped and not cancelled:
-        raise ApiError(HTTPStatus.CONFLICT, "the thread has no running work")
-    if cancelled and not stopped:
-        with state.mutation() as cur:
-            state.append_agent_event(cur, "thread.stopped", thread_id, {}, run_number=config["run_number"])
-    return {"status": "accepted"}
+    with _thread_send_lock(thread_id):
+        config = state.thread_session_config(thread_id)
+        if config is None:
+            raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
+        stopped = orchestrator.stop_thread_turn(thread_id)
+        cancelled = turn_retries.cancel(thread_id)
+        if not stopped and not cancelled:
+            raise ApiError(HTTPStatus.CONFLICT, "the thread has no running work")
+        if cancelled and not stopped:
+            with state.mutation() as cur:
+                state.append_agent_event(cur, "thread.stopped", thread_id, {}, run_number=config["run_number"])
+        return {"status": "accepted"}
+
 
 def clear_thread_memory(thread_id: str) -> dict[str, str]:
     """Drop the thread's provider session so its next run starts fresh.

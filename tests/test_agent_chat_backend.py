@@ -642,6 +642,8 @@ class AgentChatBackendTests(unittest.TestCase):
             ("older", {**old, "last_used_at": "2026-10-04T12:00:00Z"}, old, True),
             ("recent", {**old, "last_used_at": "2026-10-05T12:00:01Z"}, old, False),
             ("running", {**old, "status": "running"}, old, False),
+            ("retry pending", {**old, "retry": {"attempt": 1}}, old, False),
+            ("retry after snapshot", old, {**old, "retry": {"attempt": 1}}, False),
             ("unknown recency", {**old, "last_used_at": None}, old, False),
             ("started after snapshot", old, {**old, "status": "running"}, False),
             ("finished after snapshot", old, {**old, "last_used_at": "2026-10-06T12:00:00Z"}, False),

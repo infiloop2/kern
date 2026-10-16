@@ -42,7 +42,7 @@ class FalAITests(unittest.TestCase):
 
     def test_submission_and_poll_share_key_without_image_task_collision(self):
         for action, inputs, engine, prefix, queue in (
-            ("generate_video", {"prompt": "train", "image_asset_id": self.api.assets.add("i" * 43, media_type="image/png")}, h3max, "image", h3max.QUEUE_BASE),
+            ("generate_video", {"prompt": "train", "image_asset_id": self.api.assets.add("i" * 43, media_type="image/png")}, h3max, "turbo_image", h3max.QUEUE_BASE),
             ("upscale_image", {"image_asset_id": self.api.assets.add("j" * 43, media_type="image/png")}, topaz, "topaz_image", topaz.QUEUE_BASE),
             ("upscale_video", {"video_asset_id": self.api.assets.add("v" * 43)}, topaz, "topaz_video", topaz.QUEUE_BASE),
         ):
@@ -60,7 +60,7 @@ class FalAITests(unittest.TestCase):
                 self.assertEqual({k.lower(): v for k, v in request.call_args.kwargs["headers"].items()}["authorization"], "Key shared-fal-key")
 
     def test_save_dispatch_keeps_models_separate(self):
-        for task, action, engine in (("image", "save_video", h3max), ("topaz_video", "save_video", topaz), ("topaz_image", "save_image", topaz)):
+        for task, action, engine in (("image", "save_video", h3max), ("turbo_image", "save_video", h3max), ("topaz_video", "save_video", topaz), ("topaz_image", "save_image", topaz)):
             with self.subTest(task=task), patch.object(engine, "json_request", return_value={"status": "IN_PROGRESS"}) as request:
                 result = self.tool.execute(action, {"task_id": task + "_" + REQUEST_ID}, self.api)
                 self.assertIsInstance(result, ActionFailed)

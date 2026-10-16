@@ -1380,6 +1380,10 @@ async function setSelectedThreadArchived() {
     setStatus("Stop the agent before archiving this thread.");
     return;
   }
+  if (action === "archive" && threads.find(thread => thread.thread_id === threadId)?.retry) {
+    setStatus("Cancel the automatic retry before archiving this thread.");
+    return;
+  }
   await api("POST", `/threads/${encodeURIComponent(threadId)}/${action}`);
   if (selectedThreadId === threadId && window.location.hash === operationRoute) {
     clearSelectedThread();

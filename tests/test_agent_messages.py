@@ -355,6 +355,7 @@ class AgentMessageDatabaseTests(unittest.TestCase):
 
     def setUp(self):
         pg_harness.reset_database()
+        self.enterContext(patch.object(schedules, "call_admin_api", return_value={"thread": {"status": "idle"}}))
         self.addCleanup(db.close_pool)
 
     def test_spawn_metadata_is_stored_before_delivery_and_survives_archive(self):
@@ -420,6 +421,49 @@ class AgentMessageDatabaseTests(unittest.TestCase):
                 ("thread-4", "Recent", False, "app-3"),
                 ("thread-5", "Archived", True, "app-3"),
             ])
+
+    def test_cancel_then_archive_and_restore_all_worker_kinds(self):
+        from host.runtime.admin_api import threads, workspace_api
+        from host.runtime.agent_runtime import orchestrator, turn_retries
+        from host.runtime.workspace.chat import backend as chat
+        from host.runtime.workspace.web_apps import backend as apps
+        from host.runtime.core import state
+
+        with patch.object(apps, "active_agent_runtimes", return_value=["codex"]):
+            app_id = apps.create_web_app()["app_id"]
+        schedule = schedules.create_schedule({**SESSION, "name": "Research", "triggers": []}, actor="user")
+        with db.transaction() as cur:
+            cur.execute("INSERT INTO chat_threads (thread_id) VALUES ('thread-34')")
+            for target in ('thread-34', app_id, schedule['thread_id']):
+                state.save_thread_session(cur, 'codex', target, None, state.utc_now(), SESSION['model'], SESSION['effort'])
+
+        def admin_call(method, path, body=None):
+            return workspace_api.route_workspace_request(method, path, {}, body)
+
+        with patch.object(turn_retries, '_pending', {}), \
+                patch.object(chat, 'call_admin_api', side_effect=admin_call), \
+                patch.object(apps, 'call_admin_api', side_effect=admin_call), \
+                patch.object(schedules, 'call_admin_api', side_effect=admin_call), \
+                patch.object(orchestrator, 'stop_thread_turn', return_value=False), \
+                patch.object(threads, 'send_thread_message') as send:
+            for target, archive, restore in [
+                ('thread-34', lambda: chat.archive_chat_thread('thread-34'), lambda: chat.unarchive_chat_thread('thread-34')),
+                (app_id, lambda: apps.set_web_app_archived(app_id, True), lambda: apps.set_web_app_archived(app_id, False)),
+                (schedule['thread_id'],
+                 lambda: schedules.delete_schedule(schedule['id'], {'expected_revision': ['1']}, actor='user'),
+                 lambda: schedules.restore_revision(schedule['id'], 1, {'expected_revision': 2})),
+            ]:
+                with self.subTest(target=target):
+                    turn_retries.schedule(target, 0, 'provider unavailable')
+                    retry = turn_retries._pending[target]
+                    with self.assertRaisesRegex(WorkspaceError, 'cancel the automatic retry'):
+                        archive()
+                    admin_call('POST', f'/v1/threads/{target}/stop')
+                    archive()
+                    restore()
+                    threads.retry_failed_turn(retry)
+                    self.assertIsNone(turn_retries.pending(target))
+            send.assert_not_called()
 
     def test_schedule_purpose_survives_edit_history_restore_and_delete(self):
         schedule = schedules.create_schedule({**SESSION, "name": "Research", "triggers": [{"type": "daily", "times": ["09:00"], "prompt": "Research"}],   "purpose": "Research companies"}, actor="agent")

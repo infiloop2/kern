@@ -3277,6 +3277,10 @@ async function archiveSelectedApp() {
     showRuntimeStatus("Stop the agent before archiving this app", "error");
     return;
   }
+  if (snapshot.retry) {
+    showRuntimeStatus("Cancel the automatic retry before archiving this app", "error");
+    return;
+  }
   if (!confirm(`Archive ${selectedAppName || appId}?`)) return;
   const operationRoute = window.location.hash;
   await api("POST", `/apps/${encodeURIComponent(appId)}/archive`, {});

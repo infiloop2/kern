@@ -720,6 +720,10 @@ def set_web_app_archived(app_id: str, archived: bool) -> dict[str, Any]:
                         HTTPStatus.CONFLICT,
                         "apps can only be archived while their agent is idle",
                     )
+                if thread.get("retry"):
+                    raise WorkspaceError(
+                        HTTPStatus.CONFLICT, "cancel the automatic retry before archiving this app",
+                    )
         cur.execute(
             "UPDATE web_apps SET archived = %s WHERE app_id = %s"
             f" RETURNING {SUMMARY_COLUMNS}",

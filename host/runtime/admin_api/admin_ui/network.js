@@ -407,7 +407,7 @@ export function renderIntegrationAccounts() {
     }
     const accounts = providerAccounts().filter(entry => entry.provider === provider);
     const runtimes = providerRuntimes(provider);
-    const records = runtimes.map(runtime => {
+    const records = runtimes.filter(runtime => accounts.find(entry => entry.agent_runtime === runtime)?.enabled !== false).map(runtime => {
       const account = accounts.find(entry => entry.agent_runtime === runtime) || accounts[0] || {};
       return runtimeRecords().find(entry => entry.type === runtime) || { status: account.status || "loading" };
     });
@@ -444,22 +444,34 @@ export function renderIntegrationAccounts() {
       && (provider === BEDROCK_INTEGRATION || entry.agent_runtime === runtime)
     )) || {};
     const runtimeLabel = RUNTIME_PROVIDERS[runtime].label;
-    const record = runtimeRecords().find(entry => entry.type === runtime) || { status: account.status || "loading" };
-    const enabled = objectValue(objectValue(activeNetworkPolicy.network_integrations)[provider]).enabled === true;
+    const record = account.enabled === false ? { status: "deactivated" }
+      : runtimeRecords().find(entry => entry.type === runtime) || { status: account.status || "loading" };
+    const providerEnabled = objectValue(objectValue(activeNetworkPolicy.network_integrations)[provider]).enabled === true;
+    const enabled = providerEnabled && account.enabled !== false;
+    const optionalAccount = providerRuntimes(provider).indexOf(runtime) > 0;
+    const accountToggle = optionalAccount
+      ? `<button class="sm" data-action="toggle-runtime-account" data-runtime="${esc(runtime)}" data-enabled="${account.enabled === false}">${account.enabled === false ? "Enable account" : "Disable account"}</button>`
+      : "";
     const identity = provider === BEDROCK_INTEGRATION
       ? (account.arn || account.account_id)
       : (account.email || account.account_id);
     const linked = provider === BEDROCK_INTEGRATION ? bedrockCredentialMetadata.connected : Boolean(identity);
-    const codingDataSummary = provider === XAI_INTEGRATION
-      && typeof account.coding_data_retention_opt_out === "boolean"
-      ? ` &middot; coding-data opt-out ${account.coding_data_retention_opt_out ? "active" : "inactive"}`
+    const privacy = account.data_training;
+    const privacyStatus = privacy?.allowed === true ? "Data training is enabled."
+      : privacy?.allowed === false ? "Data training is off." : "Data training status has not been verified yet.";
+    const privacyStale = privacy && (account.status !== "active" || privacy.attempted_at !== privacy.checked_at);
+    const privacyHelp = privacy?.allowed === true
+      ? provider === XAI_INTEGRATION
+        ? "Open /privacy in Grok to opt out of coding-data training."
+        : "Open /privacy-settings in Claude Code to turn off model improvement."
       : "";
+    const privacyHtml = enabled && privacy ? `<p class="training-privacy${privacy.allowed === true ? " training-enabled" : " muted"}">${privacyStatus} ${privacyHelp}${privacyStale && typeof privacy.allowed === "boolean" ? " Last confirmed setting; the latest setting could not be verified." : ""}</p>` : "";
     const summary = !enabled && !linked && provider !== BEDROCK_INTEGRATION
       ? ""
       : record.status === "active" && identity
-        ? `Connected account: <span class="connection-identity">${esc(identity)}</span> &middot; this account is allowed through the proxy${codingDataSummary}.`
+        ? `Connected account: <span class="connection-identity">${esc(identity)}</span> &middot; this account is allowed through the proxy.`
         : identity
-          ? `Linked account: <span class="connection-identity">${esc(identity)}</span> &middot; ${provider === BEDROCK_INTEGRATION ? "enable Bedrock to activate Hermes." : "sign in again to reconnect it."}`
+          ? `Linked account: <span class="connection-identity">${esc(identity)}</span> &middot; ${account.enabled === false ? "enable this account to reconnect it." : provider === BEDROCK_INTEGRATION ? "enable Bedrock to activate Hermes." : "sign in again to reconnect it."}`
           : provider === BEDROCK_INTEGRATION && bedrockCredentialMetadata.connected
             ? `AWS credential stored: <span class="connection-identity">${esc(bedrockCredentialMetadata.access_key_id || "linked")}</span>. Enable Bedrock to activate Hermes.`
             : provider === BEDROCK_INTEGRATION
@@ -467,6 +479,8 @@ export function renderIntegrationAccounts() {
             : "No account linked yet. The first login links the account it signs in to and allows it through the proxy.";
     const guidance = record.status === "error"
       ? `<p class="provider-error">${esc(record.error_message || "The last runtime check failed.")}</p>`
+      : account.enabled === false
+        ? `<p class="muted">Enable this account to sign in or resume using it. Kern skips its connection and usage checks.</p>`
       : !enabled
         ? provider === BEDROCK_INTEGRATION
           ? bedrockCredentialMetadata.connected
@@ -475,17 +489,20 @@ export function renderIntegrationAccounts() {
           : `<p class="muted">Enable ${esc(MANAGED_INTEGRATIONS[provider].label)} access before starting a login.</p>`
         : "";
     const canLogin = provider !== BEDROCK_INTEGRATION && enabled && (record.status === "awaiting_login" || record.status === "error");
-    const usageDisplay = providerUsageBox(provider, account);
+    const usageDisplay = account.enabled === false ? "" : providerUsageBox(provider, account);
     setHtml(node, `
       ${summary ? `<p class="connection-summary">${summary}</p>` : ""}
+      ${privacyHtml}
       ${usageDisplay}
       ${guidance}
       <span class="provider-account-actions">
+        ${optionalAccount && providerEnabled ? badge(record.status) : ""}
+        ${accountToggle}
         ${canLogin ? `<button class="sm" data-action="start-login" data-runtime="${esc(runtime)}">Start ${esc(runtimeLabel)} login</button>` : ""}
         ${(provider === BEDROCK_INTEGRATION ? bedrockCredentialMetadata.connected : identity) ? `<button class="ghost sm" data-action="reset-linked-account" data-runtime="${esc(runtime)}">${provider === BEDROCK_INTEGRATION ? "Disconnect AWS" : "Disconnect"}</button>` : ""}
       </span>`);
     const oauth = document.querySelector(`[data-provider-oauth="${runtime}"]`);
-    if (oauth && record.status === "active") setHtml(oauth, "");
+    if (oauth && (record.status === "active" || !enabled)) setHtml(oauth, "");
   }
 }
 
@@ -615,6 +632,17 @@ export async function resetLinkedAccount(runtime) {
     policyMessage(provider, sharedBedrock ? "AWS Bedrock account disconnected." : `${label} account disconnected.`);
     await refreshProviderAccounts();
     await refreshHealth();
+  } catch (error) { policyMessage(provider, error.message, true); }
+}
+
+export async function setRuntimeAccountEnabled(runtime, enabled) {
+  const provider = RUNTIME_PROVIDERS[runtime].provider;
+  if (!enabled && !confirm(`Disable ${runtimeLabel(runtime)}? This stops its running work. Its linked account and credentials stay saved.`)) return;
+  try {
+    await api("PUT", "/v1/agent-runtime/account-enabled", { agent_runtime: runtime, enabled });
+    await refreshProviderAccounts();
+    await refreshHealth();
+    policyMessage(provider, `${runtimeLabel(runtime)} ${enabled ? "enabled" : "disabled"}.`);
   } catch (error) { policyMessage(provider, error.message, true); }
 }
 

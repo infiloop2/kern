@@ -91,6 +91,44 @@ class MigrateRunnerTests(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
         self.migrations = Path(self.temp_dir.name)
 
+    def test_account_enablement_migration_preserves_approved_extra_accounts(self) -> None:
+        migrate.up(target=92, quiet=True)
+        for provider, approval in (("openai-2", "codex_device_login"), ("openai-3", "codex_device_login"), ("xai-2", "grok_device_login")):
+            with db.transaction() as cur:
+                cur.execute("INSERT INTO provider_accounts (provider, account_id, metadata) VALUES (%s, %s, jsonb_build_object('operator_approval', %s::text))",
+                            (provider, "approved-" + provider, approval))
+                cur.execute("INSERT INTO proxy_provider_pins (provider, account_id) VALUES (%s, %s)", (provider, "approved-" + provider))
+        self.assertEqual(migrate.up(target=93, quiet=True), [93])
+        with db.transaction() as cur:
+            cur.execute("SELECT provider FROM provider_accounts WHERE extra_account_enabled ORDER BY provider")
+            self.assertEqual(cur.fetchall(), [("openai-2",), ("openai-3",), ("xai-2",)])
+            cur.execute("SELECT provider, account_id FROM proxy_provider_pins ORDER BY provider")
+            self.assertEqual(cur.fetchall(), [(provider, "approved-" + provider) for provider in ("openai-2", "openai-3", "xai-2")])
+        # Migration replay must not undo a later operator disable.
+        with db.transaction() as cur:
+            cur.execute("UPDATE provider_accounts SET extra_account_enabled = FALSE WHERE provider = 'openai-2'")
+        self.assertEqual(migrate.up(target=93, quiet=True), [])
+        self.assertFalse(state.runtime_account_enabled("codex-2"))
+
+    def test_account_enablement_migration_ignores_missing_or_unapproved_anchors(self) -> None:
+        migrate.up(target=92, quiet=True)
+        with db.transaction() as cur:
+            cur.execute("INSERT INTO provider_accounts (provider, account_id, metadata) VALUES"
+                        " ('openai', 'primary', '{\"operator_approval\":\"codex_device_login\"}'),"
+                        " ('openai-2', 'unapproved', '{}'),"
+                        " ('openai-3', NULL, '{\"operator_approval\":\"codex_device_login\"}'),"
+                        " ('xai-2', 'wrong-marker', '{\"operator_approval\":\"codex_device_login\"}')")
+            cur.execute("INSERT INTO proxy_provider_pins (provider, account_id) VALUES"
+                        " ('openai', 'primary'), ('openai-2', 'stale'), ('openai-3', 'stale'), ('xai-2', 'stale')")
+        self.assertEqual(migrate.up(target=93, quiet=True), [93])
+        with db.transaction() as cur:
+            cur.execute("SELECT provider FROM provider_accounts WHERE extra_account_enabled")
+            self.assertEqual(cur.fetchall(), [])
+            cur.execute("SELECT provider, account_id FROM proxy_provider_pins")
+            self.assertEqual(cur.fetchall(), [("openai", "primary")])
+            cur.execute("SELECT count(*) FROM provider_accounts")
+            self.assertEqual(cur.fetchone()[0], 4)
+
     def test_google_search_replacement_drops_only_retired_config_and_enablement(self) -> None:
         migrate.up(target=86, quiet=True)
         with db.transaction() as cur:

@@ -752,13 +752,8 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn('const XAI_INTEGRATION = "xai";', network)
         self.assertNotIn("zdr_enabled", network)
         self.assertNotIn("ZDR ${account.zdr_enabled", network)
-        self.assertIn(
-            'typeof account.coding_data_retention_opt_out === "boolean"', network
-        )
-        self.assertIn(
-            '` &middot; coding-data opt-out ${account.coding_data_retention_opt_out ? "active" : "inactive"}`',
-            network,
-        )
+        self.assertIn('const privacy = account.data_training;', network)
+        self.assertIn('Open /privacy in Grok to opt out of coding-data training.', network)
         self.assertIn("renderPolicyPointContent(point)", connection_guide)
         self.assertIn('{ url: "https://console.x.ai/", label: "xAI Console" }', catalog)
         self.assertIn(
@@ -851,13 +846,7 @@ class AdminUiStaticTests(unittest.TestCase):
 
         self.assertIn('if (!enabled) {\n      setHtml(node, "");', network_js)
         self.assertIn('const summary = !enabled && !linked', network_js)
-        self.assertEqual(
-            network_js.count(
-                'const record = runtimeRecords().find(entry => entry.type === runtime) || '
-                '{ status: account.status || "loading" };'
-            ),
-            1,
-        )
+        self.assertIn('const record = account.enabled === false ? { status: "deactivated" }', network_js)
         self.assertIn('["oauth", "mcp_oauth"].includes(tool.connection) && (tool.enabled || connected)', tools_js)
         self.assertIn('${tool.enabled ? "" : " disabled"}>Reconnect</button>', tools_js)
         self.assertIn('${tool.enabled ? "" : " disabled"}>${connections.length', tools_js)

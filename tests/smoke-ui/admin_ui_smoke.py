@@ -110,7 +110,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scope",
-        choices=("all", "core", "workspaces", "overload", "oauth-poll", "navigation-order", "swarm", "notices", "google-ads", "x-ads", "instagram-ads"),
+        choices=("all", "core", "workspaces", "overload", "oauth-poll", "runtime-accounts", "training-privacy", "navigation-order", "swarm", "notices", "google-ads", "x-ads", "instagram-ads"),
         default="all",
         help="Smoke only the host UI core, only workspaces, or both.",
     )
@@ -174,6 +174,24 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 overload_context = browser.new_context(service_workers="block")
                 overload_smokes.run(overload_context.new_page(), url, log_in)
                 overload_context.close()
+            if scope in {"all", "core", "training-privacy"}:
+                import training_privacy_smokes
+                for mobile in (False, True):
+                    privacy_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    training_privacy_smokes.run(privacy_context.new_page(), url, log_in, open_home_integration)
+                    privacy_context.close()
+            if scope in {"all", "core", "runtime-accounts"}:
+                import runtime_account_smokes
+                for mobile in (False, True):
+                    account_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    runtime_account_smokes.run(account_context.new_page(), url, log_in, open_home_integration)
+                    account_context.close()
             if scope in {"all", "core", "oauth-poll"}:
                 import oauth_poll_smokes
                 for runtime, provider in (("grok-2", "xai"), ("claude_code", "claude")):
@@ -1502,7 +1520,8 @@ def desktop_smoke(page, url: str) -> None:
     expect(openai_guide.get_by_role("heading", name="Connection", exact=True)).to_have_count(1)
     expect(openai_guide.locator(":scope > .guide-section").nth(1).locator(":scope > p")).to_have_count(0)
     expect(openai_guide).not_to_contain_text("Connection steps")
-    expect(openai_guide).to_contain_text("enter its displayed device code")
+    expect(openai_guide).to_contain_text("displayed device code")
+    expect(openai_guide).to_contain_text("Enable account")
     expect(openai_guide).to_contain_text("any host data available to Codex can go to OpenAI")
     expect(openai_guide).to_contain_text("Cached web search keeps the search query and surrounding context within OpenAI")
     expect(openai_guide).to_contain_text("What OpenAI can do with it")

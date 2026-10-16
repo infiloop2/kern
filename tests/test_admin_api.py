@@ -726,6 +726,9 @@ class ThreadAdmissionHelpersTests(unittest.TestCase):
 class AdminApiIntegrationTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
+        with state.mutation() as cur:
+            for runtime in ("codex-2", "codex-3", "grok-2"):
+                state.set_runtime_account_enabled(cur, runtime, True)
         # Login sessions and the failed-login throttle are process-global; reset
         # them so a throttle test never leaks a lockout into another test.
         admin_api.admin_auth._sessions.clear()
@@ -4960,6 +4963,31 @@ class AdminApiIntegrationTests(unittest.TestCase):
         record = orchestrator.runtime_status_record("claude_code")
         self.assertIn("account changed", record["error_message"])
 
+    def test_additional_account_switch_is_operator_controlled(self) -> None:
+        with patch.object(orchestrator, "_stop_runtime_processes"), patch.object(orchestrator, "_close_login_flow"):
+            status, body = self.request("PUT", "/v1/agent-runtime/account-enabled", {
+                "agent_runtime": "codex-2", "enabled": False,
+            })
+        self.assertEqual(status, 200)
+        account = next(row for row in body["accounts"] if row.get("agent_runtime") == "codex-2")
+        self.assertEqual(account["status"], "deactivated")
+        self.assertFalse(account["enabled"])
+        self.assertTrue(state.runtime_account_enabled("codex"))
+        refreshed = threading.Event()
+        with patch.object(orchestrator, "_refresh_runtimes", side_effect=lambda runtimes: refreshed.set()) as background:
+            status, body = self.request("PUT", "/v1/agent-runtime/account-enabled", {
+                "agent_runtime": "codex-2", "enabled": True,
+            })
+            self.assertTrue(refreshed.wait(1))
+        self.assertEqual(status, 200)
+        self.assertTrue(state.runtime_account_enabled("codex-2"))
+        background.assert_called_once_with(("codex-2",))
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request("PUT", "/v1/agent-runtime/account-enabled", {
+                "agent_runtime": "codex", "enabled": False,
+            })
+        self.assertEqual(error.exception.code, 400)
+
     def test_agent_accounts_keep_linked_identity_while_not_active(self) -> None:
         set_runtime_statuses(codex="error", claude_code="awaiting_login")
         save_approved_openai_account("acct_smoke", email="codex@example.com", plan_type="pro")
@@ -4980,17 +5008,18 @@ class AdminApiIntegrationTests(unittest.TestCase):
                         "account_id": "acct_smoke",
                         "email": "codex@example.com",
                     },
-                    {"agent_runtime": "codex-2", "provider": "openai", "status": "loading"},
-                    {"agent_runtime": "codex-3", "provider": "openai", "status": "loading"},
+                    {"agent_runtime": "codex-2", "provider": "openai", "status": "loading", "enabled": True},
+                    {"agent_runtime": "codex-3", "provider": "openai", "status": "loading", "enabled": True},
                     {
                         "agent_runtime": "claude_code",
                         "provider": "claude",
                         "status": "awaiting_login",
+                        "data_training": {"allowed": None, "checked_at": None, "attempted_at": None},
                         "account_id": "acct_claude",
                         "email": "claude@example.com",
                     },
                     {"agent_runtime": "grok", "provider": "xai", "status": "loading"},
-                    {"agent_runtime": "grok-2", "provider": "xai", "status": "loading"},
+                    {"agent_runtime": "grok-2", "provider": "xai", "status": "loading", "enabled": True},
                     {
                         "provider": "bedrock",
                         "agent_runtimes": ["hermes"],
@@ -5068,11 +5097,11 @@ class AdminApiIntegrationTests(unittest.TestCase):
                             },
                         },
                     },
-                    {"agent_runtime": "codex-2", "provider": "openai", "status": "loading"},
-                    {"agent_runtime": "codex-3", "provider": "openai", "status": "loading"},
+                    {"agent_runtime": "codex-2", "provider": "openai", "status": "loading", "enabled": True},
+                    {"agent_runtime": "codex-3", "provider": "openai", "status": "loading", "enabled": True},
                     {"agent_runtime": "claude_code", "provider": "claude", "status": "awaiting_login"},
                     {"agent_runtime": "grok", "provider": "xai", "status": "loading"},
-                    {"agent_runtime": "grok-2", "provider": "xai", "status": "loading"},
+                    {"agent_runtime": "grok-2", "provider": "xai", "status": "loading", "enabled": True},
                     {
                         "provider": "bedrock",
                         "agent_runtimes": ["hermes"],
@@ -5161,13 +5190,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
             {
                 "accounts": [
                     {"agent_runtime": "codex", "provider": "openai", "status": "deactivated"},
-                    {"agent_runtime": "codex-2", "provider": "openai", "status": "loading"},
-                    {"agent_runtime": "codex-3", "provider": "openai", "status": "loading"},
+                    {"agent_runtime": "codex-2", "provider": "openai", "status": "loading", "enabled": True},
+                    {"agent_runtime": "codex-3", "provider": "openai", "status": "loading", "enabled": True},
                     {
                         "agent_runtime": "claude_code",
                         "provider": "claude",
                         "status": "active",
                         "account_id": "acct_smoke",
+                        "data_training": {"allowed": None, "checked_at": None, "attempted_at": None},
                         "email": "smoke@example.com",
                         "plan_type": "pro",
                         "claude_usage": {
@@ -5179,7 +5209,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                         },
                     },
                     {"agent_runtime": "grok", "provider": "xai", "status": "loading"},
-                    {"agent_runtime": "grok-2", "provider": "xai", "status": "loading"},
+                    {"agent_runtime": "grok-2", "provider": "xai", "status": "loading", "enabled": True},
                     {
                         "provider": "bedrock",
                         "agent_runtimes": ["hermes"],
@@ -5210,6 +5240,7 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 "agent_runtime": "grok",
                 "provider": "xai",
                 "status": "active",
+                "data_training": {"allowed": None, "checked_at": None, "attempted_at": None},
                 "account_id": "acct-xai",
                 "email": "grok@example.com",
                 "coding_data_retention_opt_out": True,

@@ -5,30 +5,30 @@ mode="read"
 expected_token_sha256=""
 while [[ "$#" -ge 1 ]]; do
   case "$1" in
-    --attest)
-      mode="attest"
+    --attest|--training-settings)
+      mode="${1#--}"
       shift
       ;;
     --expected-token-sha256)
       if [[ "$#" -lt 2 ]]; then
-        echo "usage: read-claude-account [--attest [--expected-token-sha256 <sha256>]]" >&2
+        echo "usage: read-claude-account [--attest|--training-settings [--expected-token-sha256 <sha256>]]" >&2
         exit 2
       fi
       expected_token_sha256="$2"
       shift 2
       ;;
     *)
-      echo "usage: read-claude-account [--attest [--expected-token-sha256 <sha256>]]" >&2
+      echo "usage: read-claude-account [--attest|--training-settings [--expected-token-sha256 <sha256>]]" >&2
       exit 2
       ;;
   esac
 done
-if [[ -n "${expected_token_sha256}" && "${mode}" != "attest" ]]; then
-  echo "usage: read-claude-account [--attest [--expected-token-sha256 <sha256>]]" >&2
+if [[ -n "${expected_token_sha256}" && "${mode}" == "read" ]]; then
+  echo "usage: read-claude-account [--attest|--training-settings [--expected-token-sha256 <sha256>]]" >&2
   exit 2
 fi
 
-if [[ "${mode}" == "attest" ]]; then
+if [[ "${mode}" != "read" ]]; then
   # Attestation asks api.anthropic.com/api/oauth/profile who the agent's
   # current OAuth token belongs to, so the account identity is bound to the
   # token by the provider instead of agent-writable metadata. It runs as root
@@ -40,7 +40,7 @@ if [[ "${mode}" == "attest" ]]; then
   # secret to the no-egress admin uid — root must open the file itself. That
   # read is hardened below (see read_agent_credential). The token never leaves
   # this process.
-  EXPECTED_TOKEN_SHA256="${expected_token_sha256}" exec /usr/bin/python3 - <<'PY'
+  ACCOUNT_READ_MODE="${mode}" EXPECTED_TOKEN_SHA256="${expected_token_sha256}" exec /usr/bin/python3 - <<'PY'
 import errno
 import hashlib
 import json
@@ -133,6 +133,25 @@ expected_token_sha256 = os.environ.get("EXPECTED_TOKEN_SHA256", "").strip()
 if expected_token_sha256 and access_token_sha256 != expected_token_sha256:
     print("Claude OAuth token changed before attestation", file=sys.stderr)
     sys.exit(1)
+
+if os.environ.get("ACCOUNT_READ_MODE") == "training-settings":
+    # The account preference used by /privacy-settings. /api/claude_code_grove
+    # reports feature availability instead, and must never be used as consent.
+    request = urllib.request.Request(
+        "https://api.anthropic.com/api/oauth/account/settings",
+        headers={"Authorization": "Bearer " + access_token,
+                 "anthropic-beta": "oauth-2025-04-20"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            settings = json.load(response)
+    except (urllib.error.URLError, TimeoutError, OSError, ValueError):
+        print("Could not read Claude training preference", file=sys.stderr)
+        sys.exit(1)
+    allowed = settings.get("grove_enabled") if isinstance(settings, dict) else None
+    print(json.dumps({"training_allowed": allowed if isinstance(allowed, bool) else None,
+                      "access_token_sha256": access_token_sha256}))
+    sys.exit(0)
 
 request = urllib.request.Request(
     "https://api.anthropic.com/api/oauth/profile",

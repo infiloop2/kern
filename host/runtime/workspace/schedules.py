@@ -317,6 +317,19 @@ def delete_schedule(
         current = _schedule_row(row)
         if current["revision"] != expected:
             raise WorkspaceError(HTTPStatus.CONFLICT, "schedule changed; reload and retry")
+        try:
+            response = call_admin_api("GET", f"/v1/threads/{current['thread_id']}")
+        except WorkspaceError as exc:
+            if exc.status != HTTPStatus.NOT_FOUND:
+                raise
+        else:
+            thread = response.get("thread")
+            if not isinstance(thread, dict) or thread.get("status") not in {"idle", "running"}:
+                raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid thread")
+            if thread["status"] == "running":
+                raise WorkspaceError(HTTPStatus.CONFLICT, "stop the agent before deleting this standing agent")
+            if thread.get("retry"):
+                raise WorkspaceError(HTTPStatus.CONFLICT, "cancel the automatic retry before deleting this standing agent")
         revision = expected + 1
         cur.execute(
             "UPDATE schedules SET revision = %s, deleted_at = %s,"

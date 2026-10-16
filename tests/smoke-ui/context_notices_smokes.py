@@ -296,6 +296,9 @@ def run_turn_retries(page: Any, url: str, log_in: Any) -> None:
     from playwright.sync_api import expect
 
     pending = {"chat": True, "app": True}
+    archive_requests = []
+    page.on("request", lambda request: archive_requests.append(request.url)
+            if request.method == "POST" and request.url.endswith("/archive") else None)
     retry = {"attempt": 2, "at": "2026-10-06T12:00:00Z"}
 
     def chat_index(route: Any) -> None:
@@ -328,6 +331,9 @@ def run_turn_retries(page: Any, url: str, log_in: Any) -> None:
     chat = page.locator("#panel-workspace-chat")
     expect(chat.locator("#composer-running")).to_contain_text("Retry 2/5 at")
     expect(chat.locator("#composer-running .working-dots")).to_be_hidden()
+    chat.locator("#archive-thread").click()
+    expect(chat.locator("#status")).to_have_text("Cancel the automatic retry before archiving this thread.")
+    assert pending["chat"] and not archive_requests
     chat.get_by_role("button", name="Cancel retry", exact=True).click()
     expect(chat.locator("#composer-running")).to_be_hidden()
     assert not pending["chat"]
@@ -340,6 +346,9 @@ def run_turn_retries(page: Any, url: str, log_in: Any) -> None:
     try:
         app.locator("#history-toggle").click()
         expect(app.locator("#composer-running")).to_contain_text("Retry 2/5 at")
+        app.locator("#archive-app").click()
+        expect(app.locator("#runtime-status")).to_have_text("Cancel the automatic retry before archiving this app")
+        assert pending["app"] and not archive_requests
         app.get_by_role("button", name="Cancel retry", exact=True).click()
         expect(app.locator("#composer-running")).to_be_hidden()
         assert not pending["app"]

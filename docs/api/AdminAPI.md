@@ -311,7 +311,7 @@ Response fields:
 | `host_runtime.swap.used_bytes` | integer |  | Current filesystem-backed RAM swap used, in bytes. |
 
 Runtime status is `deactivated` when that runtime's managed provider
-integration is disabled, `loading` while the runtime is starting,
+integration or additional account is disabled, `loading` while the runtime is starting,
 `awaiting_login` while an OAuth runtime needs operator login, `active` while it
 can accept work, and `error` when the runtime supervisor cannot make it
 healthy. Hermes has no OAuth flow: while Bedrock is enabled it is
@@ -327,6 +327,7 @@ The `error` state fails closed and denies all network access.
 ```text
 GET  /v1/agent-runtime/status
 GET  /v1/agent-runtime/account
+PUT  /v1/agent-runtime/account-enabled
 POST /v1/agent-runtime/refresh
 POST /v1/agent-runtime/codex-oauth-login
 GET  /v1/agent-runtime/codex-oauth-login
@@ -353,6 +354,7 @@ Agent runtime endpoints:
 | --- | --- | --- | --- | --- |
 | `GET` | `/v1/agent-runtime/status` | none | Agent runtime status response | Returns current state for every runtime. |
 | `GET` | `/v1/agent-runtime/account` | none | Agent account response | Returns the current account status for every runtime. |
+| `PUT` | `/v1/agent-runtime/account-enabled` | `{"agent_runtime":"codex-2","enabled":true}` | Agent account response | Enables or disables one additional account (`codex-2`, `codex-3`, or `grok-2`). Exactly these two fields are required; `enabled` must be a boolean. Invalid bodies or primary runtimes return `400`. |
 | `POST` | `/v1/agent-runtime/refresh` | Agent runtime refresh request | Agent account response | Attempts to refresh provider account/status for one runtime or all runtimes, then returns the current account response. |
 | `POST` | `/v1/agent-runtime/codex-oauth-login` | none | Codex OAuth login response | Starts a Codex OAuth login flow and returns the device code and login link. |
 | `GET` | `/v1/agent-runtime/codex-oauth-login` | none | Codex OAuth login response | Returns the current Codex OAuth device code and login link. |
@@ -390,9 +392,30 @@ ready for a fresh operator login that links an account again.
 one account-status entry per runtime.
 `POST /v1/agent-runtime/refresh` accepts `{}` to refresh all runtimes, or
 `{"agent_runtime": "codex"}`, `{"agent_runtime": "codex-2"}`, `{"agent_runtime": "codex-3"}`, `{"agent_runtime": "claude_code"}`, `{"agent_runtime": "grok"}`, `{"agent_runtime": "grok-2"}`, or `{"agent_runtime": "hermes"}` to refresh one.
-It forces a provider check instead of reusing a remembered live-validation
-verdict. It returns the same response shape as
+For enabled accounts it forces a provider check instead of reusing a remembered
+live-validation verdict. Disabled additional accounts are skipped. It returns the same response shape as
 `GET /v1/agent-runtime/account`.
+
+Linked, enabled Claude Code and Grok accounts also expose `data_training`:
+`{"allowed": true, "checked_at": "2026-10-16T10:00:00+00:00", "attempted_at": "2026-10-16T10:00:00+00:00"}`.
+`allowed` is `true` when training is allowed, `false` when opted out, and `null`
+until verified. Timestamps are nullable ISO 8601 strings. A failed check advances
+`attempted_at` and preserves the last successful verdict and `checked_at`.
+Checks run after activation, then approximately every ten minutes while unknown
+or after failures, and daily after success. Manual runtime refresh forces a check.
+Disabled accounts are not checked. Resetting or replacing the linked account
+clears its privacy result. Codex does not expose this field.
+
+Primary accounts follow their overall provider switch. Additional accounts
+require explicit enablement and an enabled provider. A disabled additional
+account reports `deactivated`, makes no automatic or manual provider checks,
+and cannot start OAuth login or new work. Disabling stops its running turns,
+closes pending login flows, and revokes both data-plane and status-probe proxy
+authorization, while preserving its anchor, credentials, sessions, and historical
+usage. Enabling starts a background refresh; if the provider is off, its status
+is `deactivated`. Provider off/on cycles and linked-account resets preserve the
+account opt-in. The upgrade enables existing operator-approved anchors;
+unlinked slots start disabled.
 
 Agent runtime status response:
 
@@ -501,6 +524,7 @@ Agent account response fields:
 | `accounts[].agent_runtimes` | string array | `["hermes"]` | Runtime that uses the Bedrock provider. Present only on the Bedrock record. |
 | `accounts[].provider` | enum | `openai`, `claude`, `xai`, `bedrock` | Managed AI provider. |
 | `accounts[].status` | enum | `deactivated`, `loading`, `awaiting_login`, `active`, `error` | Current provider account status. OAuth runtimes use `awaiting_login` when operator login is required. Bedrock has no OAuth flow: its status is `awaiting_login` until a synchronously validated credential is connected, then `active`. Later inference failures are reported on their turns, not persisted as provider status. |
+| `accounts[].enabled` | boolean | present only for `codex-2`, `codex-3`, and `grok-2` | The additional account's stored opt-in. `false` reports `deactivated` and omits plan/usage metadata; linked identity remains visible. Primary accounts inherit their provider switch and omit this field. |
 | `accounts[].account_id` | string | optional | The linked provider account id; for `bedrock` this is the 12-digit AWS account id. Present whenever a validated account identity is available. |
 | `accounts[].email` | string | optional | Present when available from the linked account metadata. |
 | `accounts[].arn` | string | optional | The STS-attested IAM identity of the connected AWS credential. Present only on the Bedrock provider record while its account is linked. |
@@ -1010,6 +1034,8 @@ agent_runtime.active
 agent_runtime.login_completed
 agent_runtime.linked_account_reset
 agent_runtime.deactivated
+agent_runtime.account_enabled
+agent_runtime.account_disabled
 ```
 
 `thread.message` payload fields:
@@ -1109,6 +1135,12 @@ reset-linked-account endpoint).
 `agent_runtime.deactivated` uses `thread_id: null` and payload
 `{"agent_runtime": "codex"}`, `{"agent_runtime": "codex-2"}`, `{"agent_runtime": "codex-3"}`, `{"agent_runtime": "claude_code"}`, `{"agent_runtime": "grok"}`, `{"agent_runtime": "grok-2"}`, or `{"agent_runtime": "hermes"}` when a
 runtime is disabled because its managed provider integration is disabled.
+
+`agent_runtime.account_enabled` and `agent_runtime.account_disabled` use
+`thread_id: null` and payload `{"agent_runtime":"codex-2"}` (or `codex-3` / `grok-2`)
+for explicit operator changes to an additional account's opt-in. These are
+separate from provider deactivation; default-disabled slots do not emit
+provider-deactivation events at startup.
 
 ## Agent Files
 
