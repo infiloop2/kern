@@ -69,6 +69,17 @@ def _check_fields(tool_input: JSONObject, action: str) -> None:
         raise ToolInputValidationError(f"OpenRouter {action} received an unsupported field.")
 
 
+def _warning(exc: WebRequestError, operation: str, message: str) -> ProviderWarning:
+    # Deliberate operator-only diagnostic: never include provider text in the
+    # agent-facing message or attach request headers, prompts or media inputs.
+    warning = ProviderWarning(
+        "OpenRouter", operation, message + " Check Host diagnostics for details.",
+        status=exc.status, body=exc.body[:4096],
+    )
+    warning.body_truncated = exc.body_truncated or len(exc.body) > 4096
+    return warning
+
+
 def _failure(exc: WebRequestError, operation: str) -> str:
     messages = {
         400: "OpenRouter rejected the request. Check HeyGen input compatibility and your OpenRouter account restrictions.",
@@ -82,14 +93,13 @@ def _failure(exc: WebRequestError, operation: str) -> str:
         429: "OpenRouter rate limited the request. Wait before retrying; do not repeat a possibly accepted generation.",
     }
     if exc.status in messages:
-        return messages[exc.status]
+        raise _warning(exc, operation, messages[exc.status])
     # Submission faults can occur after acceptance. Do not invite an automatic
     # POST retry, even for an apparent server or transport failure.
     if operation == "create_heygen_video":
-        raise ProviderWarning(
-            "OpenRouter", operation,
+        raise _warning(
+            exc, operation,
             "OpenRouter submission outcome is unknown. Check OpenRouter activity before submitting again; a paid video job may already exist.",
-            status=exc.status,
         )
     known = known_provider_transport_error(exc)
     if known:

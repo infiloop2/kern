@@ -91,6 +91,7 @@ MANIFEST = ToolManifest(
     ),
     technical_details=(
         PARAM_GUARD_TECHNICAL_DETAIL,
+        "Mapped HTTP failures and ambiguous submissions record the operation, HTTP status and up to 4096 bytes of provider error response in operator-only Host diagnostics. Provider text may include echoed input; agent replies retain curated messages only. No automatic retry is performed.",
         "Media IDs must belong to this tool and remain unexpired. JPEG/PNG/WebP inputs are at most 5 MB; MP4/MOV/MP3/WAV inputs at most 16 MB. References permit 9 images, 3 videos, 3 audio files and 12 total, at most 60 MB combined. Media duration/content constraints remain provider-validated. Bytes become data URLs internally, never model context or caller URLs.",
         "Mode conflicts fail before submission. Arbitrary provider options, callbacks, model overrides and endpoints are not accepted. First-frame aspect overrides fail rather than being ignored.",
         "Accepted submission records one estimate with a stable job charge ID, without needing a poll. MP4/MOV movie-header durations round up; unreadable metadata uses a 60-second allowance per reference, not a guaranteed upper bound. Catalog pricing falls back to verified list rates and ignores discounts. Polls/saves ignore usage.cost, so estimates remain unchanged after completion or refunds. Output index 0 uses the shared video type and 200 MB bounds.",

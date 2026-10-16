@@ -47,6 +47,19 @@ def _serving(body: bytes) -> object:
 
 
 class WebResponseCapTests(unittest.TestCase):
+    def test_streaming_http_error_body_uses_one_byte_lookahead(self) -> None:
+        for size in (0, 100, 4096, 4097, 10000):
+            body = b"x" * size
+            source = io.BytesIO(body)
+            response = urllib.error.HTTPError("https://api.example.com/x", 400, "Bad Request", {}, source)
+            with self.subTest(size=size), patch.object(web._OPENER, "open", side_effect=response), self.assertRaises(WebRequestError) as caught:
+                with open_response_stream("GET", "https://api.example.com/x", failure_message="failed"):
+                    self.fail("HTTP error must not yield a download")
+            self.assertEqual(caught.exception.status, 400)
+            self.assertEqual(caught.exception.body, body[:4096])
+            self.assertEqual(caught.exception.body_truncated, size > 4096)
+            self.assertEqual(source.tell(), min(size, 4097))
+
     def test_transport_truncation_reaches_copied_diagnostic_context(self) -> None:
         from host.runtime.tools.tools_host import _provider_warning_context
         from host.runtime.core.host_errors import _safe_context
