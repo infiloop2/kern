@@ -198,10 +198,10 @@ def open_response_stream(
     except urllib.error.HTTPError as exc:
         body = b""
         try:
-            body = exc.read(4096)
+            body = exc.read(4097)
         except Exception:
             pass
-        raise WebRequestError(failure_message, status=exc.code, body=body) from exc
+        raise WebRequestError(failure_message, status=exc.code, body=body[:4096], body_truncated=len(body) > 4096) from exc
     except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as exc:
         raise WebRequestError(failure_message) from exc
     try:

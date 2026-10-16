@@ -789,6 +789,8 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
             if exc.response_body:
                 context["provider_response"] = exc.response_body
             context.update(exc.diagnostic_context)
+            if exc.body_truncated:
+                context["provider_response_truncated"] = True
             host_errors.report_warning(
                 "tools.streaming_provider_request",
                 exc,

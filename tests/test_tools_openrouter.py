@@ -4,12 +4,14 @@ from contextlib import contextmanager
 import base64
 import io
 import unittest
+import urllib.error
 from unittest.mock import patch
 
+from host.runtime.tools import tools_host
 from host.runtime.tools.tools_host import BUNDLED_TOOLS
 from host.tools import openrouter
 from host.tools.results import ActionExecuted, ActionFailed, StreamingAsset, StreamingAssetError
-from host.tools.shared import media
+from host.tools.shared import media, web
 from host.tools.shared.web import ProviderWarning, UnmappedProviderError, WebRequestError
 from test_tools import FakeHostAPI, assert_matches_output_schema
 
@@ -326,15 +328,88 @@ class OpenRouterTests(unittest.TestCase):
                     self.assertTrue(opened.source.closed)
         self.assertFalse(self.api.costs.calls)
 
-    def test_missing_config_and_mapped_errors_are_actionable_without_raw_body(self):
+    def test_missing_config_is_actionable(self):
         result = self.tool.execute("create_heygen_video", {"prompt": "A calm coast"}, FakeHostAPI())
         self.assertIsInstance(result, ActionFailed)
         self.assertIn("OPENROUTER_API_KEY", result.error)
+
+    def test_mapped_errors_reach_diagnostics_without_raw_body_in_message(self):
         for status in (400, 401, 402, 403, 404, 409, 410, 413, 429):
-            result, request = self.execute("get_task", {"task_id": JOB}, [WebRequestError("bad", status=status, body=b"private-test-key")])
-            self.assertIsInstance(result, ActionFailed)
-            self.assertNotIn("private-test-key", result.error)
+            with self.subTest(status=status), patch.object(openrouter, "json_request", side_effect=WebRequestError("bad", status=status, body=b"private-provider-detail")) as request:
+                with self.assertRaises(ProviderWarning) as raised:
+                    self.tool.execute("get_task", {"task_id": JOB}, self.api)
+            warning = raised.exception
+            self.assertEqual(warning.provider, "OpenRouter")
+            self.assertEqual(warning.operation, "get_task")
+            self.assertEqual(warning.status, status)
+            self.assertEqual(warning.response_body, "private-provider-detail")
+            self.assertNotIn("private-provider-detail", str(warning))
+            self.assertIn("Check Host diagnostics", str(warning))
             self.assertEqual(request.call_count, 1)
+
+    def test_rejected_catalog_and_submission_have_distinct_operations(self):
+        error = WebRequestError("bad", status=400, body=b'{"error":{"message":"Unsupported reference input"}}')
+        for responses, operation, calls in (([error], "heygen_capabilities", 1), ([CATALOG, error], "create_heygen_video", 2)):
+            with self.subTest(operation=operation), patch.object(openrouter, "json_request", side_effect=responses) as request:
+                with self.assertRaises(ProviderWarning) as raised:
+                    self.tool.execute("create_heygen_video", {"prompt": "A calm coast"}, self.api)
+            self.assertEqual(raised.exception.operation, operation)
+            self.assertEqual(raised.exception.status, 400)
+            self.assertIn("Unsupported reference input", raised.exception.response_body)
+            self.assertNotIn("Unsupported reference input", str(raised.exception))
+            self.assertEqual(request.call_count, calls)
+            self.assertFalse(self.api.costs.calls)
+
+    def test_warning_body_is_bounded_and_preserves_truncation(self):
+        for body, truncated in ((b"x" * 5000, False), (b"x" * 100, True)):
+            with patch.object(openrouter, "json_request", side_effect=WebRequestError("bad", status=400, body=body, body_truncated=truncated)):
+                with self.assertRaises(ProviderWarning) as raised:
+                    self.tool.execute("get_task", {"task_id": JOB}, self.api)
+            self.assertEqual(raised.exception.response_body, body[:4096].decode())
+            self.assertTrue(raised.exception.body_truncated)
+
+    def test_host_records_rejection_but_returns_only_curated_error(self):
+        for responses, operation in (([WebRequestError("bad", status=400, body=b"private-detail", body_truncated=True)], "heygen_capabilities"),
+                                     ([CATALOG, WebRequestError("bad", status=400, body=b"private-detail", body_truncated=True)], "create_heygen_video")):
+            with (
+                self.subTest(operation=operation),
+                patch.object(tools_host, "enabled_tool", return_value=self.tool),
+                patch.object(tools_host, "resolve_connection", return_value=tools_host.ConnectionScope("", None)),
+                patch.object(tools_host, "host_api_for", return_value=self.api),
+                patch.object(tools_host, "_audit") as audit,
+                patch.object(tools_host.host_errors, "report_warning") as report,
+                patch.object(openrouter, "json_request", side_effect=responses),
+            ):
+                result = tools_host.execute_action("openrouter", "create_heygen_video", {"prompt": "private-prompt"}, None)
+            report.assert_called_once()
+            self.assertEqual(report.call_args.args[0], "tools.provider_request")
+            self.assertEqual(report.call_args.kwargs["kind"], "provider_failure")
+            self.assertEqual(report.call_args.kwargs["context"], {
+                "tool_id": "openrouter", "action_id": "create_heygen_video",
+                "provider": "OpenRouter", "operation": operation, "http_status": 400,
+                "provider_response": "private-detail", "provider_response_truncated": True,
+            })
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("Check Host diagnostics", result["error"])
+            self.assertNotIn("private-detail", str(result))
+            self.assertNotIn("private-test-key", str(report.call_args))
+            self.assertNotIn("private-prompt", str(report.call_args))
+            self.assertEqual(audit.call_args.args[2], result)
+
+    def test_download_rejection_reaches_streaming_diagnostics(self):
+        body = b"download-detail" + b"x" * 5000
+        error = urllib.error.HTTPError(openrouter.API_BASE + "/" + JOB + "/content?index=0", 400, "Bad Request", {}, io.BytesIO(body))
+        with patch.object(web._OPENER, "open", side_effect=error):
+            result, request = self.execute("save_video", {"task_id": JOB}, [{"id": JOB, "status": "completed"}])
+            with self.assertRaises(ProviderWarning) as raised:
+                with result.open_stream():
+                    pass
+        self.assertEqual(raised.exception.operation, "save_video")
+        self.assertEqual(raised.exception.status, 400)
+        self.assertEqual(raised.exception.response_body, body[:4096].decode())
+        self.assertTrue(raised.exception.body_truncated)
+        self.assertNotIn("download-detail", str(raised.exception))
+        self.assertEqual(request.call_count, 1)
 
     def test_ambiguous_submission_is_never_retried(self):
         for status in (0, 500, 502):

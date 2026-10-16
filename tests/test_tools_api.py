@@ -202,6 +202,34 @@ class MCPOAuthConnectionTests(unittest.TestCase):
 
 
 class StreamMaterializationUnitTests(unittest.TestCase):
+    def test_provider_warning_preserves_operator_truncation_metadata(self) -> None:
+        from host.tools.shared.web import ProviderWarning
+
+        for truncated in (False, True):
+            warning = ProviderWarning("OpenRouter", "save_video", "Download rejected.", status=400, body=b"private-provider-detail")
+            warning.body_truncated = truncated
+
+            @contextmanager
+            def open_stream():
+                raise warning
+                yield  # pragma: no cover
+
+            handler = Mock()
+            streaming = Mock(asset=StreamingAsset(open_stream), tool_id="openrouter", action="save_video")
+            with self.subTest(truncated=truncated), patch.object(tools_host, "finish_streaming_action") as finish, patch.object(tools_api.host_errors, "report_warning") as report:
+                tools_api.ToolsRequestHandler._send_streaming_action(handler, streaming)
+            report.assert_called_once()
+            self.assertEqual(report.call_args.args[0], "tools.streaming_provider_request")
+            context = report.call_args.kwargs["context"]
+            self.assertEqual(context["provider_response"], "private-provider-detail")
+            self.assertEqual(context["http_status"], 400)
+            self.assertEqual(context["operation"], "save_video")
+            self.assertEqual(context.get("provider_response_truncated", False), truncated)
+            if not truncated:
+                self.assertNotIn("provider_response_truncated", context)
+            self.assertEqual(handler._send_json.call_args.args[1]["error"], "Download rejected.")
+            finish.assert_called_once_with(streaming, "Download rejected.")
+
     def test_nonempty_source_cannot_claim_zero_length(self) -> None:
         @contextmanager
         def open_stream():
