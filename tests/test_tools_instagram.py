@@ -535,13 +535,9 @@ class InstagramImageTests(unittest.TestCase):
         api, ids, record = self.prepare(10)
         self.assertEqual([a["asset_id"] for a in record.payload["proposal"]["image_assets"]], ids)
         live = set()
-        @contextmanager
         def grant(asset_id):
             live.add(asset_id)
-            try:
-                yield "https://kern.example/tool-media/" + asset_id
-            finally:
-                live.remove(asset_id)
+            return "https://kern.example/tool-media/" + asset_id
         children, finished, publications = [], set(), []
         polls = {}
         def request(method, url, **kwargs):
@@ -563,7 +559,7 @@ class InstagramImageTests(unittest.TestCase):
                 children.append(str(100 + index))
                 return {"id": children[-1]}
             if "/media_publish?" in url:
-                self.assertFalse(live)
+                self.assertEqual(live, set(ids))
                 self.assertEqual(params["creation_id"], ["200"])
                 publications.append(params["creation_id"])
                 return {"id": "900"}
@@ -580,7 +576,7 @@ class InstagramImageTests(unittest.TestCase):
         self.assertEqual(len(publications), 1)
         self.assertEqual(sleep.call_count, 1)
         self.assertEqual(polls["100"], 1)  # Finished children aren't polled again.
-        self.assertFalse(live)
+        self.assertEqual(live, set(ids))
         self.assertFalse(api.assets.records)
 
     def test_invalid_image_inputs_never_create_approval_or_provider_write(self):
@@ -621,18 +617,14 @@ class InstagramImageTests(unittest.TestCase):
         self.assertLessEqual(len(summary.encode()), 500)
         self.assertIn("10-image carousel", summary)
 
-    def test_processing_failure_revokes_all_grants_and_never_partially_publishes(self):
+    def test_processing_failure_retains_grants_until_expiry_and_never_partially_publishes(self):
         for terminal in ("ERROR", "EXPIRED", "IN_PROGRESS"):
             with self.subTest(terminal=terminal):
                 api, ids, record = self.prepare(2)
                 live = set()
-                @contextmanager
                 def grant(asset_id):
                     live.add(asset_id)
-                    try:
-                        yield "https://kern.example/tool-media/" + asset_id
-                    finally:
-                        live.remove(asset_id)
+                    return "https://kern.example/tool-media/" + asset_id
                 responses = [dict(ME_RESPONSE), {"id": "100"}, {"id": "101"}]
                 responses += [{"status_code": "FINISHED"}, {"status_code": terminal}]
                 responses += [{"status_code": terminal}] * 7
@@ -640,7 +632,7 @@ class InstagramImageTests(unittest.TestCase):
                       patch.object(api.assets, "public_asset_url", grant), patch.object(instagram.time, "sleep") as sleep,
                       self.assertRaises(ProviderWarning)):
                     InstagramTool().execute_approved(record, api)
-                self.assertFalse(live)
+                self.assertEqual(live, set(ids))
                 self.assertEqual(set(api.assets.records), set(ids))
                 self.assertFalse(any("media_publish" in c.args[1] for c in request.call_args_list))
                 self.assertLessEqual(sleep.call_count, 7)

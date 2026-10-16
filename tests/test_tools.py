@@ -177,10 +177,9 @@ class MemoryAssets:
     def _approved_execution(self, public_hostname=None):
         yield
 
-    @contextmanager
-    def public_asset_url(self, asset_id: str):
+    def public_asset_url(self, asset_id: str) -> str:
         self.describe(asset_id)
-        yield "https://kern.example/tool-media/" + "A" * 43
+        return "https://kern.example/tool-media/" + "R" * 43
 
     def delete(self, asset_id: str) -> None:
         self.records.pop(asset_id, None)

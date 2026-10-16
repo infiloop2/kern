@@ -343,6 +343,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
     "pagespeed_insights": (("analyze_page", {"url": "https://example.com/"}),),
     "openrouter": (
         ("create_heygen_video", {"prompt": "Kern smoke", "duration_seconds": "5", "resolution": "480p"}),
+        ("create_heygen_reference_video", {"prompt": "Kern smoke"}),
         ("get_task", {"task_id": "gen-vid-0000000000-00000000000000000000"}),
         ("save_video", {"task_id": "gen-vid-0000000000-00000000000000000000"}),
     ),

@@ -7,7 +7,6 @@ import re
 import time
 import urllib.parse
 from collections.abc import Mapping
-from contextlib import ExitStack
 from datetime import datetime
 from typing import cast
 
@@ -390,7 +389,7 @@ MANIFEST = ToolManifest(
                 title="What leaves this host",
                 points=(
                     DataSummaryPoint(label="Reads", text="Only the connected account id and bounded field and limit parameters; reads cover your own professional account, not other accounts."),
-                    DataSummaryPoint(label="Publishing", text="After approval, Meta receives the caption and fetches the staged images or video through temporary links on your public Kern address."),
+                    DataSummaryPoint(label="Publishing", text="After approval, Meta receives the caption and fetches staged images/video through temporary links on your public Kern address. Anyone holding a link can fetch that file for up to 15 minutes, including after a failed upload. Successful publication deletes the staged copy and invalidates its links early."),
                     DataSummaryPoint(label="Replies", text="After approval, Meta receives the exact public comment reply or private DM text and verified target. Reads bring incoming comments and private message text into the active model context."),
                 ),
             ),
@@ -1214,25 +1213,24 @@ def _publish_images(access_token: str, user_id: str, action: str, proposal: JSON
     if _image_proposal(action, tool_input, api) != proposal:
         raise RuntimeError("Staged images no longer match the approved assets.")
     carousel = action == "post_carousel"
-    with ExitStack() as grants:
-        urls = [grants.enter_context(api.assets.public_asset_url(cast(str, a["asset_id"]))) for a in assets]
-        children = []
-        for url in urls:
-            params = {"image_url": url}
-            if carousel:
-                params["is_carousel_item"] = "true"
-            else:
-                params["caption"] = cast(str, proposal["caption"])
-            children.append(_create_image_container(access_token, user_id, params))
-        _wait_for_image_containers(access_token, children)
+    urls = [api.assets.public_asset_url(cast(str, a["asset_id"])) for a in assets]
+    children = []
+    for url in urls:
+        params = {"image_url": url}
         if carousel:
-            container_id = _create_image_container(access_token, user_id, {
-                "media_type": "CAROUSEL", "children": ",".join(children),
-                "caption": cast(str, proposal["caption"]),
-            })
-            _wait_for_image_containers(access_token, [container_id])
+            params["is_carousel_item"] = "true"
         else:
-            container_id = children[0]
+            params["caption"] = cast(str, proposal["caption"])
+        children.append(_create_image_container(access_token, user_id, params))
+    _wait_for_image_containers(access_token, children)
+    if carousel:
+        container_id = _create_image_container(access_token, user_id, {
+            "media_type": "CAROUSEL", "children": ",".join(children),
+            "caption": cast(str, proposal["caption"]),
+        })
+        _wait_for_image_containers(access_token, [container_id])
+    else:
+        container_id = children[0]
     return _publish_container(access_token, user_id, container_id)
 
 
@@ -1265,41 +1263,41 @@ def _publish_reel(access_token: str, user_id: str, proposal: JSONObject, api: Ho
         raise RuntimeError("Staged video no longer matches the approved asset.")
     # Instagram Login uses video_url. Meta documents resumable uploads only
     # for Facebook Login for Business. The host grants access after approval.
-    with api.assets.public_asset_url(asset_id) as video_url:
-        create_params = {
-            "media_type": "REELS",
-            "share_to_feed": "true" if proposal.get("share_to_feed") else "false",
-            "access_token": access_token,
-            "video_url": video_url,
-        }
-        caption = str(proposal.get("caption") or "")
-        if caption:
-            create_params["caption"] = caption
-        try:
-            created = json_request(
-                "POST", _graph_url(f"/{user_id}/media", create_params),
-                failure_message="Instagram media container creation failed.",
-                invalid_response_message="Instagram media container creation returned an invalid response.",
-            )
-        except WebRequestError as exc:
-            raise _mapped_web_error(exc, "Reel container") from exc
-        container_id = created.get("id")
-        if not isinstance(container_id, str) or not MEDIA_ID_RE.fullmatch(container_id):
-            raise RuntimeError("Instagram did not return a media container id.")
-        for _ in range(PUBLISH_POLL_ATTEMPTS):
-            status = _graph_get(access_token, f"/{container_id}", {"fields": "status_code"}, what="container status")
-            status_code = status.get("status_code")
-            if status_code == "FINISHED":
-                break
-            if status_code in {"ERROR", "EXPIRED"}:
-                raise ProviderWarning("Instagram", "container processing",
-                                      f"Instagram could not process the video (container status {status_code}).")
-            time.sleep(PUBLISH_POLL_DELAY_SECONDS)
-        else:
-            raise ProviderWarning(
-                "Instagram", "container processing",
-                "Instagram video processing timed out. Nothing was published. Queue a new approval to retry.",
-            )
+    video_url = api.assets.public_asset_url(asset_id)
+    create_params = {
+        "media_type": "REELS",
+        "share_to_feed": "true" if proposal.get("share_to_feed") else "false",
+        "access_token": access_token,
+        "video_url": video_url,
+    }
+    caption = str(proposal.get("caption") or "")
+    if caption:
+        create_params["caption"] = caption
+    try:
+        created = json_request(
+            "POST", _graph_url(f"/{user_id}/media", create_params),
+            failure_message="Instagram media container creation failed.",
+            invalid_response_message="Instagram media container creation returned an invalid response.",
+        )
+    except WebRequestError as exc:
+        raise _mapped_web_error(exc, "Reel container") from exc
+    container_id = created.get("id")
+    if not isinstance(container_id, str) or not MEDIA_ID_RE.fullmatch(container_id):
+        raise RuntimeError("Instagram did not return a media container id.")
+    for _ in range(PUBLISH_POLL_ATTEMPTS):
+        status = _graph_get(access_token, f"/{container_id}", {"fields": "status_code"}, what="container status")
+        status_code = status.get("status_code")
+        if status_code == "FINISHED":
+            break
+        if status_code in {"ERROR", "EXPIRED"}:
+            raise ProviderWarning("Instagram", "container processing",
+                                  f"Instagram could not process the video (container status {status_code}).")
+        time.sleep(PUBLISH_POLL_DELAY_SECONDS)
+    else:
+        raise ProviderWarning(
+            "Instagram", "container processing",
+            "Instagram video processing timed out. Nothing was published. Queue a new approval to retry.",
+        )
     return _publish_container(access_token, user_id, container_id)
 
 
@@ -1419,7 +1417,8 @@ class InstagramTool:
                 asset_ids = [a["asset_id"] for a in cast(list[JSONObject], proposal["image_assets"])]
                 subject = "an image" if approval.action_id == "post_image" else "an image carousel"
             # Retain all source assets on failure or unconfirmed publication.
-            # Temporary public grants are revoked by their context managers.
+            # Deleting confirmed sources invalidates their links early. On
+            # failure, links retain their bounded 15-minute expiry.
             for asset_id in asset_ids:
                 if isinstance(asset_id, str):
                     api.assets.delete(asset_id)

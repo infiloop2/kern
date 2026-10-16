@@ -166,7 +166,13 @@ class Assets(Protocol):
 
     def delete(self, asset_id: str) -> None: ...
 
-    def public_asset_url(self, asset_id: str) -> AbstractContextManager[str]: ...
+    def public_asset_url(self, asset_id: str) -> str:
+        """Approved staged media HTTPS link; expires within 15 minutes.
+
+        Survives callback exit for asynchronous provider retrieval. Never return
+        the URL to an agent. No grant can be minted outside approved execution.
+        """
+        ...
 
 class Outbound(Protocol):
     """Host-owned guard for agent-controlled free-text request parameters.
