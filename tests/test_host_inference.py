@@ -102,6 +102,41 @@ class InferenceRedactionTests(unittest.TestCase):
 
 
 class OpenAITextAdapterTests(unittest.TestCase):
+    def test_sol_accepts_full_byte_budget_and_preserves_escaped_and_unicode_text(self) -> None:
+        for character in ("x", "\x01", "😀"):
+            with self.subTest(character=repr(character)):
+                prompt = character * (openai.SOL_MAX_PROMPT_BYTES // len(character.encode("utf-8")))
+                sent = {}
+
+                def transport(_url, **kwargs):
+                    sent.update(kwargs)
+                    return b'{"choices":[{"message":{"content":"{\\"status_line\\":\\"ok\\",\\"needs_operator\\":false}"}}]}'
+
+                openai.complete(
+                    api_key="sk-test", model="gpt-6.1-sol", prompt=prompt,
+                    schema_name="status", schema=SCHEMA, transport=transport, **TEXT_SETTINGS,
+                )
+                self.assertEqual(json.loads(sent["data"])["messages"][1]["content"], prompt)
+                self.assertLess(len(sent["data"]), openai.SOL_MAX_REQUEST_BYTES)
+
+    def test_sol_rejects_prompt_or_combined_context_over_budget_before_transport(self) -> None:
+        cases = (
+            ("😀" * (openai.SOL_MAX_PROMPT_BYTES // 4) + "x", "short"),
+            ("x" * openai.SOL_MAX_PROMPT_BYTES, "y" * (openai.SOL_MAX_INPUT_BYTES - openai.SOL_MAX_PROMPT_BYTES)),
+            # Redaction can expand short credential values; count what is sent.
+            ("x" * openai.SOL_MAX_PROMPT_BYTES, "password: a\n" * 2500),
+        )
+        for prompt, instructions in cases:
+            with self.subTest(prompt_bytes=len(prompt.encode("utf-8")), instruction_bytes=len(instructions)):
+                transport = MagicMock()
+                with self.assertRaisesRegex(ValueError, "too large"):
+                    openai.complete(
+                        api_key="sk-test", model="gpt-6.1-sol", prompt=prompt,
+                        schema_name="status", schema=SCHEMA, transport=transport,
+                        **{**TEXT_SETTINGS, "instructions": instructions},
+                    )
+                transport.assert_not_called()
+
     def test_sends_one_bounded_fixed_endpoint_request_and_validates_result(self) -> None:
         seen = {}
 
@@ -786,6 +821,52 @@ class ConcreteProviderTests(unittest.TestCase):
 
 
 class HostInferenceBoundaryTests(unittest.TestCase):
+    def test_large_sol_call_keeps_provider_deadline_and_allows_local_processing(self) -> None:
+        connection = MagicMock()
+        connection.getresponse.return_value.status = 200
+        connection.getresponse.return_value.read.return_value = b'{"result":{"status_line":"ok","needs_operator":false}}'
+        with patch.object(client, "_HostInferenceConnection", return_value=connection) as connect:
+            client.openai_text_completion(
+                "x" * openai.SOL_MAX_PROMPT_BYTES, SCHEMA, "status", timeout_seconds=60,
+                **{**OPENAI_SETTINGS, "model": "gpt-6.1-sol"},
+            )
+        connect.assert_called_once_with(65.0)
+        sent = json.loads(connection.request.call_args.kwargs["body"])
+        self.assertEqual(sent["timeout_seconds"], 60)
+
+    def test_large_sol_prompt_crosses_real_socket_and_provider_adapter(self) -> None:
+        prompt = "\x01" * openai.SOL_MAX_PROMPT_BYTES
+        settings = {**OPENAI_SETTINGS, "model": "gpt-6.1-sol", "reasoning_effort": "medium"}
+        with tempfile.TemporaryDirectory() as directory:
+            path = str(Path(directory) / "large.sock")
+            server = api.HostInferenceServer(path, frozenset({os.getuid()}))
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+            thread.start()
+            try:
+                with patch.object(client, "SOCKET_PATH", path), \
+                     patch.object(providers.state, "enabled_host_inference_provider", return_value={"api_key": "sk-test"}), \
+                     patch.object(providers.usage, "record_openai_response"), \
+                     patch.object(provider_http, "post") as post:
+                    post.return_value = b'{"choices":[{"message":{"content":"{\\"status_line\\":\\"ok\\",\\"needs_operator\\":false}"}}]}'
+                    result = client.openai_text_completion(prompt, SCHEMA, "status", timeout_seconds=60, **settings)
+                self.assertEqual(result, {"status_line": "ok", "needs_operator": False})
+                self.assertEqual(json.loads(post.call_args.kwargs["data"])["messages"][1]["content"], prompt)
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join()
+
+    def test_client_rejects_model_specific_oversized_prompts_before_socket(self) -> None:
+        for model, limit in (("gpt-6-luna", openai.MAX_PROMPT_BYTES), ("gpt-6.1-sol", openai.SOL_MAX_PROMPT_BYTES)):
+            with self.subTest(model=model), patch.object(client, "_HostInferenceConnection") as connection:
+                with self.assertRaises(client.HostInferenceError) as failure:
+                    client.openai_text_completion(
+                        "x" * (limit + 1), SCHEMA, "status", timeout_seconds=60,
+                        **{**OPENAI_SETTINGS, "model": model},
+                    )
+                self.assertEqual(failure.exception.reason, "input_too_large")
+                connection.assert_not_called()
+
     def test_luna_decision_keeps_all_four_jev_slots_available(self) -> None:
         shadow_started = threading.Event()
         jev_started = threading.Barrier(api.MAX_CONCURRENT_CALLS + 1)

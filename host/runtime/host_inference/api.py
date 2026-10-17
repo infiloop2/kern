@@ -15,7 +15,7 @@ from host.runtime.core.unix_socket_service import (
     UnixSocketServer,
     peer_uids,
 )
-from host.runtime.host_inference import decisions, providers
+from host.runtime.host_inference import decisions, openai, providers
 from host.runtime.host_inference.providers import OPENAI_MAX_TIMEOUT_SECONDS, JEV_MAX_TIMEOUT_SECONDS
 
 
@@ -101,7 +101,8 @@ class HostInferenceHandler(UnixSocketRequestHandler):
         if self.path not in {"/openai/text-completion", "/openai/decisions", "/typesafe/jev-judgment"}:
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown path."})
             return
-        length = self.bounded_content_length(MAX_REQUEST_BODY_BYTES)
+        limit = openai.SOL_MAX_REQUEST_BYTES if self.path == "/openai/text-completion" else MAX_REQUEST_BODY_BYTES
+        length = self.bounded_content_length(limit)
         if length is None:
             return
         call_slots = _DECISION_SLOTS if self.path == "/openai/decisions" else _CALL_SLOTS

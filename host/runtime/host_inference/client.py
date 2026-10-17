@@ -11,7 +11,7 @@ from typing import Any
 from host.constants import HOST_INFERENCE_SOCKET_PATH as DEFAULT_SOCKET_PATH
 from host.runtime.core import host_errors
 from host.runtime.host_inference.providers import OPENAI_MAX_TIMEOUT_SECONDS, JEV_MAX_TIMEOUT_SECONDS
-from host.runtime.host_inference.openai import MAX_PROMPT_BYTES
+from host.runtime.host_inference.openai import prompt_limit, request_limit
 
 
 SOCKET_PATH = os.environ.get("KERN_HOST_INFERENCE_SOCKET", DEFAULT_SOCKET_PATH)
@@ -58,8 +58,10 @@ def _request(
             "host_inference.client", exc, context={"path": path}, kind="unexpected_behavior"
         )
         raise HostInferenceError("Host inference request could not be encoded") from exc
-    # Small fixed allowance for local dispatch and returning the provider result.
-    connection = _HostInferenceConnection(timeout_seconds + 0.1)
+    # Large Sol envelopes need time for socket I/O, parsing, redaction and
+    # encoding before the provider's own deadline begins.
+    overhead_seconds = 5.0 if len(payload) > MAX_REQUEST_BYTES else 0.1
+    connection = _HostInferenceConnection(timeout_seconds + overhead_seconds)
     try:
         connection.request(
             "POST", path, body=payload, headers={"Content-Type": "application/json"}
@@ -115,7 +117,7 @@ def openai_text_completion(
         or not 0.1 <= timeout_seconds <= OPENAI_MAX_TIMEOUT_SECONDS
     ):
         raise ValueError(f"text completion timeout_seconds must be between 0.1 and {OPENAI_MAX_TIMEOUT_SECONDS}")
-    if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+    if len(prompt.encode("utf-8")) > prompt_limit(model):
         raise HostInferenceError("Host inference input exceeds the size limit", reason="input_too_large")
     return _request(
         "/openai/text-completion",
@@ -130,7 +132,7 @@ def openai_text_completion(
             "timeout_seconds": timeout_seconds,
         },
         float(timeout_seconds),
-        MAX_REQUEST_BYTES,
+        request_limit(model),
     )
 
 

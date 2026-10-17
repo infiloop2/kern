@@ -14,9 +14,25 @@ MAX_REQUEST_BYTES = 128 * 1024
 MAX_RESPONSE_BYTES = 64 * 1024
 MAX_PROMPT_BYTES = 48 * 1024
 MAX_SCHEMA_BYTES = 12 * 1024
+# Sol has a 1,050,000-token context. UTF-8 bytes conservatively bound text
+# tokens without assuming a characters/token ratio. Reserve 10,000 tokens for
+# the 4,096-token completion and provider framing; include instructions/schema.
+SOL_MAX_PROMPT_BYTES = 1_000_000
+SOL_MAX_INPUT_BYTES = 1_040_000
+# JSON can escape a one-byte control character as six bytes. This is a wire
+# allowance, not additional model context.
+SOL_MAX_REQUEST_BYTES = 6 * SOL_MAX_INPUT_BYTES
 SCHEMA_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,63}$")
 Transport = Callable[..., bytes]
 UsageRecorder = Callable[[str, Any | None], None]
+
+
+def prompt_limit(model: str) -> int:
+    return SOL_MAX_PROMPT_BYTES if model == "gpt-6.1-sol" else MAX_PROMPT_BYTES
+
+
+def request_limit(model: str) -> int:
+    return SOL_MAX_REQUEST_BYTES if model == "gpt-6.1-sol" else MAX_REQUEST_BYTES
 
 
 class InferenceResponseError(ValueError):
@@ -43,7 +59,7 @@ def complete(
     max_output_tokens: int,
 ) -> dict[str, Any]:
     """Return one schema-validated object or raise a bounded adapter error."""
-    if not isinstance(prompt, str) or not prompt or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+    if not isinstance(prompt, str) or not prompt or len(prompt.encode("utf-8")) > prompt_limit(model):
         raise ValueError("text inference prompt is empty or too large")
     if not isinstance(api_key, str) or not api_key:
         raise ValueError("OpenAI API key is missing")
@@ -52,7 +68,7 @@ def complete(
     if not isinstance(schema_name, str) or SCHEMA_NAME_RE.fullmatch(schema_name) is None:
         raise ValueError("text inference schema name is invalid")
     schema = json_contract.validate_object_schema(schema, max_bytes=MAX_SCHEMA_BYTES)
-    body = {
+    body: dict[str, Any] = {
         "model": model,
         "messages": [
             {
@@ -68,8 +84,13 @@ def complete(
             "json_schema": {"name": schema_name, "strict": True, "schema": schema},
         },
     }
+    if model == "gpt-6.1-sol":
+        input_bytes = sum(len(message["content"].encode("utf-8")) for message in body["messages"])
+        input_bytes += len(_json_bytes(body["response_format"]))
+        if input_bytes > SOL_MAX_INPUT_BYTES:
+            raise ValueError("text inference input including instructions and schema is too large")
     encoded = _json_bytes(body)
-    if len(encoded) > MAX_REQUEST_BYTES:
+    if len(encoded) > request_limit(model):
         raise ValueError("text inference request is too large")
     raw = transport(
         ENDPOINT,

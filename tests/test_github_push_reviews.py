@@ -166,6 +166,23 @@ class PushEvidenceTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Binary"):
             review.context(self.repo, "abc125", result.ref_updates)
 
+    def test_large_workflow_keeps_complete_evidence_and_rejects_over_budget(self):
+        content = "# workflow context\n" * 4000
+        (self.repo / ".github/large.yml").write_text(content)
+        _git(self.repo, "add", ".")
+        _git(self.repo, "commit", "--quiet", "-m", "large workflow")
+        new = _git(self.repo, "rev-parse", "HEAD").decode().strip()
+        result = engine.GateResult(self.repo, [(self.new, new, "refs/heads/topic")], False, {".github/large.yml"})
+        result.hold_for_approval("abc126")
+        evidence = review.context(self.repo, "abc126", result.ref_updates)
+        comparison = evidence[0]["comparisons"][0]
+        self.assertEqual(comparison["files"][0]["after"], content)
+        self.assertEqual(comparison["diff"].count("+# workflow context\n"), 4000)
+        # The budget includes the diff as well as blobs, across the whole push.
+        with patch.object(review, "MAX_BYTES", len(content.encode("utf-8"))), \
+             self.assertRaisesRegex(ValueError, "too large"):
+            review.context(self.repo, "abc126", result.ref_updates)
+
     def test_helper_review_reads_without_token_or_push(self):
         mirror = Path(self.temp) / "owner/repo.git"
         mirror.parent.mkdir()
