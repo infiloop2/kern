@@ -8,7 +8,9 @@ from typing import Any
 
 from host.network_integrations.github.push_gate import engine
 
-MAX_BYTES = 48 * 1024
+# Full blobs plus diffs; the assembled policy/evidence prompt is separately
+# bounded by the Sol adapter, including JSON escaping and metadata.
+MAX_BYTES = 1_000_000
 MAX_FILES = 200
 
 

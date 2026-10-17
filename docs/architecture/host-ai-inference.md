@@ -28,8 +28,20 @@ actually needs:
 - `openai_text_completion(...)` sends a bounded prompt and strict JSON schema.
   The caller supplies `model`, `instructions`, `reasoning_effort`,
   `max_output_tokens` (1 to 4096), and `timeout_seconds` (0.1 to 60 seconds).
-  Supported models are `gpt-6-luna` and `gpt-6.1-sol`. The shared socket client adds a fixed 100 ms
-  for local dispatch and response overhead.
+  Supported models are `gpt-6-luna` and `gpt-6.1-sol`. The shared socket client adds
+  100 ms for local dispatch and response overhead, or five seconds for envelopes
+  above 128 KiB to allow parsing, redaction and encoding before provider egress.
+  This does not reduce or extend the caller's provider timeout.
+  Luna retains its 48 KiB prompt and 128 KiB request limits. Sol accepts up to
+  1,000,000 UTF-8 prompt bytes, with a separate 1,040,000-byte limit covering
+  redacted prompt, instructions and serialized response format. UTF-8 bytes
+  conservatively bound text tokens; this leaves 10,000 tokens in Sol's
+  [1,050,000-token context](https://developers.openai.com/api/docs/models/gpt-6.1-sol)
+  for the completion (at most 4,096 tokens) and provider framing. It does not
+  assume a typical bytes/token ratio. Sol's wire allowance is 6,240,000 bytes
+  to accommodate JSON escaping, not additional model input. Only the text
+  completion socket route accepts this larger envelope; other routes retain
+  their existing limits.
   There is no feature-purpose field or purpose-to-model mapping.
   Task titles keep their Luna/none/400-token settings and existing timeout.
 - `typesafe_jev_judgment(...)` sends bounded state and yes/no Jev questions and
@@ -134,6 +146,11 @@ with repository, refs and commit IDs. Bases and proposed tips come from pinned
 quarantine objects, not the agent worktree or later remote state. Binary,
 unsupported, oversized or missing evidence leaves the push pending; evidence is
 never silently truncated. Held pushes predating pinned bases need manual review.
+Evidence extraction allows 1,000,000 bytes of full blobs and diffs combined,
+and 200 file entries across all comparisons. The assembled policy/evidence
+prompt must also fit Sol's input limits, so JSON escaping and metadata reduce
+the space available for file contents. Large reviews keep the existing
+60-second inference timeout and remain pending if the provider fails or times out.
 The fixed policy checks for malicious exploitation of pull-request Actions running without human review,
 including credential theft and untrusted code gaining privileges. References
 to scripts outside the supplied files are not alone grounds to withhold approval.

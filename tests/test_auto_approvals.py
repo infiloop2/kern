@@ -9,7 +9,7 @@ from host.runtime.admin_api import auto_approvals as worker, service
 from host.runtime.admin_api.errors import ApiError
 from host.runtime.core import state
 from host.runtime.admin_api import auto_approval_prompt as auto_approval
-from host.runtime.host_inference import api, providers, usage
+from host.runtime.host_inference import api, openai, providers, usage
 
 NOW = 14 * 3600
 RECORD = {"approval_id": "approval_1.token", "tool_id": "gmail", "action_id": "send_email",
@@ -286,11 +286,11 @@ class AutoApprovalTests(unittest.TestCase):
         completion = worker.client.openai_text_completion
         self.worker_context()
         self.judge.side_effect = completion
-        oversized = {**self.record, "payload": {"body": "x" * (48 * 1024)}}
+        oversized = {**self.record, "payload": {"body": "x" * openai.SOL_MAX_PROMPT_BYTES}}
         with patch.object(state, "tool_approval", return_value=oversized), \
                 patch.object(worker.client, "_request") as request:
             worker.run_once()
-        request.assert_not_called()
+        self.assertEqual(request.call_count, 0)
         self.decide.assert_not_called()
         self.assertEqual(self.save.call_args.args[3:5], (
             "failed", "Tool payload is too large for auto-review with this policy.",
