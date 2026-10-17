@@ -535,9 +535,11 @@ def _mint_host_cert(certs: Any, host: str) -> None:
     any step fails: a half-written family is unusable, and leaving it behind
     would put files on the volume that nothing ever replaces."""
     try:
+        # OpenSSL limits Common Name to 64 characters; the SAN below carries
+        # the complete DNS identity, including longer regional S3 hostnames.
         subprocess.run(
             ["/usr/bin/openssl", "req", "-newkey", "rsa:2048", "-nodes",
-             "-keyout", str(certs.key), "-out", str(certs.csr), "-subj", f"/CN={host}"],
+             "-keyout", str(certs.key), "-out", str(certs.csr), "-subj", "/CN=Kern Network Proxy"],
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,

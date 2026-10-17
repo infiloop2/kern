@@ -1506,6 +1506,34 @@ class GeneratedCertCacheTests(unittest.TestCase):
     """REL-002: a wildcard rule makes unique subdomains unlimited, so the
     durable cert cache on the admin volume needs a bound."""
 
+    def test_real_certificates_verify_full_short_and_long_hostnames(self) -> None:
+        hosts = (
+            "example.com",
+            "infiverse-backend-lambda-storage-521764600517-us-east-1.s3.us-east-1.amazonaws.com",
+        )
+        with tempfile.TemporaryDirectory() as raw_dir, patch.dict(
+            os.environ, {"KERN_PROXY_STATE_DIR": raw_dir}
+        ):
+            certs = state.network_proxy_cert_files(hosts[0])
+            certs.directory.mkdir()
+            subprocess.run(
+                ["/usr/bin/openssl", "req", "-x509", "-newkey", "rsa:2048", "-nodes",
+                 "-keyout", str(certs.ca_key), "-out", str(certs.ca_cert),
+                 "-days", "1", "-subj", "/CN=Test CA"],
+                check=True, capture_output=True,
+            )
+            for host in hosts:
+                with self.subTest(host=host):
+                    certs = state.network_proxy_cert_files(host)
+                    network_proxy._mint_host_cert(certs, host)
+                    for hostname, expected in ((host, 0), ("different.example.com", 2)):
+                        result = subprocess.run(
+                            ["/usr/bin/openssl", "verify", "-CAfile", str(certs.ca_cert),
+                             "-verify_hostname", hostname, str(certs.cert)],
+                            capture_output=True,
+                        )
+                        self.assertEqual(result.returncode, expected, result.stderr.decode())
+
     def test_eviction_keeps_the_newest_and_removes_whole_families(self) -> None:
         with tempfile.TemporaryDirectory() as raw_dir:
             directory = Path(raw_dir)
