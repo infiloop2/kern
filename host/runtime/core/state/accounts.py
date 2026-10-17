@@ -232,15 +232,20 @@ TRAINING_PROVIDERS = {"claude_code": "claude", "grok": "xai", "grok-2": "xai-2"}
 def read_training_status(runtime_type: str, cur: Any = None) -> dict[str, Any]:
     with _read(cur) as cur:
         cur.execute(
-            "SELECT training_allowed, training_checked_at, training_attempted_at"
+            # pgclient returns timestamps as PostgreSQL text (for example,
+            # a +00 offset), which Python 3.10's fromisoformat rejects.
+            # Decode numeric epochs instead, independent of server formatting.
+            "SELECT training_allowed,"
+            " EXTRACT(EPOCH FROM training_checked_at)::double precision,"
+            " EXTRACT(EPOCH FROM training_attempted_at)::double precision"
             " FROM provider_accounts WHERE provider = %s",
             (TRAINING_PROVIDERS[runtime_type],),
         )
         row = cur.fetchone()
     return {
         "allowed": row[0] if row else None,
-        "checked_at": datetime.fromisoformat(row[1]).isoformat() if row and row[1] else None,
-        "attempted_at": datetime.fromisoformat(row[2]).isoformat() if row and row[2] else None,
+        "checked_at": datetime.fromtimestamp(row[1], timezone.utc).isoformat() if row and row[1] is not None else None,
+        "attempted_at": datetime.fromtimestamp(row[2], timezone.utc).isoformat() if row and row[2] is not None else None,
     }
 
 

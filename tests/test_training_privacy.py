@@ -109,10 +109,19 @@ class TrainingPrivacyTests(unittest.TestCase):
         state.save_training_status(cur, "claude_code", {"account_id": "one", "access_token_sha256": "hash"}, False, 1000)
         for parameter in cur.execute.call_args.args[1]:
             pgclient._encode_parameter(parameter)
-        # The host's lightweight driver returns timestamp columns as text.
-        cur.fetchone.return_value = (False, "1970-01-01 00:16:40+00", "1970-01-01 00:16:40+00")
-        self.assertEqual(state.read_training_status("claude_code", cur),
-                         {"allowed": False, "checked_at": stamp(1000), "attempted_at": stamp(1000)})
+        # Read numeric epochs through the actual float8 decoder. PostgreSQL
+        # timestamp text uses offsets/fractions that Python 3.10 rejects.
+        for seconds in (None, 0, 1000, 1792230840.12345):
+            with self.subTest(seconds=seconds):
+                wire = str(seconds).encode() if seconds is not None else None
+                decoded = pgclient._decode_value(701, wire)
+                cur.fetchone.return_value = (False, decoded, decoded)
+                expected = stamp(seconds) if seconds is not None else None
+                self.assertEqual(state.read_training_status("claude_code", cur),
+                                 {"allowed": False, "checked_at": expected, "attempted_at": expected})
+                query = cur.execute.call_args.args[0]
+                self.assertIn("EXTRACT(EPOCH FROM training_checked_at)::double precision", query)
+                self.assertIn("EXTRACT(EPOCH FROM training_attempted_at)::double precision", query)
 
     def test_api_omits_training_for_disabled_untrusted_and_codex_accounts(self):
         approved = {"account_id": "one", "operator_approval": orchestrator.XAI_OPERATOR_APPROVAL}
