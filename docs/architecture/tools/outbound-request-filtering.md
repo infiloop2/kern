@@ -241,7 +241,12 @@ third-party destinations:
   `productionresultssa0..19.blob.core.windows.net` hosts: only the fixed
   `/actions-results/<run UUID>/workflow-job-run-<job UUID>/artifacts/<64-hex>.zip`
   path neutralizes the provider-generated identifiers. For this path only,
-  `rscd` must name `agent-admin-result-<short run attempt>.zip`; its separator
+  `rscd` must name `agent-admin-result-<short run attempt>.zip` or an
+  `ios-lock*.zip` basename containing only ASCII letters, digits, dots,
+  underscores and hyphens. Native-lock filenames take the explicit secret,
+  credential, personal-identifier and size checks with only generic
+  machine-token heuristics disabled, then are neutralized with an equal-length
+  value for the full-URL scan. The disposition's separator
   space is neutralized for the full-URL scan so it does not create a false
   overlong token after URL decoding. Other query content keeps the normal guard;
 - connected-account mailbox queries (Gmail `search_messages`, `list_drafts`)
