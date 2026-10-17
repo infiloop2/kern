@@ -1468,6 +1468,57 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
         self.assertIsNone(
             deny(config, "GET", host, artifact_path, full_artifact_query, [], b"")
         )
+        # Native-lock filenames support any app and naming layout, including
+        # source revisions that resemble opaque tokens or personal identifiers.
+        tiplog_revision = "8df18a8c15e9a75c9692b4014c3431fbb3e92552"
+        for revision in (tiplog_revision, "a1" * 20, "a123456789012" + "b" * 27):
+            for app in ("tiplog", "dearlytold", "a" * 20):
+                for prefix in (f"ios-lock-{app}-", f"ios-lock-{app}-pr-861-"):
+                    filename = f"{prefix}{revision}.zip"
+                    query = full_artifact_query.replace("agent-admin-result-1.zip", filename)
+                    for method in ("GET", "HEAD"):
+                        with self.subTest(filename=filename, method=method):
+                            self.assertIsNone(
+                                deny(config, method, host, artifact_path, query, [], b"")
+                            )
+        for filename in ("ios-lock.zip", "ios-lock.feature_v2.zip", "ios-lock-App1-anything.zip",
+                         "ios-lock-x7Kp2mQv9zR4tYw8LbN3.zip"):
+            with self.subTest(filename=filename):
+                query = full_artifact_query.replace("agent-admin-result-1.zip", filename)
+                self.assertIsNone(deny(config, "GET", host, artifact_path, query, [], b""))
+        tiplog_query = full_artifact_query.replace(
+            "agent-admin-result-1.zip", f"ios-lock-tiplog-{tiplog_revision}.zip"
+        )
+        for suffix, reason in (
+            ("&note=alice%40example.com", "request_param_pii_denied"),
+            ("&token=secretvalue1234567890", "request_param_secret_denied"),
+            ("&rscd=attachment", "network_policy_denied"),
+            ("&note=" + "+".join(["seaside"] * 150), "request_param_too_large"),
+        ):
+            with self.subTest(tiplog_suffix=suffix):
+                self.assertEqual(
+                    deny(config, "GET", host, artifact_path, tiplog_query + suffix, [], b""),
+                    reason,
+                )
+        self.assertEqual(
+            deny(config, "POST", host, artifact_path, tiplog_query, [], b""),
+            "network_policy_denied",
+        )
+        self.assertEqual(
+            deny(config, "GET", "attacker.blob.core.windows.net", artifact_path, tiplog_query, [], b""),
+            "network_policy_denied",
+        )
+        self.assertIsNotNone(
+            deny(config, "GET", host, artifact_path.replace("/artifacts/", "/other/"), tiplog_query, [], b"")
+        )
+        for filename, reason in (
+            ("ios-lock-ghp_AbCdEfGhIjKlMnOpQrStUvWxYz0123456789.zip", "request_param_secret_denied"),
+            ("ios-lock-4155552671.zip", "request_param_pii_denied"),
+            (f"ios-lock-{'a1' * 32}.zip", "request_param_secret_denied"),
+        ):
+            with self.subTest(filename=filename):
+                query = full_artifact_query.replace("agent-admin-result-1.zip", filename)
+                self.assertEqual(deny(config, "GET", host, artifact_path, query, [], b""), reason)
         opaque_filename_query = (
             sas_query
             + '&rscd=attachment%3B+filename%3D%22'
@@ -1484,6 +1535,11 @@ class NetworkIntegrationGuardTest(unittest.TestCase):
             "agent-admin-result-35780005634-1.zip",
             "agent-admin-result-1234567890.zip",
             "agent-admin-result.zip",
+            "ios-lock.zip.exe",
+            "ios-lock-test results.zip",
+            "ios-lock-..%2Fsecret.zip",
+            "ios-lock-%5Csecret.zip",
+            "android-lock-example.zip",
         ):
             with self.subTest(guarded_filename=guarded_filename):
                 query = (

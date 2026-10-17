@@ -71,7 +71,8 @@ GITHUB_ACTIONS_BLOB_ARTIFACT_PATH_RE = re.compile(
     r"(/artifacts/)[0-9a-f]{64}(\.zip)$"
 )
 GITHUB_ACTIONS_BLOB_ARTIFACT_DISPOSITION_RE = re.compile(
-    r'^attachment; filename="agent-admin-result-[1-9][0-9]{0,8}\.zip"$'
+    r'^attachment; filename="(?:agent-admin-result-[1-9][0-9]{0,8}'
+    r'|(?P<filename>ios-lock[A-Za-z0-9._-]*))\.zip"$'
 )
 # Preserve identifier lengths so G1 still measures the forwarded path length.
 GITHUB_ACTIONS_BLOB_NEUTRAL_UUID = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -248,9 +249,12 @@ def _github_actions_blob_request_denied(
     matches the generic raw-key rule, so only that exact path component is
     neutralized. Replacements preserve length for the structural guard; all
     other path components retain the unchanged checks. On the fixed artifact
-    path, validate the signed response-disposition as an ASCII ZIP basename
-    with the agent-admin result basename and short run attempt. Every other query field
-    retains the standard guard.
+    path, validate the signed response-disposition as an ASCII ZIP basename:
+    an agent-admin result with a short run attempt, or the ios-lock ZIP family.
+    Native-lock names may include source revisions and branch identifiers, so
+    only their generic machine-token checks are relaxed after checking explicit
+    secrets and personal identifiers. Every other query field retains the
+    standard guard.
     """
     try:
         pairs = parse_qsl(
@@ -273,8 +277,18 @@ def _github_actions_blob_request_denied(
     for key, value in pairs:
         if key.lower() != "sig":
             if key.lower() == "rscd" and artifact_path:
-                if GITHUB_ACTIONS_BLOB_ARTIFACT_DISPOSITION_RE.fullmatch(value) is None:
+                disposition = GITHUB_ACTIONS_BLOB_ARTIFACT_DISPOSITION_RE.fullmatch(value)
+                if disposition is None:
                     return "network_policy_denied"
+                filename = disposition.group("filename")
+                if filename is not None:
+                    denial = find_denial(value, allow_machine_tokens=True)
+                    if denial is not None:
+                        return denial.reason
+                    # Check explicit secrets/PII before masking opaque filename
+                    # tokens. Keep the length so the full URL still takes G1.
+                    safe_name = "ios-lock".ljust(len(filename), "_")
+                    value = value.replace(filename, safe_name, 1)
                 # The disposition's one space splits the decoded URL into
                 # tokens, making the remaining signed query look like an
                 # overlong unbroken token to G3.
