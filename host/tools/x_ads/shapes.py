@@ -73,7 +73,7 @@ POST_SCHEMA = out.obj({
     "id": out.text("Existing published post id."),
     "author_id": out.text("Numeric author id."),
     "author_username": out.text("Handle when X provides it; empty otherwise."),
-    "text": out.text("Full existing post text, up to 25000 UTF-8 bytes."),
+    "text": out.text("Available post text preview, up to 25000 UTF-8 bytes. May be incomplete; open the selected post URL for full content."),
     "created_at": out.text("Provider publication time."),
     "url": out.text("Public X post URL."),
     "content_sha256": out.text("Digest of returned text, author, attached media, entities, card references and destinations. Creation/launch reject card posts rather than relying on a mutable card URI."),

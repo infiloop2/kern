@@ -156,29 +156,23 @@ def _post_view(row: JSONObject, *, strict: bool) -> JSONObject:
         raise RuntimeError("X Ads did not return the post author.")
     author_id = _id(user.get("id_str") or (str(user["id"]) if isinstance(user.get("id"), int) else None), "post author", decimal=True)
     full_text = row.get("full_text")
-    if strict and (not isinstance(full_text, str) or row.get("truncated") is True):
-        raise ValueError("X Ads must return complete untruncated post text for approval.")
     if not isinstance(full_text, str):
         full_text = s.text(row, "text")
-    if len(full_text.encode("utf-8")) > 25000:
-        raise ValueError("X Ads post exceeds the 25000-byte creative preview limit.")
-    if strict and (row.get("is_quote_status") or row.get("quoted_status_id_str") or row.get("quoted_status_id")
-                   or row.get("quoted_status") or row.get("retweeted_status")
-                   or row.get("in_reply_to_status_id_str") or row.get("in_reply_to_status_id")):
-        raise ValueError("Quote posts, reposts and replies are excluded from this initial X Ads creative flow.")
+    if strict and (row.get("retweeted_status") or row.get("in_reply_to_status_id_str") or row.get("in_reply_to_status_id")):
+        raise ValueError("Reposts and replies are excluded from this X Ads creative flow.")
     if strict and row.get("nullcast") is not False:
         raise ValueError("Select an existing organic published post; promoted-only creative is excluded.")
     if strict and (row.get("card_uri") or row.get("card")):
         raise ValueError("Posts with cards are excluded because this flow cannot snapshot mutable card content.")
-    # Reuse the prior promotion work's stable projection, expanding it with
-    # edit history and rejecting quoted/reposted/reply content explicitly.
+    # Bind returned root creative, including quote references, without fetching
+    # referenced content. Preview uses available text; X decides eligibility.
     content: JSONObject = {key: row.get(key) for key in (
         "entities", "extended_entities", "card", "card_uri", "edit_history_tweet_ids",
-        "in_reply_to_status_id_str", "quoted_status_id_str", "nullcast", "conversation_settings",
+        "in_reply_to_status_id_str", "quoted_status_id_str", "quoted_status_id", "nullcast", "conversation_settings",
     )}
     content.update({"id": post_id, "author_id": author_id, "text": full_text})
     return {"id": post_id, "author_id": author_id, "author_username": s.text(user, "screen_name"),
-            "text": full_text, "created_at": s.text(row, "created_at"), "url": f"https://x.com/i/status/{post_id}", "content_sha256": _digest(content)}
+            "text": clip_text(full_text, 25000), "created_at": s.text(row, "created_at"), "url": f"https://x.com/i/status/{post_id}", "content_sha256": _digest(content)}
 
 
 def _creative(row: JSONObject, objective: str) -> None:
