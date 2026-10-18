@@ -41,6 +41,7 @@ RUN sed -i \
     git \
     jq \
     libnss-wrapper \
+    libzstd1 \
     openssl \
     postgresql \
     postgresql-server-dev-14 \

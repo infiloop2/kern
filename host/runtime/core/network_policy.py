@@ -23,6 +23,7 @@ from urllib.parse import unquote
 
 from host.config import parse_network_controls
 from host.runtime.core.state import network_policy_record
+from host.runtime.core import zstd_body
 
 # Matches the proxy's MAX_BODY_BYTES: decompressed output is capped so a
 # decompression bomb cannot exhaust the proxy's memory.
@@ -112,12 +113,11 @@ def normalized_path(path: str) -> str:
 
 def decode_body(body: bytes, content_encoding: str) -> bytes | None:
     """Decode a Content-Encoding so a body guard inspects real JSON, not a
-    compressed blob. Only the stdlib-decodable encodings are supported;
-    anything else (zstd, br, corrupt streams) returns None, which callers
+    compressed blob. gzip, deflate and zstd are supported;
+    anything else (br, corrupt streams) returns None, which callers
     treat as fail-closed. Decompressed output is bounded so a decompression
-    bomb cannot exhaust the proxy's memory. Clients essentially never compress
-    request bodies and the agent CLIs are version-pinned, so a live denial is
-    the signal to add an encoding, not a fallback decoder."""
+    bomb cannot exhaust the proxy's memory. Unknown encodings still fail
+    closed; Grok's zstd requests receive the same JSON/tool inspection."""
     encoding = content_encoding.strip().lower()
     if encoding in ("", "identity"):
         return body
@@ -125,6 +125,8 @@ def decode_body(body: bytes, content_encoding: str) -> bytes | None:
         return _bounded_gzip_decompress(body)
     if encoding in ("deflate", "zlib"):
         return _bounded_zlib_decompress(body)
+    if encoding == "zstd":
+        return zstd_body.decompress(body, MAX_DECODED_BODY_BYTES)
     return None
 
 
