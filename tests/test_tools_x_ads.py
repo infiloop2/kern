@@ -453,7 +453,7 @@ class XAdsTest(unittest.TestCase):
         self.assertIsInstance(self.approve(approval), ApprovalExecuted)
 
     def test_unsupported_posts_and_mutable_cards_rejected_at_proposal_and_execution(self):
-        for key, value in (("quoted_status_id_str", "123"), ("is_quote_status", True), ("retweeted_status", {"id_str": "123"}), ("in_reply_to_status_id_str", "123"), ("nullcast", True), ("truncated", True), ("card_uri", "card://mutable1"), ("card", {"url": "https://example.com/"})):
+        for key, value in (("retweeted_status", {"id_str": "123"}), ("in_reply_to_status_id_str", "123"), ("nullcast", True), ("card_uri", "card://mutable1"), ("card", {"url": "https://example.com/"})):
             with self.subTest(key=key):
                 self.provider = AdsProvider()
                 approval = self.propose("launch_campaign", plan())
@@ -461,6 +461,59 @@ class XAdsTest(unittest.TestCase):
                 self.assertIsInstance(self.execute("launch_campaign", plan()), ActionFailed)
                 self.assertIsInstance(self.approve(approval), ActionFailed)
                 self.assertEqual(self.provider.writes, [])
+
+    def test_selected_quote_post_uses_existing_text_and_url_preview(self):
+        self.provider.post.update(is_quote_status=True, quoted_status_id_str="123", quoted_status_id=123,
+                                  quoted_status={"id_str": "123", "quoted_status_id_str": "456", "article": {"id": "789"}})
+        result = self.execute("list_posts", {"account_id": ACCOUNT_ID, "promotable_user_id": "prom1"})
+        assert_matches_output_schema(self, MANIFEST, "list_posts", result)
+        approval = self.propose("launch_campaign", plan())
+        post = approval.payload["references"]["post"]
+        self.assertEqual(post["id"], POST_ID)
+        self.assertEqual(post["author_id"], USER_ID)
+        self.assertEqual(post["url"], f"https://x.com/i/status/{POST_ID}")
+        self.assertEqual(post["text"], "Build with Kern")
+        self.assertEqual(set(post), {"id", "author_id", "author_username", "text", "created_at", "url", "content_sha256"})
+        self.assertIsInstance(self.approve(approval), ApprovalExecuted)
+        associations = [c for c in self.provider.writes if c[1].endswith("/promoted_tweets")]
+        self.assertEqual(associations[0][2]["tweet_ids"], POST_ID)
+        self.assertTrue(all(c[2]["tweet_ids"] == POST_ID for c in self.provider.calls if "tweet_ids" in c[2]))
+
+    def test_available_text_is_sufficient_without_full_preview_or_quote_classification(self):
+        for fields in ({"full_text": "Shortened… http://t.co/link", "truncated": True},
+                       {"full_text": None, "text": "Available teaser", "is_quote_status": True},
+                       {"full_text": "A" * 30000, "quoted_status": {}},
+                       {"full_text": "Article teaser", "quoted_status_id_str": "123"}):
+            with self.subTest(fields=fields):
+                self.provider = AdsProvider()
+                self.provider.post.update(fields)
+                approval = self.propose("launch_campaign", plan())
+                preview = approval.payload["references"]["post"]["text"]
+                self.assertLessEqual(len(preview.encode("utf-8")), 25000)
+                self.assertIsInstance(self.approve(approval), ApprovalExecuted)
+
+    def test_returned_root_quote_references_remain_digest_bound(self):
+        for field in ("quoted_status_id_str", "quoted_status_id"):
+            with self.subTest(field=field):
+                self.provider = AdsProvider()
+                self.provider.post[field] = "123" if field.endswith("str") else 123
+                approval = self.propose("launch_campaign", plan())
+                self.provider.post[field] = "456" if field.endswith("str") else 456
+                self.assertIsInstance(self.approve(approval), ActionFailed)
+                self.assertEqual(self.provider.writes, [])
+
+    def test_full_returned_root_text_is_bound_beyond_preview_limit(self):
+        self.provider.post["full_text"] = "A" * 30000
+        approval = self.propose("launch_campaign", plan())
+        self.provider.post["full_text"] = "A" * 29999 + "B"
+        self.assertIsInstance(self.approve(approval), ActionFailed)
+        self.assertEqual(self.provider.writes, [])
+
+    def test_referenced_bodies_and_nested_quotes_are_not_expanded_or_bound(self):
+        self.provider.post.update(quoted_status_id_str="123", quoted_status={"id_str": "123", "full_text": "Original", "quoted_status_id_str": "456"})
+        approval = self.propose("launch_campaign", plan())
+        self.provider.post["quoted_status"].update(full_text="Edited", quoted_status_id_str="789")
+        self.assertIsInstance(self.approve(approval), ApprovalExecuted)
 
     def test_local_launch_validation_does_not_emit_provider_failure(self):
         for values in (plan(daily_budget_amount_local_micro="60000000"), plan(start_time="2020-01-01T00:00:00Z", end_time="2020-01-02T00:00:00Z")):

@@ -20,7 +20,7 @@ def run(page, url, log_in, open_home_integration):
     expect(guide).to_contain_text("Standard Access")
     expect(guide).to_contain_text("ENGAGEMENTS")
     expect(guide).to_contain_text("one millionth of the funding currency")
-    expect(guide).to_contain_text("No quoted/reposted/reply creative")
+    expect(guide).to_contain_text("No repost/reply creative")
     expect(guide).to_contain_text("What leaves this host")
     expect(guide.locator(".guide-capability")).to_have_count(12)
     for action in ("launch_campaign", "end_campaign", "get_performance"):
