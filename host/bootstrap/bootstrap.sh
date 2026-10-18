@@ -546,7 +546,7 @@ systemctl stop apt-daily.service apt-daily-upgrade.service
 # npm package pulls in hundreds of node-* dependencies.
 bootstrap_cache restore-debs
 apt_get update
-apt_get install --no-upgrade -y ca-certificates curl gh git iproute2 jq nftables openssl python3 python3-venv sudo unattended-upgrades xz-utils
+apt_get install --no-upgrade -y ca-certificates curl gh git iproute2 jq libzstd1 nftables openssl python3 python3-venv sudo unattended-upgrades xz-utils
 bootstrap_cache save-debs
 
 # PostgreSQL for admin state. postgresql-common is installed first so its

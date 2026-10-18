@@ -369,6 +369,15 @@ and appear in legitimate follow-up requests. This includes the allowed
 `x_search_call`, `image_generation_call`, and `video_generation_call` families
 as well as denied families whose earlier output may still appear in history.
 
+The shared body decoder accepts identity, gzip, deflate/zlib and zstd. Grok's
+compressed inference requests are decoded before the same account/tool policy
+is applied; compression grants no additional capability. Zstd uses the system
+`libzstd1` streaming decoder with a 128 MiB window bound and the shared 128 MiB
+decoded-output limit across at most 64 frames, including empty and skippable
+frames, to bound work independently of decoded size. Truncated frames, invalid checksums,
+trailing garbage and unsupported encodings fail closed. Bootstrap and the CI
+sandbox install the native library; no Python package dependency is required.
+
 A body that cannot be decoded (`xai_body_undecodable`) or that declares JSON and
 does not parse (`xai_body_not_json`) is denied rather than forwarded
 uninspected. Nesting deep enough to exhaust the interpreter stack — in the
