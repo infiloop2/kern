@@ -16,11 +16,12 @@ permissions:
 jobs:
   authorize:
     name: Authorize AWS smoke
+    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
     if: >-
-      github.repository == 'infiversehq/kern' &&
-      (github.event_name == 'workflow_dispatch' ||
-      (github.event.issue.pull_request &&
-        (github.event.comment.body == '/smoke' || github.event.comment.body == 'smoke')))
+      github.repository != 'infiversehq/kern' && (
+        github.repository == 'infiversehq/kern' && (github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request &&
+          (github.event.comment.body == '/smoke' || github.event.comment.body == 'smoke')))
+      )
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.resolve.outputs.ref }}
@@ -133,7 +134,11 @@ jobs:
   smoke:
     needs: authorize
     name: Fresh AWS smoke (${{ needs.authorize.outputs.ref }})
-    if: ${{ needs.authorize.result == 'success' }}
+    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
+    if: >-
+      github.repository != 'infiversehq/kern' && (
+        needs.authorize.result == 'success'
+      )
     runs-on: ubuntu-latest
     concurrency:
       group: kern-smoke

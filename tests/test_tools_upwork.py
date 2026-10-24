@@ -489,6 +489,182 @@ class UpworkTests(unittest.TestCase):
                     self.assertIsInstance(result, ApprovalExecuted if kind == "exact" else ActionFailed)
                 self.assertEqual(self.client.call.call_count, 4 if kind == "exact" else 3)
 
+    def fixed_review_envelope(self):
+        # Reconstruct diagnostic 6029's field/type structure (2026-10-21).
+        # Values are synthetic, not a captured private preview. Duration id 4
+        # is independently observed in get_proposal with "Less than 1 month".
+        return {
+            "type": "proposal", "preview_id": "preview-one", "status": "ok",
+            "params": {"jobReference": "123", "coverLetter": "A specific proposal",
+                       "chargedAmount": 50, "connects_cost": 10, "estimatedDuration": 4,
+                       "portfolio_project_ids": ["project-one"], "teamOrgId": "org-one",
+                       "selectedContractor": {"id": "contractor-one", "oDeskUserID": "user-one"},
+                       "sri": {"frequency": 0, "percent": 0}},
+            "preview": {"job_reference": "123", "cover_letter": "A specific proposal",
+                        "charged_amount": 50, "connects_cost": 10, "connects_balance": 20,
+                        "can_apply": True, "estimated_duration": "less_than_1_month",
+                        "payment": "by_project", "milestones_allowed": True},
+            "review_fields": {"job_reference": "123", "cover_letter": "A specific proposal",
+                              "charged_amount": 50, "estimated_duration": "less_than_1_month",
+                              "payment": "by_project"},
+        }
+
+    def execute_fixed_review(self, data, **terms):
+        approved = {"estimated_duration": "less_than_1_month", "payment_mode": "by_project",
+                    "portfolio_project_ids": ["project-one"], **terms}
+        pending = self.submit(**approved)
+        self.assertIsInstance(pending, ActionPendingApproval)
+        self.client.call.reset_mock()
+        self.client.call.side_effect = [self.fixed_job_cost(), self.preview(),
+            {"content": [{"type": "text", "text": json.dumps(data)}]},
+            {"content": [{"type": "text", "text": "Submitted"}]}]
+        return upwork.BUNDLED_TOOL.execute_approved(self.api.approvals.approve(pending.approval_id), self.api)
+
+    def test_fixed_review_envelope_confirms_exact_project_and_milestone_terms_once(self):
+        for mode, duration, payment in (("by_project", "less_than_1_month", "by_project"),
+                                        ("by_project", "Less than 1 month", "By project"),
+                                        ("by_milestone", "less_than_1_month", "By milestone")):
+            with self.subTest(mode=mode, duration=duration):
+                data = self.fixed_review_envelope()
+                terms = {"payment_mode": mode}
+                for parent in ("preview", "review_fields"):
+                    data[parent].update(estimated_duration=duration, payment=payment)
+                if mode == "by_milestone":
+                    terms["milestones"] = [{"description": "First", "amount": 20},
+                                           {"description": "Final", "amount": 30}]
+                    data["params"]["milestones"] = copy.deepcopy(terms["milestones"])
+                result = self.execute_fixed_review(data, **terms)
+                self.assertIsInstance(result, ApprovalExecuted)
+                self.assertEqual([call.args[0] for call in self.client.call.call_args_list],
+                    ["upwork__find_jobs", "upwork__manage_proposals", "upwork__get_preview", "upwork__confirm_preview"])
+                self.assertEqual(self.client.call.call_args.args[1]["params"],
+                                 {"type": "proposal", "preview_id": "preview-one"})
+
+    def test_fixed_review_envelope_conflicts_unknown_terms_and_aliases_never_confirm(self):
+        changes = [
+            ("params", "estimatedDuration", value) for value in (1, 99, True, 4.0, "4", None)
+        ] + [
+            (parent, key, value)
+            for parent in ("preview", "review_fields")
+            for key, value in (("payment", "by_milestone"), ("payment", "fixed"),
+                               ("payment", "private unknown value"), ("payment", {}),
+                               ("estimated_duration", "1_to_3_months"),
+                               ("cover_letter", "Changed"), ("charged_amount", 51),
+                               ("job_reference", "124"), ("payment_mode", "by_project"),
+                               ("estimatedDuration", 4))
+        ] + [("params", "estimated_duration", "less_than_1_month"),
+             ("params", "paymentMode", "by_milestone"),
+             ("params", "portfolio_project_ids", ["different-project"]),
+             ("params", "teamOrgId", "different-org"),
+             ("params", "attachments", ["unapproved-file"]),
+             ("preview", "connects_cost", 11), ("preview", "can_apply", False),
+             ("preview", "connects_balance", 1)]
+        for parent, key, value in changes:
+            with self.subTest(parent=parent, key=key, value=value):
+                data = self.fixed_review_envelope()
+                data[parent][key] = value
+                try:
+                    result = self.execute_fixed_review(data)
+                except ProviderWarning:
+                    pass
+                else:
+                    self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(self.client.call.call_count, 3)
+                self.assertNotIn("upwork__confirm_preview", [call.args[0] for call in self.client.call.call_args_list])
+
+    def test_fixed_review_envelope_cannot_borrow_unbound_or_missing_fields(self):
+        for kind in ("missing_type", "wrong_type", "missing_id", "wrong_id", "nested", "unrelated",
+                     "review_only", "missing_payment", "payment_only_in_review_fields", "split_asset",
+                     "split_duration", "split_cost", "split_price", "split_text", "split_job"):
+            with self.subTest(kind=kind):
+                data = self.fixed_review_envelope()
+                if kind == "missing_type":
+                    del data["type"]
+                elif kind == "wrong_type":
+                    data["type"] = "proposal_edit_terms"
+                elif kind == "missing_id":
+                    del data["preview_id"]
+                elif kind == "wrong_id":
+                    data["preview_id"] = "other-preview"
+                elif kind == "nested":
+                    data = {"other": data}
+                elif kind == "unrelated":
+                    data["other"] = data.pop("preview")
+                elif kind == "review_only":
+                    del data["params"]
+                elif kind == "missing_payment":
+                    del data["preview"]["payment"]
+                    del data["review_fields"]["payment"]
+                elif kind == "payment_only_in_review_fields":
+                    del data["preview"]["payment"]
+                else:
+                    key = {"split_asset": "portfolio_project_ids", "split_duration": "estimatedDuration",
+                           "split_cost": "connects_cost", "split_price": "chargedAmount",
+                           "split_text": "coverLetter", "split_job": "jobReference"}[kind]
+                    data["review_fields"][key] = data["params"].pop(key)
+                with self.assertRaises(ProviderWarning):
+                    self.execute_fixed_review(data)
+                self.assertEqual(self.client.call.call_count, 3)
+
+    def test_fixed_review_envelope_preserves_all_approved_optional_terms(self):
+        options = {"answers": [{"question": "First?", "answer": "One"},
+                               {"question": "Second?", "answer": "Two"}],
+                   "attachments": ["file-one"], "certificate_ids": ["cert-one"], "boost_connects": 1}
+        for key in options:
+            for kind in ("exact", "missing", "split", "changed", "duplicate"):
+                with self.subTest(key=key, kind=kind):
+                    data = self.fixed_review_envelope()
+                    data["params"].update(copy.deepcopy(options))
+                    if kind == "missing":
+                        del data["params"][key]
+                    elif kind == "split":
+                        data["review_fields"][key] = data["params"].pop(key)
+                    elif kind == "changed":
+                        data["params"][key] = (list(reversed(options[key])) if key == "answers" else
+                                               2 if key == "boost_connects" else ["different"])
+                    elif kind == "duplicate":
+                        alias = {"answers": "questions", "attachments": "attachments",
+                                 "certificate_ids": "certificateIds", "boost_connects": "boostConnects"}[key]
+                        if key == "attachments":
+                            data["preview"][key] = ["different"]
+                        else:
+                            data["params"][alias] = copy.deepcopy(options[key])
+                    try:
+                        result = self.execute_fixed_review(data, **options)
+                    except ProviderWarning:
+                        self.assertNotEqual(kind, "exact")
+                    else:
+                        self.assertIsInstance(result, ApprovalExecuted if kind == "exact" else ActionFailed)
+                    self.assertEqual(self.client.call.call_count, 4 if kind == "exact" else 3)
+
+    def test_fixed_review_envelope_cannot_change_or_split_milestones(self):
+        milestones = [{"description": "First", "amount": 20, "due_date": "2026-10-25"},
+                      {"description": "Final", "amount": 30}]
+        for kind in ("missing", "split", "reordered", "amount", "date", "description", "extra"):
+            with self.subTest(kind=kind):
+                data = self.fixed_review_envelope()
+                data["preview"]["payment"] = data["review_fields"]["payment"] = "by_milestone"
+                data["params"]["milestones"] = copy.deepcopy(milestones)
+                if kind == "missing":
+                    del data["params"]["milestones"]
+                elif kind == "split":
+                    data["review_fields"]["milestones"] = data["params"].pop("milestones")
+                elif kind == "reordered":
+                    data["params"]["milestones"].reverse()
+                elif kind == "extra":
+                    data["params"]["milestones"].append({"description": "Extra", "amount": 5})
+                else:
+                    field, value = {"amount": ("amount", 21), "date": ("due_date", "2026-10-26"),
+                                    "description": ("description", "Changed")}[kind]
+                    data["params"]["milestones"][0][field] = value
+                try:
+                    result = self.execute_fixed_review(data, payment_mode="by_milestone", milestones=milestones)
+                except ProviderWarning:
+                    pass
+                else:
+                    self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(self.client.call.call_count, 3)
+
     def test_milestone_date_alias_preserves_exact_order_and_rejects_ambiguity(self):
         terms = {"estimated_duration": "less_than_1_month", "payment_mode": "by_milestone",
                  "milestones": [{"description": "Work", "amount": 50, "due_date": "2026-10-20"}]}

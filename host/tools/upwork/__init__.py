@@ -279,6 +279,27 @@ def _milestone_values(value):
     return result
 
 
+def _preview_term(key, value):
+    """Normalize only explicit fixed-price representations, never infer terms."""
+    if key == "milestones":
+        return _milestone_values(value)
+    if key == "estimated_duration":
+        # get_proposal exposes id 4 with label "Less than 1 month" (verified
+        # October 2026). Other numeric IDs remain unsupported until verified.
+        if type(value) is int and value == 4:
+            return "less_than_1_month"
+        if isinstance(value, str):
+            return {
+                "Less than 1 month": "less_than_1_month",
+                "1 to 3 months": "1_to_3_months",
+                "3 to 6 months": "3_to_6_months",
+                "More than 6 months": "more_than_6_months",
+            }.get(value, value)
+    if key == "payment_mode" and isinstance(value, str):
+        return {"By project": "by_project", "By milestone": "by_milestone"}.get(value, value)
+    return value
+
+
 def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str,
                       cost: JSONObject, credential: StoredCredential) -> None:
     text = _text(client.call("upwork__get_preview", {"action": "get", "org_uid": params["org_uid"],
@@ -291,9 +312,8 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
         "preview_id", "cover_letter", "charged_amount", "job_reference", "connects_cost", "connects_balance", "can_apply",
         "answers", "boost_connects", "team_org_id", "attachments", "certificate_ids", "portfolio_project_ids", "screening_questions",
         "estimated_duration", "payment_mode", "milestones")}
-    # Every approved optional term must appear with the base proposal fields
-    # in at least one object; matching fragments in separate objects are not
-    # enough evidence to confirm the approved proposal.
+    # Keep optional selections with the base submission. The observed fixed
+    # envelope may put only payment mode in its linked review (see below).
     required = {"cover_letter", "charged_amount", "job_reference", "connects_cost"} | (set(params) - {"org_uid"})
     complete_payload = False
     # The stored preview uses provider camelCase parameters (coverLetter,
@@ -309,23 +329,43 @@ def _proposal_preview(client: MCPConnection, params: JSONObject, preview_id: str
         # params.questions (observed in the 2026-10-04 production diagnostic).
         "questions": "answers",
     }
+    def field_name(parent, key):
+        # payment is a fixed-price mode in these two top-level review objects,
+        # not a general alias for arbitrary nested payment metadata.
+        if (key == "payment" and "payment_mode" in params
+                and (parent is preview.get("preview") or parent is preview.get("review_fields"))):
+            return "payment_mode"
+        return aliases.get(key, key)
+
     def inspect(value):
         nonlocal complete_payload
         if isinstance(value, dict):
-            names = {aliases.get(key, key) for key in value}
+            names = {field_name(value, key) for key in value}
             complete_payload |= required <= names
             for key, child in value.items():
-                key = aliases.get(key, key)
+                key = field_name(value, key)
                 if key in fields:
-                    if key == "milestones":
-                        child = _milestone_values(child)
-                    fields[key].append((id(value), child))
+                    fields[key].append((id(value), _preview_term(key, child)))
                 inspect(child)
         elif isinstance(value, list):
             for child in value:
                 inspect(child)
     with _response("get_preview", text, credential):
         inspect(preview)
+        # Diagnostic 6029: params contains the executable proposal and assets;
+        # preview repeats its identity/text/price/cost/duration plus payment.
+        # Accept only this root envelope for this exact preview ID. Never join
+        # arbitrary fragments or borrow missing assets/answers/milestones from
+        # review_fields. All overlapping fields still pass the conflict checks.
+        stored, review = preview.get("params"), preview.get("preview")
+        if (preview.get("type") == "proposal" and preview.get("preview_id") == preview_id
+                and "payment_mode" in params and isinstance(stored, dict) and isinstance(review, dict)):
+            stored_names = {field_name(stored, key) for key in stored}
+            review_names = {field_name(review, key) for key in review}
+            review_required = {"job_reference", "cover_letter", "charged_amount", "connects_cost",
+                               "estimated_duration", "payment_mode"}
+            complete_payload |= (required - {"payment_mode"} <= stored_names
+                                 and review_required <= review_names)
     # Balance and eligibility are checked by the fresh get_job immediately
     # before preparation; they need not be repeated in the stored preview.
     with _response("get_preview", text, credential):

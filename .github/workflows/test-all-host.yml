@@ -13,6 +13,8 @@ concurrency:
 
 jobs:
   select:
+    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
+    if: github.repository != 'infiversehq/kern'
     name: Select host test suites
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -32,6 +34,8 @@ jobs:
         run: python3 .github/ci/select_tests.py --base "$BASE_SHA" --head "$HEAD_SHA"
 
   suites:
+    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
+    if: github.repository != 'infiversehq/kern'
     name: Host tests (${{ matrix.suite }})
     needs: select
     strategy:
@@ -126,7 +130,11 @@ jobs:
   test:
     name: Run all host tests
     needs: [select, suites]
-    if: always()
+    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
+    if: >-
+      github.repository != 'infiversehq/kern' && (
+        always()
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:

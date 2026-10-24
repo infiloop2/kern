@@ -16,11 +16,11 @@ concurrency:
 jobs:
   approve:
     name: Stamp clean Codex review
+    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
     if: >-
-      github.repository == 'infiversehq/kern' &&
-      github.event.issue.pull_request &&
-      github.event.comment.user.login == 'chatgpt-codex-connector[bot]' &&
-      startsWith(github.event.comment.body, 'Codex Review: Didn''t find any major issues.')
+      github.repository != 'infiversehq/kern' && (
+        github.repository == 'infiversehq/kern' && github.event.issue.pull_request && github.event.comment.user.login == 'chatgpt-codex-connector[bot]' && startsWith(github.event.comment.body, 'Codex Review: Didn''t find any major issues.')
+      )
     runs-on: ubuntu-latest
     steps:
       - name: Checkout trusted review policy
