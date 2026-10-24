@@ -12,7 +12,11 @@ concurrency:
 
 jobs:
   start-stage:
-    if: github.repository == 'infiversehq/kern'
+    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
+    if: >-
+      github.repository != 'infiversehq/kern' && (
+        github.repository == 'infiversehq/kern'
+      )
     name: Start stage instance
     runs-on: ubuntu-latest
     steps:

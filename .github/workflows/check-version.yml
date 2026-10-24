@@ -8,6 +8,8 @@ permissions:
 
 jobs:
   version:
+    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
+    if: github.repository != 'infiversehq/kern'
     name: Check VERSION increment
     runs-on: ubuntu-latest
     timeout-minutes: 5
