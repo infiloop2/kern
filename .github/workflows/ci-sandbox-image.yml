@@ -13,16 +13,25 @@ on:
 permissions:
   contents: read
 
+env:
+  CI_REGISTRY_IMAGE: ghcr.io/${{ github.repository_owner }}/kern-ci
+
 concurrency:
   group: ci-sandbox-image
   cancel-in-progress: false
 
 jobs:
   publish:
-    if: github.repository == 'infiversehq/kern' && github.ref == 'refs/heads/main'
+    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
+    if: >-
+      github.repository != 'infiversehq/kern' && (
+        (github.repository == 'infiversehq/kern' || github.repository == 'infiloop2/kern') &&
+        github.ref == 'refs/heads/main'
+      )
     name: Publish CI dependency image
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # Allow two bounded eight-minute builds plus image publication.
+    timeout-minutes: 25
     permissions:
       contents: read
       packages: write
@@ -40,7 +49,7 @@ jobs:
 
       - name: Publish missing dependency image
         shell: bash
-        run: bash .github/ci/prepare-sandbox.sh publish ghcr.io/infiversehq/kern-ci
+        run: bash .github/ci/prepare-sandbox.sh publish "$CI_REGISTRY_IMAGE"
 
       - name: Remove registry credentials
         if: always()
@@ -49,6 +58,8 @@ jobs:
       - name: Retain recent dependency images
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PACKAGE_OWNER: ${{ github.repository_owner }}
+          PACKAGE_OWNER_TYPE: ${{ github.event.repository.owner.type }}
         run: |
           dependency_hash="$(sha256sum .github/ci/sandbox.Dockerfile .github/ci/requirements.txt | sha256sum | cut -d ' ' -f 1)"
           export CURRENT_TAG="deps-$dependency_hash"
@@ -58,7 +69,8 @@ jobs:
           import re
           import subprocess
 
-          endpoint = '/orgs/infiversehq/packages/container/kern-ci/versions'
+          owner_route = {'Organization': 'orgs', 'User': 'users'}[os.environ['PACKAGE_OWNER_TYPE']]
+          endpoint = f'/{owner_route}/{os.environ["PACKAGE_OWNER"]}/packages/container/kern-ci/versions'
           current_tag = os.environ['CURRENT_TAG']
           tag_pattern = re.compile(r'deps-[0-9a-f]{64}')
           pages = json.loads(subprocess.check_output([

@@ -63,7 +63,11 @@ concurrency:
 
 jobs:
   authorize:
-    if: github.repository == 'infiversehq/kern'
+    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
+    if: >-
+      github.repository != 'infiversehq/kern' && (
+        github.repository == 'infiversehq/kern'
+      )
     name: Authorize AWS stage
     runs-on: ubuntu-latest
     outputs:
@@ -112,7 +116,11 @@ jobs:
   stage:
     needs: authorize
     name: Upgrade stage and run tests
-    if: ${{ needs.authorize.result == 'success' }}
+    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
+    if: >-
+      github.repository != 'infiversehq/kern' && (
+        needs.authorize.result == 'success'
+      )
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:

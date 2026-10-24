@@ -39,9 +39,22 @@ trap 'rm -rf "$build_context"' EXIT
 mkdir -p "$build_context/.github/ci"
 cp .github/ci/sandbox.Dockerfile "$build_context/Dockerfile"
 cp .github/ci/requirements.txt "$build_context/.github/ci/requirements.txt"
-docker build --tag kern-ci:sandbox \
-  --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY:-infiversehq/kern}" \
-  "$build_context"
+# Cold builds normally take a few minutes. A slow package mirror can instead
+# consume the entire suite budget without hitting apt's idle timeout. Bound
+# each attempt and retry one timeout; deterministic build failures fail at once.
+for attempt in 1 2; do
+  if timeout --kill-after=30s 8m docker build --tag kern-ci:sandbox \
+    --label "org.opencontainers.image.source=https://github.com/${GITHUB_REPOSITORY:-infiversehq/kern}" \
+    "$build_context"; then
+    break
+  else
+    build_status=$?
+  fi
+  if [[ "$build_status" -ne 124 || "$attempt" -eq 2 ]]; then
+    exit "$build_status"
+  fi
+  echo '::notice::Dependency build exceeded eight minutes; retrying once before running tests.'
+done
 
 if [[ "$mode" == publish ]]; then
   docker tag kern-ci:sandbox "$image_ref"
