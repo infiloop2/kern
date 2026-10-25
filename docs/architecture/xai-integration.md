@@ -309,7 +309,7 @@ and successful S3 MP4 download (1,167,970 bytes). All captured video API
 responses reported `x-zero-data-retention: true`; the operator retained
 Opt out and confirmed playback. This verifies the laptop injection protocol,
 not deployment of Kern's implementation or an independent retention audit.
-The bootstrap now pins 1.0.40; the video storage flow above was last verified
+The bootstrap now pins 1.0.70; the video storage flow above was last verified
 on 1.0.34, and historical ACP observations below identify the older version
 on which they were originally measured. The storage API is
 documented in [Admin API](../api/AdminAPI.md#grok-video-storage); storage behavior
@@ -823,8 +823,9 @@ only that exact saved mapping and asks the operator to retry; the next turn
 starts a fresh Grok session while the durable Kern transcript remains visible.
 
 The authenticated catalog offers `grok-4.7` with `xhigh`/`high`. Grok Build
-1.0.40 advertises `grok-4.7` in its authenticated ACP model list and selects
-it by default. xAI documents the [release](https://x.ai/build/changelog) and
+1.0.40 advertised `grok-4.7` in its authenticated ACP model list and selected
+it by default. Pinned 1.0.70 still lists `grok-4.7` in its offline catalog; its
+authenticated list has not yet been re-verified. xAI documents the [release](https://x.ai/build/changelog) and
 the [model id and effort levels](https://docs.x.ai/developers/models/grok-4.7).
 Recorded `grok-4.6` threads remain readable, but must switch to an offered
 model before starting another turn.

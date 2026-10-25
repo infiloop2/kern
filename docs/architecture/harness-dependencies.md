@@ -19,10 +19,10 @@ can break when a harness package is upgraded.
 
 | Harness | Package | Pinned version | Runtime id | Adapter |
 | --- | --- | --- | --- | --- |
-| Codex | `@openai/codex` | `0.159.0` | `codex`, `codex-2`, `codex-3` | `host/runtime/agent_runtime/codex_app_server.py` |
-| Claude Code | `@anthropic-ai/claude-code` | `2.1.284` | `claude_code` | `host/runtime/agent_runtime/claude_code.py` |
-| Grok Build | `@xai-official/grok` | `1.0.40` | `grok`, `grok-2` | `host/runtime/agent_runtime/grok_agent.py` |
-| Hermes | `hermes-agent[bedrock,mcp]` | `0.18.2` | `hermes` | `host/runtime/agent_runtime/hermes_agent.py` |
+| Codex | `@openai/codex` | `0.164.0` | `codex`, `codex-2`, `codex-3` | `host/runtime/agent_runtime/codex_app_server.py` |
+| Claude Code | `@anthropic-ai/claude-code` | `2.1.310` | `claude_code` | `host/runtime/agent_runtime/claude_code.py` |
+| Grok Build | `@xai-official/grok` | `1.0.70` | `grok`, `grok-2` | `host/runtime/agent_runtime/grok_agent.py` |
+| Hermes | `hermes-agent[bedrock,mcp]` | `0.19.0` | `hermes` | `host/runtime/agent_runtime/hermes_agent.py` |
 
 The `script` runtime (`host/runtime/agent_runtime/script_runner.py`) is on that
 same adapter contract but is not a harness: it runs a bash script from the
@@ -31,7 +31,7 @@ no row above. Nothing in this document applies to it beyond the shared
 launcher and scope boundary — see `docs/architecture/services-and-runtimes.md`.
 
 Bootstrap installs the npm packages globally with npm, installs Hermes with
-uv into its own dedicated Python 3.12 venv (`/usr/local/lib/hermes-venv`; the
+uv into its own dedicated Python 3.12.15 venv (`/usr/local/lib/hermes-venv`; the
 base image's Python is too old for it), and verifies the exact version
 strings before completing. A version bump should be treated as an interface
 review, not a package-only change.
@@ -105,7 +105,8 @@ and `high-ultrafast` to High reasoning with `serviceTier: "ultrafast"`.
 High, Max, and Ultra keep the normal behavior without a speed override.
 Changing runtime, model, or preset starts a fresh provider session; resuming
 keeps the selected preset. Ultra is Codex's delegation mode, independent of Ultrafast.
-The pinned 0.159.0 CLI enables the Fast feature by default, so Kern adds no
+The pinned 0.164.0 CLI enables the `fast_mode` and `ultrafast_mode` features by
+default and gates them independently, so Kern adds no
 feature flag to its managed config. The app-server accepts the service tier as a string. Kern does not filter these presets by plan, workspace, model catalog, or rollout, and does
 not retry unsupported requests with a different model or tier. Codex's error
 is surfaced to the operator. Codex itself omits tiers absent from its model
@@ -262,7 +263,7 @@ claude -p --input-format stream-json --output-format stream-json --verbose \
 ```
 
 Kern passes the session selection on every new and resumed process.
-Claude Code `2.1.284` accepts the exposed model ids `claude-opus-5-5`,
+Claude Code `2.1.310` accepts the exposed model ids `claude-opus-5-5`,
 `claude-fable-5-1`, and `claude-sonnet-5-5`; it also accepts `high`, `max`, and the
 session-only `ultracode` effort. `ultracode` combines xhigh effort with dynamic
 workflow orchestration, so an older CLI that silently ignores that value is not
@@ -542,7 +543,7 @@ Claude usage is read with:
 claude -p "/usage" --output-format json
 ```
 
-On pinned Claude Code `2.1.284`, the command returns a JSON object whose
+On pinned Claude Code `2.1.310`, the command returns a JSON object whose
 `result` string contains lines like:
 
 ```text
@@ -728,6 +729,12 @@ GLM catalog. The Bedrock guard therefore admits only
 ``SSL_CERT_FILE`` and ``AWS_CA_BUNDLE`` (both set by the launcher to the
 system bundle). IMDS is disabled so boto3 never waits on the
 instance-metadata endpoint.
+
+Since 0.19.0, Hermes probes a model's context length on its first turn by
+sending one or two deliberately oversized Converse requests (roughly 7 and
+12 MB) and caching the result in ``~/.hermes/context_length_cache.yaml``.
+They use the admitted Converse path, fit under the guard's body limit and are
+re-signed like any other request, so they appear in network events.
 
 ### Auth and account identity
 

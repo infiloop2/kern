@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextlib
 import importlib.util
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -45,6 +46,12 @@ class SelectionTests(unittest.TestCase):
             ("host/runtime/browser_network/config.py", selector.ALL),
             ("tests/smoke-ui/linkedin_adapter_smoke.py", {selector.NATIVE}),
             ("tests/smoke-ui/workspace_smokes.py", {selector.WORKSPACE}),
+            ("tests/smoke-ui/approval_smokes.py", {selector.ADMIN}),
+            ("tests/smoke-ui/tool_cost_usage_smokes.py", {selector.ADMIN}),
+            ("tests/smoke-ui/browser_smokes.py", selector.UI),
+            ("tests/smoke-ui/admin_ui_smoke.py", selector.UI),
+            ("tests/smoke-ui/run_admin_ui_mock.py", selector.UI),
+            ("tests/smoke-ui/workspace_mocks.py", selector.UI),
         ]
         for path, expected in cases:
             with self.subTest(path=path):
@@ -56,8 +63,7 @@ class SelectionTests(unittest.TestCase):
                      "host/runtime/admin_api/admin_auth.py", "host/tools/shared/web.py",
                      "host/npm/package-lock.json", ".github/ci/select_tests.py",
                      "tests/scripts/time_group.py", ".github/workflows/test-all-host.yml",
-                     "tests/smoke-ui/admin_ui_smoke.py", "tests/smoke-ui/run_admin_ui_mock.py",
-                     "tests/smoke-ui/workspace_mocks.py"):
+                     "tests/smoke-ui/timing.py", "tests/conftest.py"):
             with self.subTest(path=path):
                 self.assertEqual(self.selected(path), selector.ALL)
         self.assertEqual(self.selected("host/runtime/admin_api/admin_ui/app.js"), selector.UI)
@@ -67,7 +73,36 @@ class SelectionTests(unittest.TestCase):
 
     def test_unknown_and_empty_diff_are_broad(self):
         self.assertEqual(self.selected("new-subsystem/unknown.py"), selector.ALL)
+        self.assertEqual(self.selected("tests/smoke-ui/new_fixture.py"), selector.ALL)
         self.assertEqual(self.selected(), selector.ALL)
+
+    def test_unit_modules_do_not_expand_product_scope(self):
+        unit = "tests/test_tools_openrouter.py"
+        self.assertEqual(self.selected(unit, "tests/test_param_guard_coverage.py"), set())
+        self.assertEqual(self.selected(unit, "host/tools/openrouter/__init__.py"), {selector.ADMIN})
+        self.assertEqual(self.selected(unit, "host/runtime/core/state/accounts.py"), selector.ALL)
+        # Existing browser/workspace-specific unit and fixture mappings remain.
+        self.assertEqual(self.selected("tests/test_browser_actions.py"), {selector.ADMIN, selector.NATIVE})
+        self.assertEqual(self.selected("tests/test_workspace_api.py"), selector.UI)
+
+    def test_all_suites_without_a_git_diff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory, "output")
+            result = subprocess.run([sys.executable, str(ROOT / ".github/ci/select_tests.py"), "--all"],
+                                    cwd=directory, env={**os.environ, "GITHUB_OUTPUT": str(output)},
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            matrix = json.loads(output.read_text().removeprefix("matrix="))
+            self.assertEqual(matrix["suite"], ["python", "admin-ui", "workspace-ui", "native-browser"])
+
+    def test_incomplete_or_ambiguous_arguments_fail_without_outputs(self):
+        for args in ([], ["--base", "a" * 40], ["--all", "--head", "b" * 40]):
+            with self.subTest(args=args), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory, "output")
+                result = subprocess.run([sys.executable, str(ROOT / ".github/ci/select_tests.py"), *args],
+                                        env={**os.environ, "GITHUB_OUTPUT": str(output)}, capture_output=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(output.exists())
 
     def test_mixed_diff_unions_every_path(self):
         self.assertEqual(self.selected("host/cli/deploy.py", "host/runtime/browser/storage.py",

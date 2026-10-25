@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Conservative browser-suite selection from the complete PR merge-base diff."""
+"""Select browser suites from the complete PR diff, or all suites on public main."""
 from __future__ import annotations
 
 import argparse
@@ -35,6 +35,17 @@ WORKSPACE_SMOKES = frozenset({
 })
 NATIVE_SMOKES = frozenset({
     "native_browser_smoke.py", "browser_adapter_smoke.py", "linkedin_adapter_smoke.py",
+})
+ADMIN_SMOKES = frozenset({
+    "overload_smokes.py", "training_privacy_smokes.py", "runtime_account_smokes.py",
+    "oauth_poll_smokes.py", "google_ads_smokes.py", "swarm_smokes.py",
+    "x_ads_smokes.py", "instagram_ads_smokes.py", "file_preview_smokes.py",
+    "integration_config_smokes.py", "seo_tools_smokes.py", "analytics_smokes.py",
+    "approval_smokes.py", "auto_approval_smokes.py", "host_inference_usage_smokes.py",
+    "tool_cost_usage_smokes.py",
+})
+UI_RUNNERS = frozenset({
+    "admin_ui_smoke.py", "run_admin_ui_mock.py", "workspace_mocks.py", "browser_smokes.py",
 })
 # These shell/navigation assets host workspaces as well as the admin panels.
 SHARED_UI = frozenset({
@@ -78,13 +89,20 @@ def suites_for_path(path: str) -> frozenset[str]:
             return frozenset({NATIVE})
         if name in WORKSPACE_SMOKES:
             return frozenset({WORKSPACE})
-        # Entrypoint/mock/timing changes are runner changes; unfamiliar fixtures
-        # also stay broad until their owning suite is explicitly reviewed.
+        if name in ADMIN_SMOKES:
+            return frozenset({ADMIN})
+        if name in UI_RUNNERS:
+            return UI
+        # Shared timing and unfamiliar fixtures stay broad until reviewed.
         return ALL
     if path.startswith("tests/workspaces/") or path.startswith(("tests/test_workspace", "tests/test_personal_web_app")):
         return UI
     if path.startswith("tests/test_browser") or path == "tests/browser_fakes.py":
         return frozenset({ADMIN, NATIVE})
+    if len(parts) == 2 and parts[0] == "tests" and parts[1].startswith("test_") and parts[1].endswith(".py"):
+        # Unit modules aren't browser fixtures. Python always runs the entire
+        # unit suite; product-code changes in the same diff select independently.
+        return frozenset()
     # CI/runners, bootstrap/dependencies, core/auth/config, proxy/storage and
     # every unclassified input stay broad. No blanket host/** optimization.
     return ALL
@@ -112,12 +130,21 @@ def changed_paths(base: str, head: str) -> list[str]:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--base", required=True)
-    parser.add_argument("--head", required=True)
+    parser.add_argument("--base")
+    parser.add_argument("--head")
+    parser.add_argument("--all", action="store_true", help="Run every suite without file selection")
     args = parser.parse_args(argv)
-    paths = changed_paths(args.base, args.head)  # failure must fail the selector job
+    if args.all:
+        if args.base or args.head:
+            parser.error("--all cannot be combined with --base or --head")
+        paths = []
+        print("All host suites requested; file selection disabled")
+    else:
+        if not args.base or not args.head:
+            parser.error("--base and --head are required without --all")
+        paths = changed_paths(args.base, args.head)  # failure must fail the selector job
+        print(f"Complete PR diff ({len(paths)} paths): {paths!r}")
     matrix = select(paths)
-    print(f"Complete PR diff ({len(paths)} paths): {paths!r}")
     print(f"Selected suite matrix: {matrix}")
     with Path(os.environ["GITHUB_OUTPUT"]).open("a") as output:
         output.write(f"matrix={json.dumps(matrix)}\n")
