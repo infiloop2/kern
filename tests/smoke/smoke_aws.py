@@ -588,7 +588,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"\n{smoke.passed}/{smoke.total} checks passed")
         return 0 if smoke.passed == smoke.total else 1
     except Exception as exc:  # noqa: BLE001 - report, then always tear down in finally
-        smoke.print_network_events("Network events before failure", since=0)
+        smoke.print_failure_network_events()
         print(f"\n[FAIL] {exc}", file=sys.stderr)
         return 1
     finally:
@@ -4992,6 +4992,37 @@ LEFT JOIN proxy_provider_pins USING (provider)
             + shlex.quote(query)
         )
         return json.loads(output) if output else {}
+
+    def print_failure_network_events(self) -> None:
+        """Print network events from the instance as it is now. A stop/start
+        (the fresh-root reconfigure) assigns a new public address, a fresh root
+        has new SSH host keys even on a reused address, and a failed lifecycle
+        command stops the instance."""
+        label = "Network events before failure"
+        if self.result:
+            instance_id = self.result["instance_id"]
+            try:
+                instance = self._aws(
+                    "ec2", "describe-instances", "--instance-ids", instance_id
+                )["Reservations"][0]["Instances"][0]
+            except Exception as exc:  # noqa: BLE001 - best-effort debug output
+                print(f"  {label}: could not look up {instance_id}: {type(exc).__name__}: {exc}; "
+                      "trying the recorded address", flush=True)
+            else:
+                state = instance["State"]["Name"]
+                if state != "running":
+                    print(f"  {label}: unavailable; {instance_id} is {state}", flush=True)
+                    return
+                public_dns = instance.get("PublicDnsName") or self.result["public_dns"]
+                if public_dns != self.result["public_dns"]:
+                    print(f"  {label}: {instance_id} moved to {public_dns}", flush=True)
+                    self.result["public_dns"] = public_dns
+                # The failure may have followed a root replacement, so trust
+                # the host key and session afresh; the first API call reopens
+                # a dead tunnel.
+                (self.workdir / "known_hosts").unlink(missing_ok=True)
+                self._session_cookie = None
+        self.print_network_events(label, since=0)
 
     def print_network_events(self, label: str, *, since: int = 0) -> None:
         try:

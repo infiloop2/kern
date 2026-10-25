@@ -457,7 +457,7 @@ Deployment stops the old Browser service and deletes the retired
 file-based logins and proxy settings must be entered again. Browser state already
 stored in Postgres is preserved across deployments.
 
-This uses Playwright 1.60's [storage-state API](https://playwright.dev/python/docs/auth#reusing-signed-in-state),
+This uses Playwright 1.64's [storage-state API](https://playwright.dev/python/docs/auth#reusing-signed-in-state),
 with IndexedDB explicitly included. Snapshots do not include HTTP cache,
 browsing history or session storage.
 IndexedDB and local storage can contain application data as well as credentials,

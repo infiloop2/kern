@@ -2,6 +2,8 @@ name: test-all-host
 
 on:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -11,34 +13,45 @@ env:
 
 # Superseded tests for the same PR cancel independently of other workflows.
 concurrency:
-  group: ${{ github.workflow }}-pr-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   select:
-    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
-    if: github.repository != 'infiversehq/kern'
+    # October pause: remove only the repository-name guard in the November 1 PR.
+    # Main pushes permanently run only in public repositories.
+    if: >-
+      github.repository != 'infiversehq/kern' &&
+      (github.event_name == 'pull_request' || github.event.repository.private == false)
     name: Select host test suites
     runs-on: ubuntu-latest
     timeout-minutes: 3
     outputs:
       matrix: ${{ steps.select.outputs.matrix }}
     steps:
-      - name: Checkout complete PR history
+      - name: Checkout complete history
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - name: Select from the complete PR diff
+      - name: Select PR suites or every suite on public main
         id: select
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: python3 .github/ci/select_tests.py --base "$BASE_SHA" --head "$HEAD_SHA"
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = push ]; then
+            python3 .github/ci/select_tests.py --all
+          else
+            python3 .github/ci/select_tests.py --base "$BASE_SHA" --head "$HEAD_SHA"
+          fi
 
   suites:
-    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
-    if: github.repository != 'infiversehq/kern'
+    # October pause: remove only the repository-name guard in the November 1 PR.
+    if: >-
+      github.repository != 'infiversehq/kern' &&
+      (github.event_name == 'pull_request' || github.event.repository.private == false)
     name: Host tests (${{ matrix.suite }})
     needs: select
     strategy:
@@ -132,11 +145,10 @@ jobs:
   test:
     name: Run all host tests
     needs: [select, suites]
-    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
+    # October pause: remove only the repository-name guard in the November 1 PR.
     if: >-
-      github.repository != 'infiversehq/kern' && (
-        always()
-      )
+      always() && github.repository != 'infiversehq/kern' &&
+      (github.event_name == 'pull_request' || github.event.repository.private == false)
     runs-on: ubuntu-latest
     timeout-minutes: 1
     steps:

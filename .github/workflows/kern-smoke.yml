@@ -17,8 +17,9 @@ jobs:
   authorize:
     name: Authorize AWS smoke
     # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
+    # A manual dispatch on main stays available during the pause.
     if: >-
-      github.repository != 'infiversehq/kern' && (
+      (github.repository != 'infiversehq/kern' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && (
         github.repository == 'infiversehq/kern' && (github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request &&
           (github.event.comment.body == '/smoke' || github.event.comment.body == 'smoke')))
       )
@@ -135,8 +136,9 @@ jobs:
     needs: authorize
     name: Fresh AWS smoke (${{ needs.authorize.outputs.ref }})
     # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
+    # A manual dispatch on main stays available during the pause.
     if: >-
-      github.repository != 'infiversehq/kern' && (
+      (github.repository != 'infiversehq/kern' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && (
         needs.authorize.result == 'success'
       )
     runs-on: ubuntu-latest
@@ -195,7 +197,7 @@ jobs:
           "${RUNNER_TEMP}/kern-smoke-venv/bin/python" -m pip install \
             --disable-pip-version-check \
             --no-cache-dir \
-            'playwright==1.60.0'
+            'playwright==1.64.1'
 
       - name: Checkout
         uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd  # v5.0.1

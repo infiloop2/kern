@@ -5,17 +5,21 @@ umask 077
 # Bootstrap is usually launched from the operator home over SSH. Use a neutral
 # cwd so runuser children do not inherit an unreadable directory.
 cd /
-NODE_VERSION=22.12.0
-CODEX_CLI_VERSION=0.159.0
-CLAUDE_CODE_VERSION=2.1.284
+# Official linux tarball digests from nodejs.org/dist/v${NODE_VERSION}/SHASUMS256.txt;
+# move them with NODE_VERSION.
+NODE_VERSION=22.23.4
+NODE_TARBALL_SHA256_X64=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce
+NODE_TARBALL_SHA256_ARM64=6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b
+CODEX_CLI_VERSION=0.164.0
+CLAUDE_CODE_VERSION=2.1.310
 # Grok Build, xAI's coding agent. The npm package is a JS trampoline plus a
 # per-platform optional dependency carrying a brotli-compressed binary; see
 # docs/architecture/xai-integration.md for the upgrade review checklist.
-GROK_CLI_VERSION=1.0.40
-HERMES_AGENT_VERSION=0.18.2
+GROK_CLI_VERSION=1.0.70
+HERMES_AGENT_VERSION=0.19.0
 FASTEMBED_VERSION=0.8.0
 FASTER_WHISPER_VERSION=1.2.1
-BROWSER_PLAYWRIGHT_VERSION=1.60.0
+BROWSER_PLAYWRIGHT_VERSION=1.64.1
 # Vendored Systran/faster-whisper-base.en revision
 # 3d3d5dee26484f91867d81cb899cfcf72b96be6c; update the release tag and
 # pinned digests together when deliberately changing the model.
@@ -44,9 +48,16 @@ d241a60d5e8f04cc1b2b3e9ef7a4921b27bf526d9f6050ab90f9267a1f9e5c66  tokenizer.json
 5d5b662e421ea9fac075174bb0688ee0d9431699900b90662acd44b2a350503a  special_tokens_map.json"
 # hermes-agent requires Python 3.11-3.13; the base image ships 3.10, so uv
 # provisions a standalone interpreter for its dedicated venv.
-UV_VERSION=0.9.26
-HERMES_PYTHON_VERSION=3.12
-CLOUDFLARED_VERSION=2026.6.1
+# uv and cloudflared release digests are the published per-asset SHA256
+# values; move them with the version.
+UV_VERSION=0.13.5
+UV_TARBALL_SHA256_X86_64=f68d291c75783122dad58ab77def0e13f3233f358731db5d6d7e8715603b928f
+UV_TARBALL_SHA256_AARCH64=4bb69cf95ed13f23713bb7bc09f241896ea0c75b7c557e615a20604b82f9c403
+# Exact patch release: a bare minor resolves to whatever the pinned uv knows.
+HERMES_PYTHON_VERSION=3.12.15
+CLOUDFLARED_VERSION=2026.10.3
+CLOUDFLARED_SHA256_AMD64=053b80b0a23031a038fdbf3c073f59f82b8f1f152aa67971d7383ffafc0dbab0
+CLOUDFLARED_SHA256_ARM64=89297ebfb9e8c99c0dc013a1140601453cf3798d8306c5591651f4a3f5210be8
 # Ubuntu 22.04 ships PostgreSQL 14. The data directory below is versioned by
 # major so a future base-image bump gets an explicit pg_upgrade step instead
 # of a silent mismatch.
@@ -946,11 +957,12 @@ export UV_LINK_MODE=hardlink
 bootstrap_log "== installing Node.js ${NODE_VERSION} =="
 arch="$(dpkg --print-architecture)"
 case "$arch" in
-  amd64) node_arch=x64 ;;
-  arm64) node_arch=arm64 ;;
+  amd64) node_arch=x64; node_digest="$NODE_TARBALL_SHA256_X64" ;;
+  arm64) node_arch=arm64; node_digest="$NODE_TARBALL_SHA256_ARM64" ;;
   *) echo "unsupported architecture: ${arch}" >&2; exit 1 ;;
 esac
 bootstrap_download /tmp/node.tar.xz "https://nodejs.org/dist/v${NODE_VERSION}/node-v${NODE_VERSION}-linux-${node_arch}.tar.xz"
+echo "${node_digest}  /tmp/node.tar.xz" | sha256sum --check --status
 tar -xJf /tmp/node.tar.xz -C /usr/local --strip-components=1 --no-same-owner
 rm -f /tmp/node.tar.xz
 
@@ -1000,11 +1012,12 @@ chown root:root /usr/local/bin/grok
 chmod 0755 /usr/local/bin/grok
 bootstrap_log "== installing Hermes agent =="
 case "$arch" in
-  amd64) uv_arch=x86_64-unknown-linux-gnu ;;
-  arm64) uv_arch=aarch64-unknown-linux-gnu ;;
+  amd64) uv_arch=x86_64-unknown-linux-gnu; uv_digest="$UV_TARBALL_SHA256_X86_64" ;;
+  arm64) uv_arch=aarch64-unknown-linux-gnu; uv_digest="$UV_TARBALL_SHA256_AARCH64" ;;
   *) echo "unsupported uv architecture: ${arch}" >&2; exit 1 ;;
 esac
 bootstrap_download /tmp/uv.tar.gz "https://github.com/astral-sh/uv/releases/download/${UV_VERSION}/uv-${uv_arch}.tar.gz"
+echo "${uv_digest}  /tmp/uv.tar.gz" | sha256sum --check --status
 tar -xzf /tmp/uv.tar.gz -C /tmp
 install -m 0755 "/tmp/uv-${uv_arch}/uv" /usr/local/bin/uv
 rm -rf /tmp/uv.tar.gz "/tmp/uv-${uv_arch}"
@@ -1113,12 +1126,13 @@ PY
 if [ "$cloudflare_connection_count" -gt 0 ]; then
   bootstrap_log "== installing cloudflared ${CLOUDFLARED_VERSION} =="
   case "$arch" in
-    amd64) cloudflared_arch=amd64 ;;
-    arm64) cloudflared_arch=arm64 ;;
+    amd64) cloudflared_arch=amd64; cloudflared_digest="$CLOUDFLARED_SHA256_AMD64" ;;
+    arm64) cloudflared_arch=arm64; cloudflared_digest="$CLOUDFLARED_SHA256_ARM64" ;;
     *) echo "unsupported cloudflared architecture: ${arch}" >&2; exit 1 ;;
   esac
   bootstrap_download /usr/local/bin/cloudflared \
     "https://github.com/cloudflare/cloudflared/releases/download/${CLOUDFLARED_VERSION}/cloudflared-linux-${cloudflared_arch}"
+  echo "${cloudflared_digest}  /usr/local/bin/cloudflared" | sha256sum --check --status
   chmod 755 /usr/local/bin/cloudflared
   cloudflared_version="$(/usr/local/bin/cloudflared --version)"
   case "$cloudflared_version" in

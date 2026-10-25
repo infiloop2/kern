@@ -96,6 +96,63 @@ class GitHubWriteForwardingSmokeTests(unittest.TestCase):
 
 
 class ResourceProtectionSmokeTests(unittest.TestCase):
+    def test_failure_network_events_skip_a_stopped_instance(self):
+        smoke = AwsSmoke()
+        smoke.result = {"instance_id": "i-1", "public_dns": "old.example"}
+        described = {"Reservations": [{"Instances": [{"State": {"Name": "stopped"}}]}]}
+        with patch.object(smoke, "_aws", return_value=described), \
+                patch.object(smoke, "print_network_events") as events, \
+                patch("builtins.print") as printed:
+            smoke.print_failure_network_events()
+        events.assert_not_called()
+        self.assertIn("unavailable; i-1 is stopped", printed.call_args.args[0])
+
+    def test_failure_network_events_follow_a_new_address(self):
+        smoke = AwsSmoke()
+        smoke.result = {"instance_id": "i-1", "public_dns": "old.example"}
+        described = {"Reservations": [{"Instances": [
+            {"State": {"Name": "running"}, "PublicDnsName": "new.example"},
+        ]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            smoke.workdir = Path(tmp)
+            (smoke.workdir / "known_hosts").write_text("old.example ssh-ed25519 AAAA\n")
+            with patch.object(smoke, "_aws", return_value=described), \
+                    patch.object(smoke, "print_network_events") as events, \
+                    patch("builtins.print"):
+                smoke.print_failure_network_events()
+            self.assertFalse((smoke.workdir / "known_hosts").exists())
+        self.assertEqual(smoke.result["public_dns"], "new.example")
+        events.assert_called_once_with("Network events before failure", since=0)
+
+    def test_failure_network_events_reset_trust_on_a_reused_address(self):
+        smoke = AwsSmoke()
+        smoke.result = {"instance_id": "i-1", "public_dns": "same.example"}
+        smoke._session_cookie = "stale"
+        described = {"Reservations": [{"Instances": [
+            {"State": {"Name": "running"}, "PublicDnsName": "same.example"},
+        ]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            smoke.workdir = Path(tmp)
+            (smoke.workdir / "known_hosts").write_text("same.example ssh-ed25519 AAAA\n")
+            with patch.object(smoke, "_aws", return_value=described), \
+                    patch.object(smoke, "print_network_events") as events, \
+                    patch("builtins.print"):
+                smoke.print_failure_network_events()
+            self.assertFalse((smoke.workdir / "known_hosts").exists())
+        self.assertIsNone(smoke._session_cookie)
+        events.assert_called_once()
+
+    def test_failure_network_events_fall_back_when_lookup_fails(self):
+        smoke = AwsSmoke()
+        smoke.result = {"instance_id": "i-1", "public_dns": "recorded.example"}
+        with patch.object(smoke, "_aws", side_effect=RuntimeError("AWS unavailable")), \
+                patch.object(smoke, "print_network_events") as events, \
+                patch("builtins.print") as printed:
+            smoke.print_failure_network_events()
+        self.assertIn("trying the recorded address", printed.call_args.args[0])
+        self.assertEqual(smoke.result["public_dns"], "recorded.example")
+        events.assert_called_once()
+
     def test_remote_check_script_is_valid_and_failure_is_not_swallowed(self):
         smoke = AwsSmoke()
         with patch.object(smoke, "_ssh_code", return_value="") as ssh, patch.object(smoke, "_ok"):
@@ -1034,10 +1091,10 @@ class WorkflowSmokeTests(unittest.TestCase):
     def test_fresh_smoke_workflow_uses_fresh_smoke_script(self) -> None:
         smoke = Path(".github/workflows/kern-smoke.yml").read_text()
 
-        self.assertIn("playwright==1.60.0", smoke)
-        self.assertIn("playwright==1.60.0", Path(".github/ci/requirements.txt").read_text())
+        self.assertIn("playwright==1.64.1", smoke)
+        self.assertIn("playwright==1.64.1", Path(".github/ci/requirements.txt").read_text())
         self.assertIn('"${RUNNER_TEMP}/kern-smoke-venv/bin/python" tests/smoke/smoke_aws.py', smoke)
-        self.assertLess(smoke.index("playwright==1.60.0"), smoke.index("AWS_ACCESS_KEY_ID"))
+        self.assertLess(smoke.index("playwright==1.64.1"), smoke.index("AWS_ACCESS_KEY_ID"))
         self.assertIn("context kern-smoke", smoke)
         self.assertIn("github.event_name == 'workflow_dispatch'", smoke)
         self.assertIn("Fresh AWS smoke is already running; wait for the previous smoke to complete.", smoke)
