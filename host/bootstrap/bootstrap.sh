@@ -1497,10 +1497,21 @@ runuser -u kern-agent -- env \
 # from becoming an indirect egress path before the broad loopback accept.
 write_firewall() {
 python3 - <<'PY'
-import json, pathlib
+import ipaddress, json, pathlib
 config = json.loads(pathlib.Path('/tmp/kern_effective_config.json').read_text())
+payload = json.loads(pathlib.Path('/tmp/kern_payload.json').read_text())
+management_source = payload.get('management_ssh_source')
+management_rule = ''
+if management_source is not None:
+    # Accept one IPv4 address, never a subnet or raw nftables expression.
+    if not isinstance(management_source, str):
+        raise ValueError('management_ssh_source must be an IPv4 address')
+    management_source = str(ipaddress.IPv4Address(management_source))
+    management_rule = f'    ip saddr {management_source} tcp dport 22 accept\n'
 ssh_enabled = any(connection.get('mode') == 'ssh' for connection in config['operator_connections'])
-pathlib.Path('/tmp/kern_ssh_rule').write_text('    tcp dport 22 accept\n' if ssh_enabled else '')
+pathlib.Path('/tmp/kern_ssh_rule').write_text(
+    management_rule + ('    tcp dport 22 accept\n' if ssh_enabled else '')
+)
 cloudflare_enabled = any(connection.get('mode') == 'cloudflare_tunnel' for connection in config['operator_connections'])
 pathlib.Path('/tmp/kern_cloudflare_rules').write_text(
     '    meta skuid "cloudflared" udp dport 53 accept\n'

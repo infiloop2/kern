@@ -127,7 +127,22 @@ class LimaSmoke(AwsSmoke):
         self._check_network_enforcement()
         self._ok("real Ubuntu host provisioned; SSH, UI, API, storage, and isolation verified")
 
-        self._step("power stop and start")
+        self._step("power stop and start with management-only SSH ingress")
+        # Exercise the ingress policy of a Cloudflare-only deployment without
+        # requiring a real tunnel account. Retain the operator key for other
+        # smoke assertions, but remove its unrestricted port-22 firewall rule.
+        self._ssh("sudo python3 - <<'PY'\n"
+                  "from pathlib import Path\n"
+                  "import subprocess\n"
+                  "path = Path('/etc/nftables.conf')\n"
+                  "text = path.read_text()\n"
+                  "broad = '    tcp dport 22 accept\\n'\n"
+                  "assert text.count(broad) == 1\n"
+                  "assert 'ip saddr 192.168.5.2 tcp dport 22 accept' in text\n"
+                  "Path('/etc/nftables.conf.kern-smoke').write_text(text)\n"
+                  "path.write_text(text.replace(broad, ''))\n"
+                  "subprocess.run(['nft', '-f', str(path)], check=True)\n"
+                  "PY")
         self._close_tunnel()
         stopped = self._lifecycle("stop")
         self._assert_result(stopped, expected_state="stopped", expect_version=False)
@@ -146,13 +161,17 @@ class LimaSmoke(AwsSmoke):
         if started_again.get("initial_state") != "running":
             raise AssertionError(f"second start was not idempotent: {started_again}")
         self.result = started_again
+        # This uses Lima's own key and guest account, not the smoke operator key.
+        self._run(["limactl", "shell", self.instance_name, "true"], timeout=60)
         self._assert_ssh_host_key(first_host_key)
         if self._definition_signature() != first_definition:
             raise AssertionError("power operations replaced or rewrote the VM definition")
         self._check_live_host()
         self.check_installed_agent_script_launcher()
         self._assert_root_sentinel(present=True)
-        self._ok("stop/start preserved the instance, disks, operator access, and data")
+        self._ssh("sudo mv /etc/nftables.conf.kern-smoke /etc/nftables.conf && "
+                  "sudo nft -f /etc/nftables.conf")
+        self._ok("management-only SSH survived stop/start; instance, disks, and data preserved")
 
         self._step("upgrade from older version metadata")
         self._write_older_version_metadata()

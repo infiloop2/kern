@@ -876,6 +876,10 @@ def main_for_lifecycle(command: LifecycleCommand) -> int:
                     target_version=target_version,
                     allow_upgrade=command.allow_upgrade,
                     reset_admin_passkeys=command.reset_admin_passkeys,
+                    # Lima's default private network forwards host-loopback
+                    # SSH through this gateway (pkg/networks/const.go). Keep
+                    # management reachable even for Cloudflare-only hosts.
+                    management_ssh_source="192.168.5.2",
                 )
                 deploy_key = _generate_deploy_key(workdir)
                 stage_one_script = _render_ssh_user_data(

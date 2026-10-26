@@ -634,6 +634,36 @@ class LimaLifecycleFlowTests(unittest.TestCase):
             self.assertIn(("delete", "--force", "--tty=false", instance_name), calls)
             self.assertFalse(any(call[:2] == ("disk", "create") for call in calls))
 
+    def test_cloudflare_only_lifecycle_preserves_management_ingress(self) -> None:
+        fake = FakeLimactl()
+        with tempfile.TemporaryDirectory() as home, patch.dict(
+            os.environ, {"KERN_CLOUDFLARE_TUNNEL_TOKEN": "test-token"},
+        ):
+            for mode in ("deploy", "reconfigure", "recover", "upgrade"):
+                with self.subTest(mode=mode):
+                    if mode == "upgrade":
+                        assert fake.instance is not None
+                        definition = Path(str(fake.instance["dir"])) / "lima.yaml"
+                        definition.write_text(definition.read_text().replace(
+                            f"# kern-version: {repo_version()}", "# kern-version: 0.0.0",
+                        ))
+                    command = LifecycleCommand(
+                        mode=mode, agent_name="kern-test", provider="lima",
+                        admin_password_sha256=SAMPLE_ADMIN_PASSWORD_SHA256,
+                        operator_cloudflare_hostname=(
+                            "kern.example.com" if mode in {"deploy", "reconfigure"} else None
+                        ),
+                    )
+                    code, output, _ = self._run_lifecycle(command, fake, home)
+                    self.assertEqual(code, 0, output)
+                    stage_one = self.deliver.call_args.args[2]
+                    payload = json.loads(next(
+                        line for line in stage_one.splitlines() if line.startswith("{")
+                    ))
+                    self.assertEqual(payload["management_ssh_source"], "192.168.5.2")
+                    connections = payload["runtime_config"].get("operator_connections", [])
+                    self.assertFalse(any(item["mode"] == "ssh" for item in connections))
+
     def test_deploy_happy_path(self) -> None:
         fake = FakeLimactl()
         command = LifecycleCommand(
@@ -667,6 +697,7 @@ class LimaLifecycleFlowTests(unittest.TestCase):
             self.assertIn("ssh-ed25519 AAAADEPLOY kern-deploy", stage_one)
             embedded = next(line for line in stage_one.splitlines() if line.startswith("{"))
             payload = json.loads(embedded)
+            self.assertEqual(payload["management_ssh_source"], "192.168.5.2")
             self.assertEqual(payload["storage"]["resolver"], "lima")
             self.assertEqual(
                 payload["storage"]["resolver_input"]["admin"], {"disk_name": admin_disk}
