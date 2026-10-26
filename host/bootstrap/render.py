@@ -46,6 +46,7 @@ def _bootstrap_payload(
     target_version: str,
     allow_upgrade: bool = False,
     reset_admin_passkeys: bool = False,
+    management_ssh_source: str | None = None,
 ) -> dict[str, Any]:
     runtime_config: dict[str, Any] = {
         "agent_name": agent_name,
@@ -67,11 +68,16 @@ def _bootstrap_payload(
     # the persistent resources, and the named guest-side resolver maps them to
     # Linux block devices during bootstrap (see
     # docs/architecture/host-provider-design.md).
-    return {
+    payload: dict[str, Any] = {
         "operation": operation,
         "runtime_config": runtime_config,
         "storage": storage or {},
     }
+    # Infrastructure SSH is independent of optional operator endpoints and
+    # is never saved as a runtime credential. AWS needs no persistent rule.
+    if management_ssh_source is not None:
+        payload["management_ssh_source"] = management_ssh_source
+    return payload
 
 
 def _write_runtime_code_archive(code_path: Path) -> None:

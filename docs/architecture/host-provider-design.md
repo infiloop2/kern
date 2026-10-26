@@ -382,6 +382,15 @@ authoritative for the actual operator connections when bootstrap runs.
 
 ## Lima provider
 
+Lima needs host-to-guest management SSH even when the operator chooses only
+Cloudflare access. Its loopback forwarding port reaches guest port 22 from the
+default private gateway `192.168.5.2`. The Lima adapter supplies this single
+address as `management_ssh_source` in the bootstrap payload; shared bootstrap
+allows that source independently of operator SSH. AWS omits this field. It is
+not an operator endpoint or a persisted runtime setting, and does not expose
+the host forwarding port to the LAN. Removing the readiness check would still
+leave Lima's guest commands without their management transport.
+
 ### Resource names
 
 Lima has named instances and named independent disks rather than arbitrary

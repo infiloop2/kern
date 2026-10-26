@@ -32,7 +32,9 @@ The smoke verifies:
 - the tampered-definition power contract: stopping remains available as the
   safe response, starting the untrusted definition is refused, and restoring
   the exact generated definition permits start again;
-- idempotent stop/start without replacing compute or changing SSH host keys;
+- idempotent stop/start without replacing compute or changing SSH host keys,
+  with unrestricted operator SSH ingress removed to exercise the management-only
+  firewall policy used by Cloudflare-only hosts; Lima's own SSH command must work;
 - upgrade with the disposable root replaced and both data disks preserved;
 - upgrade from older version metadata with both durable disks preserved;
 - browser cache reuse and offline package installation during root-replacement
