@@ -471,7 +471,7 @@ Other GitHub domain decisions:
 
 | Domain | Flow and path shape | Class | Allowed when | Notes |
 | --- | --- | --- | --- | --- |
-| `uploads.github.com` | Release-asset uploads (`gh release upload`, REST *Upload a release asset*) under `/repos/<owner>/<repo>/...` | write | repository is in `write_repositories` | Decided by the same `/repos/<owner>/<repo>` write rule as `api.github.com`. Upload bodies use the normal proxy path, which buffers each request body and rejects bodies over 128 MiB; very large release assets are not supported until the proxy has a streaming path for guard-clean hosts. |
+| `uploads.github.com` | Release-asset uploads (`gh release upload`, REST *Upload a release asset*) under `/repos/<owner>/<repo>/...` | write | repository is in `write_repositories` | Decided by the same `/repos/<owner>/<repo>` write rule as `api.github.com`. Upload bodies use the normal proxy path, which buffers each request body and rejects bodies over the host-sized inspection cap (at most 1 GiB); very large release assets are not supported until the proxy has a streaming path for guard-clean hosts. |
 | `codeload.github.com` | Archive downloads such as `/<owner>/<repo>/tar.gz/<ref>` | read | always (integration enabled) | Serves only `GET`/`HEAD`, so every request is an allowed read of any repository. |
 | `raw.githubusercontent.com` | Raw file reads such as `/<owner>/<repo>/<ref>/<path>` | read | always (integration enabled) | Serves only `GET`/`HEAD`, so every request is an allowed read of any repository. |
 | `objects.githubusercontent.com` | Git object downloads through short-lived signed URLs whose paths are opaque | read | request method is `GET` or `HEAD` | No repo guard is possible because the signed URL path has no owner/repo shape. Writes are never allowed. |
@@ -519,7 +519,7 @@ directory, fetched with the working token) and uses real `git`
   reaches GitHub.
 
 At most ten pushes may await a decision. The proxy checks that global count
-before `index-pack`, so together with the existing 128 MiB request limit the
+before `index-pack`, so together with the 128 MiB gated-push limit the
 live pending payload is bounded. When the queue is full, gated pushes fail with
 `github_push_queue_full` until the operator approves or rejects one. There is
 no expiry or automatic eviction.

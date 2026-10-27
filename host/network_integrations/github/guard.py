@@ -88,6 +88,9 @@ ROUTES = {
     "release-assets.githubusercontent.com": (("GET", "HEAD"), ()),
     "results-receiver.actions.githubusercontent.com": (("GET", "HEAD"), ()),
 }
+# Keep queued Git packs independent of the provider inspection ceiling.
+MAX_GATED_PUSH_BYTES = 128 * 1024 * 1024
+
 GUARDED_HOSTS = frozenset({"github.com", "api.github.com", "uploads.github.com"})
 
 
@@ -329,6 +332,8 @@ def gate_response(
     parts = [part for part in normalized_path(path).split("/") if part]
     if host.lower() != "github.com" or method.upper() != "POST" or len(parts) != 3 or parts[2] != "git-receive-pack":
         return None, None
+    if len(body) > MAX_GATED_PUSH_BYTES:
+        return None, "request_body_too_large"
     if config.block_direct_main_pushes:
         try:
             commands, capabilities, _pack = push_gate.parse_receive_pack(body)
@@ -348,7 +353,7 @@ def gate_response(
     try:
         with push_gate.quarantine_lock():
             # inspect() runs index-pack, so the count must be checked first.
-            # The existing proxy body cap bounds each of these ten pushes.
+            # The independent 128 MiB gated-push cap bounds each of these ten pushes.
             if count_pending_pushes() >= push_gate.PENDING_PUSH_LIMIT:
                 return None, "github_push_queue_full"
             result = push_gate.inspect(owner, repo, body, read_proxy_github_token())

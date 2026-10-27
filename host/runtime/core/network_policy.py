@@ -24,10 +24,11 @@ from urllib.parse import unquote
 from host.config import parse_network_controls
 from host.runtime.core.state import network_policy_record
 from host.runtime.core import zstd_body
+from host.runtime.core.body_limits import INSPECTION_BODY_LIMIT
 
 # Matches the proxy's MAX_BODY_BYTES: decompressed output is capped so a
 # decompression bomb cannot exhaust the proxy's memory.
-MAX_DECODED_BODY_BYTES = 128 * 1024 * 1024
+MAX_DECODED_BODY_BYTES = INSPECTION_BODY_LIMIT
 
 
 def load_policy() -> dict[str, Any]:

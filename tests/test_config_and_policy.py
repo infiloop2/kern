@@ -1261,6 +1261,32 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(reason, "github_push_gate_unavailable")
         self.assertEqual(result.cleaned, ["abc123"])
 
+    def test_gated_push_size_is_checked_before_parsing_or_indexing(self) -> None:
+        policy = parse_network_controls({
+            "network_integrations": {"github": {
+                "enabled": True,
+                "block_direct_main_pushes": True,
+                "require_dot_github_approval": True,
+                "write_repositories": [{"owner": "infiversehq", "repo": "kern-tools"}],
+            }},
+        })
+        path = "/infiversehq/kern-tools.git/git-receive-pack"
+        self.assertEqual(github_guard.MAX_GATED_PUSH_BYTES, 128 * 1024**2)
+        with (
+            patch.object(github_guard, "MAX_GATED_PUSH_BYTES", 4),
+            patch.object(github_guard.push_gate, "parse_receive_pack", return_value=([], set(), b"")) as parse,
+            patch.object(github_guard.push_gate, "inspect") as inspect_fn,
+            _gate_capacity(pending=10),
+        ):
+            self.assertEqual(github_push_gate_response(policy, "POST", "github.com", path, b"12345"),
+                             (None, "request_body_too_large"))
+            parse.assert_not_called()
+            inspect_fn.assert_not_called()
+            self.assertEqual(github_push_gate_response(policy, "POST", "github.com", path, b"1234"),
+                             (None, "github_push_queue_full"))
+            parse.assert_called_once()
+            inspect_fn.assert_not_called()
+
     def test_github_push_queue_cap_is_checked_before_indexing(self) -> None:
         policy = parse_network_controls({
             "network_integrations": {

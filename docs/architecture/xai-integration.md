@@ -372,7 +372,7 @@ as well as denied families whose earlier output may still appear in history.
 The shared body decoder accepts identity, gzip, deflate/zlib and zstd. Grok's
 compressed inference requests are decoded before the same account/tool policy
 is applied; compression grants no additional capability. Zstd uses the system
-`libzstd1` streaming decoder with a 128 MiB window bound and the shared 128 MiB
+`libzstd1` streaming decoder with a 128 MiB window bound and the shared host-sized (at most 1 GiB)
 decoded-output limit across at most 64 frames, including empty and skippable
 frames, to bound work independently of decoded size. Truncated frames, invalid checksums,
 trailing garbage and unsupported encodings fail closed. Bootstrap and the CI

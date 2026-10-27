@@ -59,7 +59,7 @@ object logic, only when `.github` inspection is needed.
 
 The proxy permits at most ten pending pushes globally. It checks the count
 before `index-pack` writes the request into the durable mirror; the proxy's
-existing 128 MiB request cap is the per-push bound. A full queue rejects the
+128 MiB gated-push cap is the per-push bound. A full queue rejects the
 push with `github_push_queue_full` until the operator resolves an item. There
 is deliberately no TTL, free-space heuristic, or background maintenance pass.
 
