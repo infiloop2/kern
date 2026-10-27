@@ -43,6 +43,7 @@ from host.constants import LOOPBACK, PROXY_PORT
 from host.network_integrations import runtime as integrations
 from host.network_integrations.base import ResponseRewrite
 from host.runtime.core.network_policy import load_policy
+from host.runtime.core.body_limits import INSPECTION_BODY_LIMIT
 from host.runtime.core.peer_identity import tcp_peer_thread_id
 from host.runtime.core.state import (
     append_network_event,
@@ -54,12 +55,12 @@ HOST = LOOPBACK
 PORT = PROXY_PORT
 BUFFER_SIZE = 65536
 MAX_HEADER_BYTES = 64 * 1024
-MAX_BODY_BYTES = 128 * 1024 * 1024  # bodies are buffered in memory for inspection
+MAX_BODY_BYTES = INSPECTION_BODY_LIMIT
 # Eight runtime pools can admit 400 turns. Leave room for simultaneous tool and
 # provider requests; large buffered bodies have their own, tighter budget.
 MAX_CONNECTIONS = 1024
 LARGE_BODY_THRESHOLD = 256 * 1024
-MAX_LARGE_BODIES = 4
+MAX_LARGE_BODIES = 1
 MAX_METERED_RESPONSES = 64  # 64 * 4 MiB per meter; above one runtime's 50-turn pool
 LARGE_MESSAGE_TIMEOUT = 30.0
 MAX_GENERATED_CERTS = 512  # cap the durable per-host certificate cache on the admin volume
@@ -93,6 +94,31 @@ CERT_LOCK = threading.Lock()
 CONNECTION_SLOTS = threading.BoundedSemaphore(MAX_CONNECTIONS)
 LARGE_BODY_SLOTS = threading.BoundedSemaphore(MAX_LARGE_BODIES)
 METERED_RESPONSE_SLOTS = threading.BoundedSemaphore(MAX_METERED_RESPONSES)
+
+
+def large_body_memory_available() -> bool:
+    """Reject under memory pressure before buffering, decoding or parsing.
+
+    Linux MemAvailable excludes swap and estimates reclaimable memory. The
+    eight-times allowance covers inspection copies; it is not reserved RAM.
+    """
+    try:
+        with open("/proc/meminfo") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024 >= 8 * MAX_BODY_BYTES > 0
+    except (OSError, ValueError, IndexError):
+        pass
+    return False
+
+
+def acquire_large_body_slot() -> bool:
+    if not LARGE_BODY_SLOTS.acquire(blocking=False):
+        return False
+    if not large_body_memory_available():
+        LARGE_BODY_SLOTS.release()
+        return False
+    return True
 
 
 def _is_public_ip(ip: str) -> bool:
@@ -330,7 +356,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             is_websocket = any(key.lower() == "upgrade" and value.lower() == "websocket" for key, value in headers)
             protocol = "wss" if is_websocket else "https"
             # Small provider prompts can proceed at full connection capacity.
-            # Reserve one of four large-body slots before buffering a chunked,
+            # Reserve the large-body slot before buffering a chunked,
             # compressed, or large fixed-length request. Never wait while
             # holding a connection slot: many waiters could starve small
             # provider requests even though they need no large-body budget.
@@ -343,7 +369,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if ("chunked" in header_map.get("transfer-encoding", "").lower()
                     or body_length > LARGE_BODY_THRESHOLD
                     or content_encoding not in {"", "identity"}):
-                if not LARGE_BODY_SLOTS.acquire(blocking=False):
+                if not acquire_large_body_slot():
                     capacity_reason = "request_body_capacity"
                     append_network_event(protocol, method, host, port, path, query, False, capacity_reason)
                     client_tls.sendall(
@@ -583,7 +609,7 @@ class SocketReader:
 
     def __init__(self, sock: socket.socket) -> None:
         self._sock = sock
-        self._buffer = b""
+        self._buffer = bytearray()
 
     def readline(self, limit: int = MAX_HEADER_BYTES) -> bytes:
         while b"\n" not in self._buffer:
@@ -591,23 +617,24 @@ class SocketReader:
                 raise OSError("header line too long")
             chunk = self._sock.recv(BUFFER_SIZE)
             if not chunk:
-                line, self._buffer = self._buffer, b""
+                line, self._buffer = bytes(self._buffer), bytearray()
                 return line
-            self._buffer += chunk
+            self._buffer.extend(chunk)
         line, _, self._buffer = self._buffer.partition(b"\n")
-        return line + b"\n"
+        return bytes(line) + b"\n"
 
     def read(self, amount: int) -> bytes:
         while len(self._buffer) < amount:
             chunk = self._sock.recv(BUFFER_SIZE)
             if not chunk:
                 break
-            self._buffer += chunk
-        data, self._buffer = self._buffer[:amount], self._buffer[amount:]
+            self._buffer.extend(chunk)
+        data = bytes(memoryview(self._buffer)[:amount])
+        del self._buffer[:amount]
         return data
 
     def drain(self) -> bytes:
-        data, self._buffer = self._buffer, b""
+        data, self._buffer = bytes(self._buffer), bytearray()
         return data
 
 
@@ -656,7 +683,7 @@ def read_body(reader: Any, headers: list[tuple[str, str]]) -> tuple[bytes, str |
 
 
 def read_chunked_body(reader: Any) -> tuple[bytes, str | None]:
-    body = b""
+    body = bytearray()
     while True:
         size_line = reader.readline(MAX_HEADER_BYTES)
         try:
@@ -668,10 +695,10 @@ def read_chunked_body(reader: Any) -> tuple[bytes, str | None]:
                 line = reader.readline(MAX_HEADER_BYTES)
                 if line in (b"\r\n", b"\n", b""):
                     break
-            return body, None
+            return bytes(body), None
         if len(body) + size > MAX_BODY_BYTES:
             return b"", "request_body_too_large"
-        body += reader.read(size)
+        body.extend(reader.read(size))
         reader.read(2)  # CRLF after each chunk
 
 
@@ -911,7 +938,7 @@ class WebSocketClientGuard:
             raise WebSocketDenied("websocket_uninspectable")
         buffered_payload = max(0, min(length, len(buffer) - offset - 4))
         if opcode in (0x0, 0x1, 0x2) and len(self._message) + buffered_payload > LARGE_BODY_THRESHOLD and not self._large_body_slot:
-            if not LARGE_BODY_SLOTS.acquire(blocking=False):
+            if not acquire_large_body_slot():
                 raise WebSocketDenied("websocket_body_capacity")
             self._large_body_slot = True
             self._large_message_deadline = time.monotonic() + LARGE_MESSAGE_TIMEOUT

@@ -118,16 +118,20 @@ response is not exposed as a second general-purpose HTTP path. Anything the
 client pipelined behind the handshake is dropped rather than forwarded as
 requests no guard inspected. Request bodies are buffered for
 inspection — chunked bodies are decoded and re-sent with an explicit
-`Content-Length` — and bodies over 128 MiB are rejected so the policy always
-sees the complete body.
+`Content-Length` — and bodies over the host-sized inspection cap (at most
+1 GiB) are rejected so the policy always sees the complete body.
 The proxy accepts up to 1024 connections, with an explicit 4096-descriptor
-and 2048-task service limit. At most four requests or WebSocket messages over
-256 KiB may buffer at once; smaller provider prompts can use the remaining
-connections without multiplying the 128 MiB body cap by 1024. Chunked and
-compressed requests reserve a large-body slot even when their wire size is
-small. Excess large requests receive 429 immediately, and excess large
-WebSocket messages close with a retryable capacity reason; neither waits while
-holding a proxy connection slot. A large WebSocket frame reserves a slot only
+and 2048-task service limit. The wire and decoded-output cap is the smaller of
+1 GiB and one sixteenth of physical RAM. Only one request or WebSocket message
+over 256 KiB may buffer at once; smaller provider prompts can use the remaining
+connections. Chunked and compressed requests reserve the large-body slot even
+when their wire size is small. Admission also requires available RAM of at
+least eight times the cap to allow for decoding, parsing and temporary copies.
+This is an estimate, not a memory reservation or a guarantee against other
+processes consuming memory. A host with 2 GiB usable RAM has a 128 MiB cap;
+1 GiB inspection requires at least 16 GiB usable RAM. Excess large requests
+receive 429 immediately, and excess large WebSocket messages close with a
+retryable capacity reason; neither waits while holding a proxy connection slot. A large WebSocket frame reserves a slot only
 after more than 256 KiB has actually arrived, and must finish within 30 seconds
 once reserved. The tunnel uses an OS selector that supports the proxy's full
 file descriptor range.

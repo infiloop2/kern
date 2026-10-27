@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import base64
 import fcntl
+import gzip
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from contextlib import contextmanager, ExitStack
 import json
 import hashlib
+import io
 import os
 from pathlib import Path
 import resource
@@ -16,7 +18,8 @@ import sys
 import tempfile
 import threading
 import unittest
-from unittest.mock import MagicMock, patch
+import zlib
+from unittest.mock import MagicMock, mock_open, patch
 
 import pg_harness
 
@@ -30,7 +33,7 @@ from host.config import parse_network_controls
 from host.network_integrations.openai import guard as openai_guard
 from host.network_integrations.xai import guard as xai_guard
 from host.network_integrations.xai.manifest import XaiIntegration
-from host.runtime.core import db, network_policy, state
+from host.runtime.core import body_limits, db, network_policy, state
 from host.runtime.core.network_policy import load_policy
 from host.runtime.core.state import save_network_policy as save_policy
 from host.runtime.core.state import save_proxy_claude_account_id, save_proxy_openai_account_id
@@ -95,7 +98,141 @@ class UpstreamHandler(BaseHTTPRequestHandler):
         return
 
 
+class RequestBodyLimitTests(unittest.TestCase):
+    def test_wire_and_decoded_limits_share_host_budget(self) -> None:
+        self.assertEqual(network_proxy.MAX_BODY_BYTES, body_limits.INSPECTION_BODY_LIMIT)
+        self.assertLessEqual(network_proxy.MAX_BODY_BYTES, 1024 ** 3)
+        self.assertEqual(network_policy.MAX_DECODED_BODY_BYTES, network_proxy.MAX_BODY_BYTES)
+
+    def test_content_length_admits_large_requests_through_one_gib(self) -> None:
+        # Exercise admission without allocating a GiB-sized body on the host.
+        for length in (128 * 1024 * 1024 + 1, 1024 ** 3):
+            with self.subTest(length=length), patch.object(network_proxy, "MAX_BODY_BYTES", 1024 ** 3):
+                reader = MagicMock()
+                reader.read.return_value = b"body"
+                self.assertEqual(
+                    network_proxy.read_body(reader, [("Content-Length", str(length))]),
+                    (b"body", None),
+                )
+                reader.read.assert_called_once_with(length)
+
+    def test_oversized_http_bodies_are_rejected_before_reading_payload(self) -> None:
+        length = 1024 ** 3 + 1
+        for headers in (
+            [("Content-Length", str(length))],
+            [("Transfer-Encoding", "chunked")],
+        ):
+            with self.subTest(headers=headers):
+                reader = MagicMock()
+                reader.readline.return_value = f"{length:x}\r\n".encode()
+                self.assertEqual(
+                    network_proxy.read_body(reader, headers),
+                    (b"", "request_body_too_large"),
+                )
+                reader.read.assert_not_called()
+
+    def test_chunked_body_enforces_total_size_at_boundary(self) -> None:
+        for tail in (b"5678", b"56789"):
+            wire = b"4\r\n1234\r\n" + f"{len(tail):x}\r\n".encode() + tail + b"\r\n0\r\n\r\n"
+            with self.subTest(tail=tail), patch.object(network_proxy, "MAX_BODY_BYTES", 8):
+                self.assertEqual(
+                    network_proxy.read_body(io.BytesIO(wire), [("Transfer-Encoding", "chunked")]),
+                    (b"12345678", None) if len(tail) == 4 else (b"", "request_body_too_large"),
+                )
+
+    def test_websocket_advertised_size_admits_one_gib_and_rejects_larger(self) -> None:
+        for length in (128 * 1024 * 1024 + 1, 1024 ** 3, 1024 ** 3 + 1):
+            with self.subTest(length=length), patch.object(network_proxy, "MAX_BODY_BYTES", 1024 ** 3):
+                guard = network_proxy.WebSocketClientGuard(lambda _message: None)
+                self.addCleanup(guard.close)
+                header = b"\x81\xff" + length.to_bytes(8, "big")
+                if length <= 1024 ** 3:
+                    self.assertEqual(guard.feed(header), b"")
+                else:
+                    with self.assertRaises(network_proxy.WebSocketDenied) as caught:
+                        guard.feed(header)
+                    self.assertEqual(caught.exception.code, "websocket_uninspectable")
+
+    def test_fragmented_websocket_enforces_total_size_at_boundary(self) -> None:
+        for tail in (b"5678", b"56789"):
+            with self.subTest(tail=tail), patch.object(network_proxy, "MAX_BODY_BYTES", 8):
+                inspect_message = MagicMock(return_value=None)
+                guard = network_proxy.WebSocketClientGuard(inspect_message)
+                self.addCleanup(guard.close)
+                first = masked_frame(b"1234", fin=False)
+                last = masked_frame(tail, opcode=0)
+                self.assertEqual(guard.feed(first), b"")
+                inspect_message.assert_not_called()
+                if len(tail) == 4:
+                    self.assertEqual(guard.feed(last), first + last)
+                    inspect_message.assert_called_once_with(b"12345678")
+                else:
+                    with self.assertRaises(network_proxy.WebSocketDenied) as caught:
+                        guard.feed(last)
+                    self.assertEqual(caught.exception.code, "websocket_uninspectable")
+                    inspect_message.assert_not_called()
+
+    def test_compressed_body_enforces_decoded_size_at_boundary(self) -> None:
+        for encoding, compress in (("gzip", gzip.compress), ("deflate", zlib.compress)):
+            for length in (8, 9):
+                with self.subTest(encoding=encoding, length=length), patch.object(network_policy, "MAX_DECODED_BODY_BYTES", 8):
+                    body = b"x" * length
+                    self.assertEqual(
+                        network_policy.decode_body(compress(body), encoding),
+                        body if length == 8 else None,
+                    )
+
+    def test_limit_scales_with_host_memory(self) -> None:
+        for gib, expected_mib in ((2, 128), (4, 256), (16, 1024), (64, 1024)):
+            with self.subTest(gib=gib), patch.object(body_limits.os, "sysconf", side_effect=[gib * 1024**3 // 4096, 4096]):
+                self.assertEqual(body_limits.inspection_body_limit(), expected_mib * 1024**2)
+        with patch.object(body_limits.os, "sysconf", side_effect=OSError):
+            self.assertEqual(body_limits.inspection_body_limit(), 0)
+
+    def test_memory_pressure_releases_slot_before_buffering(self) -> None:
+        slots = MagicMock()
+        for available, admitted in ((63, False), (64, True)):
+            slots.reset_mock()
+            with (
+                self.subTest(available=available),
+                patch.object(network_proxy, "LARGE_BODY_SLOTS", slots),
+                patch.object(network_proxy, "MAX_BODY_BYTES", 8192),
+                patch("builtins.open", mock_open(read_data=f"MemAvailable: {available} kB\n")),
+            ):
+                self.assertEqual(network_proxy.acquire_large_body_slot(), admitted)
+                slots.acquire.assert_called_once_with(blocking=False)
+                self.assertEqual(slots.release.call_count, 0 if admitted else 1)
+        with patch("builtins.open", side_effect=OSError):
+            self.assertFalse(network_proxy.large_body_memory_available())
+
+    def test_socket_reader_preserves_unconsumed_bytes_across_reads(self) -> None:
+        sock = MagicMock()
+        sock.recv.side_effect = [b"head\r\nabc", b"def", b"ghi", b""]
+        reader = network_proxy.SocketReader(sock)
+        self.assertEqual(reader.readline(), b"head\r\n")
+        self.assertEqual(reader.read(5), b"abcde")
+        self.assertEqual(reader.read(2), b"fg")
+        self.assertEqual(reader.drain(), b"hi")
+        self.assertEqual(reader.read(2), b"")
+
+    def test_socket_reader_many_chunks_use_mutable_accumulator(self) -> None:
+        sock = MagicMock()
+        reader = network_proxy.SocketReader(sock)
+        def receive(_amount):
+            self.assertIsInstance(reader._buffer, bytearray)
+            return b"x" * 1024
+        sock.recv.side_effect = receive
+        self.assertEqual(reader.read(1024 * 256), b"x" * (1024 * 256))
+        self.assertEqual(sock.recv.call_count, 256)
+
+
 class ProxyCapacityTests(unittest.TestCase):
+    def setUp(self) -> None:
+        # Capacity/framing regressions do not depend on the test host's load.
+        memory = patch.object(network_proxy, "large_body_memory_available", return_value=True)
+        memory.start()
+        self.addCleanup(memory.stop)
+
     def test_proxy_has_room_for_all_admitted_runtime_pools(self) -> None:
         from host.runtime.agent_runtime.orchestrator import TURN_LIMIT_PER_RUNTIME
         from host.session_options import RUNTIMES

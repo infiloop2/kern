@@ -171,7 +171,8 @@ _CORE_PROXY_DENIAL_REASONS: tuple[DenialReason, ...] = (
     ),
     DenialReason(
         "request_body_too_large",
-        "The request body exceeds the proxy's inspection limit (128 MiB). Split the upload or "
+        "The request body exceeds the proxy's inspection limit (up to 1 GiB, lower on small "
+        "hosts; gated Git pushes remain limited to 128 MiB). Split the upload or "
         "send less data per request.",
     ),
     DenialReason(
