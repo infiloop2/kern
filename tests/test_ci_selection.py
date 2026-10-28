@@ -6,9 +6,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
+import textwrap
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +28,31 @@ selector = load_script("select_tests", ".github/ci/select_tests.py")
 
 
 class SelectionTests(unittest.TestCase):
+    def test_suites_survive_skipped_review_but_require_successful_selection(self):
+        source = (ROOT / ".github/workflows/test-all-host.yml").read_text()
+        suites = source.split("\n  suites:\n", 1)[1].split("\n  test:\n", 1)[0]
+        condition = re.search(r"    if: >-\n((?:      .+\n)+)", suites).group(1)
+        # GitHub applies implicit success() across the needs chain unless a
+        # status function overrides it. Public review is intentionally skipped.
+        self.assertIn("always()", condition)
+        self.assertIn("!cancelled()", condition)
+        self.assertIn("needs.select.result == 'success'", condition)
+        self.assertIn("github.repository != 'infiversehq/kern'", condition)
+        self.assertIn("github.event_name == 'pull_request' || github.event.repository.private == false", condition)
+
+    def test_aggregate_rejects_missing_or_failed_selected_suites(self):
+        source = (ROOT / ".github/workflows/test-all-host.yml").read_text()
+        aggregate = source.split("\n  test:\n", 1)[1]
+        script = textwrap.dedent(aggregate.split("        run: |\n", 1)[1].split("      - name:", 1)[0])
+        for select in ("success", "failure", "cancelled", "skipped"):
+            for suites in ("success", "failure", "cancelled", "skipped"):
+                with self.subTest(select=select, suites=suites):
+                    result = subprocess.run(["bash", "-e", "-c", script], capture_output=True,
+                                            env={**os.environ, "REPOSITORY": "infiloop2/kern",
+                                                 "REVIEW_RESULT": "skipped", "SELECT_RESULT": select,
+                                                 "SUITES_RESULT": suites})
+                    self.assertEqual(result.returncode == 0, select == suites == "success")
+
     def selected(self, *paths):
         matrix = selector.select(list(paths))
         self.assertIn("python", matrix["suite"])
