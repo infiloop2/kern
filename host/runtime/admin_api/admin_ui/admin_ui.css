@@ -3687,3 +3687,28 @@ button.workspace-reorder-handle:disabled { cursor: not-allowed; opacity: 0.35; }
   .training-warning-hint { display: block; margin-left: 0; }
   .topbar .training-refresh { min-height: 40px; padding-inline: 0.6rem; }
 }
+
+/* Database storage: keep policy prose readable within the scrolling table. */
+#database-storage-tables { min-width: 54rem; }
+#database-storage-tables td:first-child { width: 28%; overflow-wrap: anywhere; }
+#database-storage-tables td:nth-child(2),
+#database-storage-tables td:nth-child(3) { white-space: nowrap; font-variant-numeric: tabular-nums; }
+#database-storage-tables td:last-child { min-width: 22rem; }
+#database-storage-tables .muted { margin-top: 0.3rem; }
+
+#database-storage-total { font-size: 1.15rem; font-weight: 600; }
+.database-storage-help summary { cursor: pointer; color: var(--text-dim); }
+@media (max-width: 700px) {
+  #database-storage-tables { min-width: 0; }
+  #database-storage-tables thead { position: absolute; clip-path: inset(50%); width: 1px; height: 1px; overflow: hidden; }
+  #database-storage-tables tbody { display: block; }
+  #database-storage-tables tr { display: grid; grid-template-columns: 1fr 1fr; padding: 1rem 0; border-bottom: 1px solid var(--border); }
+  #database-storage-tables tr:last-child { border-bottom: 0; }
+  #database-storage-tables td { border: 0; padding: 0.3rem 0; min-width: 0; }
+  #database-storage-tables td:first-child,
+  #database-storage-tables td:last-child { grid-column: 1 / -1; width: auto; min-width: 0; }
+  #database-storage-tables td:nth-child(2)::before { content: "Estimated rows"; }
+  #database-storage-tables td:nth-child(3)::before { content: "Size"; }
+  #database-storage-tables td:last-child::before { content: "Retention"; }
+  #database-storage-tables td:not(:first-child)::before { display: block; color: var(--text-dim); font-size: 0.72rem; margin-bottom: 0.2rem; }
+}

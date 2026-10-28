@@ -58,6 +58,8 @@ def route_workspace_api(
     api_error: ApiErrorFactory,
     host_api: HostApi,
 ) -> dict[str, Any] | None:
+    if method == "GET" and path.startswith("/v1/workspace/reminders/"):
+        return {"reminders": [], "pending_count": 0, "pending": [], "next_before": None}
     if method == "GET" and path == "/v1/workspace/getting-started":
         return _onboarding_status()
     if method == "POST" and path == "/v1/workspace/getting-started/dismiss":

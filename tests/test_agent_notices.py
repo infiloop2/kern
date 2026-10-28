@@ -120,6 +120,8 @@ class NoticeSummaryTests(TestCase):
             ("POST", "/agent/agents", {"name": "Reviewer", "model": "gpt-6.1-sol", "message": "Check changes"}, {}, "agent_spawned", "Started Reviewer (gpt-6.1-sol): Check changes"),
             ("POST", "/agent/agents/archive", {"thread_id": "thread-2"}, {}, "agent_archived", "Archived Portfolio"),
             ("PUT", "/agent/self/memory", {"description": "Release decisions"}, {}, "self_memory_saved", "Saved self memory: Release decisions"),
+            ("PUT", "/agent/self/notes/production", {}, {}, "private_note_saved", "Saved private note: production"),
+            ("DELETE", "/agent/self/notes/production", {}, {}, "private_note_deleted", "Deleted private note: production"),
             ("PUT", "/agent/memory/pages/release-guidance", {}, {}, "shared_memory_saved", "Saved release guidance memory"),
             ("DELETE", "/agent/memory/pages/release-guidance", None, {}, "shared_memory_deleted", "Deleted release guidance memory"),
             ("POST", "/agent/schedules", {"name": "Release checker", "triggers": []}, {}, "standing_agent_created", "Created standing agent Release checker: 0 triggers"),

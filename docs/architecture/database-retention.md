@@ -29,11 +29,11 @@ The categories are:
 | `operator_connections` | fixed | At most one SSH and one tunnel row. |
 | `counters` | fixed | Internal named counters, including four lifetime token totals. Never pruned with detailed usage. |
 | `thread_sessions` | retention | Sessions referenced by retained events or turn usage are preserved; unreferenced sessions retain the newest 100,000 per runtime. |
-| `agent_events` | retention | Newest 10,000,000 rows, with at most 499 rows of amortization slack; message text is length-bounded. |
+| `agent_events` | retention | Newest 10,000,000-event sequence window, with at most 499 rows of amortization slack; sequence gaps can leave fewer rows. Message text is length-bounded. |
 | `conversation_message_embeddings` | retention | Derived vectors for the newest 250,000 user/agent messages, with at most roughly 800 newly indexed messages of amortization slack; activity and lifecycle events do not consume this quota. Rows cascade with source events. |
 | `oauth_logins` | fixed | At most one row for each supported OAuth runtime. |
 | `provider_accounts` | fixed | At most one row for each supported provider. |
-| `network_events` | retention | Newest 1,000,000 rows, with at most 499 rows of amortization slack. |
+| `network_events` | retention | Newest 1,000,000-event sequence window, with at most 499 rows of amortization slack; sequence gaps can leave fewer rows. |
 | `network_policy` | fixed | Singleton. |
 | `allowed_domains` | fixed | Replaced atomically from one bounded, validated network-policy request. |
 | `domain_methods` | fixed | Child rows of the bounded network policy. |
@@ -57,8 +57,8 @@ The categories are:
 | `host_inference_providers` | fixed | One row per supported host-owned provider. |
 | `host_inference_usage` | retention | Provider/model daily counters for 400 days, pruned on the next metered write each UTC day. |
 | `xai_video_storage` | fixed | Optional singleton storage configuration. |
-| `tool_approvals` | retention | At most 1,000 pending approvals and the newest 10,000 decided rows; pending rows expire. |
-| `tool_events` | retention | Newest 1,000,000 rows, with at most 499 rows of amortization slack. |
+| `tool_approvals` | retention | At most 1,000 pending approvals. Non-pending rows outside the newest 10,000 approval-number window are pruned; pending approvals expire after 24 hours. |
+| `tool_events` | retention | Newest 1,000,000-event sequence window, with at most 499 rows of amortization slack; sequence gaps can leave fewer rows. |
 | `bedrock_credentials` | fixed | Singleton. |
 | `turn_usage` | retention | 90 days by last measurement time; Analytics queries seven UTC calendar days. |
 | `bedrock_usage` | retention | Daily counters for the latest 400 days; model ids are normalized to a finite catalog plus `other`. |
@@ -76,6 +76,7 @@ The categories are:
 | `workspace_seen` | retention | At most one read marker per retained Chat, Web App, or schedule. Schedule markers are removed when their deleted definitions leave the 90-day restore window; Chat and App markers remain bounded by their product quotas. |
 | `chat_threads` | quota | At most 10,000 durable Chat thread records; no age-based deletion. |
 | `web_apps` | quota | At most 100 durable Web Apps; no age-based deletion. |
+| `private_notes` | quota | At most ten notes per agent, each at most 20,000 characters. Current text only: updates replace previous text without revision history. Explicit deletion; no automatic age pruning. |
 | `memory_pages` | quota | At most 10,000 retained pages; deleted pages are removed after 90 days. |
 | `memory_page_revisions` | retention | Newest 100 revisions per retained page; cascades with its page. |
 | `memory_page_embeddings` | quota | At most one current derived vector per retained page and model; soft deletion removes it and page deletion also cascades. |
@@ -85,8 +86,24 @@ The categories are:
 | `web_app_revisions` | retention | Newest 5 exact revisions, then one recovery point per four-hour interval during the first day and one per day from day two through day seven, capped at 17 revisions; cascades with its quota-bounded App. |
 | `web_app_ui_versions`, `web_app_document_versions` | reachability | Immutable components shared by App checkpoints; removed when no retained checkpoint references them. Cascade with the App. |
 | `web_app_collection_versions` | reachability | Current row intervals plus closed intervals needed by at least one of the App's retained checkpoints; cleanup uses the App lock. Cascade with the App. |
+| `auto_approval_policies`, `auto_approval_settings` | operator state | Current per-action instructions and singleton sleep window; replaced or explicitly cleared. |
+| `auto_approval_reviews` | retention | Cascades with the related tool or GitHub push approval. |
+| `browser_settings` | fixed | Singleton current Browser connection settings. |
+| `browser_accounts` | operator state | Explicit disconnect removes saved accounts; no age pruning. Saving above 1 GB of encrypted state is rejected. |
+| `tool_action_runs` | fixed | One counter per limited tool action; resets on the first run of a new UTC day. |
+| `agent_reminders` | retention | Daily cleanup keeps newest 1,000,000 finished reminders globally; pending reminders are excluded, with five pending allowed per agent. Permanent schedule deletion removes its reminders. |
 
-When adding or renaming a table, update this inventory in the same change.
+**Home → Activity and diagnostics → Database storage** shows allocated database
+and table sizes, estimated row counts, and plain-language retention descriptions.
+It reads PostgreSQL catalogs only when opened or refreshed, not on a background
+poll. Counts may be stale or unavailable. Whole-table history percentages are
+approximate: the three audit logs use sequence windows, so sequence gaps can
+cause deletion below the row target. This view cannot establish past data loss.
+See the [API contract](../api/AdminAPI.md#database-storage).
+
+When adding or renaming a table or changing retention, update this inventory and
+`host/runtime/admin_api/database_storage.py` in the same change. A PostgreSQL
+integration test checks that all migrated tables have a description.
 
 Provider-file cleanup is separate from PostgreSQL history retention. The admin
 maintenance loop sweeps Codex sessions at startup and daily. Existing workspace

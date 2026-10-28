@@ -20,7 +20,7 @@ def bound_query(query: str) -> str:
 
 # Only notices carrying task direction or an action outcome contribute to recall.
 # Receipt/tool data, history transfers and memory notices must not feed it back.
-RECALL_NOTICE_KINDS = frozenset({"agent_message", "scheduled_trigger", "approval_outcome"})
+RECALL_NOTICE_KINDS = frozenset({"reminder", "agent_message", "scheduled_trigger", "approval_outcome"})
 
 
 def context_message(event: dict[str, Any]) -> tuple[str, str] | None:

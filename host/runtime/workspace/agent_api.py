@@ -26,7 +26,7 @@ from host.runtime.core.unix_socket_service import (
     UnixSocketServer,
     peer_uids,
 )
-from host.runtime.workspace import agent_notices, agent_messages, conversation_history, memory, schedules
+from host.runtime.workspace import agent_notices, agent_messages, conversation_history, memory, private_notes, reminders, schedules
 from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.web_apps import backend as web_apps
 
@@ -47,10 +47,15 @@ PROC_ROOT = Path("/proc")
 
 
 def _may_return_large_response(path: Any) -> bool:
-    # These routes return fixed-size identity/status objects or a single memory
-    # page (capped at 2,000 content characters). All other routes retain the
-    # 24 MiB response allowance and must reserve aggregate response capacity.
-    return not isinstance(path, str) or path.split("?", 1)[0] not in {
+    # These routes return fixed-size objects or a bounded memory page/note.
+    # Other routes retain the 24 MiB response allowance and must reserve
+    # aggregate response capacity.
+    if not isinstance(path, str):
+        return True
+    base = path.split("?", 1)[0]
+    if base == "/agent/self/notes" or base.startswith("/agent/self/notes/"):
+        return False
+    return base not in {
         "/agent/identity",
         "/agent/self/memory",
         "/agent/messages",
@@ -163,6 +168,12 @@ def _dispatch_call(
                     actor="agent",
                 )
             }
+    elif parsed.path == "/agent/self/notes" or parsed.path.startswith("/agent/self/notes/"):
+        response = private_notes.route(method, parsed.path, body, query, owner=peer_thread_id)
+    elif parsed.path == "/agent/self/reminders":
+        if peer_thread_id is None:
+            raise WorkspaceError(HTTPStatus.CONFLICT, "agent thread identity is unavailable")
+        response = reminders.route(method, peer_thread_id, body, query)
     elif parsed.path == "/agent/messages":
         if method != "POST" or query:
             raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent messaging accepts only POST without query parameters")

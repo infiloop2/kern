@@ -1,0 +1,43 @@
+name: Start reviewed PR CI
+
+# Automatically start the original deferred PR test run on a clean Codex comment.
+# A first-attempt completion closes the race where that comment arrived mid-run.
+# Only one automatic rerun is allowed; later retries use GitHub Re-run jobs.
+# No /ci command, concurrency queue, deployment or approval side effects.
+# The October pause remains; remove only the leading false guard on restoration.
+on:
+  issue_comment:
+    types: [created, edited]
+  workflow_run:
+    workflows: [test-all-host]
+    types: [completed]
+
+permissions:
+  contents: read
+  issues: read
+  pull-requests: read
+  actions: write
+
+# No workflow-level concurrency: unrelated skipped comments must not evict a
+# pending completion event. The helper checks current status/attempt to dedupe.
+jobs:
+  start:
+    # October pause: remove only the leading false guard in the November 1 PR.
+    if: >-
+      false && github.repository == 'infiversehq/kern' && (
+        (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.run_attempt == 1 && github.event.workflow_run.conclusion == 'failure') ||
+        (github.event.issue.pull_request && github.event.comment.user.login == 'chatgpt-codex-connector[bot]' && (startsWith(github.event.comment.body, 'Codex Review: Didn''t find any major issues.') || (startsWith(github.event.comment.body, '<!-- codex-review-receipt:v1 -->') && contains(github.event.comment.body, 'Codex Review: Didn''t find any major issues.'))))
+      )
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      # All code in this job comes from main, never PR code or artifacts.
+      - name: Checkout trusted CI helpers
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Start eligible reviewed PR tests once
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/ci/run_reviewed_ci.py

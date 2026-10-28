@@ -89,6 +89,10 @@ def action_summary(method: str, path: str, body: Any, response: dict[str, Any],
         description = _text(request.get("description"))
         if description:
             label += f": {description}"
+    elif method in {"PUT", "DELETE"} and (match := re.fullmatch(r"/agent/self/notes/([^/]+)", path)):
+        kind = "private_note_saved" if method == "PUT" else "private_note_deleted"
+        verb = "Saved" if method == "PUT" else "Deleted"
+        label = f"{verb} private note: {unquote(match.group(1))}"
     elif method in {"PUT", "DELETE"} and (match := re.fullmatch(r"/agent/memory/pages/([^/]+)", path)):
         name = unquote(match[1]).replace("-", " ")
         verb = "Saved" if method == "PUT" else "Deleted"

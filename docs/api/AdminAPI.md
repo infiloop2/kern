@@ -1915,6 +1915,31 @@ and responses prohibit caching. No App, filesystem path, or staging id is a
 public capability. See [media
 handoff](../architecture/tools/host-integration.md#the-agent-facing-surface).
 
+## Database storage
+
+`GET /v1/database-storage` is an authenticated operator-only, read-only snapshot.
+It accepts no query parameters and returns:
+
+```json
+{"database_bytes": 4294967296, "tables": [{"name": "agent_events", "description": "Conversation messages and agent activity", "estimated_rows": 7500000, "total_bytes": 3221225472, "retention": "…", "row_target": 10000000}]}
+```
+
+Tables in the public schema are ordered by total size descending, then name.
+`total_bytes` includes indexes and TOAST (large stored values), including space
+PostgreSQL can reuse. `database_bytes` also includes database catalogs; it is not
+volume usage and excludes WAL, backups and external files. `estimated_rows`
+comes from `pg_class.reltuples`, last updated by PostgreSQL maintenance. It may
+be stale or `null` when no estimate is available. No table contents are scanned
+or returned. Each statement has a three-second timeout and a 500 ms lock timeout.
+
+`retention` explains current deletion/replacement behavior. Unknown tables say
+that their policy is undocumented; they are not assumed to be retained forever.
+`row_target` is non-null only for whole-table history targets, never per-owner
+quotas or limits on subsets. Estimated percentages do not predict deletion:
+audit logs prune by sequence windows, gaps can leave fewer rows, and cleanup is
+batched. This endpoint neither changes retention nor reports past data loss.
+The Home panel loads only when opened or manually refreshed.
+
 ## Host diagnostics
 
 ```text

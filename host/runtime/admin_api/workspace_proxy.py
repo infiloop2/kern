@@ -6,6 +6,7 @@ import http.client
 from http import HTTPStatus
 import json
 import os
+import re
 import socket
 from typing import Any
 from urllib.parse import quote, urlencode
@@ -24,6 +25,7 @@ PROXY_TIMEOUT_SECONDS = WORKSPACE_ADMIN_API_TIMEOUT_SECONDS + 10
 RECALL_TIMEOUT_SECONDS = 3
 BROWSER_SOCKET = os.environ.get("KERN_WORKSPACE_BROWSER_SOCKET", WORKSPACE_BROWSER_SOCKET_PATH)
 ROUTE_PREFIXES = {
+    "/v1/workspace/reminders": "/reminders",
     "/v1/workspace/getting-started": "/getting-started",
     "/v1/workspace/chat": "/chat",
     "/v1/workspace/web-apps": "/apps",
@@ -71,6 +73,13 @@ def recall_memory(
     )
 
 
+def saved_note_ids(value: Any) -> list[str]:
+    """Keep optional notebook metadata bounded without discarding the briefing."""
+    if not isinstance(value, list):
+        return []
+    return [item for item in value[:10] if isinstance(item, str) and re.fullmatch(r"[a-z_]{1,100}", item)]
+
+
 def self_memory(thread_id: str) -> dict[str, Any] | None:
     """Read only this thread's page, without search or inference."""
     try:
@@ -91,6 +100,7 @@ def self_memory(thread_id: str) -> dict[str, Any] | None:
         raise ApiError(HTTPStatus.BAD_GATEWAY, "Workspace returned an invalid self-memory page")
     return {key: page[key] for key in ("page_id", "content", "description", "revision")} | {
         "scope": "self", "selection": "self",
+        **({"saved_notes": saved_note_ids(page["saved_notes"])} if "saved_notes" in page else {}),
     }
 
 

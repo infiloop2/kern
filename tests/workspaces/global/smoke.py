@@ -558,6 +558,8 @@ def desktop_smoke(page: Any) -> None:
     expect(surface.locator("#global-list")).to_contain_text("release-preferences")
     expect(surface.locator("#global-list")).not_to_contain_text("thread-7")
 
+    private_notes_smoke(page)
+
     overflow = page.locator(".scheduled-agents-nav-head").evaluate("""element => {
       const previousFont = element.style.fontFamily;
       element.style.fontFamily = '"Liberation Sans", Arial, sans-serif';
@@ -1040,3 +1042,76 @@ def mobile_smoke(page: Any) -> None:
     expect(surface.locator("#schedule-name")).to_be_focused()
     expect(surface.locator(".schedule-trigger")).to_have_count(0)
     surface.get_by_role("button", name="Cancel", exact=True).click()
+
+
+def private_notes_smoke(page: Any, screenshot_dir: str | None = None) -> None:
+    """Show saved notes separately and edit the briefing without changing its text."""
+    from playwright.sync_api import expect
+
+    owner = "thread-999"
+    notes = [{"note_id": "a" * 100, "content": "<img src=x onerror=alert(1)>\nLiteral note text."},
+             {"note_id": "recovery", "content": "Recovery instructions"}]
+    stored = "A short briefing."
+    saved = []
+    memory_page = dict(page_id=owner, description="Current decisions", content=stored,
+                       saved_notes=[n["note_id"] for n in notes],
+                       revision=1, deleted=False, updated_by="agent", created_at=None,
+                       updated_at=None, links=[], backlinks=[])
+
+    def respond(route):
+        path = route.request.url.split("/v1/workspace", 1)[1]
+        if path.endswith("/notes"):
+            result = {"notes": notes}
+        elif "/revisions" in path:
+            result = {"revisions": [{"revision": 1, "description": "Current decisions", "content": stored}]}
+        else:
+            if route.request.method == "PUT":
+                saved.append(route.request.post_data_json)
+            result = {"page": memory_page}
+        route.fulfill(json=result)
+
+    pattern = "**/v1/workspace/memory/pages/thread-999**"
+    page.route(pattern, respond)
+    original_viewport = page.viewport_size
+    try:
+        page.evaluate("window.location.hash = '#memory/thread-999'")
+        surface = page.locator("#panel-workspace-global")
+        expect(surface.locator("#memory-notes .memory-note")).to_have_count(2)
+        expect(surface.locator("#memory-content")).to_have_value(stored)
+        expect(surface.locator(".memory-note-content").first).to_have_text(notes[0]["content"])
+        expect(surface.locator("#memory-notes img")).to_have_count(0)
+        surface.locator("#memory-notes-section").scroll_into_view_if_needed()
+        position = surface.locator("#memory-notes-section").evaluate(
+            "element => element.previousElementSibling.classList.contains('resource-history')"
+        )
+        assert position, "Saved note cards must follow memory history"
+        for width in (1100, 390):
+            page.set_viewport_size({"width": width, "height": 900})
+            expect(surface.locator("#memory-notes-section")).to_be_visible()
+            overflow = surface.locator("#memory-notes").evaluate("e => e.scrollWidth - e.clientWidth")
+            assert overflow <= 1, f"Notebook overflows at width {width}: {overflow}"
+            if screenshot_dir:
+                surface.locator("#memory-notes-section").scroll_into_view_if_needed()
+                page.screenshot(path=f"{screenshot_dir}/private-notes-{width}.png", animations="disabled")
+        surface.get_by_role("button", name="Save page", exact=True).click()
+        expect(surface.locator("#global-status")).to_have_text("Memory page saved")
+        assert saved[-1]["content"] == stored, "Saved notes must stay separate from the briefing"
+        surface.get_by_role("button", name="New page", exact=True).click()
+        expect(surface.locator("#memory-notes-section")).to_be_hidden()
+        surface.get_by_role("button", name="Cancel", exact=True).click()
+        # Notes must remain usable before a briefing has ever been saved.
+        memory_page.update(revision=0, content="")
+        page.evaluate("window.location.hash = '#memory/thread-999'")
+        expect(surface.locator("#memory-meta")).to_have_text("No briefing saved yet")
+        expect(surface.locator("#memory-delete")).to_be_hidden()
+        expect(surface.locator("#memory-notes .memory-note")).to_have_count(2)
+        surface.locator("#memory-content").fill("First briefing")
+        surface.get_by_role("button", name="Save page", exact=True).click()
+        expect(surface.locator("#global-status")).to_have_text("Memory page saved")
+        assert saved[-1]["expected_revision"] == 0
+        assert saved[-1]["content"] == "First briefing"
+        surface.get_by_role("button", name="Cancel", exact=True).click()
+    finally:
+        page.unroute(pattern, respond)
+        if original_viewport:
+            page.set_viewport_size(original_viewport)

@@ -229,6 +229,7 @@ Global routes are:
 ```text
 /agent/identity
 /agent/self/memory
+/agent/self/notes/{note_id}
 /agent/memory[?limit=...&cursor=...]
 /agent/memory/search?q=...
 /agent/memory/pages/{page_id}
@@ -249,12 +250,54 @@ Memory page ids beginning with `app-`, `thread-`, or `schedule-` form the
 individual-memory namespace. Agent index, search, and direct page routes expose
 only swarm memory and return 404 for direct access to an individual page. App,
 Chat, and persistent model schedule threads reach only their identity-derived
-page through self-memory. `schedule-*` pages remain individual.
+page through self-memory, and their own topic notes through the notebook routes.
+`schedule-*` pages remain individual.
 The browser API accepts `scope=swarm|individual` on memory index and search,
 defaulting to `swarm`, so the operator UI can display the namespaces
 separately. Existing pages keep their ids and are classified in place by this
 prefix rule; the distinction makes the prior individual-memory convention an
 enforced API boundary.
+
+### Private notebooks
+
+Self-memory is a short briefing and index. Notes hold durable topic detail that
+the agent reads when needed; App records remain authoritative for live jobs,
+and files hold artifacts and evidence. There is no automatic migration,
+summarization, or trimming of existing self-memory.
+
+The notebook has only `GET`, `PUT`, and `DELETE /agent/self/notes/{note_id}`.
+`PUT` takes `{"content":"..."}` and creates or replaces the note. GET and PUT
+return `{"note":{"note_id":"...","content":"..."}}`; DELETE takes no body and
+returns `{"deleted":true,"note_id":"..."}`. Missing reads/deletes return 404.
+No description, revision, owner argument or query parameter is accepted.
+There is no list/search/pagination API. IDs contain 1–100 lowercase ASCII
+letters or underscores, and content allows at most 20,000 Unicode characters.
+Each agent has at most 10 notes; an eleventh creation returns 409. Replacing an
+existing note remains allowed at capacity. Delete is permanent and immediately
+frees capacity. Concurrent writes use last-successful-write semantics.
+
+The `private_notes` table stores current text keyed by owner and ID. Writes
+serialize under an owner-specific transaction lock and check the owner's row
+count before inserting a new note. Notes survive context clears, runtime
+changes and archival. Ownership comes from the authenticated agent.
+
+Self-memory reads return the editable briefing in `content` and the complete
+alphabetic list of note IDs in `saved_notes`. Turn injection, including fallback
+and periodic reads, carries both fields separately. Note bodies are fetched
+explicitly. The delivery cache includes the note IDs so additions and deletions
+are reflected before its usual ten-minute expiry. Self-memory keeps its existing
+history, revision checks, and 20,000-character content limit.
+
+If notes exist before a briefing, the loader returns empty `content`, the saved
+IDs, and revision 0. The page appears in the individual-memory index and has no
+history until saved. A retained deleted briefing keeps its deleted state and
+revision; agent reads return 404 until the operator restores it.
+
+The operator UI edits the briefing and displays a separate Saved notes section
+below memory history. `GET /memory/pages/{owner}/notes` supplies its note cards
+with IDs and bodies. Notes are not private from the operator or retained history.
+
+### Standing agents and shared resources
 
 Every schedule owns one stable `schedule-N` thread. A due calendar trigger submits its saved
 prompt through the thread-message delivery path with an automated-trigger
@@ -306,3 +349,48 @@ accept only the `kern-agent-thread-<thread_id>.scope` unit created by the root
 launcher. The identity route returns that thread id, while the self-memory
 alias selects only its corresponding page. Callers cannot supply or override
 the value. It does not authorize access to a Web App.
+
+## One-time reminders
+
+`GET|POST /agent/self/reminders` uses the authenticated thread identity.
+POST requires exactly `message`
+(nonblank, at most 1,000 Unicode characters) and either `at` (a future timestamp
+with timezone) or `after` (a positive integer followed by `s`, `m`, `h` or `d`).
+Delivery must be scheduled within the next 7 days. Times are stored as UTC seconds. GET returns `reminders` (100 entries ordered by
+immutable id descending), `next_before` (pass as `?before=ID` for the next page),
+and the complete `pending` list ordered by due time with `pending_count`. Pending
+entries may also appear in `reminders`; the UI uses `pending` for its Pending section.
+The id cursor stays stable when entries are delivered.
+Each agent may have at most 5 pending reminders; creation checks this limit
+under the parent row lock. The existing reminder worker cleans up history once daily, retaining
+the 1,000,000 most recently finished records across all agents. Pending reminders
+are never pruned. A reminder has `id`, `thread_id`, `message`, `due_at`, `status`, `error`,
+`created_at` and `finished_at`. Once created, the message and delivery time cannot be changed. There is no editing, rescheduling or cancellation API or UI. The agent can ignore a delivered reminder if it is no longer useful.
+
+The operator uses `/v1/workspace/reminders/{thread_id}` with the same
+verbs and bodies. The shared Reminders toolbar panel appears on Chat, spawned,
+App and model Standing agents, including archived agents. It only displays Pending
+and Completed records (delivered or failed); creation is available through the API.
+Bash agents are excluded.
+
+An independent Workspace worker scans durable overdue entries every 30 seconds,
+examining up to 100 candidates per poll in due-time order. It starts at most
+four concurrent delivery attempts, with one in flight per agent and no queued
+batch; slow attempts do not block polling or delivery to other agents while
+capacity is available. Remaining overdue entries stay pending for a later poll. Each reminder gets one delivery
+attempt through existing agent message admission using current session settings
+and active-turn steering. Acceptance marks it delivered; every admission or
+transport error marks it failed, including busy agents, capacity limits and
+ambiguous timeouts. Failed reminders are not retried. A timeout can mean the
+message was accepted even though its reminder is marked failed.
+Completion timestamps are captured after each attempt. A delivered reminder means its
+message was accepted, not that the requested work completed. A reminder fails if its agent is archived when delivery is attempted; archive
+itself does not change reminder records. Spawned auto-archive skips agents with pending reminders.
+Reminders also fail if their target has become a Bash agent. Pruning a deleted schedule also removes its reminder history.
+There is no additional pause/lock state.
+
+Reminder notices use the same `kind` and `summary` fields and ordinary Admin
+message path as other automated inputs. There is no reminder-specific ID,
+validation or duplicate-detection logic in Admin. A crash after acceptance but
+before Workspace records the result can leave a pending reminder that is sent
+again after restart; the operator accepts this rare duplicate case.

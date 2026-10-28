@@ -19,11 +19,11 @@ MESSAGE_HEADER = (
     "Reply only when needed.\n\n---\n\n"
 )
 RESTART_MESSAGE = AUTOMATED_TRIGGER_PREFIX + "Kern was restarted. Please resume your work."
-INPUT_KINDS = ("scheduled_trigger", "approval_outcome", "restart", "retry", "agent_message")
+INPUT_KINDS = ("reminder", "scheduled_trigger", "approval_outcome", "restart", "retry", "agent_message")
 CONTEXT_KINDS = ("history_transfer", "memory_injection", "memory_suggestion")
 ACTION_KINDS = frozenset({
     "agent_message_sent", "agent_spawned", "agent_archived", "self_memory_saved",
-    "shared_memory_saved", "shared_memory_deleted", "standing_agent_created",
+    "shared_memory_saved", "shared_memory_deleted", "private_note_saved", "private_note_deleted", "standing_agent_created",
     "standing_agent_updated", "standing_agent_deleted", "app_created", "app_renamed",
     "app_agent_updated", "app_ui_published", "app_data_changed", "app_collection_changed",
 })

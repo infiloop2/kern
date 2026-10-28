@@ -1,5 +1,8 @@
 name: kern-smoke
 
+# Explicit manual dispatch or a newly created /smoke (or smoke) PR comment only.
+# Authorization/rate limits still apply; clean review alone never launches AWS smoke.
+# During the private October pause, only authorized manual dispatch on main remains available.
 on:
   workflow_dispatch:
   issue_comment:

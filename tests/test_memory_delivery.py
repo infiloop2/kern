@@ -24,7 +24,7 @@ class MemoryDeliveryTests(unittest.TestCase):
         return self.cache.select(thread, pages)[0]
 
     def deliver(self, pages, thread='thread-1'):
-        self.cache.delivered(thread, tuple((p['page_id'], p['revision']) for p in pages))
+        self.cache.delivered(thread, tuple(self.cache.key(p) for p in pages))
 
     def test_boundary_and_suppression_does_not_renew_for_self_or_shared(self):
         pages = [page('thread-1', scope='self'), page()]
@@ -53,6 +53,21 @@ class MemoryDeliveryTests(unittest.TestCase):
         self.assertEqual(self.select([page('thread-1', 2, 'self'), page('c')]), [page('thread-1', 2, 'self'), page('c')])
         # Deleted/unselected pages are never refilled from delivery history.
         self.assertEqual(self.select([]), [])
+
+    def test_note_index_changes_refresh_self_without_changing_its_revision(self):
+        for revision in (0, 7):
+            with self.subTest(revision=revision):
+                self.cache.clear('thread-1')
+                current = page('thread-1', revision, 'self')
+                shared = page()
+                self.deliver([current, shared])
+                for note_ids in (['first'], ['first', 'second'], ['second'], []):
+                    changed = {**current, 'saved_notes': note_ids}
+                    self.assertEqual(self.select([changed, shared]), [changed])
+                    self.deliver([changed])
+                    self.assertEqual(self.select([changed, shared]), [])
+                    self.assertEqual(changed['revision'], revision)
+                self.assertNotIn('Saved notes', repr(self.cache._threads))
 
     def test_thread_isolation_clear_and_restart(self):
         pages = [page('thread-1', scope='self'), page()]
@@ -114,13 +129,13 @@ class MemoryDeliveryTests(unittest.TestCase):
         self.assertEqual(self.select([page()]), [])
 
     def test_injection_notice_is_recorded_once_at_readiness_with_exact_message(self):
-        for pages in ([page()], []):
+        for pages in ([page()], [page('thread-1', scope='self')], []):
             with self.subTest(pages=bool(pages)):
                 turn = runtime._Turn('codex', 'thread-1', 'model', 'high', 3, 0)
                 message = memory_context_message(turn.thread_id, pages)
                 notice = memory_notice(pages, 'Selection diagnostics', message=message)
                 turn.memory_notice = notice
-                turn.memory_pages = tuple((p['page_id'], p['revision']) for p in pages)
+                turn.memory_pages = tuple(self.cache.key(p) for p in pages)
                 with patch.object(runtime.state, 'mutation') as mutation, \
                         patch.object(runtime.state, 'append_agent_event') as append:
                     # Learning a session id alone is not delivery.
@@ -135,6 +150,7 @@ class MemoryDeliveryTests(unittest.TestCase):
                     self.assertEqual(notice['notice']['details'], message)
                     self.assertIn('injected.', notice['message'])
                     self.assertIsNone(turn.memory_notice)
+                    self.assertEqual(self.select(pages), [])
 
     def test_startup_failure_or_stop_never_emits_injection_notice(self):
         for phase in (runtime.ExecutionPhase.FINISHING, runtime.ExecutionPhase.CLOSED):
@@ -181,6 +197,12 @@ class MemoryDeliveryTests(unittest.TestCase):
             self.assertFalse(runtime._deliver_self_memory(turn, current))
             self.assertEqual(self.select([current]), [current])
             turn.server.steer.side_effect = None
+            self.assertTrue(runtime._deliver_self_memory(turn, current))
+            self.assertEqual(self.select([current]), [])
+            # Same briefing revision, but creating/deleting a note changes the IDs.
+            with_note = {**current, 'saved_notes': ['topic']}
+            self.assertTrue(runtime._deliver_self_memory(turn, with_note))
+            self.assertEqual(self.select([with_note]), [])
             self.assertTrue(runtime._deliver_self_memory(turn, current))
             self.assertEqual(self.select([current]), [])
             self.clock.return_value = 601

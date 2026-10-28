@@ -91,6 +91,7 @@ let renameThreadReturnFocus = null;
 
 const chatRoot = window.KernWorkspaceRoots.chat;
 const $ = id => chatRoot.querySelector(`#${CSS.escape(id)}`);
+const remindersPanel = window.KernReminders(chatRoot, $("agent-reminders"));
 
 function positionMemoryPages(notice) {
   const panel = notice.querySelector(".memory-pages");
@@ -444,6 +445,7 @@ function updateComposer() {
   $("rename-thread").title = scheduled ? "Rename standing agent" : "Rename thread";
   $("schedule-settings").hidden = !scheduled;
   $("thread-memory").hidden = !hasThread || scriptTranscript;
+  remindersPanel.setTarget(hasThread && !scriptTranscript ? selectedThreadId : null, selectedThreadArchived);
   // Clearing is a write, so it follows the composer: hidden while the thread
   // is archived or the archived list is open, and refused while a turn runs.
   $("clear-memory").hidden = !hasThread || !selectedThreadHasSession || readOnly;

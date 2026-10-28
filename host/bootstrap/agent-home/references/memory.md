@@ -16,6 +16,18 @@ one line, at most 100 characters; content is at most 20,000 characters.
 Keep durable thread-specific preferences, decisions and ruled-out approaches
 as a current summary. Do not create a page without durable information.
 
+## Private notes
+
+Save up to 10 notes, each with at most 20,000 characters. IDs use 1–100
+lowercase letters or underscores, such as `release_checklist`.
+
+- `PUT /agent/self/notes/{note_id}` with `{"content":"..."}` creates or replaces a note.
+- `GET /agent/self/notes/{note_id}` returns `{"note":{"note_id":"...","content":"..."}}`.
+- `DELETE /agent/self/notes/{note_id}` permanently deletes a note.
+
+`GET /agent/self/memory` returns your briefing in `page.content` and note IDs
+in `page.saved_notes`.
+
 ## Read and maintain swarm memory
 
 - `GET /agent/memory?limit=50&cursor=...`: page ids, descriptions, revisions

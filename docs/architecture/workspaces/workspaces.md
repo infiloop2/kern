@@ -42,6 +42,11 @@ allow 2,000. Descriptions remain limited to 100 characters. The API, editor,
 and database enforce these limits, including retained revisions. Semantic
 indexing uses a UTF-8-safe prefix within the embedding service's 16 KiB input
 budget; storage, reads, lexical search, and self-memory recall keep the full text.
+Each model agent can also keep ten private notes with IDs up to 100 lowercase
+letters/underscores and text up to 20,000 characters. Notes store current values
+without search or revisions. Self-memory reads include note IDs in a separate
+`saved_notes` field; bodies are fetched explicitly. The operator sees
+note cards below memory history. See [private notebooks](workspace-agent-api.md#private-notebooks).
 Each definition stores shared agent runtime, model and effort settings, plus a
 list of UTC calendar triggers, and owns one stable `schedule-N` host thread. Every firing submits
 the automated-trigger prefix plus the due trigger prompt through the ordinary

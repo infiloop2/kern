@@ -110,7 +110,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scope",
-        choices=("all", "core", "workspaces", "overload", "oauth-poll", "runtime-accounts", "training-privacy", "navigation-order", "swarm", "notices", "google-ads", "x-ads", "instagram-ads"),
+        choices=("all", "core", "workspaces", "database-storage", "overload", "oauth-poll", "runtime-accounts", "training-privacy", "reminders", "navigation-order", "swarm", "notices", "google-ads", "x-ads", "instagram-ads"),
         default="all",
         help="Smoke only the host UI core, only workspaces, or both.",
     )
@@ -169,6 +169,15 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 f"or set {CHROMIUM_EXECUTABLE_ENV} to an existing Chromium/Chrome executable."
             ) from exc
         try:
+            if scope in {"all", "core", "database-storage"}:
+                import database_storage_smokes
+                for mobile in (False, True):
+                    storage_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    database_storage_smokes.run(storage_context.new_page(), url, log_in)
+                    storage_context.close()
             if scope in {"all", "core", "overload"}:
                 import overload_smokes
                 overload_context = browser.new_context(service_workers="block")
@@ -398,6 +407,16 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 report_page_errors(voice_page, "dictation recovery")
                 dictation_smokes.run(voice_page, url, log_in)
                 voice_context.close()
+
+            if scope in {"all", "workspaces", "reminders"}:
+                import reminders_smokes
+                for mobile in (False, True):
+                    reminder_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    reminders_smokes.run(reminder_context.new_page(), url, log_in)
+                    reminder_context.close()
 
             if scope in {"all", "workspaces", "notices"}:
                 import context_notices_smokes
