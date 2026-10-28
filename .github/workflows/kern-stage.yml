@@ -1,5 +1,7 @@
 name: kern-stage
 
+# Manual dispatch selects the stage test suite; existing authorization and main-only rules apply.
+# No PR push or clean-review trigger. The private October pause remains in the jobs.
 on:
   workflow_dispatch:
     inputs:

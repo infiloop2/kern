@@ -386,7 +386,7 @@ def send_thread_message(
                     )
                 if agent_runtime != SCRIPT_RUNTIME:
                     turn.memory_pages = tuple(
-                        (page["page_id"], page["revision"]) for page in injected_pages
+                        memory_delivery.key(page) for page in injected_pages
                     )
                     # Keep the exact payload until the provider accepts it. A
                     # prepared or failed launch is not an injection receipt.
@@ -476,6 +476,8 @@ def _recalled_memory_pages(
                 "page_id": page["page_id"],
                 "revision": page["revision"],
                 "scope": page["scope"],
+                **({"saved_notes": workspace_proxy.saved_note_ids(page["saved_notes"])}
+                   if page["scope"] == "self" and "saved_notes" in page else {}),
                 "selection": (
                     "self" if page["scope"] == "self"
                     else "popular" if page.get("selection") == "popular"

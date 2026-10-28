@@ -26,13 +26,32 @@ FAILURE = "The MCP provider request failed."
 INVALID = "The MCP provider returned an unsupported or invalid response."
 
 
+class MCPResponseError(RuntimeError):
+    """Keep MCP failure evidence separate from the safe exception message.
+
+    Only the owning adapter may project/redact this evidence for diagnostics.
+    It must never forward the payload to an agent or serialize this exception.
+    """
+
+    def __init__(self, kind: str, payload: object):
+        super().__init__(FAILURE)
+        self.kind = kind
+        self.payload = payload
+        self.status = 0
+        self.method = ""
+        self.request_id = ""
+        self.tool = ""
+        self.action = ""
+        self.session_id = ""
+
+
 def result_text(result: JSONObject) -> str:
     """Validate MCP content, returning text without forwarding other blocks."""
     content = result.get("content")
     if not isinstance(content, list) or not isinstance(result.get("isError", False), bool):
         raise RuntimeError(INVALID)
     if result.get("isError") is True:
-        raise RuntimeError(FAILURE)
+        raise MCPResponseError("tool_error", result)
     text = []
     for row in content:
         if not isinstance(row, dict):
@@ -100,7 +119,7 @@ def _result(raw: bytes, content_type: str, request_id: str) -> JSONObject:
         raise RuntimeError(INVALID)
     if "error" in message:
         # Provider messages/data can echo credentials or request content.
-        raise RuntimeError(FAILURE)
+        raise MCPResponseError("jsonrpc_error", message["error"])
     result = message.get("result")
     if not isinstance(result, dict):
         raise RuntimeError(INVALID)
@@ -211,18 +230,32 @@ class MCPConnection:
                 if _read(stream, 1, deadline):
                     raise RuntimeError(INVALID)
                 return {}
-            content_type = headers.get("content-type", "")
-            if content_type.split(";", 1)[0].strip().lower() == "text/event-stream":
-                return _stream_result(stream, request_id, deadline)
-            raw = bytearray()
-            while True:
-                chunk = _read(stream, min(4096, MAX_BYTES + 1 - len(raw)), deadline)
-                if not chunk:
-                    break
-                raw.extend(chunk)
-                if len(raw) > MAX_BYTES:
-                    raise RuntimeError(INVALID)
-            return _result(bytes(raw), content_type, request_id)
+            try:
+                content_type = headers.get("content-type", "")
+                if content_type.split(";", 1)[0].strip().lower() == "text/event-stream":
+                    result = _stream_result(stream, request_id, deadline)
+                else:
+                    raw = bytearray()
+                    while True:
+                        chunk = _read(stream, min(4096, MAX_BYTES + 1 - len(raw)), deadline)
+                        if not chunk:
+                            break
+                        raw.extend(chunk)
+                        if len(raw) > MAX_BYTES:
+                            raise RuntimeError(INVALID)
+                    result = _result(bytes(raw), content_type, request_id)
+                # Catch explicit tool failures while the HTTP metadata is
+                # available; call() validates successful content afterward.
+                if method == "tools/call" and result.get("isError") is True:
+                    result_text(result)
+                return result
+            except MCPResponseError as exc:
+                status = getattr(stream, "status", None)
+                exc.status = status if type(status) is int and 100 <= status <= 599 else 0
+                exc.method = method
+                exc.request_id = request_id
+                exc.session_id = self.headers.get("Mcp-Session-Id", "")
+                raise
 
     def close(self) -> None:
         if "Mcp-Session-Id" not in self.headers:
@@ -238,6 +271,12 @@ class MCPConnection:
             pass
 
     def call(self, name: str, arguments: JSONObject) -> JSONObject:
-        result = self.request("tools/call", {"name": name, "arguments": arguments})
-        result_text(result)
-        return result
+        try:
+            result = self.request("tools/call", {"name": name, "arguments": arguments})
+            result_text(result)
+            return result
+        except MCPResponseError as exc:
+            exc.tool = name
+            action = arguments.get("action")
+            exc.action = action if isinstance(action, str) else ""
+            raise

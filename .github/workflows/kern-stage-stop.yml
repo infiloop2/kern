@@ -1,5 +1,7 @@
 name: kern-stage-stop
 
+# Manual main dispatch stops the private stage instance after repo-admin authorization.
+# No PR/review trigger. The private October pause remains in the job.
 on:
   workflow_dispatch:
 

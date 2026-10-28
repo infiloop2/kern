@@ -418,6 +418,7 @@ class WorkspaceTests(unittest.TestCase):
                 "workspace-agent-api",
                 "workspace-memory-embedding-index",
                 "workspace-scheduler",
+                "workspace-reminders",
                 "workspace-maintenance",
                 "browser-serve",
             ],

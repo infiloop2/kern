@@ -50,7 +50,7 @@ from host.config import AGENT_RUNTIMES, ConfigError, parse_network_controls
 from host.agent_messages import INPUT_KINDS, RESTART_MESSAGE, restart_notice
 from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES, PROXY_PORT
 from host.runtime.admin_api import browser as browser_admin
-from host.runtime.admin_api import xai_video_storage
+from host.runtime.admin_api import database_storage, xai_video_storage
 from host.runtime.admin_api.request_server import BoundedThreadingHTTPServer, MAX_CONCURRENT_REQUESTS
 from host.network_integrations.bedrock.manifest import SUPPORTED_REGIONS as BEDROCK_REGIONS
 from host.network_integrations.github.push_gate import pending as github_pending_push
@@ -218,6 +218,8 @@ UI_ASSETS.update({
     for module in sorted(ADMIN_UI_DIR.glob("*.js"))
 })
 WORKSPACE_UI_ASSETS = {
+    "/workspace/reminders.js": (RUNTIME_DIR.parent / "workspace/ui/reminders.js", "application/javascript; charset=utf-8"),
+    "/workspace/reminders.css": (RUNTIME_DIR.parent / "workspace/ui/reminders.css", "text/css; charset=utf-8"),
     "/workspace/chat.html": (RUNTIME_DIR.parent / "workspace/chat/ui/index.html", "text/html; charset=utf-8"),
     "/workspace/chat.js": (RUNTIME_DIR.parent / "workspace/chat/ui/agent_chat.js", "application/javascript; charset=utf-8"),
     "/workspace/chat.css": (RUNTIME_DIR.parent / "workspace/chat/ui/agent_chat.css", "text/css; charset=utf-8"),
@@ -1177,7 +1179,7 @@ def _resolve_pending_push_route(request: _RouteRequest) -> dict[str, Any]:
 # The Workspace service reaches the admin API through these proxied subtrees;
 # each one is operator-only here so a Workspace principal can never take the
 # proxy path back into the admin API.
-_WORKSPACE_PROXY_SUBTREES = ("getting-started", "chat", "web-apps", "memory", "schedules")
+_WORKSPACE_PROXY_SUBTREES = ("reminders", "getting-started", "chat", "web-apps", "memory", "schedules")
 
 # Order decides ties: the first entry whose method and path match handles the
 # request. Specific paths therefore precede the subtree entries that would
@@ -1326,6 +1328,8 @@ _ROUTES: tuple[_Route, ...] = (
         query_label="host diagnostic",
     ),
     _Route("GET", re.compile(r"/v1/host-diagnostics/([1-9][0-9]*)"), _host_diagnostic_route),
+    _Route("GET", "/v1/database-storage", lambda request: database_storage.snapshot(),
+           operator_only=True, query_keys=frozenset(), query_label="database storage"),
     _Route(
         None,
         re.compile(r"/v1/tools(?:/.*)?"),

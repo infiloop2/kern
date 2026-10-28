@@ -603,6 +603,10 @@ def set_chat_thread_archived(
         if cur.fetchone() is None:
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "thread not found")
         if archived:
+            if inactive_before is not None:
+                cur.execute("SELECT 1 FROM agent_reminders WHERE thread_id = %s AND status = 'pending' LIMIT 1", (thread_id,))
+                if cur.fetchone() is not None:
+                    raise WorkspaceError(HTTPStatus.CONFLICT, "agent has pending reminders")
             response = call_admin_api(
                 "GET", f"/v1/threads/{quote(thread_id, safe='')}"
             )

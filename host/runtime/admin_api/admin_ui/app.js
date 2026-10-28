@@ -23,6 +23,7 @@ import {
   openAgentPath, openLinkedAgentFile,
   refreshFiles,
 } from "./files.js";
+import { refreshDatabaseStorage } from "./database_storage.js";
 import { refreshAgentProcesses } from "./processes.js";
 import { agentLog, changeHostDiagnosticFilters, copyHostDiagnostic, hostDiagnosticLog, netLog, toolLog, toggleNetDeniedFilter } from "./logs.js";
 import {
@@ -103,7 +104,7 @@ let operatorScrolledSincePanelOpen = false;
 for (const event of ["wheel", "touchmove", "keydown"]) {
   window.addEventListener(event, () => { operatorScrolledSincePanelOpen = true; }, { passive: true });
 }
-const staticTabs = ["analytics", "home", "swarm", "approvals", "processes", "agent-log", "files", "network", "net-log", "tool-log", "host-diagnostics"];
+const staticTabs = ["analytics", "home", "swarm", "approvals", "processes", "agent-log", "files", "network", "net-log", "tool-log", "host-diagnostics", "database-storage"];
 const homeDetailTabs = new Set(staticTabs.filter(name => !["home", "swarm", "approvals", "analytics"].includes(name)));
 const MOBILE_NAV_QUERY = "(max-width: 860px)";
 let mobileNavOpen = false;
@@ -701,6 +702,7 @@ const tabRefreshers = {
     enter: [() => hostDiagnosticLog.showFirstPage()],
     tick: [() => hostDiagnosticLog.page === 1 && hostDiagnosticLog.showFirstPage()],
   },
+  "database-storage": { enter: [refreshDatabaseStorage], tick: [] },
   "processes": { enter: [refreshAgentProcesses], tick: [refreshAgentProcesses] },
   "files": { enter: [ensureFilesLoaded], tick: [refreshFiles] },
   "network": {
@@ -944,6 +946,7 @@ async function performWorkspaceMount(name, panelId, htmlPath) {
     addWorkspaceStyle(shadow, "/admin_ui.css"),
     addWorkspaceStyle(shadow, "/workspace/rich_text.css"),
     addWorkspaceStyle(shadow, "/workspace/composer.css"),
+    addWorkspaceStyle(shadow, "/workspace/reminders.css"),
     addWorkspaceStyle(shadow, `/workspace/${assetName}.css`),
   ]);
   shadow.append(root);
@@ -957,6 +960,7 @@ async function performWorkspaceMount(name, panelId, htmlPath) {
   if (!window.KernRichText) {
     await loadWorkspaceScript("/workspace/rich_text.js");
   }
+  if (!window.KernReminders) await loadWorkspaceScript("/workspace/reminders.js");
   await loadWorkspaceScript(`/workspace/${assetName}.js`);
 }
 
@@ -1476,6 +1480,7 @@ document.addEventListener("click", event => {
     "agent-page": () => agentLog.showPage(button.dataset.page).catch(() => {}),
     "tool-page": () => toolLog.showPage(button.dataset.page).catch(() => {}),
     "host-diagnostic-page": () => hostDiagnosticLog.showPage(button.dataset.page).catch(() => {}),
+    "database-storage-refresh": () => refreshDatabaseStorage(),
     "copy-host-diagnostic": () => copyHostDiagnostic(button),
     "enable-tool": () => setToolEnabled(button.dataset.tool, true),
     "disable-tool": () => setToolEnabled(button.dataset.tool, false),

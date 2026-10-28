@@ -653,7 +653,7 @@ class AgentChatBackendTests(unittest.TestCase):
             with self.subTest(name=name):
                 cursor = unittest.mock.MagicMock()
                 cursor.fetchall.return_value = [("thread-1",)]
-                cursor.fetchone.side_effect = [(1,), ("thread-1", True)]
+                cursor.fetchone.side_effect = [(1,), None, ("thread-1", True)]
                 with (
                     patch.object(backend.db, "transaction") as transaction,
                     patch.object(backend, "datetime") as clock,
@@ -686,7 +686,7 @@ class AgentChatBackendTests(unittest.TestCase):
     def test_spawned_expiry_reports_host_failure_without_archiving(self) -> None:
         cursor = unittest.mock.MagicMock()
         cursor.fetchall.return_value = [("thread-1",)]
-        cursor.fetchone.return_value = (1,)
+        cursor.fetchone.side_effect = [(1,), None]
         old = {"thread_id": "thread-1", "status": "idle", "last_used_at": "2020-01-01T00:00:00Z"}
         with (
             patch.object(backend.db, "transaction") as transaction,

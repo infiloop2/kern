@@ -57,6 +57,8 @@ STATIC_FILES = {
         "dictation.js": "ui/dictation.js",
         "dictation-worklet.js": "ui/dictation-worklet.js",
         "composer.css": "ui/composer.css",
+        "reminders.css": "ui/reminders.css",
+        "reminders.js": "ui/reminders.js",
         "web-apps.html": "web_apps/ui/index.html",
         "web-apps.js": "web_apps/ui/personal_web_app_builder.js",
         "web-apps.css": "web_apps/ui/personal_web_app_builder.css",
@@ -72,7 +74,7 @@ STATIC_FILES = {
 PATTERN_SAMPLES = (
     "/v1/workspace/getting-started", "/v1/workspace/chat/thread-1",
     "/v1/workspace/web-apps/app-1", "/v1/workspace/memory/pages/example",
-    "/v1/workspace/schedules/1", "/v1/threads/thread-1/messages",
+    "/v1/workspace/reminders/thread-1", "/v1/workspace/schedules/1", "/v1/threads/thread-1/messages",
     "/v1/host-inference/providers/openai", "/v1/tools/events/1",
     "/v1/host-diagnostics/1", "/v1/tools", "/v1/tools/instagram/approvals",
     "/v1/tools/instagram/approvals/approval-1/approve",

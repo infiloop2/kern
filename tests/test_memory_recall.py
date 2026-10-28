@@ -255,9 +255,10 @@ class TaskRecallTests(unittest.TestCase):
                 "notice": {"kind": kind, "summary": f"Summary-{kind}", "details": "PRIVATE TOOL JSON"},
                 "memory_recall_details": "RECALLED BODY", "historical_context": "TRANSFERRED HISTORY"}})
         query = conversation_query(events)
-        self.assertEqual(RECALL_NOTICE_KINDS, {'agent_message', 'scheduled_trigger', 'approval_outcome'})
+        self.assertEqual(RECALL_NOTICE_KINDS, {'reminder', 'agent_message', 'scheduled_trigger', 'approval_outcome'})
         self.assertIn('Peer: Body-agent_message', query)
         self.assertIn('Scheduled request: Body-scheduled_trigger', query)
+        self.assertIn('Scheduled request: Body-reminder', query)
         self.assertIn('Approval outcome: Summary-approval_outcome', query)
         self.assertNotIn('Body-approval_outcome', query)
         for forbidden in ('PRIVATE', 'RECALLED', 'TRANSFERRED', 'Body-memory', 'Body-restart', 'Body-retry', 'Body-automated'):

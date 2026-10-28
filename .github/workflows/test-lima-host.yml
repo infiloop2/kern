@@ -1,5 +1,8 @@
 name: test-lima-host
 
+# Explicit manual dispatch or a newly created /lima-smoke (or lima-smoke) PR comment only.
+# Existing admin/review-stamp authorization applies; clean review alone never launches Lima.
+# The private October pause still suppresses all Lima jobs.
 on:
   workflow_dispatch:
   issue_comment:

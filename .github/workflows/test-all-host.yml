@@ -1,5 +1,11 @@
 name: test-all-host
 
+# PR updates run dependency-free syntax/JSON/action-pin preflight before expensive tests.
+# Private PR suites wait for a clean current-head Codex comment. run-reviewed-ci
+# starts the deferred run once, preserving its merge ref and required check names.
+# Public PR suites remain automatic; public main pushes always select every suite.
+# Private main never runs this suite automatically. October guards remain in every paid private job.
+# On restoration, remove pause guards only; retain review dependencies and aggregate checks.
 on:
   pull_request:
   push:
@@ -17,12 +23,53 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  review:
+    name: Cheap checks and review gate
+    # October pause: remove only the leading false guard in the November 1 PR.
+    if: false && github.repository == 'infiversehq/kern' && github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Checkout trusted CI policy
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: main
+          path: .ci-policy
+          persist-credentials: false
+      - name: Checkout the original test revision as data
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          path: source
+          persist-credentials: false
+      - name: Run dependency-free preflight
+        run: python3 .ci-policy/.github/ci/preflight.py --root source
+      - name: Check current Codex verdict
+        if: github.event_name == 'pull_request'
+        id: review
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .ci-policy/.github/ci/check_review.py gate
+      # This deliberate failure keeps required validation incomplete. A clean
+      # review starts this deferred run once; later retries use GitHub Re-run jobs.
+      # Before merging, the agent must recheck the latest review and all findings.
+      - name: Wait for clean Codex review
+        if: steps.review.outputs.ready == 'false'
+        run: |
+          echo '::notice::Waiting for clean Codex review; final CI will start automatically once. Later retries use GitHub Re-run jobs.'
+          exit 1
+
   select:
+    needs: review
     # October pause: remove only the repository-name guard in the November 1 PR.
     # Main pushes permanently run only in public repositories.
     if: >-
-      github.repository != 'infiversehq/kern' &&
-      (github.event_name == 'pull_request' || github.event.repository.private == false)
+      always() && github.repository != 'infiversehq/kern' &&
+      (github.event_name == 'pull_request' || github.event.repository.private == false) &&
+      (github.repository != 'infiversehq/kern' || needs.review.result == 'success')
     name: Select host test suites
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -34,6 +81,9 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Run dependency-free preflight on public CI
+        if: github.repository != 'infiversehq/kern'
+        run: python3 .github/ci/preflight.py
       - name: Select PR suites or every suite on public main
         id: select
         env:
@@ -143,19 +193,37 @@ jobs:
             'python3 tests/smoke-ui/native_browser_smoke.py'
 
   test:
+    permissions:
+      contents: read
+      issues: read
+      pull-requests: read
     name: Run all host tests
-    needs: [select, suites]
+    needs: [review, select, suites]
     # October pause: remove only the repository-name guard in the November 1 PR.
     if: >-
       always() && github.repository != 'infiversehq/kern' &&
       (github.event_name == 'pull_request' || github.event.repository.private == false)
     runs-on: ubuntu-latest
-    timeout-minutes: 1
+    timeout-minutes: 3
     steps:
       - name: Require selection and every selected suite to pass
         env:
+          REVIEW_RESULT: ${{ needs.review.result }}
+          REPOSITORY: ${{ github.repository }}
           SELECT_RESULT: ${{ needs.select.result }}
           SUITES_RESULT: ${{ needs.suites.result }}
         run: |
+          if [ "$REPOSITORY" = infiversehq/kern ]; then test "$REVIEW_RESULT" = success; fi
           test "$SELECT_RESULT" = success
           test "$SUITES_RESULT" = success
+      - name: Checkout trusted final review policy
+        if: github.repository == 'infiversehq/kern' && github.event_name == 'pull_request'
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5.0.1
+        with:
+          ref: main
+          persist-credentials: false
+      - name: Verify review and PR head/base are still current
+        if: github.repository == 'infiversehq/kern' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 .github/ci/check_review.py verify

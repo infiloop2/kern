@@ -24,7 +24,7 @@ from host.constants import (
 )
 from host.runtime.core import host_errors
 from host.runtime.core.unix_socket_service import UnixSocketServer, peer_uids
-from host.runtime.workspace import agent_api, agent_messages, getting_started, memory, schedules
+from host.runtime.workspace import agent_api, agent_messages, getting_started, memory, reminders, schedules
 from host.runtime.workspace.chat import backend as chat
 from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.web_apps import backend as web_apps
@@ -100,6 +100,13 @@ class Handler(BaseHTTPRequestHandler):
             elif method == "POST" and parsed.path.startswith("/messages/"):
                 body = self._read_body(agent_api.MAX_REQUEST_BODY_BYTES)
                 response = agent_messages.deliver_message(parsed.path.removeprefix("/messages/"), body)
+            elif parsed.path.startswith("/reminders/"):
+                parts = parsed.path.removeprefix("/reminders/").split("/")
+                if len(parts) != 1:
+                    raise WorkspaceError(HTTPStatus.NOT_FOUND, "reminder route not found")
+                body = self._read_body(agent_api.MAX_REQUEST_BODY_BYTES)
+                response = reminders.route(method, parts[0],
+                                           body, parse_qs(parsed.query, keep_blank_values=True))
             elif parsed.path == "/chat" or parsed.path.startswith("/chat/"):
                 body = self._read_body(chat.MAX_REQUEST_BODY_BYTES)
                 response = chat.route_browser(
@@ -225,6 +232,10 @@ def main() -> int:
         target=schedules.scheduler_loop, name="workspace-scheduler", daemon=True
     )
     scheduler.start()
+    reminder_delivery = threading.Thread(
+        target=reminders.delivery_loop, name="workspace-reminders", daemon=True
+    )
+    reminder_delivery.start()
     maintenance = threading.Thread(
         target=maintenance_loop, name="workspace-maintenance", daemon=True
     )

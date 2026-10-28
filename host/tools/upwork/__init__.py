@@ -15,7 +15,7 @@ from host.tools.host_api import ApprovalRecord, HostAPI, StoredCredential
 from host.tools.json_types import JSONObject
 from host.tools.manifest import protect_inputs, guarded_input, validated_input, DataSummary, DataSummaryCard, DataSummaryLink, SetupStep, ToolManifest
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ApprovalExecuted
-from host.tools.upwork.mcp_http import MCPConnection, result_text as _text
+from host.tools.upwork.mcp_http import MCPConnection, MCPResponseError, result_text as _text
 from host.tools.shared.oauth2 import IntegrationReconnectRequired
 from host.tools.shared.web import ProviderWarning, WebRequestError
 from host.tools.upwork.oauth import UpworkOAuth, RECONNECT
@@ -108,7 +108,7 @@ MANIFEST = ToolManifest(
     technical_details=(PARAM_GUARD_TECHNICAL_DETAIL,
         "OAuth authorization code with S256 PKCE and public-client dynamic registration. Temporary sign-in state uses encrypted host storage and expires after 15 minutes. OAuth endpoints were verified against Upwork's public metadata on 2026-09-09.",
         "MCP Streamable HTTP with bounded JSON/SSE responses. Fixed tool names and operation selectors come from the authenticated Upwork catalog. Every action has closed, explicit parameters. Known result fields have closed typed schemas; provider_extra_fields_json preserves only unfamiliar or changed-type fields at their containing object. Opaque results retain complete provider_details_json. All details remain inline without another provider call. Responses over 1 MiB are rejected, never clipped. Resources, images and other non-text blocks are omitted.",
-        "Unexpected responses appear in Host diagnostics. JSON parser failures include an operation, reason and redacted response sample of at most 8 KiB; transport warnings omit response bodies. Ordinary input and eligibility rejections remain tool errors.",
+        "Unexpected responses appear in Host diagnostics. JSON parser failures include an operation, reason and redacted response sample of at most 8 KiB. MCP errors identify the failed operation, error kind, request ID and HTTP status when known. Job lookup MCP errors may include up to 8 KiB of explanatory text with known OAuth and session secrets redacted; other MCP errors omit provider text. Transport warnings omit response bodies. Ordinary input and eligibility rejections remain tool errors.",
         "Upwork publishes no user-info endpoint in its MCP OAuth metadata. Kern labels and binds this connection by a new OAuth grant identifier, not by an asserted Upwork user id. Disconnect before reconnecting; old approvals cannot use a new grant."),
     setup_steps=(
         SetupStep(title="Enable and connect Upwork", description="Enable this integration, click Connect, and sign in to Upwork in the authorization window. Upwork's official MCP service requires no developer API key. Kern registers its OAuth client automatically.", link_url=DOCS, link_label="Upwork MCP setup"),
@@ -136,6 +136,68 @@ def _redact(text: str, credential: StoredCredential) -> str:
     else:
         return json.dumps(redact_json(value, credential), sort_keys=True, separators=(",", ":"), allow_nan=False)
     return redact_text(text, credential)
+
+
+def _mcp_warning(exc: MCPResponseError, credential: StoredCredential) -> ProviderWarning:
+    """Project MCP errors into operator diagnostics, never action results.
+
+    Public job lookup errors may retain redacted explanatory text. All other
+    operations (including reads of private messages/proposals and every write
+    stage) omit text: provider errors may echo the entire submitted payload.
+    No request arguments, headers, JSON-RPC data or non-text blocks are logged.
+    """
+    operation = next((name for name, op in OPERATIONS.items()
+                      if op.tool == exc.tool and op.action == exc.action), "MCP response")
+    operation = {("upwork__get_preview", "get"): "get_preview",
+                 ("upwork__confirm_preview", "confirm"): "confirm_preview"}.get(
+                     (exc.tool, exc.action), operation)
+    if exc.method == "initialize":
+        operation = "MCP initialize"
+    context: dict[str, str | int | bool] = {
+        "mcp_error_kind": exc.kind,
+        "provider_response_omitted": True,
+        "http_status_known": exc.status != 0,
+    }
+    if exc.method in ("initialize", "tools/call"):
+        context["mcp_method"] = exc.method
+    if re.fullmatch(r"[0-9a-f]{32}", exc.request_id):
+        context["mcp_request_id"] = exc.request_id
+    payload = exc.payload
+    text = ""
+    if isinstance(payload, dict):
+        if exc.kind == "jsonrpc_error":
+            code = payload.get("code")
+            if type(code) is int and -(2 ** 31) <= code < 2 ** 31:
+                context["mcp_error_code"] = code
+            if isinstance(payload.get("message"), str):
+                text = payload["message"]
+        elif exc.kind == "tool_error":
+            content = payload.get("content")
+            if isinstance(content, list):
+                context["mcp_content_blocks"] = len(content)
+                text = "".join(row["text"] for row in content
+                                 if isinstance(row, dict) and row.get("type") == "text"
+                                 and isinstance(row.get("text"), str))
+    sample = b""
+    truncated = False
+    if operation == "get_job" and text:
+        # Decode/redact before clipping, including credentials split across
+        # blocks and JSON escapes. Treat the transient MCP session as a secret.
+        secrets = {**credential["secret"], "mcp_session_id": exc.session_id}
+        try:
+            sample = _redact(text, {**credential, "secret": secrets}).encode("utf-8")
+            if len(sample) > 8192:
+                sample = sample[:8150].decode("utf-8", "ignore").encode() + b"\n[diagnostic sample clipped at 8 KiB]"
+                truncated = True
+            context["provider_response_omitted"] = False
+        except (ValueError, RecursionError):
+            context["provider_response_redaction_failed"] = True
+    warning = ProviderWarning("Upwork", operation,
+        "The MCP provider request failed. Check Host diagnostics and Upwork before retrying a write.",
+        status=exc.status, body=sample)
+    warning.body_truncated = truncated
+    warning.diagnostic_context = context
+    return warning
 
 
 @contextmanager
@@ -434,6 +496,8 @@ class UpworkTool:
             yield credential, client
         except ProviderWarning:
             raise
+        except MCPResponseError as exc:
+            raise _mcp_warning(exc, credential) from None
         except WebRequestError as exc:
             if exc.status == 401:
                 self.credentials.invalidate(api, credential)

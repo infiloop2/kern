@@ -976,7 +976,7 @@ def _deliver_memory_context(
             )
         if body_page is not None:
             memory_delivery.delivered(
-                turn.thread_id, ((body_page["page_id"], body_page["revision"]),),
+                turn.thread_id, (memory_delivery.key(body_page),),
             )
         return True
     finally:

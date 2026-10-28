@@ -33,7 +33,7 @@ import workspace_mocks
 import secrets
 from host.config import ConfigError, parse_network_controls
 from host.constants import LOOPBACK
-from host.runtime.admin_api import admin_auth
+from host.runtime.admin_api import admin_auth, database_storage
 from host.session_options import session_config_error
 from host.runtime.tools.tools_host import BUNDLED_TOOLS
 
@@ -68,6 +68,8 @@ UI_ASSETS.update({
     "/workspace/rich_text.css": (WORKSPACE_DIR / "chat/ui/rich_text.css", "text/css; charset=utf-8"),
     "/workspace/dictation.js": (WORKSPACE_DIR / "ui/dictation.js", "application/javascript; charset=utf-8"),
     "/workspace/dictation-worklet.js": (WORKSPACE_DIR / "ui/dictation-worklet.js", "application/javascript; charset=utf-8"),
+    "/workspace/reminders.js": (WORKSPACE_DIR / "ui/reminders.js", "application/javascript; charset=utf-8"),
+    "/workspace/reminders.css": (WORKSPACE_DIR / "ui/reminders.css", "text/css; charset=utf-8"),
     "/workspace/composer.css": (WORKSPACE_DIR / "ui/composer.css", "text/css; charset=utf-8"),
     "/workspace/web-apps.html": (WORKSPACE_DIR / "web_apps/ui/index.html", "text/html; charset=utf-8"),
     "/workspace/web-apps.js": (WORKSPACE_DIR / "web_apps/ui/personal_web_app_builder.js", "application/javascript; charset=utf-8"),
@@ -1459,6 +1461,21 @@ def route(method: str, path: str, query: dict[str, list[str]], body: Any) -> dic
             raise ApiError(HTTPStatus.NOT_FOUND, "tool event not found")
         event["has_arguments"] = isinstance(event.get("arguments"), dict)
         return {"event": event}
+    if method == "GET" and path == "/v1/database-storage":
+        examples = [
+            ("agent_events", 7_500_000, 3 * 1024 ** 3),
+            ("turn_usage", 12_000, 8 * 1024 ** 2),
+            ("chat_threads", 42, 1024 ** 2),
+            ("tool_costs", 100, 65536),
+            ("memory_pages", None, 8192),
+        ]
+        return {"database_bytes": 4 * 1024 ** 3, "tables": [
+            {"name": name, "estimated_rows": rows, "total_bytes": size,
+             "description": database_storage.POLICIES[name][0],
+             "retention": database_storage.POLICIES[name][1],
+             "row_target": database_storage.ROW_TARGETS.get(name)}
+            for name, rows, size in examples
+        ]}
     if method == "GET" and path == "/v1/host-diagnostics":
         before, limit = event_page_query(
             query, {"before", "limit", "service", "severity", "component"}, "host diagnostic"

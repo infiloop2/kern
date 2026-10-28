@@ -9,6 +9,7 @@
       <p id="global-intro">Durable pages available to every agent thread.</p>
     </div>
     <div class="global-head-actions">
+      <button id="agent-reminders" class="ghost reminders-toolbar" type="button" aria-label="Reminders" hidden>Reminders<b data-reminder-count></b></button>
       <button id="global-archive-toggle" class="ghost">Show deleted</button>
       <button id="global-new" class="soft-primary">New page</button>
     </div>
@@ -55,6 +56,10 @@
         <section class="resource-history">
           <h2>History</h2>
           <div id="memory-history"></div>
+        </section>
+        <section id="memory-notes-section" class="resource-history" hidden>
+          <h2>Saved notes</h2>
+          <div id="memory-notes" class="memory-notes"></div>
         </section>
       </form>
 

@@ -106,6 +106,7 @@ const agentSettingsSaveFailures = new Map();
 
 const webAppsRoot = window.KernWorkspaceRoots["web-apps"];
 const $ = id => webAppsRoot.querySelector(`#${CSS.escape(id)}`);
+const remindersPanel = window.KernReminders(webAppsRoot, $("agent-reminders"));
 
 function positionMemoryPages(notice) {
   const panel = notice.querySelector(".memory-pages");
@@ -2841,6 +2842,7 @@ function syncAgentSettings(task) {
 function syncWorkspaceControls() {
   const hasApp = selectedAppId !== null;
   const readOnly = hasApp && selectedAppOutsideActiveIndex;
+  remindersPanel.setTarget(selectedAppId, readOnly);
   if (!hasApp) historyMode = false;
   $("app-title").textContent = selectedAppName || "";
   $("app-view-toolbar").hidden = !hasApp;

@@ -141,42 +141,49 @@ def deliver_message(
     # Keep the destination eligible through admission/steering. The row
     # lock also covers concurrent archive and settings changes.
     with db.transaction() as cur:
-        settings: dict[str, str] = {}
-        if thread_id.startswith("app-"):
-            cur.execute(
-                "SELECT agent_runtime, agent_model, agent_effort, archived, agent_updates_locked"
-                " FROM web_apps WHERE app_id = %s FOR SHARE", (thread_id,),
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
-            if row[3]:
-                raise WorkspaceError(HTTPStatus.CONFLICT, "archived apps cannot receive agent messages")
-            if row[4]:
-                raise WorkspaceError(HTTPStatus.LOCKED, "the operator has locked agent updates for this app")
-            settings = {"agent_runtime": row[0], "model": row[1], "effort": row[2]}
-        elif thread_id.startswith("schedule-"):
-            cur.execute(
-                "SELECT agent_runtime, model, effort FROM schedules"
-                " WHERE thread_id = %s AND deleted_at IS NULL FOR SHARE", (thread_id,),
-            )
-            row = cur.fetchone()
-            if row is None:
-                raise WorkspaceError(HTTPStatus.NOT_FOUND, "active schedule not found")
-            if row[0] == SCRIPT_RUNTIME:
-                raise WorkspaceError(HTTPStatus.CONFLICT, "Bash schedules cannot receive agent messages")
-            settings = {"agent_runtime": row[0], "model": row[1], "effort": row[2]}
-        else:
-            cur.execute("SELECT archived FROM chat_threads WHERE thread_id = %s FOR SHARE", (thread_id,))
-            row = cur.fetchone()
-            if row is None:
-                raise WorkspaceError(HTTPStatus.NOT_FOUND, "chat thread not found")
-            if row[0]:
-                raise WorkspaceError(HTTPStatus.CONFLICT, "archived chats cannot receive agent messages")
-        host_request: dict[str, Any] = {**body, **settings}
-        if peer_sender_thread_id is not None:
-            host_request["peer_sender_thread_id"] = peer_sender_thread_id
-        response = call_admin_api("POST", f"/v1/threads/{thread_id}/messages", host_request)
-        if response.get("status") != "accepted":
-            raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid send status")
+        return _deliver_message(cur, thread_id, body, peer_sender_thread_id=peer_sender_thread_id)
+
+
+def _deliver_message(
+    cur: Any, thread_id: str, body: dict[str, Any], *, peer_sender_thread_id: str | None = None,
+) -> dict[str, Any]:
+    """Admit a validated message while the caller holds the destination transaction."""
+    settings: dict[str, str] = {}
+    if thread_id.startswith("app-"):
+        cur.execute(
+            "SELECT agent_runtime, agent_model, agent_effort, archived, agent_updates_locked"
+            " FROM web_apps WHERE app_id = %s FOR SHARE", (thread_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
+        if row[3]:
+            raise WorkspaceError(HTTPStatus.CONFLICT, "archived apps cannot receive agent messages")
+        if row[4]:
+            raise WorkspaceError(HTTPStatus.LOCKED, "the operator has locked agent updates for this app")
+        settings = {"agent_runtime": row[0], "model": row[1], "effort": row[2]}
+    elif thread_id.startswith("schedule-"):
+        cur.execute(
+            "SELECT agent_runtime, model, effort FROM schedules"
+            " WHERE thread_id = %s AND deleted_at IS NULL FOR SHARE", (thread_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            raise WorkspaceError(HTTPStatus.NOT_FOUND, "active schedule not found")
+        if row[0] == SCRIPT_RUNTIME:
+            raise WorkspaceError(HTTPStatus.CONFLICT, "Bash schedules cannot receive agent messages")
+        settings = {"agent_runtime": row[0], "model": row[1], "effort": row[2]}
+    else:
+        cur.execute("SELECT archived FROM chat_threads WHERE thread_id = %s FOR SHARE", (thread_id,))
+        row = cur.fetchone()
+        if row is None:
+            raise WorkspaceError(HTTPStatus.NOT_FOUND, "chat thread not found")
+        if row[0]:
+            raise WorkspaceError(HTTPStatus.CONFLICT, "archived chats cannot receive agent messages")
+    host_request: dict[str, Any] = {**body, **settings}
+    if peer_sender_thread_id is not None:
+        host_request["peer_sender_thread_id"] = peer_sender_thread_id
+    response = call_admin_api("POST", f"/v1/threads/{thread_id}/messages", host_request)
+    if response.get("status") != "accepted":
+        raise WorkspaceError(HTTPStatus.BAD_GATEWAY, "host admin returned invalid send status")
     return {"status": "accepted", "thread_id": thread_id}

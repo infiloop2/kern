@@ -29,6 +29,7 @@ from host.runtime.embeddings import client as embedding_client
 from host.runtime.host_inference import HostInferenceError, openai_decisions, typesafe_jev_judgment as judge
 from host.runtime.host_inference import redaction
 from host.runtime.workspace.host_api import WorkspaceError
+from host.runtime.workspace import private_notes
 from host.runtime.workspace.query import one as _one
 
 
@@ -99,6 +100,10 @@ def route_browser(
                 "memory recall does not accept query parameters",
             )
         return recall_pages(body)
+    match = re.fullmatch(r"/memory/pages/([^/]+)/notes", path)
+    if match and method == "GET":
+        _reject_query_keys(query, set(), "private notes")
+        return {"notes": private_notes.list_notes(match.group(1), include_content=True)}
     match = re.fullmatch(r"/memory/pages/([^/]+)", path)
     if match:
         page_id = _page_id(match.group(1))
@@ -177,9 +182,17 @@ def _list_pages(
         clause += " AND page_id > %s"
         params.append(after)
     with db.transaction() as cur:
+        source = "memory_pages"
+        if scope == "individual" and not deleted:
+            # A notebook can exist before the agent writes its first briefing.
+            source = (
+                "(SELECT page_id, description, content, revision, deleted_at, updated_by, created_at, updated_at FROM memory_pages"
+                " UNION ALL SELECT DISTINCT owner, 'Saved notes', '', 0, NULL, 'agent', NULL, NULL"
+                " FROM private_notes WHERE NOT EXISTS (SELECT 1 FROM memory_pages WHERE page_id = owner)) AS pages"
+            )
         cur.execute(
             "SELECT page_id, description, content, revision, deleted_at,"
-            " updated_by, created_at, updated_at FROM memory_pages"
+            f" updated_by, created_at, updated_at FROM {source}"
             f" WHERE {clause} ORDER BY page_id LIMIT %s",
             (*params, limit + 1),
         )
@@ -1078,9 +1091,17 @@ def load_page(
             backlinks = [str(item[0]) for item in cur.fetchall()[:100]]
         else:
             backlinks = []
-    if row is None or (not include_deleted and row[4] is not None):
+    if row is not None and not include_deleted and row[4] is not None:
         raise WorkspaceError(HTTPStatus.NOT_FOUND, "memory page not found")
-    return {**_page_summary(row), "content": row[2], "backlinks": backlinks}
+    notes = private_notes.list_notes(page_id) if private_notes.OWNER_RE.fullmatch(page_id) else []
+    if row is None:
+        if not notes:
+            raise WorkspaceError(HTTPStatus.NOT_FOUND, "memory page not found")
+        row = (page_id, "Saved notes", "", 0, None, "agent", None, None)
+    page = {**_page_summary(row), "content": row[2], "backlinks": backlinks}
+    if private_notes.OWNER_RE.fullmatch(page_id):
+        page["saved_notes"] = [note["note_id"] for note in notes]
+    return page
 
 
 def save_page(
@@ -1219,6 +1240,10 @@ def list_revisions(page_id: str, query: dict[str, list[str]]) -> dict[str, Any]:
     with db.transaction() as cur:
         cur.execute("SELECT 1 FROM memory_pages WHERE page_id = %s", (page_id,))
         if cur.fetchone() is None:
+            if private_notes.OWNER_RE.fullmatch(page_id):
+                cur.execute("SELECT 1 FROM private_notes WHERE owner = %s LIMIT 1", (page_id,))
+                if cur.fetchone() is not None:
+                    return {"revisions": []}
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "memory page not found")
         cur.execute(
             "SELECT id, revision, description, content, deleted, actor, created_at"

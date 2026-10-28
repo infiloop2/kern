@@ -1,5 +1,8 @@
 name: check-version
 
+# Every PR open, synchronize or reopen checks VERSION and immutable migrations.
+# This inexpensive workflow is independent of Codex review.
+# Private-repo October pause still applies; public PR checks remain automatic.
 on:
   pull_request:
 

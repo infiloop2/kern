@@ -3,6 +3,7 @@
 
   const root = window.KernWorkspaceRoots.global;
   const $ = id => root.getElementById(id);
+  const remindersPanel = window.KernReminders(root, $("agent-reminders"));
   const api = (method, path, body) => window.KernHost.api(method, `/v1/workspace${path}`, body);
   // The one runtime whose schedule message is a path, not a prompt
   // (host/session_options.py, host/agent_scripts.py).
@@ -198,12 +199,14 @@
   }
 
   function hideForms() {
+    remindersPanel.setTarget(null);
     $("memory-form").hidden = true;
     $("schedule-form").hidden = true;
     $("global-empty").hidden = false;
   }
 
   async function selectItem(id, propagateTransientError = false) {
+    remindersPanel.setTarget(null);
     state.creating = false;
     const sequence = ++state.sequence;
     window.KernHost.navigateWorkspace(state.resource, String(id));
@@ -229,6 +232,7 @@
   }
 
   function cancelItem() {
+    ++state.sequence;
     state.selected = null;
     state.creating = false;
     hideForms();
@@ -237,6 +241,8 @@
   }
 
   function newItem(prefilledMemoryId = "") {
+    ++state.sequence;
+    remindersPanel.setTarget(null);
     state.selected = null;
     state.creating = true;
     window.KernHost.navigateWorkspace(
@@ -260,6 +266,8 @@
       $("memory-links").replaceChildren();
       $("memory-backlinks").replaceChildren();
       $("memory-history").replaceChildren();
+      $("memory-notes-section").hidden = true;
+      $("memory-notes").replaceChildren();
       $("memory-delete").hidden = true;
       setFormDisabled($("memory-form"), false);
       (prefilledMemoryId ? $("memory-description") : $("memory-page-id")).focus();
@@ -292,13 +300,16 @@
     $("memory-page-id").value = page.page_id;
     $("memory-description").value = page.description;
     $("memory-content").value = page.content;
+    $("memory-notes-section").hidden = !(page.saved_notes || []).length;
+    $("memory-notes").replaceChildren();
     validateMemoryContent();
     resizeTextarea("memory-content");
-    $("memory-meta").textContent = `Revision ${page.revision} · edited by ${page.updated_by} · ${relativeTime(page.updated_at)}`;
+    $("memory-meta").textContent = page.revision === 0 ? "No briefing saved yet"
+      : `Revision ${page.revision} · edited by ${page.updated_by} · ${relativeTime(page.updated_at)}`;
     $("memory-link-graph").hidden = state.memoryScope === "individual";
     renderChips($("memory-links"), page.links || []);
     renderChips($("memory-backlinks"), page.backlinks || []);
-    $("memory-delete").hidden = page.deleted;
+    $("memory-delete").hidden = page.deleted || page.revision === 0;
     setFormDisabled($("memory-form"), page.deleted);
     // Page identifiers are stable even while an active page is editable.
     $("memory-page-id").disabled = true;
@@ -311,6 +322,21 @@
       false,
       response.next_before,
     );
+    if ((page.saved_notes || []).length) {
+      const result = await api("GET", `/memory/pages/${encodeURIComponent(page.page_id)}/notes`);
+      if (sequence !== state.sequence) return;
+      for (const note of result.notes || []) {
+        const card = document.createElement("article");
+        card.className = "memory-note";
+        const title = document.createElement("h3");
+        title.textContent = note.note_id;
+        const content = document.createElement("div");
+        content.className = "memory-note-content";
+        content.textContent = note.content;
+        card.append(title, content);
+        $("memory-notes").append(card);
+      }
+    }
   }
 
   function renderChips(container, values) {
@@ -443,6 +469,7 @@
     renderTriggers(schedule.triggers || []);
     syncSessionSelectors(schedule.agent_runtime, schedule.model, schedule.effort);
     const script = schedule.agent_runtime === SCRIPT_RUNTIME;
+    remindersPanel.setTarget(script ? null : schedule.thread_id, schedule.deleted);
     $("global-title").textContent = script ? "Script schedule" : "Standing agent";
     $("global-intro").textContent = script
       ? "Recurring message executed by the time-bounded Bash runtime."

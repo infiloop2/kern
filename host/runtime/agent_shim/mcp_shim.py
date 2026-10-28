@@ -582,8 +582,16 @@ def _workspace_api_tool() -> dict[str, Any]:
     return {
         "name": WORKSPACE_API_TOOL_NAME,
         "description": (
-            "Call Kern's bounded agent-facing Workspace API for Web Apps, global memory, "
-            "standing agents and triggers, spawned-agent discovery, and current thread identity. "
+            "Call Kern's bounded agent-facing Workspace API for Web Apps, self-memory, private notes, global memory, "
+            "standing agents and triggers, reminders, spawned-agent discovery, and current thread identity. "
+            'GET/PUT/DELETE /agent/self/notes/{note_id} reads, saves, or deletes a private note; PUT takes {"content":"..."}. '
+            "GET/POST /agent/self/reminders lists/creates your one-time reminders; "
+            "Once created, reminders cannot be changed or cancelled; ignore a delivered reminder if it is no longer useful. "
+            "At most 5 reminders may be pending per agent, at most 7 days ahead. "
+            "Each reminder gets one delivery attempt: accepted means delivered; errors mean failed, without retry. "
+            "Create with message (nonblank, at most 1000 characters) and exactly one of "
+            "at (future timestamp with timezone) or after (positive duration such as 30m or 2h). "
+            "Daily cleanup retains the 1,000,000 most recent past reminders globally. Listing returns reminders, the complete pending list, pending_count and next_before; pass ?before=ID for more. "
             "GET /agent/spawned-agents lists active spawned Chats with name, thread id, parent id, "
             "runtime/model/effort, and status. Only the owning agent can modify an App or "
             "standing-agent definition/triggers; ask its owner via send_agent_message for changes. "

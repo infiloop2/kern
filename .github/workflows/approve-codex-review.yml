@@ -1,5 +1,8 @@
 name: approve-codex-review
 
+# Created/edited clean Codex bot comments stamp approval on the exact reviewed PR head.
+# This does not replace CODEOWNER approval or trigger infrastructure smoke.
+# Private-repo October pause still suppresses the stamping job.
 on:
   issue_comment:
     types: [created, edited]
