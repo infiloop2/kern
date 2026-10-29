@@ -188,6 +188,7 @@ SMOKE_MANAGED_DOMAINS = (
     "bedrock-runtime.us-west-2.amazonaws.com",
 )
 SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
+    "trustmrr": (("list_startups", {"limit": 1}), ("get_startup", {"slug": "shipfast"})),
     "aurora_postgres": (
         ("list_tables", {}),
         ("describe_table", {"table": "kern_smoke"}),
