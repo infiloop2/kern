@@ -29,7 +29,7 @@ The categories are:
 | `operator_connections` | fixed | At most one SSH and one tunnel row. |
 | `counters` | fixed | Internal named counters, including four lifetime token totals. Never pruned with detailed usage. |
 | `thread_sessions` | retention | Sessions referenced by retained events or turn usage are preserved; unreferenced sessions retain the newest 100,000 per runtime. |
-| `agent_events` | retention | Newest 10,000,000-event sequence window, with at most 499 rows of amortization slack; sequence gaps can leave fewer rows. Message text is length-bounded. |
+| `agent_events` | retention | Newest 100,000,000-event sequence window, with at most 499 rows of amortization slack; sequence gaps can leave fewer rows. Large details expire only when both outside the newest 1,000,000-event sequence window globally and older than three calendar months. Message text is length-bounded and survives detail expiry. |
 | `conversation_message_embeddings` | retention | Derived vectors for the newest 250,000 user/agent messages, with at most roughly 800 newly indexed messages of amortization slack; activity and lifecycle events do not consume this quota. Rows cascade with source events. |
 | `oauth_logins` | fixed | At most one row for each supported OAuth runtime. |
 | `provider_accounts` | fixed | At most one row for each supported provider. |
@@ -104,6 +104,23 @@ See the [API contract](../api/AdminAPI.md#database-storage).
 When adding or renaming a table or changing retention, update this inventory and
 `host/runtime/admin_api/database_storage.py` in the same change. A PostgreSQL
 integration test checks that all migrated tables have a description.
+
+Admin startup/hourly maintenance clears old event details in transactions of
+at most 1,000 rows, releasing the mutation lock between batches. A pass stops
+after ten batches (10,000 rows); remaining work waits for the next hourly pass.
+Each pass fixes
+the global `MAX(seq) - 1,000,000` boundary and subtracts three calendar months
+from its UTC start time (clamping the day at month end). Both conditions must
+hold: `seq <= boundary` and `created_at < time cutoff`. This is the same sequence
+numbering as whole-event retention, not a per-thread or per-activity count.
+
+Expiry removes `activity.detail`, `activity.output`, and `notice.details` JSON
+keys and sets `memory_recall_details` and `historical_context` to SQL `NULL`.
+It stores no placeholder or per-row expiry flag. Readers omit missing details;
+they do not claim whether details expired or were never present. Message text,
+activity titles/status, notice kind/summary, timestamps and other metadata stay.
+App records and saved memories are separate and unaffected. The partial expiry
+index drops cleared rows, so later passes do not rescan compacted history.
 
 Provider-file cleanup is separate from PostgreSQL history retention. The admin
 maintenance loop sweeps Codex sessions at startup and daily. Existing workspace

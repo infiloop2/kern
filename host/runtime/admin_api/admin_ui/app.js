@@ -961,6 +961,7 @@ async function performWorkspaceMount(name, panelId, htmlPath) {
     await loadWorkspaceScript("/workspace/rich_text.js");
   }
   if (!window.KernReminders) await loadWorkspaceScript("/workspace/reminders.js");
+  if (!window.KernComposerDrafts) await loadWorkspaceScript("/workspace/composer-drafts.js");
   await loadWorkspaceScript(`/workspace/${assetName}.js`);
 }
 

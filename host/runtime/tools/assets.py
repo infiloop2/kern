@@ -224,11 +224,11 @@ class ToolAssetStore:
         """Validate an asset id and return its live, tool-owned record. The
         caller must hold the lock."""
         if not isinstance(asset_id, str) or not ASSET_ID_RE.fullmatch(asset_id):
-            raise AssetError("Asset id is invalid or expired. Upload the file again.")
+            raise AssetError("Asset id is invalid or expired. Stage the file again for the destination tool.")
         self._cleanup_locked(int(time.time()))
         record = self._records.get(asset_id)
         if record is None or record.tool_id != tool_id or not record.ready:
-            raise AssetError("Asset id is invalid or expired. Upload the file again.")
+            raise AssetError("Asset id is invalid or expired. Stage the file again for the destination tool.")
         return record
 
     def describe(self, tool_id: str, asset_id: str) -> AssetMetadata:
@@ -243,7 +243,7 @@ class ToolAssetStore:
             with path.open("rb") as source:
                 yield source
         except FileNotFoundError as exc:
-            raise AssetError("Asset id is invalid or expired. Upload the file again.") from exc
+            raise AssetError("Asset id is invalid or expired. Stage the file again for the destination tool.") from exc
 
     def delete(self, tool_id: str, asset_id: str) -> None:
         with self._lock:

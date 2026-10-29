@@ -981,8 +981,14 @@ log: the first request returns the newest events, and `before=<seq>`
 continues with events whose `seq` is lower than that cursor. `limit=<n>` is
 optional, defaults to 100, and must be between 1 and 100.
 
-The host retains only the most recent 10,000,000 agent events; older events are
-discarded and can no longer be listed.
+The host retains the newest 100,000,000-event sequence window globally; older
+events are discarded and can no longer be listed. Sequence gaps can leave fewer
+rows. For events both outside the newest 1,000,000-event sequence window and
+older than three calendar months, background maintenance removes activity
+`detail`/`output` and notice `details`, and clears `memory_recall_details` and
+`historical_context`. Cleared fields are omitted, without placeholder text.
+Message text and compact metadata remain until whole-event retention deletes
+the row.
 
 Event list response:
 
@@ -1921,7 +1927,7 @@ handoff](../architecture/tools/host-integration.md#the-agent-facing-surface).
 It accepts no query parameters and returns:
 
 ```json
-{"database_bytes": 4294967296, "tables": [{"name": "agent_events", "description": "Conversation messages and agent activity", "estimated_rows": 7500000, "total_bytes": 3221225472, "retention": "…", "row_target": 10000000}]}
+{"database_bytes": 4294967296, "tables": [{"name": "agent_events", "description": "Conversation messages and agent activity", "estimated_rows": 7500000, "total_bytes": 3221225472, "retention": "…", "row_target": 100000000}]}
 ```
 
 Tables in the public schema are ordered by total size descending, then name.

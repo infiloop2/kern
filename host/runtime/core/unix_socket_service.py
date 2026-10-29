@@ -86,7 +86,7 @@ class UnixSocketRequestHandler(BaseHTTPRequestHandler):
         except ValueError:
             length = -1
         if length < 0 or length > max_bytes:
-            self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "Request too large."})
+            self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": f"Request must be at most {max_bytes} bytes with a valid Content-Length."})
             return None
         return length
 

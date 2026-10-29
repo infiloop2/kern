@@ -1128,7 +1128,7 @@ def _publish_ui(
         if row is None:
             raise WorkspaceError(HTTPStatus.INTERNAL_SERVER_ERROR, "app state is unavailable")
         if row[0] != expected_revision:
-            raise WorkspaceError(HTTPStatus.CONFLICT, "the app changed; read state and retry")
+            raise WorkspaceError(HTTPStatus.CONFLICT, "the app changed; reread affected state, reconcile changes and use its revision as expected_revision")
         current = _state_row(row)
         # The decoded row is transaction-local; mutate it directly instead of
         # cloning a document that may be 10 MiB. A validation failure still
@@ -1261,7 +1261,7 @@ def _apply_data_operations(
         if row is None:
             raise WorkspaceError(HTTPStatus.INTERNAL_SERVER_ERROR, "app state is unavailable")
         if row[0] != version:
-            raise WorkspaceError(HTTPStatus.CONFLICT, "the app changed; read state and retry")
+            raise WorkspaceError(HTTPStatus.CONFLICT, "the app changed; reread affected state, reconcile changes and use its revision as expected_revision")
         current = _state_row(row)
         # This is a private decode of the locked database row, so no defensive
         # 10 MiB clone is needed before applying the transactional operations.
@@ -1570,7 +1570,7 @@ def _validated_data(value: Any) -> str:
     except (TypeError, ValueError) as exc:
         raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "data must contain only JSON values") from exc
     if len(encoded.encode()) > MAX_DATA_BYTES:
-        raise WorkspaceError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, f"data exceeds {MAX_DATA_BYTES} bytes")
+        raise WorkspaceError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, f"data exceeds {MAX_DATA_BYTES} bytes; repeated rows can be stored in collections")
     return encoded
 
 

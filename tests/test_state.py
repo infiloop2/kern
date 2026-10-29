@@ -1313,7 +1313,7 @@ class StateStorageTests(unittest.TestCase):
 
     def test_event_logs_prune_to_the_newest_cap(self) -> None:
         # Retention is a primary-key range delete below MAX(seq) - cap: cheap
-        # enough for the append cadence even at the 10M agent-event production
+        # enough for the append cadence even at the 100M agent-event production
         # cap, pinned here with small limits.
         with state.mutation() as cur:
             for index in range(8):

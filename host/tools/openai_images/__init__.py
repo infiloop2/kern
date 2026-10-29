@@ -314,9 +314,7 @@ MANIFEST = ToolManifest(
         "and pass the returned ids as image_asset_ids; a staged id is consumed by the call "
         "that uses it, so stage again for the next edit. The result is a workspace file "
         "path under /tool_assets, not image data: read, show, or stage that path for "
-        "another tool rather than expecting bytes back, and there is no separate save "
-        "step. If a call fails with no provider status, the render likely outran the "
-        "call budget; retry at a lower quality or a smaller size."
+        "another tool rather than expecting bytes back, and there is no separate save step."
     ),
 )
 
@@ -539,7 +537,7 @@ def _image_bytes(response: JSONObject, output_format: str) -> bytes:
     first = data[0] if isinstance(data, list) and data and isinstance(data[0], dict) else {}
     encoded = first.get("b64_json")
     if not isinstance(encoded, str) or not encoded:
-        raise RuntimeError("OpenAI returned no image data. Submit the request again.")
+        raise RuntimeError("OpenAI returned no image data. Generation may have consumed credits.")
     if len(encoded) > MAX_RESPONSE_BODY_BYTES:
         raise RuntimeError("OpenAI returned an image larger than the supported size.")
     try:
@@ -612,7 +610,7 @@ def _failure_from_status(exc: WebRequestError) -> str:
             f"filters, or the model, size, and quality combination is unsupported.{suffix}"
         )
     if exc.status >= 500:
-        return f"OpenAI reported a server error (HTTP {exc.status}). Submit the request again."
+        return f"OpenAI reported a server error (HTTP {exc.status}). Generation may have consumed credits."
     if exc.status:
         return f"OpenAI API returned HTTP {exc.status}.{suffix}"
     # No status: the request never produced an HTTP response. A render that

@@ -185,7 +185,7 @@ class NetworkIntrospectionRequestHandler(UnixSocketRequestHandler):
         if length is None:
             return
         if not _CALL_SLOTS.acquire(blocking=False):
-            self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "Too many concurrent calls."})
+            self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "Too many concurrent calls. This call was not started; retry after an active call finishes."})
             return
         try:
             body = self.read_json_object_body(length)

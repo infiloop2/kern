@@ -39,7 +39,6 @@ const AGENT_DELIVERY_TIMEOUT_MS = 60 * 1000;
 const DELIVERY_TIMEOUT_MESSAGE = "Delivery is taking longer than expected. "
   + "You can try again; the message may be submitted twice.";
 const COMPOSER_DRAFTS_STORAGE_KEY = "kern.agent-chat.composer-drafts.v1";
-const COMPOSER_DRAFT_LIMIT = 50;
 let selectedThreadId = null;
 let selectedThreadName = null;
 let selectedThreadRuntime = null;
@@ -148,7 +147,8 @@ document.addEventListener("keydown", event => {
 });
 
 let dictation = null;
-const composerDrafts = loadComposerDrafts();
+const draftStore = window.KernComposerDrafts(COMPOSER_DRAFTS_STORAGE_KEY);
+const composerDrafts = draftStore.drafts;
 const runtimeLabel = runtime => ({
   claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", "codex-3": "Codex 3", grok: "Grok", "grok-2": "Grok 2", hermes: "Hermes",
 })[runtime] || runtime;
@@ -183,15 +183,6 @@ const relativeTime = value => {
   return date.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 };
 
-function loadComposerDrafts() {
-  try {
-    const drafts = JSON.parse(localStorage.getItem(COMPOSER_DRAFTS_STORAGE_KEY) || "{}");
-    return drafts && typeof drafts === "object" && !Array.isArray(drafts) ? drafts : {};
-  } catch (_error) {
-    return {};
-  }
-}
-
 function composerDraftKey(threadId = selectedThreadId) {
   return threadId === null ? "new" : `thread:${threadId}`;
 }
@@ -200,37 +191,21 @@ function selectedThreadIsSending() {
   return sendingMessage && sendingMessageThreadKey === composerDraftKey();
 }
 
-function persistComposerDrafts() {
-  try {
-    localStorage.setItem(COMPOSER_DRAFTS_STORAGE_KEY, JSON.stringify(composerDrafts));
-  } catch (_error) {
-    // Draft persistence is best-effort when browser storage is unavailable.
-  }
-}
-
 function saveComposerDraft() {
   const key = composerDraftKey();
   const value = $("new-task").value;
-  delete composerDrafts[key];
-  if (value) composerDrafts[key] = value;
-  while (Object.keys(composerDrafts).filter(key => key !== "__dictationReceipts").length > COMPOSER_DRAFT_LIMIT) {
-    delete composerDrafts[Object.keys(composerDrafts).find(key => key !== "__dictationReceipts")];
-  }
-  persistComposerDrafts();
+  draftStore.save(key, value);
 }
 
 function restoreComposerDraft() {
-  $("new-task").value = composerDrafts[composerDraftKey()] || "";
+  $("new-task").value = draftStore.restore(composerDraftKey());
   autosizeComposer();
   dictation?.sync();
 }
 
 function clearComposerDraft(threadId, submittedDraft) {
   const key = composerDraftKey(threadId);
-  if ((composerDrafts[key] ?? "") !== submittedDraft) return false;
-  delete composerDrafts[key];
-  persistComposerDrafts();
-  return true;
+  return draftStore.clear(key, submittedDraft);
 }
 
 function api(method, path, body, timeoutMs = WORKSPACE_API_TIMEOUT_MS, timeoutMessage = "request timed out") {
@@ -1699,7 +1674,7 @@ window.KernChat = {
     showingSpawnedThreads = false;
     if (selectedThreadId === null && sendingMessage) {
       delete composerDrafts[composerDraftKey()];
-      persistComposerDrafts();
+      draftStore.persist();
       $("new-task").value = "";
     }
     startNewThread();
