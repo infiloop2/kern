@@ -127,6 +127,22 @@ class AuroraTests(unittest.TestCase):
         self.assertEqual(execute["parameters"], [{"name":"id","value":{"stringValue":"0"}}])
         self.assertEqual(execute["resultSetOptions"], {"decimalReturnType":"STRING","longReturnType":"STRING"})
 
+    def test_wrapped_query_utf8_limit_before_aws(self):
+        for value in ("a" * 65486, "é" * 32743):
+            with self.subTest(multibyte=value[0] == "é"):
+                self.aws.calls.clear()
+                statement = "SELECT '" + value + "'"
+                result = self.run_action("query", {"sql":statement, "params":[]})
+                self.assertIsInstance(result, ActionExecuted)
+                self.assertEqual(len(self.aws.calls[-2][1]["sql"].encode("utf-8")), 65536)
+                self.aws.calls.clear()
+                oversized = {"sql":statement + " ", "params":[]}
+                self.assertLess(len(sql.json_bytes(oversized)), 65536)
+                result = self.run_action("query", oversized)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("Wrapped query exceeds AWS's SQL limit", result.error)
+                self.assertFalse(self.aws.calls)
+
     def test_insert_one_atomic_statement_casts_and_reports_skips(self):
         self.aws.inserted = 1
         result = self.run_action("insert_rows", {**INSERT,"rows":[["1","First"],["2",None]]})
@@ -137,6 +153,23 @@ class AuroraTests(unittest.TestCase):
         self.assertIn("ON CONFLICT DO NOTHING", inserts[0])
         self.assertTrue(self.aws.calls[-1][0].endswith("/CommitTransaction"))
         self.assertTrue(all(body["secretArn"].endswith("writer-abcdef") for _,body,_ in self.aws.calls))
+
+    def test_private_content_reaches_aws_unchanged_without_parameter_guard(self):
+        value = "-----BEGIN PRIVATE KEY-----\npassword: hunter2\n" + "é" * 2561
+        statement = "SELECT 'password: hunter2 " + "é" * 2561 + "', :value"
+        with patch.object(self.api.outbound, "guard_request_parameter_string", side_effect=AssertionError("Aurora must not scan private content")):
+            result = self.run_action("query", {"sql":statement, "params":[{"name":"value","value":value}]})
+            self.assertIsInstance(result, ActionExecuted)
+            query = self.aws.calls[-2][1]
+            self.assertIn(statement, query["sql"])
+            self.assertEqual(query["parameters"], [{"name":"value","value":{"stringValue":value}}])
+            self.aws.calls.clear()
+            result = self.run_action("insert_rows", {**INSERT,"rows":[["1",value]]})
+            self.assertIsInstance(result, ActionExecuted)
+            insert = self.aws.calls[-2][1]
+            self.assertEqual(insert["parameters"][1], {"name":"v0_1","value":{"stringValue":value}})
+        for action in pg.MANIFEST.actions:
+            self.assertTrue(all(protection.kind == "validated" for protection in action.input_protections.values()))
 
     def test_insert_failure_rolls_back_without_retries_or_raw_error_data(self):
         self.aws.fail_sql = "INSERT"
@@ -225,12 +258,12 @@ class AuroraTests(unittest.TestCase):
                 self.assertIsInstance(self.run_action("manage_schema",values),ActionFailed)
         self.assertFalse(self.aws.calls)
 
-    def test_input_bounds_utf8_guard_and_unknown_fields_before_aws(self):
-        bad = [({**INSERT,"rows":[["1","é"*2561]]}),
+    def test_input_bounds_and_unknown_fields_before_aws(self):
+        bad = [({**INSERT,"rows":[["1","é"*16384]]}),
                ({**INSERT,"rows":[[str(i),"a"*5000] for i in range(14)]}),
                ({**INSERT,"rows":[["1","a"]]*501}), ({**INSERT,"rows":[["1"]]}),
                ({**INSERT,"on_conflict":"update"}), ({**INSERT,"table":"other.insights"}),
-               ({**INSERT,"extra":True}), ({**INSERT,"rows":[["1","-----BEGIN PRIVATE KEY-----"]]})]
+               ({**INSERT,"extra":True}), ({**INSERT,"rows":[["1",123]]})]
         for values in bad:
             with self.subTest(label=repr(values)[:80]):
                 self.assertIsInstance(self.run_action("insert_rows",values),ActionFailed)

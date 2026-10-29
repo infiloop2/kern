@@ -5,7 +5,6 @@ import json
 import re
 from typing import cast
 
-from host.param_guard import ParamGuardDenied
 from host.tools.host_api import ApprovalRecord, HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ActionResult, ApprovalExecuted, ApprovalResult
@@ -17,16 +16,12 @@ from .sql import (DESCRIBE_TABLE, LIST_TABLES, TABLE_COUNTS, TABLE_TARGET,
     ddl, fail, fields, identifier, json_bytes, names, quoted, relation)
 
 
-def guarded(value: str, api: HostAPI) -> str:
-    return api.outbound.guard_request_parameter_string(value, allow_identifiers=True, allow_machine_tokens=True, allow_longer_text=True)
-
-
-def cell(value: JSONValue, api: HostAPI) -> str | None:
+def cell(value: JSONValue) -> str | None:
     if value is None:
         return None
     if not isinstance(value, str):
         fail("Each value must be text or SQL null. Encode numbers and JSON as text.")
-    return guarded(cast(str, value), api)
+    return cast(str, value)
 
 
 def table_params(config: Config, table: str) -> list[JSONObject]:
@@ -71,12 +66,11 @@ def tabular(response: JSONObject, limit: int) -> JSONObject:
     return result
 
 
-def query_input(values: JSONObject, api: HostAPI) -> tuple[str, list[JSONObject], int]:
+def query_input(values: JSONObject) -> tuple[str, list[JSONObject], int]:
     fields(values, {"sql","params","limit"}, {"sql","params"})
     statement = values["sql"]
     if not isinstance(statement, str) or not re.match(r"\s*(SELECT|WITH)\b", statement, re.I):
         fail("query requires one SELECT or WITH statement.")
-    statement = guarded(cast(str, statement), api)
     if any(token in statement for token in (";", "--", "/*", "*/")):
         fail("SQL cannot contain semicolons or comments. Pass such text in params instead.")
     raw_params = values["params"]
@@ -93,16 +87,19 @@ def query_input(values: JSONObject, api: HostAPI) -> tuple[str, list[JSONObject]
         if name in used:
             fail("Duplicate parameter names.")
         used.add(name)
-        params.append(parameter(name, cell(obj["value"], api)))
+        params.append(parameter(name, cell(obj["value"])))
     limit = values.get("limit", 200)
     if type(limit) is not int or not 1 <= cast(int, limit) <= 200:
         fail("limit must be an integer from 1 to 200.")
     # Query is a subquery, not a concatenated statement list. READ ONLY plus
     # reader grants are the mutation boundary, not the leading-keyword check.
-    return f"SELECT * FROM ({statement}) AS kern_result LIMIT {cast(int, limit)+1}", params, cast(int, limit)
+    statement = f"SELECT * FROM ({statement}) AS kern_result LIMIT {cast(int, limit)+1}"
+    if len(statement.encode("utf-8")) > 65536:
+        fail("Wrapped query exceeds AWS's SQL limit. Use a shorter query or bind values as parameters.")
+    return statement, params, cast(int, limit)
 
 
-def insert_input(values: JSONObject, api: HostAPI) -> tuple[str, list[str], list[list[str | None]], str]:
+def insert_input(values: JSONObject) -> tuple[str, list[str], list[list[str | None]], str]:
     fields(values, {"table","columns","rows","on_conflict"}, {"table","columns","rows","on_conflict"})
     table = identifier(values["table"], "Table")
     columns = names(values["columns"], "columns")
@@ -115,7 +112,7 @@ def insert_input(values: JSONObject, api: HostAPI) -> tuple[str, list[str], list
             fail("Every row must have exactly one cell per supplied column.")
         if len(json_bytes(raw)) > MAX_ROW_BYTES:
             fail("A serialized row exceeds 32768 UTF-8 bytes. Store a smaller record.")
-        rows.append([cell(value, api) for value in cast(list[JSONValue], raw)])
+        rows.append([cell(value) for value in cast(list[JSONValue], raw)])
     conflict = values["on_conflict"]
     if conflict not in ("error","ignore"):
         fail("on_conflict must be error or ignore.")
@@ -206,12 +203,12 @@ class AuroraPostgresTool:
                     result = manage(client, operation, table, statement)
                 return ActionExecuted(result)
             if action == "insert_rows":
-                table, columns, rows, conflict = insert_input(tool_input, api)
+                table, columns, rows, conflict = insert_input(tool_input)
                 with Client(config, "writer").transaction(False) as client:
                     result = insert(client, table, columns, rows, conflict)
                 return ActionExecuted(result)
             if action == "query":
-                statement, params, limit = query_input(tool_input, api)
+                statement, params, limit = query_input(tool_input)
                 with Client(config, "reader").transaction(True) as client:
                     result = tabular(client.execute(statement, params), limit)
                 return ActionExecuted(result)
@@ -235,7 +232,7 @@ class AuroraPostgresTool:
                     "table":table, "binding":config.binding(), "target":cast(list[JSONValue], identity)})
                 return ActionPendingApproval(approval.approval_id, approval.summary)
             return ActionExecuted(result)
-        except (ToolInputValidationError, ParamGuardDenied) as exc:
+        except ToolInputValidationError as exc:
             return ActionFailed(str(exc))
 
     def execute_approved(self, approval: ApprovalRecord, api: HostAPI) -> ApprovalResult:
@@ -254,7 +251,7 @@ class AuroraPostgresTool:
                     fail("Table or attached partitions changed. Request a new drop approval.")
                 client.execute(f"DROP TABLE {relation(config.schema, table)} RESTRICT", [])
             return ApprovalExecuted(f"Dropped {config.schema}.{table} and its attached partitions. All their rows were removed; AWS backups follow your configured retention.")
-        except (ToolInputValidationError, ParamGuardDenied) as exc:
+        except ToolInputValidationError as exc:
             return ActionFailed(str(exc))
 
 

@@ -81,14 +81,17 @@ class AuroraSetupTests(unittest.TestCase):
                 "print(json.dumps({'ARN': 'arn:aws:test:secret:' + payload.get('Name', 'bootstrap')}))",
             ]) + "\n")
             fake_aws.chmod(0o700)
-            result = subprocess.run(["/bin/bash", "-H"], input=SETUP_COMMAND, cwd=root,
+            result = subprocess.run(["/bin/bash", "-H", "-c", SETUP_COMMAND], input="\n".join(["us-east-1", CLUSTER, MASTER, "", ""]) + "\n", cwd=root,
                 env={**{key:value for key,value in os.environ.items() if key != "PYTHONPATH"}, "PATH":str(root) + os.pathsep + os.environ.get("PATH", "")},
                 capture_output=True, text=True, timeout=15)
             self.assertEqual(result.returncode, 0, result.stderr)
             calls = [json.loads(line) for line in (root / "requests.jsonl").read_text().splitlines()]
             self.assertEqual(len(calls), 5)
             self.assertEqual(calls[-1]["secretArn"], MASTER)
-            self.assertIn("--master-secret-arn '" + MASTER + "'", SETUP_COMMAND)
+            self.assertIn("AWS region: ", result.stdout)
+            self.assertEqual(calls[-1]["resourceArn"], CLUSTER)
+            self.assertEqual(calls[-1]["database"], "agent_store")
+            self.assertIn('CREATE SCHEMA "agent_data"', calls[-1]["sql"])
             for payload in calls[:4]:
                 password = json.loads(payload["SecretString"])["password"]
                 self.assertIn(password, calls[-1]["sql"])

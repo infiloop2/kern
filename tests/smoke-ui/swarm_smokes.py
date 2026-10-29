@@ -25,7 +25,9 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
 
     def tap(locator):
         # Agents may sit beyond the camera; keyboard focus glides them into view.
-        locator.focus()
+        # Native focus scrolling races the map's scroll reset and can make its
+        # focus handler mistake an off-camera agent for one already in view.
+        locator.evaluate('(element) => element.focus({preventScroll: true})')
         settle()
         locator.click()
 

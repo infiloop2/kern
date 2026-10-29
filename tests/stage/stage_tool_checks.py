@@ -399,6 +399,7 @@ class StageToolChecks:
             )
         else:
             calls = {
+                "trustmrr": (("list_startups", {"limit": 1}), ("get_startup", {"slug": "shipfast"})),
                 "seo_metrics_api": (("get_keyword_metrics", {"keywords": ["seo api"], "country": "US"}), ("get_usage", {})),
                 "ahrefs_domain_rating": (("get_domain_rating", {"domain": "ahrefs.com"}),),
                 "instagram": (

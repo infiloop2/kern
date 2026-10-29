@@ -31,9 +31,8 @@ from test_tools import FakeHostAPI
 # (tool_id, action_id, field) -> guarded free-text parameter. The tool's
 # package test and the behavioral tests below exercise each.
 GUARDED_FIELDS = {
-    ("aurora_postgres", "query", "sql"),
-    ("aurora_postgres", "query", "params"),
-    ("aurora_postgres", "insert_rows", "rows"),
+    ("trustmrr", "get_startup", "slug"),
+    ("trustmrr", "list_startups", "xHandle"),
     ('prolific', 'get_filters', 'search'),
     ('prolific', 'get_eligibility_count', 'filters'),
     ('prolific', 'list_studies', 'search'),
@@ -183,6 +182,13 @@ APPROVAL_GATED = "approval-gated content: the operator approval is the control"
 TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning"
 
 EXEMPT_FIELDS = {
+    **{("trustmrr", "list_startups", field): TYPED for field in (
+        "page", "limit", "sort", "onSale", "category", "teamSize", "fundingStatus",
+        "minRevenue", "maxRevenue", "minMrr", "maxMrr", "minGrowth", "maxGrowth", "minPrice", "maxPrice",
+    )},
+    ("aurora_postgres", "query", "sql"): "Private storage in the operator-configured database; content scanning is intentionally disabled.",
+    ("aurora_postgres", "query", "params"): "Private storage in the operator-configured database; content scanning is intentionally disabled.",
+    ("aurora_postgres", "insert_rows", "rows"): "Private storage in the operator-configured database; content scanning is intentionally disabled.",
     ("aurora_postgres", "describe_table", "table"): TYPED,
     ("aurora_postgres", "query", "limit"): TYPED,
     ("aurora_postgres", "insert_rows", "table"): TYPED,
@@ -805,23 +811,6 @@ class BehavioralDenialTest(unittest.TestCase):
         self.assertIn(fragment, result.error)
         self.assertIn("retry", result.error)
 
-    def test_aurora_free_text_denied_before_aws(self) -> None:
-        from host.tools import aurora_postgres
-        from host.tools.aurora_postgres import client
-        from test_tools_aurora_postgres import api
-
-        secret = "-----BEGIN PRIVATE KEY-----"
-        cases = (
-            ("query", {"sql": f"SELECT '{secret}'", "params": []}),
-            ("query", {"sql": "SELECT :value", "params": [{"name": "value", "value": secret}]}),
-            ("insert_rows", {"table": "notes", "columns": ["note"], "rows": [[secret]], "on_conflict": "error"}),
-        )
-        for action, values in cases:
-            with self.subTest(action=action, values=values), patch.object(client, "request_bytes") as request:
-                result = aurora_postgres.BUNDLED_TOOL.execute(action, values, api())
-                self.assert_denied(result, "private-key")
-                request.assert_not_called()
-
     def test_ahrefs_domain_denied_before_provider_request(self) -> None:
         from host.tools import ahrefs_domain_rating
 
@@ -831,6 +820,18 @@ class BehavioralDenialTest(unittest.TestCase):
                 FakeHostAPI(config={"AHREFS_API_KEY": "k"}),
             )
         self.assert_denied(result, "credential")
+        request.assert_not_called()
+
+    def test_trustmrr_slug_and_founder_handle_denied_before_provider_request(self) -> None:
+        from host.tools import trustmrr
+
+        with patch.object(trustmrr, "_request_bytes_and_headers") as request:
+            for action, field in (("get_startup", "slug"), ("list_startups", "xHandle")):
+                result = trustmrr.BUNDLED_TOOL.execute(
+                    action, {field: "AKIAIOSFODNN7EXAMPLE"},
+                    FakeHostAPI(config={"TRUSTMRR_API_KEY": "k"}),
+                )
+                self.assert_denied(result, "credential")
         request.assert_not_called()
 
     def test_openrouter_prompt_denied_before_provider_request(self) -> None:
