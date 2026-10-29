@@ -25,7 +25,7 @@ API_TOOLS = frozenset({
     "google_calendar", "google_search", "google_search_console", "ibkr",
     "indexnow", "instagram", "instagram_ads", "instagram_discovery", "linkedin",
     "openai_images", "openrouter", "pagespeed_insights", "polymarket", "prolific",
-    "reddit", "reddit_scrapecreators", "runway", "seo_metrics_api", "twitter",
+    "reddit", "reddit_scrapecreators", "runway", "sec_edgar", "seo_metrics_api", "twitter",
     "twitterapi_io", "upwork", "vercel_analytics", "web_fetch", "whatsapp",
     "x_ads", "zoho_mail",
 })

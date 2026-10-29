@@ -97,9 +97,12 @@ The proxy enforces, per request:
   references in request bodies cannot be verified with path rules. Denials
   carry write-scope reasons in network events. The decision tables live in
   [`../api/NetworkControls.md`](../api/NetworkControls.md#access-enforcement).
-- Package guards: `python_packages` and `npm_packages` own fixed
-  read-only domain and path rules for PyPI, pythonhosted, the npm registry,
-  and Node.js downloads.
+- Package guards: `python_packages` and `npm_packages` own fixed read routes
+  for PyPI, pythonhosted, the npm registry and Node.js downloads. npm also
+  permits POST only to its exact bulk security-advisory endpoint, without
+  queries and with bounded, inspected package/version JSON (including npm
+  gzip). Publishing and other POST routes remain denied. The complete contract
+  is in [NetworkControls](../api/NetworkControls.md#npm-packages-integration).
 
 The proxy refuses to connect upstream to any address that is not publicly routable
 (loopback, link-local, or private ranges), so an allowed domain pointed at an

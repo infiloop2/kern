@@ -425,24 +425,25 @@ export const MANAGED_INTEGRATIONS = {
   },
   npm_packages: {
     label: "NPM Packages",
-    summary: "Lets your agent discover and install public JavaScript packages and download Node.js releases.",
+    summary: "Lets your agent install public JavaScript packages, check npm security advisories, and download Node.js releases.",
     protections: [
-      "Registry and Node.js distribution access is read-only; npm publishing and arbitrary Node.js website paths remain denied.",
-      "Only public registry data and release files are available through this integration.",
-      "Requested package names and URL values pass the host parameter guard: anything shaped like a secret, credential, or sensitive identifier is denied before the request is sent. Credential headers are removed and User-Agent is replaced with a fixed host value; other headers are forwarded as sent, because the registry reflects none of them back. The bulk URL paths are exempt — registry.npmjs.org carries no path guards, and every npm tarball path (any path containing `/-/`) is NOT scanned by the parameter guard.",
+      "Registry reads and Node.js downloads remain available. POST is allowed only at /-/npm/v1/security/advisories/bulk for a validated package/version map; publishing, login, and other POST routes remain denied.",
+      "Audit requests accept bounded JSON, including npm gzip, with no extra query parameters or project metadata. Malformed payloads and other content encodings are denied.",
+      "Requested package names and URL values pass the host parameter guard: anything shaped like a secret, credential, or sensitive identifier is denied before the request is sent. Credential headers are removed and User-Agent is replaced with a fixed host value; other headers are forwarded as sent, because the registry reflects none of them back. GET/HEAD tarball paths containing `/-/` remain exempt from path scanning. Audit POST bodies are validated separately and package names and versions are checked by the parameter guard.",
     ],
     setupSteps: [
-      { title: "Enable NPM Packages", description: "On Home, open NPM Packages under Integrations and choose Enable. npm and compatible package clients can then resolve and download public packages and Node.js distributions." },
+      { title: "Enable NPM Packages", description: "On Home, open NPM Packages under Integrations and choose Enable. npm and compatible package clients can then resolve and download public packages and Node.js distributions, and run npm audit through the bulk advisory endpoint." },
     ],
     capabilities: [
       { name: "npm registry reads", description: "Reads public package metadata and tarballs through registry.npmjs.org." },
+      { name: "npm security audit", description: "Looks up advisories for a bounded map of package names to installed versions. No publishing or other registry writes are allowed." },
       { name: "Node.js downloads", description: "Downloads published Node.js distributions from the official /dist path." },
     ],
     dataSummary: {
       items: [
         {
           title: "What leaves this host",
-          description: "Package names and versions, the files requested, and the request headers your package client sends — these are forwarded as sent, so treat any header the client adds as visible to the registry. Two are changed: credential headers (Authorization, Cookie) are removed, and User-Agent is replaced with a fixed value identifying this host rather than your client. Standard web request metadata (source IP, request time) is visible as it is for any HTTPS request. Nothing else on this host is sent. The registry reflects no header back, so the control that matters here is on the requested package name.",
+          description: "Package names and versions (including the dependency inventory sent by npm audit), the files requested, and the request headers your package client sends — these are forwarded as sent, so treat any header the client adds as visible to the registry. Two are changed: credential headers (Authorization, Cookie) are removed, and User-Agent is replaced with a fixed value identifying this host rather than your client. Standard web request metadata (source IP, request time) is visible as it is for any HTTPS request. Nothing else on this host is sent. The registry reflects no header back, so the control that matters here is on the requested package name.",
           links: [],
         },
         {
@@ -474,10 +475,10 @@ export const MANAGED_INTEGRATIONS = {
       ],
     },
     controls: [
-      "Parameter guard: requested package names and URL values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent. Headers are not scanned; credential headers are removed and User-Agent is replaced with a fixed host value. npm tarball URL paths (any path containing /-/) are exempt and are not scanned.",
+      "Parameter guard: requested package names and URL values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent. Headers are not scanned; credential headers are removed and User-Agent is replaced with a fixed host value. GET/HEAD tarball URL paths containing /-/ are exempt from path scanning. The exact audit POST route separately validates its bounded package/version JSON and rejects other payload fields.",
     ],
     networkScope: [
-      ["registry.npmjs.org", "GET and HEAD only"],
+      ["registry.npmjs.org", "GET and HEAD; POST only to /-/npm/v1/security/advisories/bulk with validated package/version JSON"],
       ["nodejs.org", "GET and HEAD only under /dist"],
     ],
   },

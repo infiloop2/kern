@@ -656,7 +656,8 @@ is replaced with a fixed host value, and the rest are forwarded as sent.
 ## NPM Packages Integration
 
 When `network_integrations.npm_packages.enabled` is `true`, its
-integration directly enforces:
+integration enforces the following read routes, plus the narrowly guarded
+bulk-advisory POST described below:
 
 ```json
 {
@@ -670,8 +671,21 @@ integration directly enforces:
 }
 ```
 
-As with Python packages, only `GET` and `HEAD` are allowed — read-only by
-construction, no publishing. npm metadata and Node.js distribution URL values
+POST is additionally allowed only to the exact
+`https://registry.npmjs.org/-/npm/v1/security/advisories/bulk` path, without
+query parameters. It requires `application/json` and a map of package names
+to nonempty arrays of bounded version strings. Plain JSON and npm gzip are
+accepted, with a 1 MiB compressed/decompressed limit. Duplicate keys, invalid
+shapes, optional gzip metadata, trailing members and other content encodings
+are rejected. Package names retain the parameter guard and its existing exact
+public-package exceptions; legacy names use the same guard length limit as
+metadata reads. Version values retain secret, personal-data and encoded-token
+checks, except valid YYYYMMDDhhmmss components in numeric version strings may
+pass the personal-identifier heuristic. Arbitrary numeric suffixes and opaque
+strings remain guarded. Publishing, login, quick-audit and every other POST
+route remain denied.
+
+npm metadata and Node.js distribution URL values
 take the parameter guard. npm tarball paths under
 `/-/` remain exempt because they are provider-returned. The exact public
 package metadata path `/token-types` skips path scanning because its name is a

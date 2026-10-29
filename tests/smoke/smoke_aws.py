@@ -188,6 +188,13 @@ SMOKE_MANAGED_DOMAINS = (
     "bedrock-runtime.us-west-2.amazonaws.com",
 )
 SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
+    "sec_edgar": (
+        ("lookup_company", {"ticker": "AAPL"}),
+        ("get_submissions", {"cik": "0000320193"}),
+        ("get_company_facts", {"cik": "0000320193"}),
+        ("list_filing_documents", {"cik": "0000320193", "accession": "0000320193-23-000106"}),
+        ("download_document", {"cik": "0000320193", "accession": "0000320193-23-000106", "document": "aapl-20230930.htm"}),
+    ),
     "trustmrr": (("list_startups", {"limit": 1}), ("get_startup", {"slug": "shipfast"})),
     "aurora_postgres": (
         ("list_tables", {}),
