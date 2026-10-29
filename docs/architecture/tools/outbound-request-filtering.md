@@ -17,6 +17,10 @@ api.outbound.guard_request_parameter_string(value, allow_longer_text=True) # rev
 api.outbound.guard_request_parameter_string(value, allow_identifiers=True, allow_machine_tokens=True) # validated opaque token that can be identifier-shaped
 ```
 
+Aurora PostgreSQL deliberately does not scan SQL, query parameters or inserted
+values: they are private storage in the operator-configured database. Its
+structural validation, batch limits and database column constraints still apply.
+
 The default form is for values sent to a public or third-party destination.
 The optional flags are false by default and each addresses a narrow class
 of false positive. `allow_identifiers=True` is for a field whose validated

@@ -1285,6 +1285,7 @@ button.home-card:focus-visible { outline: 2px solid var(--accent); outline-offse
 
 .integration-logo svg { display: block; height: 1.95rem; width: 1.95rem; }
 .integration-logo-word { font-size: 0.82rem; font-weight: 800; letter-spacing: -0.03em; line-height: 1; }
+.integration-logo-tool-trustmrr .integration-logo-word { font-size: 0.62rem; }
 .integration-logo-word-aws { font-size: 1rem; transform: translateY(-0.18rem); }
 .integration-logo-smile { bottom: 0.48rem; fill: none; height: 0.55rem !important; position: absolute; stroke: currentColor; stroke-linecap: round; stroke-width: 1.7; width: 2rem !important; }
 .integration-logo-search { --logo-badge: #0a66c2; bottom: 0.15rem; fill: var(--logo-badge); height: 1.25rem !important; position: absolute; right: 0.15rem; stroke: #fff; stroke-linecap: round; stroke-width: 2; width: 1.25rem !important; }

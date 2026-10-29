@@ -546,6 +546,9 @@ function bindMapPan() {
   viewport.addEventListener("focusin", event => {
     const card = event.target.closest?.(".swarm-card");
     if (!card || drag) return;
+    // Native focus can scroll before focusin; the asynchronous scroll handler
+    // has not necessarily reset it yet. Measure in the camera's coordinates.
+    viewport.scrollTop = 0; viewport.scrollLeft = 0;
     const view = viewport.getBoundingClientRect(), box = card.querySelector(".swarm-avatar").getBoundingClientRect();
     if (box.left < view.left || box.top < view.top || box.right > view.right || box.bottom > view.bottom) {
       const point = layout?.positions.get(card.dataset.threadId);

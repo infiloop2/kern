@@ -138,29 +138,41 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
           return [m.e, m.f, m.a].every((value, i) => Math.abs(value - expected[i]) < .01);
         }""", arg=expected)
 
-    def cards_inside():
-        return page.evaluate('''() => {
+    cards_inside_script = '''() => {
           const view = document.querySelector('#swarm-viewport').getBoundingClientRect();
           return [...document.querySelectorAll('.swarm-avatar')].filter(e => {
             const r = e.getBoundingClientRect();
             return r.left >= view.left - 1 && r.top >= view.top - 1 && r.right <= view.right + 1 && r.bottom <= view.bottom + 1;
           }).length;
-        }''')
+        }'''
 
     def expect_cards_inside(count):
-        # Camera moves glide briefly; settle, then poll for the final frame.
+        # Poll rendered frames after the glide instead of sleeping in Python.
         settle()
-        for _ in range(30):
-            if cards_inside() == count:
-                return
-            page.wait_for_timeout(100)
-        assert cards_inside() == count, (cards_inside(), camera())
+        page.wait_for_function(f'expected => ({cards_inside_script})() === expected', arg=count, timeout=3000)
     # Fit includes all nodes, including idle and disconnected ones.
     page.locator('#swarm-fit').click()
     expect(page.locator('#swarm-zoom-level')).not_to_have_text('100%')
     expect_cards_inside(102)
     page.locator('#swarm-actual').click()
     expect(page.locator('#swarm-zoom-level')).to_have_text('100%')
+    # Native keyboard focus may scroll the viewport before focusin runs. The
+    # camera must still bring an off-screen agent into view after that reset.
+    settle()
+    distant = page.locator('.swarm-card[data-thread-id="app-30"]')
+    avatar_inside = '''e => {
+      const a = e.querySelector('.swarm-avatar').getBoundingClientRect();
+      const v = document.querySelector('#swarm-viewport').getBoundingClientRect();
+      return a.left >= v.left && a.right <= v.right && a.top >= v.top && a.bottom <= v.bottom;
+    }'''
+    assert not distant.evaluate(avatar_inside)
+    distant.focus()
+    settle()
+    assert viewport.evaluate('e => e.scrollLeft === 0 && e.scrollTop === 0')
+    assert distant.evaluate(avatar_inside), 'native focus left the agent outside the camera'
+    distant.click()
+    expect(distant).to_have_attribute('aria-pressed', 'true')
+    page.get_by_role('button', name='Close agent details', exact=True).click()
     box = viewport.bounding_box()
     if not mobile:
         # Drag in both axes and release outside the map. The camera is
