@@ -904,14 +904,14 @@ class ExecuteActionTests(ToolsHostTestCase):
         self.prepare_fake_tool()
         with patch.object(tools_host.host_errors, "report_warning") as report:
             result = tools_host.execute_action("fake_notes", "crash_note", {}, origin_thread_id=None)
-        self.assertEqual(result, {"status": "failed", "error": "Tool call failed.", "reconnect_required": False})
+        self.assertEqual(result, {"status": "failed", "error": "fake_notes.crash_note failed unexpectedly. Ask the operator to check Host diagnostics.", "reconnect_required": False})
         report.assert_called_once()
         events = state.page_tool_events_before(None)
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["tool_id"], "fake_notes")
         self.assertEqual(events[0]["action_id"], "crash_note")
         self.assertEqual(events[0]["outcome"], "failed")
-        self.assertEqual(events[0]["detail"], "Tool call failed.")
+        self.assertEqual(events[0]["detail"], "fake_notes.crash_note failed unexpectedly. Ask the operator to check Host diagnostics.")
         self.assertEqual(state.tool_event(events[0]["seq"])["arguments"], {})
 
     def test_unmapped_provider_failure_is_logged_with_operator_context(self) -> None:
@@ -926,7 +926,7 @@ class ExecuteActionTests(ToolsHostTestCase):
             result,
             {
                 "status": "failed",
-                "error": "Provider request failed. Check Host diagnostics for details.",
+                "error": "Example lookup failed (HTTP 503). Ask the operator to check Host diagnostics.",
                 "reconnect_required": False,
             },
         )
@@ -1100,10 +1100,10 @@ class ApprovalLifecycleTests(ToolsHostTestCase):
         approval_id = self.queue_write("raise")
         decision = tools_host.decide_approval(approval_id, "approve", public_hostname=None)
         self.assertEqual(decision["approval"]["status"], "failed")
-        self.assertEqual(decision["result"], {"status": "failed", "error": "Tool call failed.", "reconnect_required": False})
+        self.assertEqual(decision["result"], {"status": "failed", "error": "fake_notes.write_note failed unexpectedly; outcome unknown. Check the provider before requesting another execution.", "reconnect_required": False})
         self.assertEqual(state.tool_approval(approval_id)["status"], "failed")
-        self.assertEqual(state.tool_approval(approval_id)["result"], "Tool call failed.")
-        self.assertEqual(state.page_tool_events_before(None)[0]["detail"], f"{approval_id}: Tool call failed.")
+        self.assertEqual(state.tool_approval(approval_id)["result"], "fake_notes.write_note failed unexpectedly; outcome unknown. Check the provider before requesting another execution.")
+        self.assertEqual(state.page_tool_events_before(None)[0]["detail"], f"{approval_id}: fake_notes.write_note failed unexpectedly; outcome unknown. Check the provider before requesting another execution.")
 
     def test_unknown_approval_is_rejected(self) -> None:
         with self.assertRaisesRegex(tools_host.ToolCallError, "Unknown approval"):

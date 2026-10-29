@@ -70,7 +70,12 @@ conversation_embedding_work = threading.Event()
 # Conversation history gets a deeper retained window than the high-volume
 # network and tool audit logs. Each log prunes every PRUNE_EVERY appends so
 # the cost stays amortized.
-AGENT_EVENT_LIMIT = 10_000_000
+AGENT_EVENT_LIMIT = 100_000_000
+# Large event details survive both the newest sequence window and three
+# calendar months. Whole-event retention above remains independent.
+AGENT_EVENT_DETAIL_LIMIT = 1_000_000
+AGENT_EVENT_DETAIL_BATCH_SIZE = 1_000
+AGENT_EVENT_DETAIL_BATCHES_PER_PASS = 10
 NETWORK_EVENT_LIMIT = 1_000_000
 TOOL_EVENT_LIMIT = 1_000_000
 PRUNE_EVERY = 500

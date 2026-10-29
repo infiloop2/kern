@@ -47,16 +47,18 @@ LIST_BUNDLED_TOOLS_TOOL: JSONObject = {
     "name": "list_bundled_tools",
     "description": (
         "List bundled tools and enablement. Omit tool_ids for the capability catalog; pass "
-        "known ids for actions, agent_notes, and OAuth connected_accounts. Follow agent_notes; "
+        "known ids for actions and OAuth connected_accounts. Request include_notes=true for usage notes. Follow agent_notes; "
         "empty means no extra guidance. With multiple accounts, pass the intended connection_id "
         "to call_tool. Disabled tools require operator enablement (and OAuth connection) under "
         "Home > Integrations; ask instead of building a replacement. Only absence from the "
         "full catalog means a capability is not bundled. approval=operator queues approval. "
-        "Fetch tool_ids for notes/accounts, then describe_tool for needed schemas and call_tool to run."
+        "Reuse notes already in context; fetch them before first use. Then describe_tool for needed schemas and call_tool to run."
     ),
     "input_schema": {
         "type": "object",
         "properties": {
+            "include_notes": {"type": "boolean", "default": False,
+                              "description": "Include usage notes for selected tool_ids."},
             "tool_ids": {
                 "type": "array",
                 "items": {"type": "string", "minLength": 1},
@@ -76,7 +78,7 @@ DESCRIBE_TOOL_TOOL: JSONObject = {
         "Return a bundled tool's action input schemas and returns kind: json, approval, or asset "
         "(a workspace file). Output schemas are available on request with include_output_schema=true. "
         "Pass action_ids for needed actions; omit for all. Reuse schemas already in context. "
-        "First fetch list_bundled_tools with tool_ids for usage notes, or set include_notes=true here."
+        "Request include_notes=true here or in focused list_bundled_tools before first use; reuse notes already in context."
     ),
     "input_schema": {
         "type": "object",

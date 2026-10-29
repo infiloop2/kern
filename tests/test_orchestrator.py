@@ -467,7 +467,7 @@ class OrchestratorTests(unittest.TestCase):
         with (patch.object(admin_threads, "_recalled_memory_pages", return_value=(pages, "Selected guide r1")),
               patch.object(orchestrator.time, "monotonic", return_value=0.0) as clock,
               patch.object(orchestrator, "launch_turn") as launch):
-            for number, timestamp in enumerate((0, 100, 200, 300, 500, 599.999, 600), 1):
+            for number, timestamp in enumerate((0, 100, 600, 1800, 3000, 3599.999, 3600), 1):
                 clock.return_value = timestamp
                 self.send_message("thread-1", "continue")
                 turn, message, _session = launch.call_args.args
@@ -488,7 +488,7 @@ class OrchestratorTests(unittest.TestCase):
                 details = notice["payload"]["memory_recall_details"]
                 diagnostic = json.loads(details.splitlines()[0].partition(': ')[2])
                 self.assertEqual(diagnostic['delivery_status'], 'pending_readiness')
-                self.assertEqual(diagnostic['ttl_seconds'], 600)
+                self.assertEqual(diagnostic['ttl_seconds'], 3600)
                 self.assertEqual(diagnostic['selected_count'], 2)
                 self.assertEqual(diagnostic['prepared_injection_count'], len(expected))
                 self.assertEqual(diagnostic['suppressed_count'], 2 - len(expected))
@@ -3833,53 +3833,15 @@ class RuntimeStatusDiagnosticTests(unittest.TestCase):
 
 
 class StartBackgroundLoopsOrderTests(unittest.TestCase):
-    def test_start_background_loops_refreshes_github_credentials_before_loops(self) -> None:
-        order: list[str] = []
-        with (
-            patch(
-                "host.runtime.agent_runtime.orchestrator.github_credential.reconcile",
-                side_effect=lambda: order.append("refresh"),
-            ),
-            patch(
-                "host.runtime.agent_runtime.orchestrator.threading.Thread",
-                side_effect=lambda *a, **k: order.append("thread") or _NoopThread(),
-            ),
-        ):
-            orchestrator.start_background_loops()
-        # The synchronous refresh must land before any background loop thread
-        # is spawned, so a turn cannot be admitted against a stale token.
-        self.assertEqual(order[0], "refresh")
-        self.assertIn("thread", order)
-
-    def test_start_background_loops_publishes_unmanaged_runtimes_immediately(self) -> None:
-        # A script schedule can fire while the provider probes are still
-        # running, and an occurrence is attempted once: a runtime with nothing
-        # to probe must not be left "loading" behind them, or that occurrence
-        # fails permanently against a runtime that is never unavailable.
+    def test_publishes_unmanaged_runtimes_immediately(self) -> None:
         with orchestrator._RUNTIME_STATUS_LOCK:
             orchestrator._RUNTIME_STATUSES.clear()
         self.addCleanup(orchestrator._RUNTIME_STATUSES.clear)
-        observed: list[str] = []
-        with (
-            patch(
-                "host.runtime.agent_runtime.orchestrator.github_credential.reconcile",
-                side_effect=lambda: observed.append(
-                    orchestrator.runtime_status("script")
-                ),
-            ),
-            patch(
-                "host.runtime.agent_runtime.orchestrator.threading.Thread",
-                side_effect=lambda *a, **k: _NoopThread(),
-            ),
-        ):
-            orchestrator.start_background_loops()
-        # Already active by the time anything slow runs, not merely by the end.
-        self.assertEqual(observed, ["active"])
+        orchestrator.publish_unmanaged_runtime_statuses()
         self.assertEqual(orchestrator.runtime_status("script"), "active")
 
     def test_only_managed_runtimes_get_independent_status_loops(self) -> None:
         with (
-            patch.object(orchestrator.github_credential, "reconcile"),
             patch.object(orchestrator.threading, "Thread") as thread,
         ):
             orchestrator.start_background_loops()
@@ -4192,11 +4154,6 @@ class ClaudeLiveStatusTests(unittest.TestCase):
             provider_account_trust._CLAUDE_LIVE_PROBE["at"] -= orchestrator.CLAUDE_LIVE_PROBE_RETRY_SECONDS + 1
             self.assertEqual(orchestrator._live_claude_status(account), expected)
         self.assertEqual(probe.call_count, 2)
-
-
-class _NoopThread:
-    def start(self) -> None:
-        return None
 
 if __name__ == "__main__":
     unittest.main()

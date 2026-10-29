@@ -39,7 +39,10 @@ def route(method: str, path: str, body: Any, query: dict[str, list[str]], *, own
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "private notes do not accept query parameters")
     match = re.fullmatch(r"/agent/self/notes/([a-z_]{1,100})", path)
     if match is None or method not in {"GET", "PUT", "DELETE"}:
-        raise WorkspaceError(HTTPStatus.NOT_FOUND, "private note route not found")
+        raise WorkspaceError(
+            HTTPStatus.NOT_FOUND,
+            "Use GET, PUT or DELETE /agent/self/notes/{note_id}; note IDs must be 1–100 lowercase letters or underscores.",
+        )
     note_id = match.group(1)
     if method != "PUT" and body is not None:
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "note reads and deletes take no body")
@@ -67,7 +70,7 @@ def route(method: str, path: str, body: Any, query: dict[str, list[str]], *, own
         cur.execute("SELECT note_id FROM private_notes WHERE owner = %s", (owner,))
         existing = {row[0] for row in cur.fetchall()}
         if note_id not in existing and len(existing) >= 10:
-            raise WorkspaceError(HTTPStatus.CONFLICT, "You already have 10 notes; delete one before creating another")
+            raise WorkspaceError(HTTPStatus.CONFLICT, "You already have 10 notes; update an existing note or delete one before creating another")
         cur.execute(
             "INSERT INTO private_notes (owner, note_id, content) VALUES (%s, %s, %s)"
             " ON CONFLICT (owner, note_id) DO UPDATE SET content = EXCLUDED.content",

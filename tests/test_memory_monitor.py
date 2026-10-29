@@ -28,7 +28,7 @@ class MemoryMonitorTests(unittest.TestCase):
             'pages': [page('ui'), page(), {**page('self'), 'scope': 'self'}]}))
 
     def ready(self, key=None):
-        self.activity(5, key)
+        self.activity(mm.SUGGESTION_EVENTS, key)
         self.clock.return_value += mm.SUGGESTION_INTERVAL
 
     def activity(self, count, key=None):
@@ -62,81 +62,81 @@ class MemoryMonitorTests(unittest.TestCase):
                          ['guide-3', 'guide-4', 'guide-5'])
         self.assertNotIn('self', self.monitor.turns[self.key].known)
 
-    def test_minute_interval_is_not_bypassed_by_events_or_incoming_direction(self):
+    def test_two_minute_interval_is_not_bypassed_by_events_or_incoming_direction(self):
         for _ in range(30):
             self.monitor.observe(self.key, 'completed')
         self.redirect()
-        self.clock.return_value = 59
-        self.assertFalse(self.monitor.check_once())
-        self.query.assert_not_called()
-        self.clock.return_value = 60
-        self.assertTrue(self.monitor.check_once())
-        self.redirect()
-        self.activity(4)
         self.clock.return_value = 119
         self.assertFalse(self.monitor.check_once())
-        self.assertEqual(self.search.call_count, 1)
+        self.query.assert_not_called()
         self.clock.return_value = 120
+        self.assertTrue(self.monitor.check_once())
+        self.redirect()
+        self.activity(9)
+        self.clock.return_value = 239
+        self.assertFalse(self.monitor.check_once())
+        self.assertEqual(self.search.call_count, 1)
+        self.clock.return_value = 240
         self.assertTrue(self.monitor.check_once())
 
     def test_oldest_due_turn_and_global_rate_bound(self):
         second = ('thread-2', 1)
         self.clock.return_value = 1
         self.monitor.seed(second, 'Second', [], self.deliver, self.deliver_self)
-        self.activity(5)
-        self.activity(5, second)
-        self.clock.return_value = 61
+        self.activity(10)
+        self.activity(10, second)
+        self.clock.return_value = 121
         self.monitor.check_once()
         self.assertEqual(self.search.call_args.args[0], 'thread-1')
-        self.clock.return_value = 70
+        self.clock.return_value = 130
         self.assertFalse(self.monitor.check_once())
-        self.clock.return_value = 71
+        self.clock.return_value = 131
         self.monitor.check_once()
         self.assertEqual(self.search.call_args.args[0], 'thread-2')
 
-    def test_shared_check_requires_five_new_events_even_after_timer_expires(self):
-        self.activity(4)
-        self.clock.return_value = 60
+    def test_shared_check_requires_ten_new_events_even_after_timer_expires(self):
+        self.activity(9)
+        self.clock.return_value = 120
         self.assertFalse(self.monitor.check_once())
         self.monitor.observe(self.key, 'Assistant progress')
         self.assertTrue(self.monitor.check_once())
-        self.clock.return_value = 120
+        self.clock.return_value = 240
         self.assertFalse(self.monitor.check_once())
-        self.activity(4)
+        self.activity(9)
         self.assertFalse(self.monitor.check_once())
         self.activity(1)
         self.assertTrue(self.monitor.check_once())
         # The unchanged-query skip consumes this batch without another search.
         self.search.assert_called_once()
         self.assertEqual(self.monitor.turns[self.key].suggestion_events, 0)
-        self.assertEqual(self.monitor.turns[self.key].self_events, 10)
+        self.assertEqual(self.monitor.turns[self.key].self_events, 20)
 
     def test_self_threshold_and_counter_reset_are_independent_of_shared_checks(self):
         self.self_read.return_value = {**page('thread-1'), 'content': 'Notes', 'scope': 'self'}
         self.ready()
         self.monitor.check_once()
-        self.activity(19)
-        self.clock.return_value = 300
+        self.activity(14)
+        self.clock.return_value = 3600
         self.assertTrue(self.monitor.check_once())
         self.self_read.assert_not_called()
         self.assertEqual(self.monitor.turns[self.key].self_events, 24)
         self.activity(1)
-        self.clock.return_value = 310
+        self.clock.return_value = 3610
         self.assertTrue(self.monitor.check_once())
         self.deliver_self.assert_called_once()
         self.assertEqual(self.query.call_count, 2)
         self.assertEqual(self.monitor.turns[self.key].self_events, 0)
         self.assertEqual(self.monitor.turns[self.key].suggestion_events, 1)
-        self.clock.return_value = 610
+        self.clock.return_value = 7300
         self.assertFalse(self.monitor.check_once())
 
-    def test_self_event_threshold_does_not_bypass_five_minutes(self):
+    def test_self_event_threshold_does_not_bypass_one_hour(self):
         self.activity(30)
-        self.clock.return_value = 299
+        self.clock.return_value = 3599
         self.assertTrue(self.monitor.check_once())  # Shared check only.
         self.self_read.assert_not_called()
         self.assertEqual(self.monitor.turns[self.key].self_events, 25)
-        self.clock.return_value = 309  # The global ten-second limit also applies.
+        self.clock.return_value = 3609  # The global ten-second limit also applies.
         self.assertTrue(self.monitor.check_once())
         self.self_read.assert_called_once()
 
@@ -144,7 +144,7 @@ class MemoryMonitorTests(unittest.TestCase):
         second = ('thread-2', 1)
         self.clock.return_value = 1
         self.monitor.seed(second, 'Second', [], self.deliver, self.deliver_self)
-        self.activity(5, second)
+        self.activity(10, second)
         self.clock.return_value = 600
         self.assertTrue(self.monitor.check_once())
         self.search.assert_called_once_with('thread-2', self.query.return_value)
@@ -167,9 +167,32 @@ class MemoryMonitorTests(unittest.TestCase):
         self.monitor.observe(self.key, dict(event_type='thread.notice', payload={
             'source': 'user', 'message': 'Publish changes',
             'notice': {'kind': 'agent_message', 'summary': 'From peer'}}), incoming=True)
-        self.assertEqual(self.monitor.turns[self.key].next_suggestion, 60)
+        self.assertEqual(self.monitor.turns[self.key].next_suggestion, 120)
         self.assertEqual(self.monitor.turns[self.key].generation, 1)
         self.assertEqual(self.monitor.turns[self.key].self_events, 2)
+
+    def test_two_suggestion_notices_per_operator_input_then_checks_continue_silently(self):
+        self.monitor.turns[self.key].update_task = Mock()
+        for index in range(4):
+            self.search.return_value = {'pages': [page(f'guide-{index}')]}
+            self.query.return_value = f'User: Change arrows\n\nAssistant: Step {index}'
+            self.ready()
+            self.monitor.next_check = 0
+            with patch.object(mm.state, 'swarm_task_context', return_value={'task_title': 'Edit arrows'}):
+                self.monitor.check_once()
+        self.assertEqual(self.deliver.call_count, 2)
+        self.assertEqual([c.args[0][0][0] for c in self.deliver.call_args_list], ['guide-0', 'guide-1'])
+        self.assertEqual(self.search.call_count, 4)  # Recall and titles keep running.
+        self.assertEqual(self.monitor.turns[self.key].update_task.call_count, 4)
+        self.assertNotIn('guide-3', self.monitor.turns[self.key].known)
+        self.redirect()  # New operator input restores the allowance.
+        self.search.return_value = {'pages': [page('guide-4')]}
+        self.ready()
+        self.monitor.next_check = 0
+        with patch.object(mm.state, 'swarm_task_context', return_value=None):
+            self.monitor.check_once()
+        self.assertEqual(self.deliver.call_count, 3)
+        self.assertIn('guide-4', self.monitor.turns[self.key].known)
 
     def test_capacity_drops_new_turns_and_finish_releases_slot(self):
         with patch.object(mm, 'MAX_TURNS', 1):
@@ -194,9 +217,9 @@ class MemoryMonitorTests(unittest.TestCase):
             self.assertTrue(entered.wait(2))
             self.redirect()
             self.assertEqual(self.monitor.turns[self.key].generation, 1)
-            self.assertEqual(self.monitor.turns[self.key].next_suggestion, 120)
+            self.assertEqual(self.monitor.turns[self.key].next_suggestion, 240)
             self.assertEqual(self.monitor.turns[self.key].suggestion_events, 1)
-            self.assertEqual(self.monitor.turns[self.key].self_events, 6)
+            self.assertEqual(self.monitor.turns[self.key].self_events, 11)
         finally:
             release.set()
             worker.join(2)
@@ -221,7 +244,7 @@ class MemoryMonitorTests(unittest.TestCase):
                                                      ('pr-guidance', 1, 'When publishing a PR')])
                 self.model.assert_not_called()
                 self.monitor.turns[self.key].update_task.assert_not_called()
-                self.assertEqual(self.monitor.turns[self.key].next_suggestion, self.clock.return_value + 60)
+                self.assertEqual(self.monitor.turns[self.key].next_suggestion, self.clock.return_value + 120)
 
     def test_finished_turn_drops_late_result_and_cannot_affect_new_run(self):
         def search(*args):
@@ -345,14 +368,14 @@ class MemoryMonitorTests(unittest.TestCase):
             self.monitor.check_once()
         save.assert_not_called()
 
-    def test_self_memory_is_read_every_five_minutes_with_unchanged_query_and_revision(self):
+    def test_self_memory_is_read_every_hour_with_unchanged_query_and_revision(self):
         self.query.return_value = 'User: Change arrows'
         current = {**page('thread-1'), 'scope': 'self', 'content': 'Complete notes. ' * 1000}
         self.self_read.return_value = current
-        for minute in range(1, 11):
+        for check in range(1, 61):
             self.ready()
             self.monitor.check_once()
-            self.assertEqual(self.deliver_self.call_count, minute // 5)
+            self.assertEqual(self.deliver_self.call_count, check // 30)
         self.search.assert_not_called()
         self.assertEqual(self.self_read.call_count, 2)
         self.assertEqual(self.deliver_self.call_args.args[0], current)
@@ -360,7 +383,7 @@ class MemoryMonitorTests(unittest.TestCase):
     def test_missing_or_failed_self_read_does_not_block_shared_suggestions(self):
         for result in (None, OSError('unavailable')):
             with self.subTest(result=result):
-                self.clock.return_value += 300
+                self.clock.return_value += 3600
                 self.activity(25)
                 self.monitor.turns[self.key].known = {}
                 self.monitor.turns[self.key].last_query = ''
@@ -373,7 +396,7 @@ class MemoryMonitorTests(unittest.TestCase):
 
     def test_self_refresh_survives_shared_context_failure(self):
         self.activity(25)
-        self.clock.return_value = 300
+        self.clock.return_value = 3600
         self.self_read.return_value = {**page('thread-1'), 'content': 'Current notes', 'scope': 'self'}
         self.query.side_effect = OSError('context unavailable')
         with patch.object(mm.host_errors, 'report_warning'):
@@ -382,14 +405,14 @@ class MemoryMonitorTests(unittest.TestCase):
 
     def test_self_refresh_reads_latest_page_without_catchup_or_busy_retry(self):
         self.activity(25)
-        self.clock.return_value = 1800
+        self.clock.return_value = 3600
         self.self_read.return_value = {**page('thread-1', 2), 'content': 'Updated notes', 'scope': 'self'}
         self.deliver_self.return_value = False
         self.monitor.check_once()
         self.deliver_self.assert_called_once_with(self.self_read.return_value)
-        self.clock.return_value = 1810
+        self.clock.return_value = 3610
         self.assertFalse(self.monitor.check_once())
-        self.assertEqual(self.monitor.turns[self.key].next_self, 2100)
+        self.assertEqual(self.monitor.turns[self.key].next_self, 7200)
 
     def test_finished_self_read_cannot_deliver_to_replacement_run(self):
         def read(_):
@@ -398,10 +421,10 @@ class MemoryMonitorTests(unittest.TestCase):
             return {**page('thread-1'), 'content': 'Old notes', 'scope': 'self'}
         self.self_read.side_effect = read
         self.activity(25)
-        self.clock.return_value = 300
+        self.clock.return_value = 3600
         self.monitor.check_once()
         self.deliver_self.assert_not_called()
-        self.assertEqual(self.monitor.turns[('thread-1', 2)].next_self, 600)
+        self.assertEqual(self.monitor.turns[('thread-1', 2)].next_self, 7200)
 
     def test_worker_waits_for_events_then_timer_and_sleeps_when_idle(self):
         class StopWorker(Exception):
@@ -413,12 +436,12 @@ class MemoryMonitorTests(unittest.TestCase):
             self.monitor.run()
         self.monitor.wake.wait.assert_called_once_with(None)
         self.clock.return_value = 0
-        self.activity(5)
+        self.activity(10)
         self.monitor.wake.set.assert_called()
         self.monitor.wake.wait.reset_mock()
         with self.assertRaises(StopWorker):
             self.monitor.run()
-        self.monitor.wake.wait.assert_called_once_with(60)
+        self.monitor.wake.wait.assert_called_once_with(120)
         self.monitor.finish(self.key)
         self.monitor.wake.wait.reset_mock()
         with self.assertRaises(StopWorker):

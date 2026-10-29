@@ -6,6 +6,12 @@ one independent file-level approval control:
 push that changes `.github/` is held for operator approval before anything is
 sent to GitHub.
 
+`admin_api/github_maintenance.py` owns the credential convergence and repository
+audit refresh loop. `service.main()` attempts initial credential convergence
+after publishing unmanaged runtime status and before starting status loops or
+admitting turns; credential operations remain in `github_credential.py` and
+repository warnings in `github_repo_audit.py`.
+
 ## Policy Surface
 
 Both toggles live under `network_integrations.github` next to

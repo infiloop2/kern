@@ -122,7 +122,7 @@ context instead of rewriting its prefix:
 - **`list_bundled_tools`** returns a cheap capability catalog by default —
   `tool_id`, display name, description, connection type, and `enabled` — or
   focused entries named in an optional `tool_ids` array with their action ids,
-  one-line action descriptions, agent-only usage notes, and OAuth tools'
+  one-line action descriptions, opt-in agent-only usage notes (`include_notes=true`), and OAuth tools'
   non-secret `connected_accounts` (`connection_id` plus provider id, label,
   and scopes). Nothing consults secret tokens or third parties. Action input
   schemas are deliberately excluded: descriptions are what the agent plans
@@ -137,8 +137,8 @@ context instead of rewriting its prefix:
   full input schemas plus each action's `returns` kind (`json`, `approval`, or
   `asset`). Output schemas are included only with `include_output_schema=true`;
   only JSON actions have one. Agent notes are included only with
-  `include_notes=true`. Fetch focused `list_bundled_tools` entries first for
-  notes/accounts, or request notes here if starting from the broad catalog.
+  `include_notes=true`. Fetch focused `list_bundled_tools` entries for accounts; request notes with
+  `include_notes=true` there or here before first use, reusing notes already in context.
   Input-protection metadata belongs to the operator API and is not returned.
 - **`call_tool`** takes `tool_id`, `action_id`, optional `connection_id`, and
   `input` and runs the action. One connected account is selected implicitly for
@@ -366,6 +366,10 @@ operator delegation routes are not subject to this cap, so a busy agent can neve
 block the operator from deciding approvals or disconnecting a tool.
 
 ## Input and output validation
+
+`host.runtime.tools.schema` owns `unsupported_schema_error`,
+`validate_against_schema`, and the supported declaration keywords.
+`tools_host` imports and re-exports the two validators for existing callers.
 
 The host schema-validates action input against the manifest `input_schema`
 before invoking the package, and validates a direct action's result against its

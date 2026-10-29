@@ -328,7 +328,7 @@ def apply_collection_actions(
             raise WorkspaceError(HTTPStatus.INTERNAL_SERVER_ERROR, "app state is unavailable")
         if int(app_state[0]) != expected_revision:
             raise WorkspaceError(
-                HTTPStatus.CONFLICT, "the app changed; read state and retry"
+                HTTPStatus.CONFLICT, "the app changed; reread affected state, reconcile changes and use its revision as expected_revision"
             )
         cur.execute(
             "SELECT row_count, data_bytes FROM web_app_collection_state"

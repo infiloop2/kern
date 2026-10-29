@@ -36,9 +36,9 @@ provides task context. New notice kinds are excluded until explicitly selected.
 
 Admission still selects relevant pages on every new model turn. An unchanged
 self or shared page ID/revision is omitted when its full body was successfully
-injected less than 10 minutes ago in the same host thread.
-At elapsed time >=600 seconds it is eligible again if selected. For example,
-a body injected at 12:00 is skipped at 12:09:59 and eligible at 12:10. A skipped
+injected less than one hour ago in the same host thread.
+At elapsed time >=3600 seconds it is eligible again if selected. For example,
+a body injected at 12:00 is skipped at 12:59:59 and eligible at 13:00. A skipped
 selection never renews that timestamp, and a changed revision is immediately
 eligible. Nothing is injected just because time elapsed; existing recall and
 periodic self-memory opportunities remain the only triggers. Selection is not
@@ -56,11 +56,11 @@ steering. Same-thread runtime/session changes and failed-resume recovery retain
 suppression until expiry; provider session lifecycle behavior is unchanged.
 Explicit context clearing drops that thread's cache after the existing clear
 transaction succeeds. Cache loss/restart or eviction favors sending.
-There are no new turn/message counters, history queries, storage schema, service,
-configuration or provider-specific probes.
+The body cache adds no turn/message counters, history queries, storage schema,
+service, configuration or provider-specific probes.
 
-Mid-turn ID/description suggestions stay enabled with their existing dedupe and
-cadence. They never mark a full body injected or refresh its timestamp. The
+Mid-turn ID/description suggestions retain their separate dedupe and scheduling
+(described below). They never mark a full body injected or refresh its timestamp. The
 monitor still seeds its suggestion dedupe with the full admission selection;
 its suggestion-only bookkeeping stays separate from the full-body cache.
 
@@ -93,8 +93,10 @@ read; otherwise it attempts the direct fallback and retains valid shared pages.
 
 Steerable model turns seed a small admin-process cache with the initial query,
 known page IDs/revisions, and independent timers and event counts. Shared
-suggestions require both 60 seconds and five qualifying events; self-memory reads
-require both 300 seconds and 25 qualifying events, starting from admission.
+suggestions require both 120 seconds and ten qualifying events; self-memory reads
+require both 3600 seconds and 25 qualifying events, starting from admission. At
+most two suggestion notices are delivered per operator input; a new incoming
+message restores that allowance.
 Completed operations, assistant messages and selected incoming messages count
 toward both thresholds. Streaming/log updates and the monitor's own notices do
 not count. The single serial worker selects the oldest due turn whose event
@@ -107,8 +109,8 @@ Message content remains in existing history rather than another activity buffer.
 Every self-memory refresh reads the current full page, even if its revision and
 the task query have not changed. It runs independently of shared search, query
 building and the shared-page dedupe budget. The delivery path applies the same
-10-minute revision/timestamp suppression as admission; an unchanged read at five
-minutes does not refresh the last injection time. Changed revisions can
+one-hour revision/timestamp suppression as admission; a suppressed read does
+not refresh the last injection time. Changed revisions can
 be delivered at the next existing opportunity. When eligible, full contents use
 the existing host context envelope and `memory_injection` notice, labeled as a periodic refresh,
 with the same optional-context runtime hint as suggestions. No summary or
@@ -184,6 +186,11 @@ loaded, separately from self-memory. Admission selects up to six plus self-memor
 mid-turn suggestions retain their existing limit of three.
 
 ## Optional Jev and Luna reranking
+
+`workspace/memory_ranking.py` owns `_rerank_recall`, the Jev and Luna ranking
+functions, and their shared score validation and diagnostics. `memory.py` calls
+that helper with the existing candidates/query/details shape and retains
+search, page CRUD, and revision checks.
 
 Provider configuration and credentials stay inside the Host AI inference
 service. Workspace has no read grant on the provider configuration table.

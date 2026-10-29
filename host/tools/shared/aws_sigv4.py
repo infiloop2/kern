@@ -33,8 +33,11 @@ def sign_post(
     content_type: str,
     extra_headers: dict[str, str] | None = None,
     now: datetime.datetime | None = None,
+    path: str = "/",
 ) -> SignedRequest:
-    """Sign one ``POST https://<host>/`` request with lowercase headers."""
+    """Sign one POST to a tool-owned ASCII path with lowercase headers."""
+    if not path.startswith("/") or any(c not in "/ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-" for c in path):
+        raise ValueError("AWS signing path must be a fixed ASCII API path.")
     when = now or datetime.datetime.now(datetime.timezone.utc)
     amz_date = when.strftime("%Y%m%dT%H%M%SZ")
     date_stamp = when.strftime("%Y%m%d")
@@ -50,7 +53,7 @@ def sign_post(
         f"{name}:{headers[name].strip()}\n" for name in sorted(headers)
     )
     canonical_request = "\n".join(
-        ("POST", "/", "", canonical_headers, signed_header_names, payload_hash)
+        ("POST", path, "", canonical_headers, signed_header_names, payload_hash)
     )
     credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
     string_to_sign = "\n".join(
@@ -73,5 +76,5 @@ def sign_post(
         f"SignedHeaders={signed_header_names}, Signature={signature}"
     )
     return SignedRequest(
-        url=f"https://{host}/", headers=request_headers, body=body
+        url=f"https://{host}{path}", headers=request_headers, body=body
     )

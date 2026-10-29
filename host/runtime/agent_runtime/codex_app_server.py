@@ -329,11 +329,13 @@ class CodexAppServer:
         with self._io_lock:
             with self._stdin_lock:
                 request_id = self._write_request_locked(method, params)
+            deadline = time.monotonic() + timeout
             # Notifications that arrive before our response are kept for
             # read_message(). The I/O lock gives exactly one consumer
-            # ownership of both queues while it correlates this response.
+            # ownership of both queues while it correlates this response. Unrelated
+            # notifications must not reset the response-wait budget.
             while True:
-                message = self._next_message(timeout)
+                message = self._next_message(deadline - time.monotonic())
                 if message.get("id") != request_id:
                     self._pending.append(message)
                     continue
