@@ -134,12 +134,22 @@ peer-authenticated `/run/kern-workspace/agent.sock`.
 The agent event log keeps the newest 10,000,000 entries. The network and tool
 event logs each keep the newest 1,000,000 entries.
 
+`admin_api/health.py` owns `health()`, `_health_issues()`, and `proxy_alive()`;
+the service route table dispatches health reads there. Shared int-based query
+validation for service and thread routes lives in `admin_api/query.py`, with
+single-value extraction in `request_params.py`.
+
 `/v1/health` derives network status from policy validity and proxy liveness. If
 the persisted policy cannot be parsed or the proxy process is not listening,
 health reports `network_controls.status: error` so the operator notices and
 repairs it. This failure is safe — nftables blocks the agent's direct egress
 independently of the proxy, so a dead proxy leaves the agent with no network at
 all, never with unfiltered access.
+
+Startup in `admin_api/service.py` first publishes unmanaged runtime status,
+then attempts GitHub credential convergence through `github_maintenance.py`
+before starting runtime-status loops and admitting turns. That admin-owned
+module also runs periodic GitHub credential and repository-audit refreshes.
 
 A background poller re-verifies an `active` agent login at most every five
 minutes, so an expired login surfaces in health as `awaiting_login` without

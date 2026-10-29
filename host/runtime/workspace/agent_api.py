@@ -126,7 +126,7 @@ def _dispatch_call(
         raise ValueError(f"path must match {AGENT_PATH_RE.pattern}")
     encoded = None if body is None else json.dumps(body, sort_keys=True).encode()
     if encoded is not None and len(encoded) > MAX_REQUEST_BODY_BYTES:
-        raise ValueError(f"body exceeds {MAX_REQUEST_BODY_BYTES} bytes")
+        raise ValueError(f"body exceeds {MAX_REQUEST_BODY_BYTES} bytes; reduce the request payload")
 
     parsed = urlparse(path)
     query = parse_qs(parsed.query, keep_blank_values=True)
@@ -234,7 +234,7 @@ class AgentWorkspaceRequestHandler(UnixSocketRequestHandler):
         if not _CALL_SLOTS.acquire(blocking=False):
             self._send_json(
                 HTTPStatus.TOO_MANY_REQUESTS,
-                {"error": "Too many concurrent Workspace calls."},
+                {"error": "Too many concurrent Workspace calls. This call was not started; retry after an active call finishes."},
             )
             return
         large_response_slot = False
@@ -252,7 +252,7 @@ class AgentWorkspaceRequestHandler(UnixSocketRequestHandler):
                 if not _LARGE_RESPONSE_SLOTS.acquire(blocking=False):
                     self._send_json(
                         HTTPStatus.TOO_MANY_REQUESTS,
-                        {"error": "Too many concurrent large Workspace responses."},
+                        {"error": "Too many concurrent large Workspace responses. This call was not started; retry after an active call finishes."},
                     )
                     return
                 large_response_slot = True

@@ -797,11 +797,7 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
                 context=context,
                 kind="provider_failure",
             )
-            error = (
-                "Provider request failed. Check Host diagnostics for details."
-                if isinstance(exc, UnmappedProviderError)
-                else str(exc)
-            )
+            error = str(exc)
         except ValueError:
             error = "Tool returned invalid streaming asset metadata."
         except Exception as exc:
@@ -849,7 +845,7 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
             else MAX_REQUEST_BODY_BYTES
         )
         if length > max_length:
-            self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "Request too large."})
+            self._send_json(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": f"Request exceeds {max_length} bytes. Reduce the payload."})
             return
         if asset_kind is not None:
             self._stage_asset(length, cast(tool_assets.AssetKind, asset_kind))
@@ -871,7 +867,7 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
         # Agent tool calls each block a handler thread on a third-party request, so
         # they are capacity-capped, checked before the agent-controlled body is read.
         if not _CALL_SLOTS.acquire(blocking=False):
-            self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "Too many concurrent tool calls."})
+            self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"error": "Too many concurrent tool calls. This call was not started; retry after an active call finishes."})
             return
         action_result: dict[str, Any] | tools_host.StreamingAction
         try:
@@ -889,7 +885,7 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
                 # Tool packages map their own errors; anything else must not leak
                 # internals to the agent.
                 host_errors.report_warning("tools.agent_call", exc)
-                action_result = {"status": "failed", "error": "Tool call failed.", "reconnect_required": False}
+                action_result = {"status": "failed", "error": "Tool call failed. Ask the operator to check Host diagnostics.", "reconnect_required": False}
             if isinstance(action_result, tools_host.StreamingAction):
                 self._send_streaming_action(action_result)
             else:
@@ -904,7 +900,7 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
         if not _UPLOAD_SLOTS.acquire(blocking=False):
             self._send_json(
                 HTTPStatus.TOO_MANY_REQUESTS,
-                {"error": "Too many concurrent asset uploads."},
+                {"error": "Too many concurrent asset uploads. This upload was not started; retry after an active upload finishes."},
             )
             return
         try:
@@ -925,7 +921,7 @@ class ToolsRequestHandler(UnixSocketRequestHandler):
             if tool_id not in state.enabled_tool_ids():
                 self._send_json(
                     HTTPStatus.BAD_REQUEST,
-                    {"error": "The destination tool is not enabled."},
+                    {"error": "The destination tool is not enabled. Ask the operator to enable it in Home > Integrations."},
                 )
                 return
             encoded_filename = self.headers.get("X-Kern-Filename") or ""
