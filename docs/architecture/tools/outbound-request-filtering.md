@@ -238,7 +238,7 @@ third-party destinations:
   `allow_machine_tokens=True`, because revision ids, blob shas, and cursors
   are legitimately long and machine-shaped;
 - GitHub Actions signed Azure Blob artifact ZIP downloads on the recognized
-  `productionresultssa0..19.blob.core.windows.net` hosts: only the fixed
+  `productionresultssa{0..19,30..49,100..199}.blob.core.windows.net` hosts: only the fixed
   `/actions-results/<run UUID>/workflow-job-run-<job UUID>/artifacts/<64-hex>.zip`
   path neutralizes the provider-generated identifiers. For this path only,
   `rscd` must name `agent-admin-result-<short run attempt>.zip` or an

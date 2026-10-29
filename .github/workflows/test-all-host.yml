@@ -99,7 +99,10 @@ jobs:
 
   suites:
     # October pause: remove only the repository-name guard in the November 1 PR.
+    # Public CI skips review; override skip propagation through select while
+    # still requiring a valid matrix and honoring workflow cancellation.
     if: >-
+      always() && !cancelled() && needs.select.result == 'success' &&
       github.repository != 'infiversehq/kern' &&
       (github.event_name == 'pull_request' || github.event.repository.private == false)
     name: Host tests (${{ matrix.suite }})

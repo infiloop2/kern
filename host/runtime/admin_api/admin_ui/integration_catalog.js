@@ -297,7 +297,7 @@ export const MANAGED_INTEGRATIONS = {
       "Direct Git pushes to main are blocked by default. Push a feature branch and merge it through a pull request, or explicitly disable the protection in Settings.",
       "Keep approval for `.github` pushes enabled. Workflow changes can make GitHub Actions run arbitrary code with network access and repository credentials.",
       "Search/read query values pass the host parameter guard: values shaped like a secret, credential, or sensitive identifier are denied before the request is sent. Request headers are not inspected; the agent's Authorization is replaced with the host-held token and User-Agent with a fixed host value.",
-      "GitHub Actions Azure downloads are limited to GitHub's documented productionresultssa0 through productionresultssa19 storage accounts; path and query values take the parameter guard.",
+      "GitHub Actions Azure downloads are limited to GitHub's documented productionresultssa accounts numbered 0–19, 30–49, and 100–199; path and query values take the parameter guard.",
     ],
     setupSteps: [
       { title: "Choose a credential mode", description: "Use a fine-grained personal access token for the simplest personal setup. Use a GitHub App when you want repository installation scope and short-lived minted tokens." },
@@ -348,7 +348,7 @@ export const MANAGED_INTEGRATIONS = {
     },
     controls: [
       "Parameter guard: agent-authored read query values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent. Repository paths and revision identifiers are exempt. Request headers are not inspected: the agent's Authorization is replaced with the host-held token and User-Agent with a fixed host value, and the rest are forwarded as the client sent them.",
-      "Azure Blob downloads: only GitHub's documented productionresultssa0 through productionresultssa19 storage accounts are eligible. The SAS signature is shape-validated and neutralized, then the path and other query values take the parameter guard.",
+      "Azure Blob downloads: only GitHub's documented productionresultssa accounts numbered 0–19, 30–49, and 100–199 are eligible. The SAS signature is shape-validated and neutralized, then the path and other query values take the parameter guard.",
       "Disabling GitHub clears the write-repository list; the independently stored credential can remain staged or be cleared separately.",
     ],
     networkScope: [
@@ -362,6 +362,8 @@ export const MANAGED_INTEGRATIONS = {
       ["release-assets.githubusercontent.com", "GET and HEAD for signed release-asset URLs only"],
       ["results-receiver.actions.githubusercontent.com", "GET and HEAD for GitHub Actions result downloads; provider-signed URL only"],
       ["productionresultssa{0..19}.blob.core.windows.net", "GET and HEAD for GitHub Actions logs, summaries, artifacts, and caches; exactly one validated Azure SAS signature required"],
+      ["productionresultssa{30..49}.blob.core.windows.net", "GET and HEAD for GitHub Actions logs, summaries, artifacts, and caches; exactly one validated Azure SAS signature required"],
+      ["productionresultssa{100..199}.blob.core.windows.net", "GET and HEAD for GitHub Actions logs, summaries, artifacts, and caches; exactly one validated Azure SAS signature required"],
     ],
   },
   python_packages: {

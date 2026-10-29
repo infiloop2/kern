@@ -409,7 +409,9 @@ and `.github` approval toggle:
   "objects.githubusercontent.com": {"allow_http_methods": ["GET", "HEAD"]},
   "release-assets.githubusercontent.com": {"allow_http_methods": ["GET", "HEAD"]},
   "github-cloud.githubusercontent.com": {"allow_http_methods": ["GET", "HEAD"]},
-  "productionresultssa{0..19}.blob.core.windows.net": {"allow_http_methods": ["GET", "HEAD"]}
+  "productionresultssa{0..19}.blob.core.windows.net": {"allow_http_methods": ["GET", "HEAD"]},
+  "productionresultssa{30..49}.blob.core.windows.net": {"allow_http_methods": ["GET", "HEAD"]},
+  "productionresultssa{100..199}.blob.core.windows.net": {"allow_http_methods": ["GET", "HEAD"]}
 }
 ```
 
@@ -422,7 +424,8 @@ and downloads-only closes the other direction (a signed URL can also
 authorize an upload).
 
 GitHub Actions Azure Blob downloads are limited to GitHub's documented
-`productionresultssa0` through `productionresultssa19` storage accounts.
+`productionresultssa` storage accounts numbered 0–19, 30–49, and 100–199.
+The added ranges are documented in [GitHub’s October 22, 2026 announcement](https://github.blog/changelog/2026-10-22-meta-api-endpoints-updated-for-actions-blob-storage/).
 
 ### Access Enforcement
 

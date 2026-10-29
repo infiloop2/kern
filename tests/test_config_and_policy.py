@@ -490,6 +490,40 @@ class ConfigTests(unittest.TestCase):
         self.assertIn("*.example.com", custom.domains)
         self.assertIsNone(managed_domain_owner("*.example.com"))
 
+    def test_github_actions_blob_storage_ranges(self) -> None:
+        controls = parse_network_controls(
+            {"network_integrations": {"github": {"enabled": True}}}
+        )
+        disabled = parse_network_controls({})
+        signed_query = "sv=2025-07-05&sig=HhC%2FUPa%2FtitCP1DLVLa0ZnGPCw0RT338fxdeQ04ZoPw%3D"
+        path = (
+            "/actions-results/4f9841da-8399-4637-ae0d-6d00ffb7c316"
+            "/workflow-job-run-3ff561e6-7b9b-5c33-a2b5-e93806060046"
+            "/logs/job/job-logs.txt"
+        )
+        for account in range(201):
+            host = f"productionresultssa{account}.blob.core.windows.net"
+            expected = account < 20 or 30 <= account <= 49 or 100 <= account <= 199
+            with self.subTest(account=account):
+                self.assertEqual(network_integrations.host_allowed(controls, host), expected)
+                for method in ("GET", "HEAD"):
+                    self.assertEqual(
+                        request_allowed(controls, method, host, path, signed_query), expected
+                    )
+                self.assertFalse(request_allowed(controls, "POST", host, path, signed_query))
+                self.assertFalse(request_allowed(controls, "GET", host, path))
+                self.assertFalse(request_allowed(disabled, "GET", host, path, signed_query))
+        for host in (
+            "productionresultssa030.blob.core.windows.net",
+            "productionresultssa1000.blob.core.windows.net",
+            "nested.productionresultssa30.blob.core.windows.net",
+            "productionresultssa30.blob.core.windows.net.attacker.test",
+            "attacker.blob.core.windows.net",
+        ):
+            with self.subTest(host=host):
+                self.assertFalse(network_integrations.host_allowed(controls, host))
+                self.assertFalse(request_allowed(controls, "GET", host, path, signed_query))
+
     def test_github_repository_git_suffix_is_normalized_away(self) -> None:
         # The commonly pasted "repo.git" form must match requests, whose repo
         # segment is .git-stripped before lookup.
