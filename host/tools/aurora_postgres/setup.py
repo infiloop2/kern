@@ -40,7 +40,7 @@ SETUP_COMMAND = r"""(
   IFS= read -r aurora_region || exit 1
   printf 'Cluster ARN: '
   IFS= read -r aurora_cluster_arn || exit 1
-  printf 'Master secret ARN: '
+  printf 'Master secret ARN [Enter for Express / IAM admin]: '
   IFS= read -r aurora_master_secret_arn || exit 1
   printf 'Database [agent_store]: '
   IFS= read -r aurora_database || exit 1
