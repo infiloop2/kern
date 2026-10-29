@@ -933,6 +933,20 @@ class StageAwsSmokeTests(unittest.TestCase):
         self.assertIn("enable the tool", failures[0])
         self.assertNotIn("KERN_STAGE_GOOGLE", failures[0])
 
+    def test_fresh_smoke_sec_edgar_calls_fail_closed_without_contact(self) -> None:
+        from host.tools.results import ActionFailed
+        from host.tools.sec_edgar import client
+        from test_tools import FakeHostAPI
+
+        with patch.object(client, "source") as source:
+            for action_id, arguments in SMOKE_TOOL_CALLS["sec_edgar"]:
+                with self.subTest(action=action_id):
+                    result = BUNDLED_TOOLS["sec_edgar"].execute(action_id, arguments, FakeHostAPI())
+                    self.assertIsInstance(result, ActionFailed)
+                    self.assertIn("not set", result.error.lower())
+                    self.assertIn("SEC_CONTACT_EMAIL", result.error)
+            source.assert_not_called()
+
     def test_fresh_smoke_has_valid_input_for_every_bundled_action(self) -> None:
         covered = {
             f"{tool_id}_{action_id}"

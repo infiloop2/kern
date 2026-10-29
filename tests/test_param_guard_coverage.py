@@ -182,6 +182,15 @@ APPROVAL_GATED = "approval-gated content: the operator approval is the control"
 TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning"
 
 EXEMPT_FIELDS = {
+    ("sec_edgar", "lookup_company", "ticker"): "Matched locally against a fixed SEC directory; never sent in the request.",
+    ("sec_edgar", "get_submissions", "cik"): TYPED,
+    ("sec_edgar", "get_submissions", "history_file"): "Strict CIK-bound submissions filename grammar.",
+    ("sec_edgar", "get_company_facts", "cik"): TYPED,
+    ("sec_edgar", "list_filing_documents", "cik"): TYPED,
+    ("sec_edgar", "list_filing_documents", "accession"): TYPED,
+    ("sec_edgar", "download_document", "cik"): TYPED,
+    ("sec_edgar", "download_document", "accession"): TYPED,
+    ("sec_edgar", "download_document", "document"): "Validated basename must match an independently fetched SEC directory before it is sent.",
     **{("trustmrr", "list_startups", field): TYPED for field in (
         "page", "limit", "sort", "onSale", "category", "teamSize", "fundingStatus",
         "minRevenue", "maxRevenue", "minMrr", "maxMrr", "minGrowth", "maxGrowth", "minPrice", "maxPrice",

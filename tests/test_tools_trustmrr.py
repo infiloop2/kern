@@ -166,6 +166,30 @@ class TrustMRRTests(unittest.TestCase):
         self.assertIn("Supports Bearer authentication", payload)
         self.assertIn("The bearer of good news", payload)
 
+    def test_monetary_fields_and_filter_bounds_are_never_rescaled(self):
+        # Representative captured precision/magnitude; fields need independent
+        # provenance, not a single assumed cents-to-dollars conversion.
+        row = {"slug": "fixture-startup", "revenue": {"last30Days": 52296.84, "mrr": 40063.25, "total": 319701.48},
+               "askingPrice": 800000, "previousAskingPrice": None, "revenuePerVisitor": 2.7174,
+               "futureMoney": 1234.56789}
+        bounds = {"minRevenue": 50000, "maxRevenue": 60000, "minMrr": 39000, "maxMrr": 41000,
+                  "minPrice": 790000, "maxPrice": 810000}
+        self.reply({"data": [row], "meta": {"page": 1, "limit": 10, "total": 1, "hasMore": False}})
+        result = self.execute(bounds)
+        assert_matches_output_schema(self, trustmrr.MANIFEST, "list_startups", result)
+        self.assertEqual(json.loads(result.result["provider_response_json"])["data"], [row])
+        for key, value in bounds.items():
+            self.assertEqual(self.query()[key], [str(value)])
+        self.reply({"data": row})
+        result = self.execute({"slug": "fixture-startup"}, action="get_startup")
+        assert_matches_output_schema(self, trustmrr.MANIFEST, "get_startup", result)
+        self.assertEqual(json.loads(result.result["provider_response_json"])["data"], row)
+
+    def test_second_and_millisecond_reset_headers_are_preserved_raw(self):
+        for value in (1793285520, 1793285520000):
+            self.reply(headers={"X-RateLimit-Reset": str(value)})
+            self.assertEqual(self.execute().result["rate_limit"]["reset"], value)
+
     def test_duplicate_provider_keys_fail_instead_of_silently_losing_values(self):
         self.open.return_value = Response(b'{"data":{"slug":"ok","future":1,"future":2}}')
         self.assertIsInstance(self.execute({"slug": "ok"}, action="get_startup"), ActionFailed)
