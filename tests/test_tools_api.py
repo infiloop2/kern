@@ -491,7 +491,7 @@ class ActionListingTests(ToolsApiTestCase):
         self.assertNotIn("output_schema", described_action("gmail", "send_email"))
         self.assertNotIn("output_schema", described_action("openai_images", "generate_image"))
 
-    def test_agent_notes_are_stated_only_for_focused_catalog_entries(self) -> None:
+    def test_agent_notes_are_opt_in_for_focused_catalog_entries(self) -> None:
         broad_catalog = {
             entry["tool_id"]: entry
             for entry in tools_api.call_action("list_bundled_tools", {}, origin_thread_id=None)["result"]["tools"]
@@ -500,12 +500,19 @@ class ActionListingTests(ToolsApiTestCase):
             self.assertNotIn("agent_notes", entry)
             self.assertNotIn("actions", entry)
 
+        for flag in ({}, {"include_notes": False}):
+            focused = tools_api.call_action("list_bundled_tools", {"tool_ids": ["twitter"], **flag}, origin_thread_id=None)["result"]["tools"][0]
+            self.assertNotIn("agent_notes", focused)
+            self.assertIn("actions", focused)
+        with self.assertRaises(tools_host.ToolCallError):
+            tools_api.call_action("list_bundled_tools", {"tool_ids": ["twitter"], "include_notes": "true"}, origin_thread_id=None)
+
         # Focused discovery is bounded even when the bundled catalog grows.
         tool_ids = list(tools_host.BUNDLED_TOOLS)
         catalog = {}
         for offset in range(0, len(tool_ids), 32):
             result = tools_api.call_action(
-                "list_bundled_tools", {"tool_ids": tool_ids[offset:offset + 32]}, origin_thread_id=None
+                "list_bundled_tools", {"tool_ids": tool_ids[offset:offset + 32], "include_notes": True}, origin_thread_id=None
             )["result"]["tools"]
             catalog.update({entry["tool_id"]: entry for entry in result})
         # Always stated, empty included, so "this tool has nothing to add" is

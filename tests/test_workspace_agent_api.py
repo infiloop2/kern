@@ -445,10 +445,13 @@ class McpShimTests(unittest.TestCase):
             )
         tools = {tool["name"]: tool for tool in listing["result"]["tools"]}
         description = tools["workspace_api"]["description"]
-        self.assertIn("GET /agent/apps", description)
-        self.assertIn("POST /agent/apps", description)
-        self.assertIn("only when the operator explicitly asks", description)
-        self.assertIn("explicit immutable app id", description)
+        self.assertIn("documented in the host instructions; use only those", description)
+        self.assertIn("Only the owning agent can modify an App", description)
+        guidance = (REPO_ROOT / "host/bootstrap/agent-home/agents_claude.md").read_text()
+        self.assertIn("GET /agent/apps", guidance)
+        self.assertIn("POST /agent/apps", guidance)
+        self.assertIn("only when explicitly asked", guidance)
+        self.assertIn("Use immutable `app-N`", guidance)
         self.assertEqual(
             tools["workspace_api"]["inputSchema"]["required"], ["method", "path"]
         )

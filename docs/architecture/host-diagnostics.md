@@ -80,6 +80,9 @@ API. Any future agent view must independently select typed safe fields for
 both lists and details, including historical rows, instead of forwarding the
 operator response or relying on truncation as redaction.
 
+Health status and its actionable issue summaries are assembled separately by
+`admin_api/health.py`; it reads cached runtime status and probes proxy liveness.
+
 This is a curated diagnostic view, not a replacement for the system journal.
 Ordinary validation failures, user denials, and successful operational events
 remain in their existing product and audit surfaces. Bounded Codex maintenance

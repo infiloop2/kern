@@ -84,7 +84,6 @@ from host.runtime.agent_runtime import (
     script_runner,
     turn_retries,
 )
-from host.runtime.admin_api import github_credential, github_repo_audit
 from host.runtime.admin_api.errors import ApiError
 from host.runtime.agent_runtime import provider_account_trust
 from host.runtime.agent_runtime.provider_account_trust import (
@@ -669,7 +668,7 @@ def runtime_status_loop(runtime_type: str) -> None:
         time.sleep(delay)
 
 
-def start_background_loops() -> None:
+def publish_unmanaged_runtime_statuses() -> None:
     # Publish the unmanaged runtimes once, here, before anything slow runs.
     # This is the whole of their status lifecycle: they have no provider to
     # probe and no credential to expire, so there is nothing for the status
@@ -688,44 +687,11 @@ def start_background_loops() -> None:
     for runtime_type in UNMANAGED_RUNTIMES:
         status, _error, _account = harness_adapter(runtime_type).account_status()
         _set_runtime_status(runtime_type, status)
-    # Converge GitHub credentials before any turn can be admitted: after a
-    # restart the persisted App installation token may already be expired, and
-    # a turn's first git/gh call must not run against a stale token file.
-    # This blocks startup by at most one mint (~1s) and does not hold up the
-    # other runtimes.
-    try:
-        github_credential.reconcile()
-        converged = True
-    except Exception:
-        # reconcile() records its own failures; reaching here means it could
-        # not even run (the database briefly unavailable during startup), so
-        # the refresh loop retries quickly rather than waiting a full cycle.
-        converged = False
+
+
+def start_background_loops() -> None:
     for runtime_type in INTERACTIVE_RUNTIMES:
         threading.Thread(target=runtime_status_loop, args=(runtime_type,), daemon=True).start()
-    threading.Thread(target=github_credential_refresh_loop, args=(converged,), daemon=True).start()
-
-
-GITHUB_CREDENTIAL_REFRESH_CHECK_SECONDS = 300
-GITHUB_CREDENTIAL_RETRY_SECONDS = 10
-
-
-def github_credential_refresh_loop(converged: bool) -> None:
-    # Converge the installed token file every cycle: App installation tokens
-    # live one hour and are re-minted inside the refresh margin, and any
-    # earlier failure (mint, install, disable-time removal) is retried here.
-    # The initial convergence ran synchronously in start_background_loops
-    # before any turn could be admitted; while a convergence attempt cannot
-    # run at all (the database unavailable), retry on the short interval so
-    # turns are not admitted against stale credential files for a full cycle.
-    while True:
-        time.sleep(GITHUB_CREDENTIAL_REFRESH_CHECK_SECONDS if converged else GITHUB_CREDENTIAL_RETRY_SECONDS)
-        try:
-            github_credential.reconcile()
-            github_repo_audit.refresh()
-            converged = True
-        except Exception:
-            converged = False
 
 
 def live_thread_ids() -> set[str]:

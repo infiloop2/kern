@@ -42,6 +42,21 @@ from tests.stage.stage_support import (
 
 
 class StageOrchestrationTests(unittest.TestCase):
+    def test_aurora_stage_reads_without_writes_and_rejects_bad_probe(self) -> None:
+        stage = StageAwsSmoke.__new__(StageAwsSmoke)
+        for probe in ({"rows": [["1"]], "truncated": False}, {"rows": [], "truncated": False},
+                      {"rows": [["1"]], "truncated": True}):
+            with self.subTest(probe=probe), patch.object(
+                stage, "_successful_tool_call", side_effect=[{"rows": []}, probe]
+            ) as call:
+                if probe == {"rows": [["1"]], "truncated": False}:
+                    self.assertIn("write and drop roles were not exercised", stage._check_tool_provider("aurora_postgres"))
+                else:
+                    with self.assertRaisesRegex(AssertionError, "complete probe result"):
+                        stage._check_tool_provider("aurora_postgres")
+                self.assertEqual([args.args[0] for args in call.call_args_list],
+                                 ["aurora_postgres_list_tables", "aurora_postgres_query"])
+
     def test_topaz_stage_checks_credentials_without_paid_submission(self) -> None:
         stage = StageAwsSmoke.__new__(StageAwsSmoke)
         with patch.object(stage, "_shim_tool_response", return_value=({"isError": True}, "fal task or media was not found; it may have expired.")) as call:

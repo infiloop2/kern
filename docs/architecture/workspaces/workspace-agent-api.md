@@ -184,6 +184,15 @@ consistent revision. Multi-path responses return ordered `{path, value}`
 entries. `missing` defaults to `"error"`; `"null"` keeps sparse operational
 reads compact by returning `null` for absent branches.
 
+Agent read responses share a `max_bytes` budget, default 8 KiB of compact JSON
+(including metadata, excluding the outer `app` wrapper). Largest branches are
+replaced first with `truncated: true`, serialized `bytes`, applied `max_bytes`
+and `shape` instead of `value`. Shapes may themselves be truncated to keep the
+response bounded. Read narrower paths or explicitly raise `max_bytes`, up to
+`MAX_STATE_RESPONSE_BYTES`, for full values. A budget too small for the paths
+and metadata is rejected with 422. App UI runtime reads retain full values
+under the existing state-response limit and do not accept `max_bytes`.
+
 `GET /agent/apps/{app_id}/state/data/shape` answers the question a narrow read
 requires an answer to first: which branches exist, and which are worth the
 tokens. It returns per node a `type`, an object's `keys`, and an array's merged
@@ -285,7 +294,7 @@ Self-memory reads return the editable briefing in `content` and the complete
 alphabetic list of note IDs in `saved_notes`. Turn injection, including fallback
 and periodic reads, carries both fields separately. Note bodies are fetched
 explicitly. The delivery cache includes the note IDs so additions and deletions
-are reflected before its usual ten-minute expiry. Self-memory keeps its existing
+are reflected before its usual one-hour expiry. Self-memory keeps its existing
 history, revision checks, and 20,000-character content limit.
 
 If notes exist before a briefing, the loader returns empty `content`, the saved

@@ -105,6 +105,8 @@ CONVERSATION_EVENT_TYPES = (
 MAX_PATH_DEPTH = 16
 MAX_PATH_KEY_BYTES = 128
 MAX_DATA_READ_PATHS = 16
+# Default response budget for agent data reads; shapes replace oversized values.
+DEFAULT_DATA_READ_BYTES = 8 * 1024
 MAX_BATCH_OPERATIONS = 32
 # A shape response answers "which branch should I read" and must stay far
 # cheaper than the document it describes, so every dimension it walks is
@@ -201,7 +203,7 @@ def _route_browser(
     match = re.fullmatch(r"/apps/([^/]+)/runtime/data/read", path)
     if method == "POST" and match:
         return {
-            "app": read_app_data_path(_path_segment(match.group(1)), body)
+            "app": read_app_data_path(_path_segment(match.group(1)), body, response_budget=None)
         }
 
     match = re.fullmatch(r"/apps/([^/]+)/runtime/collections/([^/]+)/query", path)
@@ -1002,9 +1004,22 @@ def load_app_data_shape(app_id: str) -> dict[str, Any]:
     }
 
 
-def read_app_data_path(app_id: str, body: Any) -> dict[str, Any]:
+def read_app_data_path(
+    app_id: str, body: Any, *, response_budget: int | None = DEFAULT_DATA_READ_BYTES,
+) -> dict[str, Any]:
+    """Read branches with a response budget; App UI reads keep full values."""
     request = _required_object(body, "data read")
-    _require_keys(request, {"path", "paths", "missing"}, required=set())
+    _require_keys(request, {"path", "paths", "missing", "max_bytes"}, required=set())
+    if "max_bytes" in request:
+        if response_budget is None:
+            raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "max_bytes is not accepted on runtime reads")
+        max_bytes = request["max_bytes"]
+        if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or not 1 <= max_bytes <= MAX_STATE_RESPONSE_BYTES:
+            raise WorkspaceError(
+                HTTPStatus.UNPROCESSABLE_ENTITY,
+                f"max_bytes must be an integer from 1 to {MAX_STATE_RESPONSE_BYTES}",
+            )
+        response_budget = max_bytes
     has_path = "path" in request
     has_paths = "paths" in request
     if has_path == has_paths:
@@ -1058,8 +1073,42 @@ def read_app_data_path(app_id: str, body: Any) -> dict[str, Any]:
             "values": values,
             "updated_at": state["updated_at"],
         }
+    if response_budget is not None:
+        _bound_data_read(result, values, response_budget, single=has_path)
     _require_state_response_fits(result)
     return result
+
+
+def _read_bytes(value: Any) -> int:
+    # Match the existing state/shape serialization, including escaped Unicode.
+    return len(json.dumps(value, separators=(",", ":")).encode())
+
+
+def _bound_data_read(
+    result: dict[str, Any], values: list[dict[str, Any]], budget: int, *, single: bool,
+) -> None:
+    """Replace largest branches first, then simplify shapes if needed.
+
+    Bound the whole response, so multi-path reads and wide shape trees cannot
+    multiply the default budget. Keep paths, revision and timestamps intact.
+    """
+    entries = [result] if single else values
+    for entry in sorted(entries, key=lambda item: _read_bytes(item["value"]), reverse=True):
+        if _read_bytes(result) <= budget:
+            return
+        value = entry.pop("value")
+        entry.update(truncated=True, bytes=_read_bytes(value), max_bytes=budget, shape=data_shape(value))
+    for entry in sorted(entries, key=_read_bytes, reverse=True):
+        if _read_bytes(result) <= budget:
+            return
+        shape = entry["shape"]
+        entry["shape"] = {"type": shape["type"], "bytes": entry["bytes"], "truncated": True}
+    if _read_bytes(result) > budget:
+        raise WorkspaceError(
+            HTTPStatus.UNPROCESSABLE_ENTITY,
+            "max_bytes is too small for read metadata; increase it or request fewer/shorter paths",
+        )
+
 
 
 def apply_agent_action(body: Any, app_id: str) -> dict[str, Any]:
@@ -1128,7 +1177,7 @@ def _publish_ui(
         if row is None:
             raise WorkspaceError(HTTPStatus.INTERNAL_SERVER_ERROR, "app state is unavailable")
         if row[0] != expected_revision:
-            raise WorkspaceError(HTTPStatus.CONFLICT, "the app changed; read state and retry")
+            raise WorkspaceError(HTTPStatus.CONFLICT, "the app changed; reread affected state, reconcile changes and use its revision as expected_revision")
         current = _state_row(row)
         # The decoded row is transaction-local; mutate it directly instead of
         # cloning a document that may be 10 MiB. A validation failure still
@@ -1261,7 +1310,7 @@ def _apply_data_operations(
         if row is None:
             raise WorkspaceError(HTTPStatus.INTERNAL_SERVER_ERROR, "app state is unavailable")
         if row[0] != version:
-            raise WorkspaceError(HTTPStatus.CONFLICT, "the app changed; read state and retry")
+            raise WorkspaceError(HTTPStatus.CONFLICT, "the app changed; reread affected state, reconcile changes and use its revision as expected_revision")
         current = _state_row(row)
         # This is a private decode of the locked database row, so no defensive
         # 10 MiB clone is needed before applying the transactional operations.
@@ -1570,7 +1619,7 @@ def _validated_data(value: Any) -> str:
     except (TypeError, ValueError) as exc:
         raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "data must contain only JSON values") from exc
     if len(encoded.encode()) > MAX_DATA_BYTES:
-        raise WorkspaceError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, f"data exceeds {MAX_DATA_BYTES} bytes")
+        raise WorkspaceError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, f"data exceeds {MAX_DATA_BYTES} bytes; repeated rows can be stored in collections")
     return encoded
 
 

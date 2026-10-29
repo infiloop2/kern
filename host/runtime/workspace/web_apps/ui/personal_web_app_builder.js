@@ -32,7 +32,6 @@ const WORKSPACE_API_TIMEOUT_MS = 12000;
 // duplicate a message the host accepted after the frame gave up.
 const AGENT_DELIVERY_TIMEOUT_MS = 60 * 1000;
 const COMPOSER_DRAFTS_STORAGE_KEY = "kern.agentic-web-app.composer-drafts.v1";
-const COMPOSER_DRAFT_LIMIT = 50;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 let requestCounter = 0;
@@ -163,7 +162,8 @@ document.addEventListener("keydown", event => {
 });
 
 let dictation = null;
-const composerDrafts = loadComposerDrafts();
+const draftStore = window.KernComposerDrafts(COMPOSER_DRAFTS_STORAGE_KEY);
+const composerDrafts = draftStore.drafts;
 const runtimeLabel = runtime => ({
   claude_code: "Claude Code", codex: "Codex", "codex-2": "Codex 2", "codex-3": "Codex 3", grok: "Grok", "grok-2": "Grok 2", hermes: "Hermes",
 })[runtime] || runtime;
@@ -175,38 +175,16 @@ const modelLabel = (runtime, value) => runtime === "codex" || runtime === "codex
   ? value
   : optionLabel(String(value).replace(/^claude-/, ""));
 
-function loadComposerDrafts() {
-  try {
-    const drafts = JSON.parse(localStorage.getItem(COMPOSER_DRAFTS_STORAGE_KEY) || "{}");
-    return drafts && typeof drafts === "object" && !Array.isArray(drafts) ? drafts : {};
-  } catch (_error) {
-    return {};
-  }
-}
-
-function persistComposerDrafts() {
-  try {
-    localStorage.setItem(COMPOSER_DRAFTS_STORAGE_KEY, JSON.stringify(composerDrafts));
-  } catch (_error) {
-    // Draft persistence is best-effort when browser storage is unavailable.
-  }
-}
-
 function saveComposerDraft() {
   if (!selectedAppId) return;
   const key = `app:${selectedAppId}`;
   const value = $("message").value;
-  delete composerDrafts[key];
-  if (value) composerDrafts[key] = value;
-  while (Object.keys(composerDrafts).filter(key => key !== "__dictationReceipts").length > COMPOSER_DRAFT_LIMIT) {
-    delete composerDrafts[Object.keys(composerDrafts).find(key => key !== "__dictationReceipts")];
-  }
-  persistComposerDrafts();
+  draftStore.save(key, value);
 }
 
 function restoreComposerDraft() {
   $("message").value = selectedAppId
-    ? composerDrafts[`app:${selectedAppId}`] || ""
+    ? draftStore.restore(`app:${selectedAppId}`)
     : "";
   autosizeComposer();
   dictation?.sync();
@@ -247,10 +225,7 @@ function keepLatestMessageAboveComposer() {
 
 function clearComposerDraft(appId, submittedDraft) {
   const key = `app:${appId}`;
-  if ((composerDrafts[key] ?? "") !== submittedDraft) return false;
-  delete composerDrafts[key];
-  persistComposerDrafts();
-  return true;
+  return draftStore.clear(key, submittedDraft);
 }
 
 function api(method, path, body, timeoutMs = WORKSPACE_API_TIMEOUT_MS) {

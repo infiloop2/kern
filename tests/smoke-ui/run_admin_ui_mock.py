@@ -68,6 +68,7 @@ UI_ASSETS.update({
     "/workspace/rich_text.css": (WORKSPACE_DIR / "chat/ui/rich_text.css", "text/css; charset=utf-8"),
     "/workspace/dictation.js": (WORKSPACE_DIR / "ui/dictation.js", "application/javascript; charset=utf-8"),
     "/workspace/dictation-worklet.js": (WORKSPACE_DIR / "ui/dictation-worklet.js", "application/javascript; charset=utf-8"),
+    "/workspace/composer-drafts.js": (WORKSPACE_DIR / "ui/composer-drafts.js", "application/javascript; charset=utf-8"),
     "/workspace/reminders.js": (WORKSPACE_DIR / "ui/reminders.js", "application/javascript; charset=utf-8"),
     "/workspace/reminders.css": (WORKSPACE_DIR / "ui/reminders.css", "text/css; charset=utf-8"),
     "/workspace/composer.css": (WORKSPACE_DIR / "ui/composer.css", "text/css; charset=utf-8"),

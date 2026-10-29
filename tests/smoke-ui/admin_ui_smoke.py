@@ -2180,6 +2180,15 @@ def tools_smoke(page, url: str) -> None:
             expect(policy_blocks.nth(0)).to_contain_text('"Action": "logs:FilterLogEvents"')
             expect(policy_blocks.nth(0)).to_contain_text('"Resource": "*"')
             expect(guide).not_to_contain_text("kms:Decrypt")
+        if tool_id == "aurora_postgres":
+            from host.tools.aurora_postgres.setup import SETUP_COMMAND
+            setup = guide.locator(".guide-steps > li").filter(
+                has=page.get_by_role("heading", name="Copy and run the setup command", exact=True)
+            )
+            expect(setup.locator("code")).to_have_text(SETUP_COMMAND)
+            setup.get_by_role("button", name="Copy setup code", exact=True).click()
+            expect(setup.locator("[data-code-copy-feedback]")).to_have_text("Copied")
+            assert page.evaluate("navigator.clipboard.readText()") == SETUP_COMMAND
         if tool_id == "instagram":
             # A field the provider may withhold is declared as a union, and the
             # operator must read it as one rather than as "unspecified".

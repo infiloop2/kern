@@ -8,7 +8,7 @@ from typing import Any
 
 from host.runtime.core import db
 from host.runtime.core.state import (
-    AGENT_EVENT_LIMIT, NETWORK_EVENT_LIMIT, TOOL_EVENT_LIMIT, HOST_DIAGNOSTIC_LIMIT,
+    AGENT_EVENT_LIMIT, AGENT_EVENT_DETAIL_LIMIT, NETWORK_EVENT_LIMIT, TOOL_EVENT_LIMIT, HOST_DIAGNOSTIC_LIMIT,
     BEDROCK_USAGE_RETAIN_DAYS, HOST_INFERENCE_USAGE_RETAIN_DAYS,
     CONVERSATION_EMBEDDING_MESSAGE_LIMIT,
 )
@@ -29,7 +29,7 @@ POLICIES: dict[str, tuple[str, str]] = {
     "operator_connections": ("SSH and tunnel configuration", "One current record per connection mode; replaced when configured."),
     "counters": ("Lifetime usage and activity totals", "No automatic pruning. Totals survive deletion of detailed history."),
     "thread_sessions": ("Agent runtime session mappings", "Automatically removes oldest unreferenced mappings beyond 100,000 per runtime. Retained messages, activity or usage protect their mappings."),
-    "agent_events": ("Conversation messages and agent activity", f"Automatically deletes oldest messages and activity across all conversations, aiming to keep the newest {AGENT_EVENT_LIMIT:,} events. Gaps in event numbering can leave fewer rows; cleanup runs in batches. Keeping a Chat does not keep its messages indefinitely."),
+    "agent_events": ("Conversation messages and agent activity", f"Automatically deletes oldest messages and activity across all conversations, aiming to keep the newest {AGENT_EVENT_LIMIT:,} events. Large activity details/output, notice details, memory recall details and transferred context are cleared only when older than three calendar months AND outside the newest {AGENT_EVENT_DETAIL_LIMIT:,}-event window globally. Messages and compact metadata remain until whole-event deletion. Gaps in event numbering can leave fewer rows; cleanup runs in batches. Keeping a Chat does not keep its messages indefinitely."),
     "conversation_message_embeddings": ("Derived conversation search vectors", f"Keeps vectors for the newest {CONVERSATION_EMBEDDING_MESSAGE_LIMIT:,} user/agent messages globally, with batched pruning. Source-message deletion also removes vectors. Pruning vectors does not delete messages."),
     "oauth_logins": ("In-progress provider sign-ins", "One current login per supported runtime; replaced or removed by the sign-in flow."),
     "provider_accounts": ("Linked provider accounts", "No age-based deletion. Explicit account reset removes the selected account."),

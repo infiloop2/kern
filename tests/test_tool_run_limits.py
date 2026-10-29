@@ -95,7 +95,7 @@ class RunLimitUnitTests(unittest.TestCase):
         self.tool.execute.assert_not_called()
         self.tool.execute_approved.assert_not_called()
 
-    def test_manifest_validation_and_initial_rollout(self):
+    def test_manifest_validation_and_declared_limits(self):
         for invalid in (0, -1, True, False, 1.5, "50"):
             with self.subTest(value=invalid), self.assertRaisesRegex(ValueError, "limit_runs_per_day"):
                 limited_manifest(invalid)
@@ -104,7 +104,7 @@ class RunLimitUnitTests(unittest.TestCase):
         declared = [(tool_id, spec.id, spec.limit_runs_per_day)
                     for tool_id, tool in tools_host.BUNDLED_TOOLS.items()
                     for spec in tool.manifest.actions if spec.limit_runs_per_day is not None]
-        self.assertEqual(declared, [("zoho_mail", "send_email", 50)])
+        self.assertEqual(declared, [("aurora_postgres", "drop_table", 20), ("zoho_mail", "send_email", 50)])
 
     def test_discovery_exposes_only_declared_limits(self):
         with patch.object(state, "enabled_tool_ids", return_value=set()), patch.object(state, "tool_connections", return_value=[]):

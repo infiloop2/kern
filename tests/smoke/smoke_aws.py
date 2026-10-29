@@ -188,6 +188,15 @@ SMOKE_MANAGED_DOMAINS = (
     "bedrock-runtime.us-west-2.amazonaws.com",
 )
 SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
+    "aurora_postgres": (
+        ("list_tables", {}),
+        ("describe_table", {"table": "kern_smoke"}),
+        ("query", {"sql": "SELECT 1", "params": [], "limit": 1}),
+        ("insert_rows", {"table": "kern_smoke", "columns": ["id"], "rows": [["1"]], "on_conflict": "ignore"}),
+        ("manage_schema", {"operation": "create_table", "table": "kern_smoke",
+                           "columns": [{"name": "id", "type": "bigint", "nullable": False}], "primary_key": ["id"]}),
+        ("drop_table", {"table": "kern_smoke"}),
+    ),
     "seo_metrics_api": (("get_keyword_metrics", {"keywords": ["seo api"], "country": "US"}), ("get_usage", {})),
     "ahrefs_domain_rating": (("get_domain_rating", {"domain": "ahrefs.com"}),),
     "indexnow": (("get_verification_file", {}), ("submit_urls", {"urls": ["https://example.com/new"]}),),

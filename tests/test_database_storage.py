@@ -17,7 +17,7 @@ class DatabaseStorageTests(unittest.TestCase):
             report = database_storage.snapshot()
         self.assertEqual(report["database_bytes"], 8192)
         known, unknown = report["tables"]
-        self.assertEqual(known["row_target"], 10000000)
+        self.assertEqual(known["row_target"], 100000000)
         self.assertEqual(known["estimated_rows"], 7500000)
         self.assertIn("all conversations", known["retention"])
         self.assertIsNone(unknown["estimated_rows"])

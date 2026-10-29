@@ -58,6 +58,7 @@ STATIC_FILES = {
         "dictation-worklet.js": "ui/dictation-worklet.js",
         "composer.css": "ui/composer.css",
         "reminders.css": "ui/reminders.css",
+        "composer-drafts.js": "ui/composer-drafts.js",
         "reminders.js": "ui/reminders.js",
         "web-apps.html": "web_apps/ui/index.html",
         "web-apps.js": "web_apps/ui/personal_web_app_builder.js",

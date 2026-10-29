@@ -11,11 +11,11 @@ from typing import Any
 from host.memory_recall import conversation_query
 from host.runtime.core import host_errors, pgclient, state
 
-MEMORY_BODY_TTL_SECONDS = 600
+MEMORY_BODY_TTL_SECONDS = 3600
 
 
 class MemoryDelivery:
-    """Bounded ten-minute body-delivery cache, not a provider context inventory.
+    """Bounded one-hour body-delivery cache, not a provider context inventory.
 
     Each thread retains only page IDs, delivery keys and monotonic times.
     Self-memory keys include its content and note IDs so note-index changes are fresh

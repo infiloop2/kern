@@ -243,7 +243,7 @@ def update_schedule(schedule_id: int, body: Any, *, actor: str) -> dict[str, Any
         if "purpose" not in request:
             fields["purpose"] = current["purpose"]
         if current["revision"] != expected:
-            raise WorkspaceError(HTTPStatus.CONFLICT, "schedule changed; reload and retry")
+            raise WorkspaceError(HTTPStatus.CONFLICT, "schedule changed; reread and reconcile changes, then use the current revision as expected_revision")
         timing_changed = _timings(fields) != _timings(current)
         next_run = _next_run(fields, now) if timing_changed else current["next_run_at"]
         revision = expected + 1
@@ -316,7 +316,7 @@ def delete_schedule(
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "schedule not found")
         current = _schedule_row(row)
         if current["revision"] != expected:
-            raise WorkspaceError(HTTPStatus.CONFLICT, "schedule changed; reload and retry")
+            raise WorkspaceError(HTTPStatus.CONFLICT, "schedule changed; reread and reconcile changes, then use the current revision as expected_revision")
         try:
             response = call_admin_api("GET", f"/v1/threads/{current['thread_id']}")
         except WorkspaceError as exc:
@@ -402,7 +402,7 @@ def restore_revision(schedule_id: int, revision: int, body: Any) -> dict[str, An
             raise WorkspaceError(HTTPStatus.NOT_FOUND, "schedule not found")
         current = _schedule_row(current_row)
         if current["revision"] != expected:
-            raise WorkspaceError(HTTPStatus.CONFLICT, "schedule changed; reload and retry")
+            raise WorkspaceError(HTTPStatus.CONFLICT, "schedule changed; reread and reconcile changes, then use the current revision as expected_revision")
         cur.execute(
             "SELECT name, triggers, agent_runtime, model, effort, deleted, purpose"
             " FROM schedule_revisions"

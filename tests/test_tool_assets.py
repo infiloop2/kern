@@ -297,10 +297,10 @@ class ToolAssetStoreTests(unittest.TestCase):
                     source=io.BytesIO(b"x" * 512),
                 )
 
-    def test_missing_image_uses_generic_upload_again_error(self) -> None:
+    def test_missing_image_suggests_staging_for_destination_tool(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = ToolAssetStore(Path(directory) / "assets")
-            with self.assertRaisesRegex(AssetError, "Asset id is invalid or expired. Upload the file again") as ctx:
+            with self.assertRaisesRegex(AssetError, "Asset id is invalid or expired. Stage the file again for the destination tool") as ctx:
                 store.describe("runway", "asset_abcdefghijklmnopqrstuvwxyz123456")
         self.assertNotIn("video", str(ctx.exception).lower())
 

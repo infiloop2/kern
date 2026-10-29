@@ -283,7 +283,9 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("if (focused && typeof focused.blur", source)
         self.assertIn("stopCapabilityWorker();", source)
         self.assertIn("COMPOSER_DRAFTS_STORAGE_KEY", source)
-        self.assertIn("localStorage.setItem", source)
+        self.assertIn("window.KernComposerDrafts(COMPOSER_DRAFTS_STORAGE_KEY)", source)
+        drafts = (APP_DIR.parent / "ui" / "composer-drafts.js").read_text()
+        self.assertIn("localStorage.setItem", drafts)
         self.assertIn("/revisions/${revision}/restore", source)
         self.assertIn("applyAppVersion(response.app);", source)
         self.assertIn("@media (max-width: 720px)", css)
@@ -925,7 +927,7 @@ class BrowserRoutingTests(unittest.TestCase):
                 {"app": branch},
             )
         load_ui.assert_called_once_with("app-2")
-        read.assert_called_once_with("app-2", {"path": ["rows"]})
+        read.assert_called_once_with("app-2", {"path": ["rows"]}, response_budget=None)
 
     def test_browser_can_query_a_generated_app_collection(self) -> None:
         result = {"name": "leads", "rows": [], "total": 0}
@@ -1352,6 +1354,56 @@ class BrowserRoutingTests(unittest.TestCase):
                 {"path": ["missing"], "value": None},
             ],
         )
+
+    def test_agent_read_replaces_an_oversized_branch_with_its_shape(self) -> None:
+        rows = [{"id": index, "note": "x" * 200} for index in range(100)]
+        state = {"revision": 9, "data": {"rows": rows, "count": 100}, "updated_at": "now"}
+        with patch.object(backend, "load_app_data", return_value=state):
+            bounded = backend.read_app_data_path("app-9", {"path": ["rows"]})
+            small = backend.read_app_data_path("app-9", {"path": ["count"]})
+            explicit = backend.read_app_data_path("app-9", {"path": ["rows"], "max_bytes": 64 * 1024})
+            multi = backend.read_app_data_path("app-9", {"paths": [["rows"], ["count"]]})
+            runtime = backend._route_browser(
+                "POST", "/apps/app-9/runtime/data/read", {"path": ["rows"]}
+            )
+        self.assertNotIn("value", bounded)
+        self.assertTrue(bounded["truncated"])
+        self.assertEqual(bounded["max_bytes"], backend.DEFAULT_DATA_READ_BYTES)
+        self.assertGreater(bounded["bytes"], backend.DEFAULT_DATA_READ_BYTES)
+        self.assertEqual(bounded["shape"]["type"], "array")
+        self.assertEqual(bounded["shape"]["items"]["keys"]["note"]["type"], "string")
+        self.assertEqual(bounded["path"], ["rows"])
+        self.assertEqual(bounded["revision"], 9)
+        self.assertEqual(small["value"], 100)
+        self.assertEqual(explicit["value"], rows)
+        self.assertNotIn("value", multi["values"][0])
+        self.assertTrue(multi["values"][0]["truncated"])
+        self.assertEqual(multi["values"][1], {"path": ["count"], "value": 100})
+        self.assertEqual(runtime["app"]["value"], rows)
+        for request in ({"path": ["rows"], "max_bytes": 0}, {"path": ["rows"], "max_bytes": True},
+                        {"path": ["rows"], "max_bytes": backend.MAX_STATE_RESPONSE_BYTES + 1}):
+            with self.subTest(request=request), self.assertRaises(backend.WorkspaceError):
+                backend.read_app_data_path("app-9", request)
+        with self.assertRaises(backend.WorkspaceError):
+            backend._route_browser(
+                "POST", "/apps/app-9/runtime/data/read", {"path": ["rows"], "max_bytes": 10}
+            )
+
+    def test_data_read_budget_covers_all_branches_shapes_and_unicode(self) -> None:
+        data = {str(i): "x" * 6000 for i in range(16)}
+        data["wide"] = {("key" + str(i)) * 30: "x" * 200 for i in range(64)}
+        data["unicode"] = "\ud800" * 2000
+        with patch.object(backend, "load_app_data", return_value={"revision": 9, "data": data, "updated_at": "now"}):
+            for request in ({"paths": [[str(i)] for i in range(16)]}, {"path": ["wide"]}, {"path": ["unicode"]}):
+                with self.subTest(request=request):
+                    result = backend.read_app_data_path("app-9", request)
+                    self.assertLessEqual(len(json.dumps(result, separators=(",", ":")).encode()), backend.DEFAULT_DATA_READ_BYTES)
+                    self.assertEqual(result["revision"], 9)
+            full = backend.read_app_data_path("app-9", {"path": ["unicode"], "max_bytes": 20000})
+            self.assertEqual(full["value"], data["unicode"])
+            exact = len(json.dumps(full, separators=(",", ":")).encode())
+            self.assertIn("value", backend.read_app_data_path("app-9", {"path": ["unicode"], "max_bytes": exact}))
+            self.assertTrue(backend.read_app_data_path("app-9", {"path": ["unicode"], "max_bytes": exact - 1})["truncated"])
 
     def test_data_path_read_rejects_ambiguous_or_invalid_multi_path_requests(self) -> None:
         invalid_requests = (

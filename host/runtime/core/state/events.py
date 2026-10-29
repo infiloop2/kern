@@ -6,6 +6,9 @@ from typing import Any
 
 from host.runtime.core import db, pgclient
 from host.runtime.core.state._base import (
+    AGENT_EVENT_DETAIL_BATCH_SIZE,
+    AGENT_EVENT_DETAIL_BATCHES_PER_PASS,
+    AGENT_EVENT_DETAIL_LIMIT,
     AGENT_EVENT_LIMIT,
     CONVERSATION_EVENT_SQL,
     CONVERSATION_EMBEDDING_MAX_ATTEMPTS,
@@ -202,6 +205,47 @@ def _page_before(
 
 def prune_agent_events(cur: Any) -> None:
     _prune_events(cur, "agent_events", AGENT_EVENT_LIMIT)
+
+
+def expire_agent_event_details() -> int:
+    """Clear old large fields in separately committed maintenance batches.
+
+    Both cutoffs are fixed for this pass. The partial index contains only
+    events still carrying details, so cleared history is not rescanned.
+    """
+    with db.transaction() as cur:
+        cur.execute(
+            "SELECT COALESCE(MAX(seq), 0) - %s,"
+            " to_char((%s::timestamptz AT TIME ZONE 'UTC') - INTERVAL '3 months',"
+            " 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') FROM agent_events",
+            (AGENT_EVENT_DETAIL_LIMIT, utc_now()),
+        )
+        row = cur.fetchone()
+        assert row is not None
+        seq_cutoff, time_cutoff = row
+    if seq_cutoff <= 0:
+        return 0
+    total = 0
+    for _ in range(AGENT_EVENT_DETAIL_BATCHES_PER_PASS):
+        with mutation() as cur:
+            cur.execute(
+                "WITH expired AS (SELECT seq FROM agent_events"
+                " WHERE seq <= %s AND created_at < %s AND ("
+                " activity ? 'detail' OR activity ? 'output' OR notice ? 'details'"
+                " OR memory_recall_details IS NOT NULL OR historical_context IS NOT NULL)"
+                " ORDER BY created_at, seq LIMIT %s)"
+                " UPDATE agent_events AS events SET"
+                " activity = events.activity - 'detail' - 'output',"
+                " notice = events.notice - 'details',"
+                " memory_recall_details = NULL, historical_context = NULL"
+                " FROM expired WHERE events.seq = expired.seq RETURNING events.seq",
+                (seq_cutoff, time_cutoff, AGENT_EVENT_DETAIL_BATCH_SIZE),
+            )
+            changed = len(cur.fetchall())
+        total += changed
+        if changed < AGENT_EVENT_DETAIL_BATCH_SIZE:
+            break
+    return total
 
 
 def prune_event_logs(cur: Any) -> None:

@@ -13,7 +13,8 @@ def run(page, url, log_in):
     expect(panel).to_be_visible()
     expect(page.locator("#database-storage-total")).to_contain_text("GiB")
     expect(table.locator("tbody tr").first).to_contain_text("agent_events")
-    expect(table).to_contain_text("75% of history target")
+    # The mock has 7.5 million events against the 100-million-event target.
+    expect(table).to_contain_text("7.5% of history target")
     expect(table).to_contain_text("all conversations")
     expect(table).to_contain_text("Creation blocked")
     expect(table).to_contain_text("90 days")
