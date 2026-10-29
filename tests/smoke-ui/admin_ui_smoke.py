@@ -110,9 +110,9 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scope",
-        choices=("all", "core", "workspaces", "database-storage", "overload", "oauth-poll", "runtime-accounts", "training-privacy", "reminders", "navigation-order", "swarm", "notices", "google-ads", "x-ads", "instagram-ads"),
+        choices=("all", "core", "admin-layout", "workspaces", "database-storage", "overload", "oauth-poll", "runtime-accounts", "training-privacy", "reminders", "navigation-order", "swarm", "notices", "google-ads", "x-ads", "instagram-ads"),
         default="all",
-        help="Smoke only the host UI core, only workspaces, or both.",
+        help="Run all smoke tests, the host core, workspaces, or a focused feature (admin-layout covers desktop, phone and PWA).",
     )
     return parser.parse_args(argv)
 
@@ -289,6 +289,7 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 workspace_route_supersession_smoke(route_restore_page, url)
                 route_restore.close()
 
+            if scope in {"all", "core", "admin-layout"}:
                 desktop = browser.new_context()
                 desktop.grant_permissions(["clipboard-read", "clipboard-write"], origin=url.rstrip("/"))
                 desktop_page = desktop.new_page()
@@ -296,10 +297,11 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 login_error_mapping_smoke(desktop_page, url)
                 stale_password_smoke(desktop_page, url)
                 desktop_smoke(desktop_page, url)
-                import browser_smokes
-                browser_context = browser.new_context(viewport={"width": 1280, "height": 900})
-                browser_smokes.run(browser_context.new_page(), url, log_in, open_home_integration)
-                browser_context.close()
+                if scope in {"all", "core"}:
+                    import browser_smokes
+                    browser_context = browser.new_context(viewport={"width": 1280, "height": 900})
+                    browser_smokes.run(browser_context.new_page(), url, log_in, open_home_integration)
+                    browser_context.close()
                 desktop.close()
 
                 narrow_desktop = browser.new_context(viewport={"width": 1220, "height": 800})
@@ -329,6 +331,7 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 iphone_pwa_swipe_smoke(iphone_pwa_page, url)
                 iphone_pwa.close()
 
+            if scope in {"all", "core"}:
                 # The mobile journey deliberately exercises the hard-refresh
                 # gesture, which advances the mock's provider-usage fixture.
                 # Run it after the shared desktop/mobile journey has asserted
@@ -1164,24 +1167,33 @@ def desktop_smoke(page, url: str) -> None:
         raise AssertionError("broken sidebar clamp passed the layout assertion")
     short_task_fits = task_line.evaluate("""element => {
       const original = element.textContent;
-      element.textContent = 'Document theming, add tests, and open the pull PR';
-      const fits = element.scrollHeight <= element.clientHeight;
-      element.textContent = original;
-      return fits;
+      try {
+        element.textContent = 'Document theming, add tests, and open the pull PR';
+        return element.scrollHeight <= element.clientHeight;
+      } finally {
+        element.textContent = original;
+      }
     }""")
     if not short_task_fits:
         raise AssertionError("49-character sidebar task was clipped")
     name_line = thread_one_nav.locator(".workspace-nav-label")
-    original_name = name_line.inner_text()
-    name_line.evaluate("element => { element.textContent = 'A very long agent name '.repeat(12); }")
-    name_style = name_line.evaluate("""element => ({
-      overflowed: element.scrollWidth > element.clientWidth,
-      ellipsis: getComputedStyle(element).textOverflow,
-    })""")
+    # Keep the fixture, measurement and cleanup in one browser task. A sidebar
+    # refresh between evaluate calls can replace the long name with the real one.
+    name_style = name_line.evaluate("""element => {
+      const original = element.textContent;
+      try {
+        element.textContent = 'A very long agent name '.repeat(12);
+        return {
+          overflowed: element.scrollWidth > element.clientWidth,
+          ellipsis: getComputedStyle(element).textOverflow,
+        };
+      } finally {
+        element.textContent = original;
+      }
+    }""")
     if name_style != {"overflowed": True, "ellipsis": "ellipsis"}:
         raise AssertionError(f"sidebar name did not truncate: {name_style}")
     expect(task_line).to_be_visible()
-    name_line.evaluate("(element, name) => { element.textContent = name; }", original_name)
     expect(thread_one_nav).to_have_attribute("title", re.compile(r"Document the theming setup.*New activity$", re.S))
     expect(page.locator("#chat-nav-items [data-item-id='thread-2'] .workspace-nav-task")).to_have_count(0)
     expect(thread_one_nav.locator(".workspace-nav-unseen")).to_be_visible()
@@ -1368,9 +1380,7 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("#file-content")).to_be_hidden()
     # Visible does not mean decoded: wait for the load to settle before reading
     # naturalWidth, which is 0 on an image that is still in flight.
-    expect(page.locator("#file-image")).to_have_js_property("complete", True)
-    if page.locator("#file-image").evaluate("(image) => image.naturalWidth") != 1:
-        raise AssertionError("workspace image preview did not decode")
+    expect(page.locator("#file-image")).to_have_js_property("naturalWidth", 1)
 
     page.locator("#panel-files .home-back").click()
     with page.expect_response(lambda response: "/v1/network/events" in response.url):
@@ -1664,9 +1674,10 @@ def desktop_smoke(page, url: str) -> None:
     consent_image = gmail_guide.locator("img[alt*='App name']")
     expect(consent_image).to_have_count(1)
     consent_image.scroll_into_view_if_needed()
-    expect(consent_image).to_have_js_property("complete", True)
-    if consent_image.evaluate("image => image.naturalWidth") <= 0:
-        raise AssertionError("the Google OAuth guide screenshot did not load")
+    page.wait_for_function("""() => {
+      const image = document.querySelector('[data-guide-section="tool:gmail"] img[alt*="App name"]');
+      return image?.complete && image.naturalWidth > 0;
+    }""", timeout=5000)
 
     # Moving straight from one focused detail to another must not change what
     # the explicit Home controls mean. They always open Home; only the browser
@@ -2112,18 +2123,20 @@ def assert_runtime_usage_type(page, minimum_number_px: float) -> None:
     """Quota and Hermes values share readable type in the fixed-height rings."""
     from playwright.sync_api import expect
 
-    quota_number = page.locator("#runtime-overview .usage-ring text").first
-    quota_label = page.locator("#runtime-overview .usage-window").first
-    hermes_number = page.locator("#runtime-overview .runtime-summary-bedrock .runtime-stat-value").first
-    hermes_label = page.locator("#runtime-overview .runtime-summary-bedrock .runtime-stat-label").first
-    quota_size = quota_number.evaluate("element => getComputedStyle(element).fontSize")
-    hermes_size = hermes_number.evaluate("element => getComputedStyle(element).fontSize")
+    # Resolve every live node in the same browser task; provider polling can
+    # replace the summaries between separate locator reads.
+    sizes = page.wait_for_function("""() => {
+      const selectors = ['.usage-ring text', '.usage-window',
+        '.runtime-summary-bedrock .runtime-stat-value', '.runtime-summary-bedrock .runtime-stat-label'];
+      const elements = selectors.map(selector => document.querySelector('#runtime-overview ' + selector));
+      if (elements.some(element => !element || element.getBoundingClientRect().height <= 0)) return false;
+      return elements.map(element => getComputedStyle(element).fontSize);
+    }""", timeout=5000).json_value()
+    quota_size, quota_label_size, hermes_size, hermes_label_size = sizes
     if quota_size != hermes_size:
         raise AssertionError(f"quota number size {quota_size} does not match Hermes {hermes_size}")
     if float(quota_size.removesuffix("px")) < minimum_number_px:
         raise AssertionError(f"runtime usage number is too small: {quota_size}")
-    quota_label_size = quota_label.evaluate("element => getComputedStyle(element).fontSize")
-    hermes_label_size = hermes_label.evaluate("element => getComputedStyle(element).fontSize")
     if quota_label_size != hermes_label_size:
         raise AssertionError(
             f"quota label size {quota_label_size} does not match Hermes {hermes_label_size}"
@@ -2506,11 +2519,16 @@ def mobile_smoke(page, url: str) -> None:
     # synchronization.
     expect(connected_row.locator(".status-chips")).to_contain_text("enabled")
     expect(connected_row.locator(".status-chips")).to_contain_text("1 account connected")
-    for row in (connected_row,):
-        chips_box = row.locator(".status-chips").bounding_box()
-        actions_box = row.locator(".integration-actions").bounding_box()
-        if not chips_box or not actions_box or chips_box["y"] + chips_box["height"] > actions_box["y"] + 1:
-            raise AssertionError("phone integration status overlaps or competes with its actions")
+    # Measure both parts of one rendered row, rather than mixing two refreshes.
+    status_layout = page.wait_for_function("""() => {
+      const row = document.querySelector('.integration-row[data-tool-row="google_calendar"]');
+      const chips = row?.querySelector('.status-chips')?.getBoundingClientRect();
+      const actions = row?.querySelector('.integration-actions')?.getBoundingClientRect();
+      if (!chips?.height || !actions?.height) return false;
+      return {statusBottom: chips.bottom, actionsTop: actions.top};
+    }""", timeout=5000).json_value()
+    if status_layout['statusBottom'] > status_layout['actionsTop'] + 1:
+        raise AssertionError(f"phone integration status overlaps or competes with its actions: {status_layout}")
     connected_label = connected_row.locator(".connection-identity")
     if connected_label.evaluate("element => element.scrollWidth > element.clientWidth + 1"):
         raise AssertionError("connected account identity is truncated on a phone")
