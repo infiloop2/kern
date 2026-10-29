@@ -1,7 +1,8 @@
 """npm packages managed integration: static contract.
 
-Read-only access to the npm registry and Node.js downloads. No guard: the
-GET/HEAD-only, path-guarded rules are the whole control.
+Public registry reads, Node.js downloads and the exact bulk advisory lookup.
+The audit POST accepts only bounded package/version JSON, including npm gzip.
+Publishing and other registry writes remain denied by the request guard.
 """
 
 from __future__ import annotations
@@ -12,8 +13,8 @@ MANIFEST = IntegrationManifest(
     integration_id="npm_packages",
     display_name="npm packages",
     description=(
-        "Read-only access to the npm registry (npm install) and Node.js release "
-        "downloads."
+        "Public npm package reads, bounded bulk vulnerability lookups (npm audit), "
+        "and Node.js release downloads. Publishing and other writes are denied."
     ),
     owned_apexes=("npmjs.org", "nodejs.org"),
 )

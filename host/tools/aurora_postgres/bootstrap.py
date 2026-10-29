@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import secrets
 import subprocess
@@ -84,15 +85,65 @@ def aws(region: str, service: str, operation: str, payload: dict) -> dict:
     return json.loads(result.stdout)
 
 
+def iam_sql(region: str, host: str, username: str, database: str, sql: str) -> None:
+    """Use the operator's AWS session; keep its login token out of argv/env/output."""
+    result = subprocess.run(["aws", "--region", region, "rds", "generate-db-auth-token",
+        "--hostname", host, "--port", "5432", "--username", username],
+        capture_output=True, text=True, timeout=60, check=False)
+    if result.returncode or not result.stdout.strip():
+        raise RuntimeError("Could not generate the database login token. Check your AWS CLI admin session.")
+    token = result.stdout.strip()
+    if "\n" in token or "\r" in token:
+        raise RuntimeError("AWS returned an invalid database login token.")
+    with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", prefix="kern-aurora-", suffix=".pgpass") as password_file:
+        fields = (host, "5432", database, username, token)
+        password_file.write(":".join(value.replace("\\", "\\\\").replace(":", "\\:") for value in fields) + "\n")
+        password_file.flush()
+        # Ignore inherited libpq routing, credentials and startup options.
+        env = {key: value for key, value in os.environ.items() if not key.startswith("PG")}
+        env.update(PGPASSFILE=password_file.name, PGSSLMODE="verify-full", PGSSLROOTCERT="system",
+                   PGGSSENCMODE="disable", PGCONNECT_TIMEOUT="20")
+        result = subprocess.run(["psql", "-X", "-w", "--set=ON_ERROR_STOP=1",
+            "--host", host, "--port", "5432", "--username", username, "--dbname", database, "--file=-"],
+            input=sql, env=env, capture_output=True, text=True, timeout=90, check=False)
+    if result.returncode:
+        raise RuntimeError("Database setup over IAM failed. Check rds-db:connect, system CA trust, connectivity and whether the database or roles already exist. Database output is withheld because it may contain credentials.")
+
+
+def prepare_express(region: str, cluster_arn: str, database: str) -> tuple[str, str]:
+    version = subprocess.run(["psql", "--version"], capture_output=True, text=True, timeout=10, check=False)
+    match = re.search(r"\(PostgreSQL\) (\d+)", version.stdout)
+    if version.returncode or not match or int(match[1]) < 17:
+        raise ValueError("Install PostgreSQL psql 17 or newer with system CA certificates before Express setup.")
+    response = aws(region, "rds", "describe-db-clusters", {"DBClusterIdentifier": cluster_arn})
+    cluster = response["DBClusters"][0]
+    if (cluster["DBClusterArn"] != cluster_arn or cluster["Engine"] != "aurora-postgresql"
+            or not cluster.get("InternetAccessGatewayEnabled") or not cluster.get("IAMDatabaseAuthenticationEnabled")):
+        raise ValueError("Without a master secret ARN, setup requires an Aurora PostgreSQL Express cluster with IAM authentication.")
+    host, username = cluster["Endpoint"], cluster["MasterUsername"]
+    if not re.fullmatch(r"[a-zA-Z0-9.-]+", host) or not re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_]{0,62}", username):
+        raise ValueError("AWS returned an unsupported endpoint or master username.")
+    print("Checking the IAM database connection using your AWS CLI session.", flush=True)
+    iam_sql(region, host, username, "postgres", "SELECT 1;")
+    if not cluster.get("HttpEndpointEnabled"):
+        print("Enabling RDS Data API for this Express cluster.", flush=True)
+        aws(region, "rds", "enable-http-endpoint", {"ResourceArn": cluster_arn})
+    print(f"Creating fresh database {database}. Existing databases are never reused in Express setup.", flush=True)
+    iam_sql(region, host, username, "postgres", f'CREATE DATABASE "{database}";')
+    return host, username
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--region", required=True)
     parser.add_argument("--cluster-arn", required=True)
-    parser.add_argument("--master-secret-arn", required=True)
+    parser.add_argument("--master-secret-arn", default="", help="Full configuration only; omit for Express IAM setup.")
     parser.add_argument("--database", default="agent_store")
     parser.add_argument("--schema", default="agent_data")
     args = parser.parse_args()
     identifier(args.database)
+    if args.database in {"postgres", "template0", "template1"}:
+        raise ValueError("Use a fresh dedicated database, not postgres or a template database.")
     identifier(args.schema)
     if args.schema in {"public", "information_schema"} or args.schema.startswith("pg_"):
         raise ValueError("Use a dedicated schema, not public, information_schema or a pg_ name.")
@@ -101,8 +152,9 @@ def main() -> None:
     cluster = re.fullmatch(r"arn:aws:rds:" + re.escape(args.region) + r":([0-9]{12}):cluster:([a-zA-Z0-9-]{1,63})", args.cluster_arn)
     if not cluster:
         raise ValueError("Cluster ARN must match the selected AWS region.")
-    if not re.fullmatch(r"arn:aws:secretsmanager:" + re.escape(args.region) + ":" + cluster[1] + r":secret:[a-zA-Z0-9/_+=.@!-]{1,512}", args.master_secret_arn):
+    if args.master_secret_arn and not re.fullmatch(r"arn:aws:secretsmanager:" + re.escape(args.region) + ":" + cluster[1] + r":secret:[a-zA-Z0-9/_+=.@!-]{1,512}", args.master_secret_arn):
         raise ValueError("Master secret ARN must match the cluster account and region.")
+    express = None if args.master_secret_arn else prepare_express(args.region, args.cluster_arn, args.database)
     passwords = {role: secrets.token_urlsafe(32) for role in ROLES}
     arns = {}
     print("Creating four role secrets. Use a fresh dedicated database; existing roles are never changed.", flush=True)
@@ -114,9 +166,12 @@ def main() -> None:
         arns[role] = response["ARN"]
         print(f"Created secret for {role}.", flush=True)
     sql = "DO $kern_setup$\nBEGIN\n" + ";\n".join(bootstrap_statements(args.database, args.schema, passwords)) + ";\nEND;\n$kern_setup$;"
-    print("Applying roles, grants and drop protection atomically through the master Data API connection.", flush=True)
-    aws(args.region, "rds-data", "execute-statement", {"resourceArn":args.cluster_arn,
-        "secretArn":args.master_secret_arn, "database":args.database, "sql":sql})
+    print("Applying roles, grants and drop protection atomically.", flush=True)
+    if express:
+        iam_sql(args.region, *express, args.database, sql)
+    else:
+        aws(args.region, "rds-data", "execute-statement", {"resourceArn":args.cluster_arn,
+            "secretArn":args.master_secret_arn, "database":args.database, "sql":sql})
     print("Bootstrap complete. Save these values in Home > Integrations along with a separately scoped IAM access key:")
     output = {"AWS_REGION":args.region, "CLUSTER_ARN":args.cluster_arn, "DATABASE":args.database, "SCHEMA":args.schema}
     output.update({role.removeprefix("kern_").upper() + "_SECRET_ARN":arn for role, arn in arns.items()})
@@ -126,6 +181,10 @@ def main() -> None:
 if __name__ == "__main__":
     try:
         main()
-    except (RuntimeError, ValueError, KeyError, OSError, subprocess.TimeoutExpired):
-        print("Setup did not complete. Do not blindly rerun: secrets may exist and a timed-out database call may have committed. Inspect the kern/<cluster>/<database>/ role secrets and database roles in AWS. Repair or remove only this setup's unused resources before trying again. Passwords were not printed.", file=sys.stderr)
+    except (RuntimeError, ValueError) as error:
+        print(str(error), file=sys.stderr)
+        print("Setup did not complete. Do not blindly rerun: the database and secrets may exist and a timed-out database call may have committed. Inspect the dedicated database, kern/<cluster>/<database>/ role secrets and database roles in AWS. Repair or remove only this setup's unused resources before trying again. Passwords and login tokens were not printed.", file=sys.stderr)
+        sys.exit(1)
+    except (KeyError, IndexError, OSError, subprocess.TimeoutExpired):
+        print("Setup did not complete. Check AWS CLI/psql installation, AWS responses and connectivity. Inspect the dedicated database, role secrets and database roles before retrying; a timed-out call may have committed. Provider output is withheld because it may contain credentials.", file=sys.stderr)
         sys.exit(1)
