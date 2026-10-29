@@ -18,7 +18,7 @@ from host.runtime.core.state import events as event_state, host_inference as pro
 from host.runtime import memory_context
 from host.runtime.admin_api import conversation_history, threads
 from host.runtime.host_inference import api, decisions, provider_http, providers, typesafe, client
-from host.runtime.workspace import memory
+from host.runtime.workspace import memory, memory_ranking
 
 
 TEXT_SETTINGS = {"instructions": "Return a JSON object that matches the supplied schema.",
@@ -117,7 +117,7 @@ class MemoryRecallDiagnosticsTests(unittest.TestCase):
         with patch.object(threads.workspace_proxy, "_proxy") as proxy:
             threads.workspace_proxy.recall_memory("thread-1", "Fix login")
         with patch.object(client, "_request") as inference:
-            client.typesafe_jev_judgment({}, {"q0": {}}, timeout_seconds=memory.RECALL_RERANK_TIMEOUT_SECONDS)
+            client.typesafe_jev_judgment({}, {"q0": {}}, timeout_seconds=memory_ranking.RECALL_RERANK_TIMEOUT_SECONDS)
         self.assertEqual(inference.call_args.args[2], 1.2)
         self.assertEqual(proxy.call_args.kwargs["timeout_seconds"], 3)
         with patch.object(client, "_request") as title:
@@ -187,8 +187,8 @@ class MemoryRecallDiagnosticsTests(unittest.TestCase):
 class TaskRecallTests(unittest.TestCase):
     def setUp(self) -> None:
         # Retrieval tests keep hybrid order; reranker tests cover Jev outcomes.
-        self.enterContext(patch.object(memory, "judge", side_effect=client.HostInferenceError("disabled", reason="provider_disabled")))
-        self.enterContext(patch.object(memory, "openai_decisions", side_effect=client.HostInferenceError("disabled", reason="provider_disabled")))
+        self.enterContext(patch.object(memory_ranking, "judge", side_effect=client.HostInferenceError("disabled", reason="provider_disabled")))
+        self.enterContext(patch.object(memory_ranking, "openai_decisions", side_effect=client.HostInferenceError("disabled", reason="provider_disabled")))
 
     def test_admission_and_midturn_share_context_with_independent_buckets(self):
         history = [
@@ -402,15 +402,15 @@ class RecallRerankingTests(unittest.TestCase):
                        "memory_relevance_score": .1 / (i + 1)} for i in range(6)]
         self.scores = {f"q{i}": i / 10 for i in range(6)}
         self.config_read = self.enterContext(patch.object(memory.state, "host_inference_provider_is_enabled", side_effect=AssertionError("Workspace must not read provider settings")))
-        self.judge = self.enterContext(patch.object(memory, "judge", return_value={
+        self.judge = self.enterContext(patch.object(memory_ranking, "judge", return_value={
             "model": "jev-latest", "answers": {k: {"type": "noul", "noul": v} for k, v in self.scores.items()}}))
-        self.decisions = self.enterContext(patch.object(memory, "openai_decisions",
+        self.decisions = self.enterContext(patch.object(memory_ranking, "openai_decisions",
             side_effect=client.HostInferenceError("disabled", reason="provider_disabled")))
 
     def rerank(self, pages=None, *, query="Fix login\n\nDo not deploy"):
         details = []
         self.selected = list(self.pages) if pages is None else pages
-        memory._rerank_recall(self.selected,
+        memory_ranking._rerank_recall(self.selected,
                               query=query, details=details)
         self.details = details
         return self.ranking_diagnostic()["providers"]["jev"]
@@ -674,9 +674,9 @@ class RecallRerankingTests(unittest.TestCase):
     def test_empty_candidates_skip_both_rankings_and_record_a_clear_reason(self):
         candidates = []
         details = []
-        with patch.object(memory, "_jev_recall_ranking") as jev, \
-             patch.object(memory, "_luna_recall_ranking") as luna:
-            memory._rerank_recall(candidates, query="Fix login", details=details)
+        with patch.object(memory_ranking, "_jev_recall_ranking") as jev, \
+             patch.object(memory_ranking, "_luna_recall_ranking") as luna:
+            memory_ranking._rerank_recall(candidates, query="Fix login", details=details)
         self.assertEqual(candidates, [])
         self.assertEqual(details, ["Rerank skipped: no candidates."])
         jev.assert_not_called()
@@ -724,8 +724,8 @@ class RecallRerankingTests(unittest.TestCase):
             worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": .01}, daemon=True)
             worker.start()
             try:
-                with (patch.object(memory, "judge", client.typesafe_jev_judgment),
-                      patch.object(memory, "openai_decisions", client.openai_decisions),
+                with (patch.object(memory_ranking, "judge", client.typesafe_jev_judgment),
+                      patch.object(memory_ranking, "openai_decisions", client.openai_decisions),
                       patch.object(client, "SOCKET_PATH", socket_path),
                       patch.object(provider_state.db, "transaction", side_effect=transaction),
                       patch.object(provider_state.secretbox, "decrypt", side_effect=lambda value: value),
@@ -847,7 +847,7 @@ class RecallRerankingTests(unittest.TestCase):
     def test_socket_timeouts_keep_hybrid_order(self):
         connection = MagicMock()
         connection.getresponse.side_effect = TimeoutError("private network detail")
-        with patch.object(memory, "judge", client.typesafe_jev_judgment), \
+        with patch.object(memory_ranking, "judge", client.typesafe_jev_judgment), \
              patch.object(client, "_HostInferenceConnection", return_value=connection) as connect, \
              patch.object(memory.host_errors, "report_warning"):
             result = self.rerank()
@@ -885,7 +885,7 @@ class RecallRerankingTests(unittest.TestCase):
             return decisions.evaluate(api_key="test-key", model=model, input=input,
                                       questions=questions, transport=luna_transport)
         self.decisions.side_effect = luna
-        with patch.object(memory, "judge", side_effect=judge):
+        with patch.object(memory_ranking, "judge", side_effect=judge):
             result = self.rerank([dict(p) for p in pages],
                                  query='Fix login {"api_key":"development"}\n\nDo not deploy')
         self.assertEqual(result["outcome"], "success")

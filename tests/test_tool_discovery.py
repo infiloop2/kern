@@ -35,7 +35,11 @@ class ToolDiscoveryTests(unittest.TestCase):
                 })["result"]
                 self.assertEqual(expanded["agent_notes"], tool.manifest.agent_notes)
                 catalog = api._list_bundled_tools({"tool_ids": [tool_id]})["result"]["tools"][0]
-                self.assertEqual(catalog["agent_notes"], expanded["agent_notes"])
+                self.assertNotIn("agent_notes", catalog)
+                explicit_catalog = api._list_bundled_tools({"tool_ids": [tool_id], "include_notes": False})["result"]["tools"][0]
+                self.assertEqual(explicit_catalog, catalog)
+                with_notes = api._list_bundled_tools({"tool_ids": [tool_id], "include_notes": True})["result"]["tools"][0]
+                self.assertEqual(with_notes, {**catalog, "agent_notes": expanded["agent_notes"]})
                 for action, detailed, spec in zip(payload["result"]["actions"], expanded["actions"], tool.manifest.actions):
                     self.assertEqual(action["input_schema"], spec.input_schema)
                     self.assertNotIn("input_protections", detailed)
@@ -55,3 +59,11 @@ class ToolDiscoveryTests(unittest.TestCase):
                     tools_host.ToolCallError, "must be a boolean"
                 ):
                     api._describe_tool({"tool_id": "gmail", flag: invalid})
+
+    def test_catalog_notes_flag_and_broad_catalog(self) -> None:
+        for invalid in (None, 0, 1, "false", [], {}):
+            with self.subTest(invalid=invalid), self.assertRaisesRegex(tools_host.ToolCallError, "must be a boolean"):
+                api._list_bundled_tools({"tool_ids": ["gmail"], "include_notes": invalid})
+        for entry in api._list_bundled_tools({"include_notes": True})["result"]["tools"]:
+            self.assertNotIn("agent_notes", entry)
+            self.assertNotIn("actions", entry)

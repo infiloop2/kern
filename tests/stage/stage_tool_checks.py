@@ -353,6 +353,7 @@ class StageToolChecks:
         specialized = {
             "apify": self._check_apify_live,
             "apify_developer": self._check_apify_developer_live,
+            "aurora_postgres": self._check_aurora_postgres_live,
             "brave_search": self._check_brave_live,
             "browser": self._check_browser_live,
             "cloudwatch_logs": self._check_cloudwatch_logs_live,
@@ -481,6 +482,17 @@ class StageToolChecks:
         if not isinstance(scores, dict) or "performance" not in scores:
             raise AssertionError(f"PageSpeed returned no category scores: {result}")
         return "one bounded mobile Lighthouse audit completed"
+
+    def _check_aurora_postgres_live(self) -> str:
+        tables = self._successful_tool_call("aurora_postgres_list_tables", {})
+        if not isinstance(tables.get("rows"), list):
+            raise AssertionError("Aurora table discovery returned invalid rows")
+        result = self._successful_tool_call(
+            "aurora_postgres_query", {"sql": "SELECT 1 AS probe", "params": [], "limit": 1}
+        )
+        if result.get("rows") != [["1"]] or result.get("truncated") is not False:
+            raise AssertionError("Aurora read-only query did not return the complete probe result")
+        return "table discovery and read-only query completed; write and drop roles were not exercised"
 
     def _check_cloudwatch_logs_live(self) -> str:
         from datetime import datetime, timedelta, timezone

@@ -62,6 +62,7 @@ const INTEGRATION_LOGOS = {
 // The bundled OpenAI image tool carries the same brand mark as the managed
 // OpenAI network integration: one definition, two guide ids.
 INTEGRATION_LOGOS["tool:openai_images"] = INTEGRATION_LOGOS.openai;
+INTEGRATION_LOGOS["tool:aurora_postgres"] = INTEGRATION_LOGOS["tool:cloudwatch_logs"];
 INTEGRATION_LOGOS["tool:instagram_ads"] = INTEGRATION_LOGOS["tool:instagram"];
 INTEGRATION_LOGOS["tool:x_ads"] = INTEGRATION_LOGOS["tool:twitter"];
 INTEGRATION_LOGOS.host_openai = INTEGRATION_LOGOS.openai;
@@ -77,7 +78,7 @@ function integrationLogo(guide) {
 function hideCallbackCopyFeedback() {
   if (copyFeedbackTimer) clearTimeout(copyFeedbackTimer);
   copyFeedbackTimer = null;
-  for (const feedback of document.querySelectorAll("[data-callback-copy-feedback]")) {
+  for (const feedback of document.querySelectorAll("[data-callback-copy-feedback], [data-code-copy-feedback]")) {
     feedback.hidden = true;
   }
 }
@@ -87,9 +88,16 @@ export function dismissCallbackCopyFeedback() {
   hideCallbackCopyFeedback();
 }
 
-export async function copyCallbackUri(button) {
-  const value = button.dataset.copyValue || "";
-  const feedback = button.parentElement?.querySelector("[data-callback-copy-feedback]");
+export function copyCallbackUri(button) {
+  return copyGuideValue(button, button.dataset.copyValue || "");
+}
+
+export function copySetupCode(button) {
+  return copyGuideValue(button, button.closest(".guide-code-block").querySelector("code").textContent);
+}
+
+async function copyGuideValue(button, value) {
+  const feedback = button.parentElement?.querySelector("[data-callback-copy-feedback], [data-code-copy-feedback]");
   const generation = ++copyFeedbackGeneration;
   hideCallbackCopyFeedback();
   try {
@@ -332,7 +340,13 @@ function renderSetup(guide) {
         <div class="guide-step-copy">
           <h4>${esc(step.title)}</h4>
           <p>${renderSetupDescription(step)}</p>
-          ${step.code ? `<pre class="guide-step-code"><code>${esc(step.code)}</code></pre>` : ""}
+          ${step.code ? `<div class="guide-code-block">
+            <div class="guide-code-toolbar">
+              <button class="guide-copy-button guide-code-copy-button" data-action="copy-setup-code" aria-label="Copy setup code">Copy</button>
+              <span class="guide-copy-feedback" data-code-copy-feedback role="status" hidden>Copied</span>
+            </div>
+            <pre class="guide-step-code"><code>${esc(step.code)}</code></pre>
+          </div>` : ""}
           ${step.showCallback && guide.callbackUrl ? `<div class="guide-callback">
             <span class="guide-callback-label">Callback URI for this host</span>
             <div class="guide-callback-value">

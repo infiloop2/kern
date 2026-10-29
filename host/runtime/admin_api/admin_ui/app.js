@@ -43,7 +43,7 @@ import {
   selectToolDetail, refreshLinkedDevice,
 } from "./tools.js";
 import {
-  copyCallbackUri, dismissCallbackCopyFeedback, openConnectionGuide, refreshConnectionGuide,
+  copyCallbackUri, copySetupCode, dismissCallbackCopyFeedback, openConnectionGuide, refreshConnectionGuide,
 } from "./connection_guide.js";
 import {
   finishPasskeyLogin, refreshLoginPasskeyStatus, refreshPasskeySetup,
@@ -961,6 +961,7 @@ async function performWorkspaceMount(name, panelId, htmlPath) {
     await loadWorkspaceScript("/workspace/rich_text.js");
   }
   if (!window.KernReminders) await loadWorkspaceScript("/workspace/reminders.js");
+  if (!window.KernComposerDrafts) await loadWorkspaceScript("/workspace/composer-drafts.js");
   await loadWorkspaceScript(`/workspace/${assetName}.js`);
 }
 
@@ -1491,6 +1492,7 @@ document.addEventListener("click", event => {
     "refresh-linked-device": () => refreshLinkedDevice(button.dataset.tool),
     "disconnect-linked-device": () => disconnectLinkedDevice(button.dataset.tool),
     "copy-callback-uri": () => copyCallbackUri(button),
+    "copy-setup-code": () => copySetupCode(button),
   };
   const handler = actions[action];
   if (!handler) return;

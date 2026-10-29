@@ -2154,12 +2154,16 @@ button.integration-chevron {
 
 .guide-step-copy p { color: var(--text-dim); font-size: 0.81rem; margin: 0.2rem 0 0; }
 
+.guide-code-toolbar { display: flex; justify-content: flex-end; position: relative; margin-top: 0.55rem; }
+button.guide-copy-button.guide-code-copy-button { width: auto; padding: 0 0.65rem; }
+
 .guide-step-code {
   background: var(--surface);
   border: 1px solid var(--border);
   font-size: 0.72rem;
-  margin: 0.55rem 0 0;
-  overflow-x: auto;
+  margin: 0.25rem 0 0;
+  max-height: 28rem;
+  overflow: auto;
   padding: 0.65rem 0.75rem;
   white-space: pre;
 }

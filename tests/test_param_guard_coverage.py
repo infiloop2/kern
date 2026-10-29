@@ -31,6 +31,9 @@ from test_tools import FakeHostAPI
 # (tool_id, action_id, field) -> guarded free-text parameter. The tool's
 # package test and the behavioral tests below exercise each.
 GUARDED_FIELDS = {
+    ("aurora_postgres", "query", "sql"),
+    ("aurora_postgres", "query", "params"),
+    ("aurora_postgres", "insert_rows", "rows"),
     ('prolific', 'get_filters', 'search'),
     ('prolific', 'get_eligibility_count', 'filters'),
     ('prolific', 'list_studies', 'search'),
@@ -180,6 +183,23 @@ APPROVAL_GATED = "approval-gated content: the operator approval is the control"
 TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning"
 
 EXEMPT_FIELDS = {
+    ("aurora_postgres", "describe_table", "table"): TYPED,
+    ("aurora_postgres", "query", "limit"): TYPED,
+    ("aurora_postgres", "insert_rows", "table"): TYPED,
+    ("aurora_postgres", "insert_rows", "columns"): TYPED,
+    ("aurora_postgres", "insert_rows", "on_conflict"): TYPED,
+    ("aurora_postgres", "manage_schema", "operation"): TYPED,
+    ("aurora_postgres", "manage_schema", "table"): TYPED,
+    ("aurora_postgres", "manage_schema", "columns"): TYPED,
+    ("aurora_postgres", "manage_schema", "primary_key"): TYPED,
+    ("aurora_postgres", "manage_schema", "partition_by"): TYPED,
+    ("aurora_postgres", "manage_schema", "column"): TYPED,
+    ("aurora_postgres", "manage_schema", "name"): TYPED,
+    ("aurora_postgres", "manage_schema", "unique"): TYPED,
+    ("aurora_postgres", "manage_schema", "partition"): TYPED,
+    ("aurora_postgres", "manage_schema", "from"): TYPED,
+    ("aurora_postgres", "manage_schema", "to"): TYPED,
+    ("aurora_postgres", "drop_table", "table"): APPROVAL_GATED,
     ('prolific', 'get_filters', 'limit'): TYPED,
     ('prolific', 'get_filters', 'workspace_id'): TYPED,
     ('prolific', 'get_eligibility_count', 'workspace_id'): TYPED,
@@ -784,6 +804,23 @@ class BehavioralDenialTest(unittest.TestCase):
         self.assertIsInstance(result, ActionFailed)
         self.assertIn(fragment, result.error)
         self.assertIn("retry", result.error)
+
+    def test_aurora_free_text_denied_before_aws(self) -> None:
+        from host.tools import aurora_postgres
+        from host.tools.aurora_postgres import client
+        from test_tools_aurora_postgres import api
+
+        secret = "-----BEGIN PRIVATE KEY-----"
+        cases = (
+            ("query", {"sql": f"SELECT '{secret}'", "params": []}),
+            ("query", {"sql": "SELECT :value", "params": [{"name": "value", "value": secret}]}),
+            ("insert_rows", {"table": "notes", "columns": ["note"], "rows": [[secret]], "on_conflict": "error"}),
+        )
+        for action, values in cases:
+            with self.subTest(action=action, values=values), patch.object(client, "request_bytes") as request:
+                result = aurora_postgres.BUNDLED_TOOL.execute(action, values, api())
+                self.assert_denied(result, "private-key")
+                request.assert_not_called()
 
     def test_ahrefs_domain_denied_before_provider_request(self) -> None:
         from host.tools import ahrefs_domain_rating

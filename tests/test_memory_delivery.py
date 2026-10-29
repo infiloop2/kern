@@ -1,4 +1,4 @@
-"""10-minute full-body injection heuristic; no provider-compaction claims."""
+"""One-hour full-body injection heuristic; no provider-compaction claims."""
 import json
 import unittest
 from unittest.mock import Mock, patch
@@ -29,27 +29,27 @@ class MemoryDeliveryTests(unittest.TestCase):
     def test_boundary_and_suppression_does_not_renew_for_self_or_shared(self):
         pages = [page('thread-1', scope='self'), page()]
         self.deliver(pages)
-        for timestamp in (0, 120, 300, 599.999):
+        for timestamp in (0, 1200, 3000, 3599.999):
             self.clock.return_value = timestamp
             self.assertEqual(self.select(pages), [])
-        self.clock.return_value = 600
+        self.clock.return_value = 3600
         self.assertEqual(self.select(pages), pages)
         self.deliver(pages)
-        self.clock.return_value = 1199.999
+        self.clock.return_value = 7199.999
         self.assertEqual(self.select(pages), [])
-        self.clock.return_value = 1200
+        self.clock.return_value = 7200
         self.assertEqual(self.select(pages), pages)
         self.assertEqual(memory_context_message('thread-1', []), 'Kern immutable thread identity: {"thread_id": "thread-1"}')
 
     def test_changed_revisions_and_multiple_pages_keep_independent_times(self):
         self.deliver([page('thread-1', scope='self'), page('b')])
-        self.clock.return_value = 300
+        self.clock.return_value = 1800
         selected = self.select([page('thread-1', 2, 'self'), page('b'), page('c')])
         self.assertEqual(selected, [page('thread-1', 2, 'self'), page('c')])
         self.deliver(selected)
-        self.clock.return_value = 600
+        self.clock.return_value = 3600
         self.assertEqual(self.select([page('thread-1', 2, 'self'), page('b'), page('c')]), [page('b')])
-        self.clock.return_value = 900
+        self.clock.return_value = 5400
         self.assertEqual(self.select([page('thread-1', 2, 'self'), page('c')]), [page('thread-1', 2, 'self'), page('c')])
         # Deleted/unselected pages are never refilled from delivery history.
         self.assertEqual(self.select([]), [])
@@ -81,7 +81,7 @@ class MemoryDeliveryTests(unittest.TestCase):
         self.assertEqual(self.select(pages, thread='thread-2'), pages)
 
     def test_preparation_without_delivery_never_suppresses(self):
-        for timestamp in (0, 1, 600):
+        for timestamp in (0, 1, 3600):
             self.clock.return_value = timestamp
             self.assertEqual(self.select([page()]), [page()])
         self.deliver([page()])
@@ -97,9 +97,9 @@ class MemoryDeliveryTests(unittest.TestCase):
             self.deliver([page(f'p-{n}')])
         known = self.cache._threads['thread-1']
         self.assertEqual(len(known), 64)
-        self.clock.return_value = 600
+        self.clock.return_value = 3600
         self.deliver([page('new')])
-        self.assertEqual(self.cache._threads['thread-1'], {'new': (1, 600)})
+        self.assertEqual(self.cache._threads['thread-1'], {'new': (1, 3600)})
 
     def test_readiness_records_without_session_id_and_later_callbacks_do_not_renew(self):
         turn = runtime._Turn('codex', 'thread-1', 'model', 'high', 1, 0)
@@ -108,12 +108,12 @@ class MemoryDeliveryTests(unittest.TestCase):
         self.assertTrue(runtime._provider_ready(turn))
         self.assertIsNone(turn.provider_session_id)
         self.assertEqual(self.select([page()]), [])
-        self.clock.return_value = 300
+        self.clock.return_value = 1800
         runtime._mark_finishing(turn)
-        self.clock.return_value = 600
+        self.clock.return_value = 3600
         runtime._publish_provider_session(turn, 'session')
         self.assertEqual(self.select([page()]), [])
-        self.clock.return_value = 610
+        self.clock.return_value = 3610
         self.assertEqual(self.select([page()]), [page()])
 
     def test_failed_readiness_does_not_record_and_session_replacement_does_not_clear(self):
@@ -184,14 +184,14 @@ class MemoryDeliveryTests(unittest.TestCase):
         current = page('thread-1', scope='self')
         self.deliver([current, page()])
         with patch.object(runtime.state, 'mutation'), patch.object(runtime.state, 'append_agent_event') as append:
-            for timestamp in (120, 300, 599.999):
+            for timestamp in (1200, 3000, 3599.999):
                 self.clock.return_value = timestamp
                 self.assertFalse(runtime._deliver_self_memory(turn, current))
             turn.server.steer.assert_not_called()
             append.assert_not_called()
             self.assertTrue(runtime._deliver_memory_suggestion(turn, [('guide', 1, 'Guidance'), ('new', 1, 'New')]))
             self.assertEqual(self.select([page('new')]), [page('new')])
-            self.clock.return_value = 600
+            self.clock.return_value = 3600
             self.assertEqual(self.select([page()]), [page()])  # Suggestion did not renew body TTL.
             turn.server.steer.side_effect = runtime.ProviderTurnFinishing('busy')
             self.assertFalse(runtime._deliver_self_memory(turn, current))
@@ -205,7 +205,7 @@ class MemoryDeliveryTests(unittest.TestCase):
             self.assertEqual(self.select([with_note]), [])
             self.assertTrue(runtime._deliver_self_memory(turn, current))
             self.assertEqual(self.select([current]), [])
-            self.clock.return_value = 601
+            self.clock.return_value = 3601
             changed = page('thread-1', 2, 'self')
             self.assertTrue(runtime._deliver_self_memory(turn, changed))
             self.assertEqual(append.call_args.args[3]['memory_page_ids'], ['thread-1'])
@@ -213,21 +213,21 @@ class MemoryDeliveryTests(unittest.TestCase):
     def test_preparation_diagnostics_and_context_formatting(self):
         pages = [page('a'), page('b'), page('c')]
         self.deliver(pages)
-        self.clock.return_value = 599.999
+        self.clock.return_value = 3599.999
         selected, details = self.cache.select('thread-1', [page('a'), page('b', 2), page('new')])
         diagnostic = json.loads(details.partition(': ')[2])
         self.assertEqual(diagnostic['delivery_status'], 'pending_readiness')
-        self.assertEqual(diagnostic['ttl_seconds'], 600)
+        self.assertEqual(diagnostic['ttl_seconds'], 3600)
         self.assertEqual([diagnostic[key] for key in ('selected_count', 'prepared_injection_count', 'suppressed_count')], [3, 2, 1])
         self.assertEqual([p['reason'] for p in diagnostic['pages']], ['recent', 'changed', 'new'])
         self.assertEqual([p['decision'] for p in diagnostic['pages']], ['suppressed', 'prepared', 'prepared'])
-        self.assertEqual([p['seconds_since_injection'] for p in diagnostic['pages']], [599.999, 599.999, None])
+        self.assertEqual([p['seconds_since_injection'] for p in diagnostic['pages']], [3599.999, 3599.999, None])
         self.assertNotIn('Useful guidance', details)
         message = memory_context_message('thread-1', selected)
         self.assertIn('workspace_memory', message)
         self.assertIn('"memories":', message)
         self.assertNotIn('pending_readiness', message)
-        self.clock.return_value = 600
+        self.clock.return_value = 3600
         _, details = self.cache.select('thread-1', [page('c')])
         self.assertEqual(json.loads(details.partition(': ')[2])['pages'][0]['reason'], 'expired')
 

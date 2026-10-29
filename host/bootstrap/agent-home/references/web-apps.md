@@ -46,7 +46,10 @@ relevant state and retrying. Stop on an archived App or a 423 lock.
   that key; use a full data read. Shape is derived, never written.
 - `POST /agent/apps/{app_id}/state/data/read` with `{"path":["projects",0]}`
   reads a branch. `{"paths":[["config"],["next_id"]],"missing":"null"}` reads
-  up to 16 branches at one revision; `missing` defaults to `"error"`.
+  up to 16 branches at one revision; `missing` defaults to `"error"`. Responses default to
+  8 KiB of compact JSON. Oversized branches return `truncated: true`, `bytes`
+  and `shape` instead of `value`; large shapes may also be truncated. Read a
+  narrower path or increase `max_bytes` (up to 23 MiB) for the full branches.
 
 ## Write state
 

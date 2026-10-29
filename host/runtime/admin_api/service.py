@@ -39,7 +39,6 @@ import os
 from pathlib import Path
 import re
 import secrets
-import socket
 import subprocess
 import threading
 import time
@@ -48,9 +47,9 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from host.config import AGENT_RUNTIMES, ConfigError, parse_network_controls
 from host.agent_messages import INPUT_KINDS, RESTART_MESSAGE, restart_notice
-from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES, PROXY_PORT
+from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES
 from host.runtime.admin_api import browser as browser_admin
-from host.runtime.admin_api import database_storage, xai_video_storage
+from host.runtime.admin_api import database_storage, health, github_maintenance, xai_video_storage
 from host.runtime.admin_api.request_server import BoundedThreadingHTTPServer, MAX_CONCURRENT_REQUESTS
 from host.network_integrations.bedrock.manifest import SUPPORTED_REGIONS as BEDROCK_REGIONS
 from host.network_integrations.github.push_gate import pending as github_pending_push
@@ -96,6 +95,12 @@ from host.runtime.admin_api.conversation_history import (
     read_conversation_history,
     search_conversation_history,
 )
+from host.runtime.admin_api.query import (
+    _event_page_limit,
+    _optional_bounded_positive_query_int,
+    _optional_non_negative_int,
+    _reject_query_keys,
+)
 from host.runtime.admin_api.request_params import one as _one
 from host.runtime.core import host_errors, network_policy, pgclient, state
 from host.runtime.core.host_metrics import (
@@ -105,7 +110,6 @@ from host.runtime.core.host_metrics import (
     agent_processes,
     cpu_usage_percent,
     filesystem_metrics,
-    host_metrics,
     memory_metrics,
     swap_metrics,
 )
@@ -161,7 +165,6 @@ from host.runtime.core.state import (
     utc_now,
 )
 from host.runtime.admin_api.codex_cleanup import reconcile_codex_sessions
-from host.version import version_status
 
 
 class OperatorPrincipal(NamedTuple):
@@ -218,6 +221,7 @@ UI_ASSETS.update({
     for module in sorted(ADMIN_UI_DIR.glob("*.js"))
 })
 WORKSPACE_UI_ASSETS = {
+    "/workspace/composer-drafts.js": (RUNTIME_DIR.parent / "workspace/ui/composer-drafts.js", "application/javascript; charset=utf-8"),
     "/workspace/reminders.js": (RUNTIME_DIR.parent / "workspace/ui/reminders.js", "application/javascript; charset=utf-8"),
     "/workspace/reminders.css": (RUNTIME_DIR.parent / "workspace/ui/reminders.css", "text/css; charset=utf-8"),
     "/workspace/chat.html": (RUNTIME_DIR.parent / "workspace/chat/ui/index.html", "text/html; charset=utf-8"),
@@ -1198,7 +1202,7 @@ _ROUTES: tuple[_Route, ...] = (
            operator_only=True, query_keys=frozenset(), query_label="dictation"),
     _Route("POST", "/v1/dictation/transcribe", lambda request: transcription_client.transcribe(request.body),
            operator_only=True, query_keys=frozenset(), query_label="dictation"),
-    _Route("GET", "/v1/health", lambda request: health()),
+    _Route("GET", "/v1/health", lambda request: health.health()),
     _Route("GET", "/v1/analytics", lambda request: state.usage_report(), operator_only=True,
            query_keys=frozenset(), query_label="analytics"),
     _Route("GET", "/v1/agent-runtime/status", lambda request: agent_runtime_status()),
@@ -1527,10 +1531,6 @@ def _credential_response(metadata: dict[str, Any]) -> dict[str, Any]:
     return metadata
 
 
-
-
-
-
 def reboot_host() -> dict[str, str]:
     """Run the reboot helper synchronously. ``systemctl reboot`` only schedules
     the reboot and returns, so this stays fast — and a helper that fails to even
@@ -1549,168 +1549,6 @@ def reboot_host() -> dict[str, str]:
     if proc.returncode != 0:
         raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, proc.stderr.strip() or "reboot helper failed")
     return {"status": "accepted"}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def health() -> dict[str, Any]:
-    runtime = agent_runtime_status()
-    network_status = network_policy.network_status()
-    version = version_status()
-    host = host_metrics()
-    network_error_detail = "The saved network-control policy could not be validated."
-    if network_status == "active" and not proxy_alive():
-        network_status = "error"  # policy says active but nothing is enforcing it
-        network_error_detail = (
-            "The network policy is active, but the enforcing proxy is not accepting connections."
-        )
-    issues = _health_issues(
-        runtime,
-        network_status,
-        network_error_detail,
-        version,
-        host,
-    )
-    return {
-        "status": "degraded" if issues else "ok",
-        "issues": issues,
-        "agent_name": load_config().get("agent_name"),
-        "version": version,
-        "upgrade": upgrade_check.status(),
-        "agent_runtime": runtime,
-        "network_controls": {"status": network_status},
-        "host_runtime": host,
-        "history": state.agent_history_counts(),
-        "lifetime_tokens": state.lifetime_token_usage(),
-    }
-
-
-def _health_issues(
-    runtime: dict[str, Any],
-    network_status: str,
-    network_error_detail: str,
-    version: dict[str, Any],
-    host: dict[str, Any],
-) -> list[dict[str, str]]:
-    """Explain every predicate that makes the host health status degraded."""
-    issues: list[dict[str, str]] = []
-    # The integration page the operator would open, which is named after the
-    # provider rather than the runtime: every runtime sharing a provider is an
-    # account card inside one page, so "Grok 2" would name a page that does
-    # not exist.
-    integration_labels = {
-        "openai": "Codex", "claude": "Claude Code", "xai": "Grok", "bedrock": "AWS Bedrock",
-    }
-    for record in runtime["runtimes"]:
-        if record.get("status") != "error":
-            continue
-        runtime_type = str(record.get("type", "agent runtime"))
-        label = orchestrator.RUNTIME_LABELS.get(runtime_type, runtime_type)
-        identity = session_options.RUNTIMES.get(runtime_type)
-        provider = identity.provider if identity else None
-        integration_label = integration_labels.get(provider or "", label)
-        detail = record.get("error_message")
-        if not isinstance(detail, str) or not detail:
-            detail = "The runtime reported an error without additional details."
-        issues.append(
-            {
-                "kind": "agent_runtime",
-                "summary": f"{label} is unavailable",
-                "detail": detail,
-                "next_step": (
-                    f"Open Home > Agent runtimes > {integration_label}, refresh its status, "
-                    "and reconnect or revalidate the account if the error continues."
-                ),
-            }
-        )
-    if network_status == "error":
-        issues.append(
-            {
-                "kind": "network_controls",
-                "summary": "Network controls are unavailable",
-                "detail": network_error_detail,
-                "next_step": (
-                    "Stop starting agents and use the operator plane to recover or upgrade the host."
-                ),
-            }
-        )
-    if version.get("status") == "mismatch":
-        runtime_version = str(version.get("runtime", "unknown"))
-        state_version = str(version.get("state", "unknown"))
-        issues.append(
-            {
-                "kind": "version",
-                "summary": "Host versions do not match",
-                "detail": f"Runtime {runtime_version}; durable state {state_version}.",
-                "next_step": "Run a Kern upgrade or recovery from the operator plane.",
-            }
-        )
-    elif version.get("status") != "ok":
-        unavailable: list[str] = []
-        if version.get("runtime") is None:
-            unavailable.append("running root version (/opt/kern-host/VERSION)")
-        if version.get("state") is None:
-            unavailable.append(
-                "durable-state version (/mnt/kern-admin/admin-state/version.json)"
-            )
-        detail = (
-            f"Unavailable or invalid: {', '.join(unavailable)}."
-            if unavailable
-            else "The host version status could not be read."
-        )
-        issues.append(
-            {
-                "kind": "version",
-                "summary": "Host version information is unavailable",
-                "detail": detail,
-                "next_step": (
-                    "Run a Kern recovery from the operator plane to restore the version metadata."
-                ),
-            }
-        )
-    root = host.get("filesystem", {}).get("mounts", {}).get("root", {})
-    used_bytes = root.get("used_bytes", 0)
-    total_bytes = root.get("total_bytes", 0)
-    if (
-        isinstance(used_bytes, int)
-        and isinstance(total_bytes, int)
-        and total_bytes > 0
-        and used_bytes / total_bytes >= 0.9
-    ):
-        used_percent = used_bytes / total_bytes * 100
-        issues.append(
-            {
-                "kind": "root_filesystem",
-                "summary": "Root volume is nearly full",
-                "detail": f"The root filesystem is {used_percent:.1f}% full.",
-                "next_step": (
-                    "Stop agent work, inspect /tmp and /var/tmp, and remove unneeded temporary "
-                    "files; redeploy if free space does not recover."
-                ),
-            }
-        )
-    return issues
-
-
-def proxy_alive() -> bool:
-    """The proxy binds loopback, which nftables always allows, so a TCP
-    connect is a meaningful liveness probe even while the network is locked
-    down. If the proxy is down the agent has no network path at all."""
-    try:
-        with socket.create_connection((HOST, PROXY_PORT), timeout=1):
-            return True
-    except OSError:
-        return False
 
 
 def prune_state() -> None:
@@ -1733,6 +1571,7 @@ def prune_state() -> None:
         for runtime_type in sorted(AGENT_RUNTIMES):
             state.prune_thread_sessions(cur, runtime_type, THREAD_MAP_LIMIT)
     tools_host.maintain_approvals()
+    state.expire_agent_event_details()
 
 
 def maintenance_loop(interrupted_threads: list[str] | None = None) -> None:
@@ -1817,8 +1656,6 @@ def _bounded_embedding_batch(
     return bounded
 
 
-
-
 # Bedrock is absent on purpose: its usage is computed live from the proxy's
 # token counters (_bedrock_live_usage), never stored on the account row.
 _RUNTIME_USAGE_KEYS = {
@@ -1835,24 +1672,6 @@ _RUNTIME_USAGE_KEYS = {
 # per-thread lock registry while unrelated threads normally proceed in
 # parallel.
 _THREAD_SEND_LOCKS = tuple(threading.Lock() for _ in range(64))
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 
 def replace_network_policy(body: Any) -> dict[str, Any]:
@@ -1897,62 +1716,6 @@ def replace_network_policy(body: Any) -> dict[str, Any]:
     return {"network_controls": policy, "updated_at": updated_at}
 
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-def _optional_non_negative_int(query: dict[str, list[str]], key: str) -> int | None:
-    value = _one(query, key)
-    if value is None:
-        return None
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be an integer") from exc
-    if parsed < 0:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be non-negative")
-    return parsed
-
-
-def _optional_bounded_positive_query_int(
-    query: dict[str, list[str]],
-    key: str,
-    maximum: int,
-) -> int | None:
-    value = _one(query, key)
-    if value is None:
-        return None
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be an integer") from exc
-    if parsed < 1:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be positive")
-    if parsed > maximum:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be at most {maximum}")
-    return parsed
-
-
-
-
 def _network_event_decision(query: dict[str, list[str]]) -> str | None:
     value = _one(query, "decision")
     if value is None or value == "all":
@@ -1960,33 +1723,6 @@ def _network_event_decision(query: dict[str, list[str]]) -> str | None:
     if value not in {"allowed", "denied"}:
         raise ApiError(HTTPStatus.BAD_REQUEST, "decision must be allowed, denied, or all")
     return value
-
-
-def _event_page_limit(query: dict[str, list[str]]) -> int:
-    value = _one(query, "limit")
-    if value is None:
-        return state.EVENT_PAGE_LIMIT
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "limit must be an integer") from exc
-    if parsed < 1:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "limit must be positive")
-    if parsed > state.EVENT_PAGE_LIMIT:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"limit must be at most {state.EVENT_PAGE_LIMIT}")
-    return parsed
-
-
-
-
-
-
-
-
-def _reject_query_keys(query: dict[str, list[str]], allowed: frozenset[str], label: str) -> None:
-    unexpected = sorted(set(query) - allowed)
-    if unexpected:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"unsupported {label} query parameter: {unexpected[0]}")
 
 
 def _minutes_from_now(minutes: int) -> str:
@@ -2036,7 +1772,6 @@ def restart_interrupted_agents(thread_ids: list[str]) -> None:
             )
 
 
-
 def main() -> int:
     # Schema migrations are deploy-plane work: bootstrap runs `migrate up`
     # before services start, and the service itself never migrates — a stray
@@ -2055,7 +1790,12 @@ def main() -> int:
     # The agent-facing tools socket and tool execution run in the dedicated
     # kern-tools service (its own user, egress, and scoped DB role); the
     # admin service only forwards operator operations to it.
+    orchestrator.publish_unmanaged_runtime_statuses()
+    # Converge before status loops and turn admission; the saved token may
+    # already have expired while the admin process was stopped.
+    converged = github_maintenance.initial_credential_convergence()
     orchestrator.start_background_loops()
+    threading.Thread(target=github_maintenance.github_credential_refresh_loop, args=(converged,), daemon=True).start()
     threading.Thread(target=maintenance_loop, args=(interrupted,), daemon=True).start()
     threading.Thread(target=orchestrator.turn_retries.run, args=(retry_failed_turn,), name="turn-retries", daemon=True).start()
     threading.Thread(target=auto_approvals.run, name="auto-approvals", daemon=True).start()

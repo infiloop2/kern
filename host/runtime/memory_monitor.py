@@ -17,10 +17,13 @@ from host.runtime.host_inference import client
 
 MAX_TURNS = 128
 MAX_PAGES = 64
-SUGGESTION_INTERVAL = 60.0
-SELF_MEMORY_INTERVAL = 300.0
-SUGGESTION_EVENTS = 5
+SUGGESTION_INTERVAL = 120.0
+SELF_MEMORY_INTERVAL = 3600.0
+SUGGESTION_EVENTS = 10
 SELF_MEMORY_EVENTS = 25
+# Delivered suggestion notices per operator input; new incoming direction
+# restores the allowance because it can change what is relevant.
+SUGGESTION_DELIVERIES = 2
 # Global spend/rate bound, in addition to per-turn intervals.
 CHECK_INTERVAL = 10.0
 
@@ -44,6 +47,7 @@ class Context:
     generation: int = 0
     suggestion_events: int = 0
     self_events: int = 0
+    suggestion_deliveries: int = 0
 
     def due_at(self) -> float:
         return min(self.next_suggestion if self.suggestion_events >= SUGGESTION_EVENTS else float('inf'),
@@ -98,6 +102,7 @@ class Monitor:
             if incoming:
                 context.last_query = ""
                 context.generation += 1
+                context.suggestion_deliveries = 0
         self.wake.set()
 
     def check_once(self) -> bool:
@@ -164,12 +169,16 @@ class Monitor:
                 suggestions = suggestions[:max(0, MAX_PAGES - len(context.known))]
                 if context.generation == generation:
                     context.last_query = query
+                # Checks and titles continue; only the notices are capped per operator input.
+                if context.suggestion_deliveries >= SUGGESTION_DELIVERIES:
+                    suggestions = []
             if suggestions:
                 delivered = context.deliver(suggestions)
                 with self.lock:
                     if self.turns.get(key) is context:
                         if delivered:
                             context.known.update({p[0]: p[1] for p in suggestions})
+                            context.suggestion_deliveries += 1
                         else:
                             # Keep the next interval eligible after a busy drop.
                             context.last_query = ""
