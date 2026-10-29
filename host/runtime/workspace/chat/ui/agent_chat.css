@@ -490,6 +490,7 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
   .chat-head {
     align-items: center;
     display: flex;
+    flex-wrap: wrap;
     gap: 0.35rem;
     min-height: 3.25rem;
     /* The host toolbar already consumes the device's top safe area. Applying
@@ -497,13 +498,15 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
        the thread title on notched iPhones. */
     padding: 0.25rem max(0.5rem, env(safe-area-inset-right)) 0.25rem max(0.5rem, env(safe-area-inset-left));
   }
-  .chat-head-title { flex: 1 1 auto; }
+  /* Keep thread identity readable when reminders and agent controls are
+     present. Actions can move below it instead of shrinking the title away. */
+  .chat-head-title { flex: 1 0 min(12rem, 100%); }
   .thread-title-row { justify-content: flex-start; }
   .thread-title { flex: 1 1 auto; font-size: 0.9rem; }
   .thread-subtitle { display: none; }
   button.thread-rename-button { height: 44px; margin: -0.35rem 0; width: 36px; }
   button.thread-rename-button svg { height: 16px; width: 16px; }
-  .chat-head-actions { display: flex; gap: 0; margin-left: auto; width: auto; }
+  .chat-head-actions { display: flex; flex: 0 1 auto; flex-wrap: wrap; gap: 0; margin-left: auto; max-width: 100%; }
   .chat-head-actions > button { justify-content: center; min-height: 44px; min-width: 0; }
 
   button.activity-switch,

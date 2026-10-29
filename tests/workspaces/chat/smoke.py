@@ -679,9 +679,41 @@ def _assert_mobile_header_and_navigation(page: Any, frame: Any) -> None:
     """Thread identity stays usable and the host drawer fills an app viewport."""
     from playwright.sync_api import expect
 
+    original_viewport = page.viewport_size
+    assert original_viewport is not None
+    try:
+        for width in (original_viewport["width"], 320):
+            page.set_viewport_size({**original_viewport, "width": width})
+            _assert_mobile_header_layout(frame)
+    finally:
+        page.set_viewport_size(original_viewport)
+
+    frame.get_by_role("button", name="Rename thread", exact=True).click()
+    rename_input = frame.locator("#rename-thread-input")
+    expect(frame.get_by_role("dialog", name="Rename thread")).to_be_visible()
+    if rename_input.evaluate("element => parseFloat(getComputedStyle(element).fontSize)") < 16:
+        raise AssertionError("mobile thread rename input would trigger iOS focus zoom")
+    frame.locator("#rename-thread-cancel").click()
+
+    _open_mobile_host_navigation(page)
+    drawer = page.locator("#sidebar").bounding_box()
+    viewport_height = page.evaluate("() => window.innerHeight")
+    if not drawer or abs(drawer["y"]) > 1 or abs(drawer["height"] - viewport_height) > 1:
+        raise AssertionError(
+            f"Chat host navigation does not fill the viewport: {drawer}, viewport={viewport_height}"
+        )
+    page.locator("#nav-backdrop").click(position={"x": 380, "y": 400})
+
+
+def _assert_mobile_header_layout(frame: Any) -> None:
+    from playwright.sync_api import expect
+
     expect(frame.locator(".thread-title")).to_be_visible()
     expect(frame.locator(".thread-title")).to_have_text("thread-1")
     expect(frame.get_by_role("button", name="Rename thread", exact=True)).to_be_visible()
+    title = frame.locator(".thread-title")
+    if title.evaluate("element => element.scrollWidth > element.clientWidth"):
+        raise AssertionError("mobile Chat header clipped a short thread title")
     header_overflow = frame.locator(".chat-head").evaluate(
         "element => element.scrollWidth - element.clientWidth"
     )
@@ -699,32 +731,27 @@ def _assert_mobile_header_and_navigation(page: Any, frame: Any) -> None:
     actions_box = frame.locator(".chat-head-actions").bounding_box()
     if not header_box or not title_box or not actions_box:
         raise AssertionError("mobile Chat header controls are not visible")
-    if header_box["height"] > 54:
+    if header_box["height"] > 160:
         raise AssertionError(f"mobile Chat header is too tall: {header_box}")
-    vertical_offset = abs(
-        title_box["y"] + title_box["height"] / 2
-        - actions_box["y"] - actions_box["height"] / 2
+    # The growing action list may wrap below the title, but must never cover
+    # it or place controls outside the header, including on a 320px phone.
+    separated = (
+        title_box["x"] + title_box["width"] <= actions_box["x"] + 1
+        or title_box["y"] + title_box["height"] <= actions_box["y"] + 1
     )
-    if vertical_offset > 2:
+    if not separated:
         raise AssertionError(
-            f"mobile Chat title and actions are not on one row: title={title_box}, actions={actions_box}"
+            f"mobile Chat title overlaps actions: title={title_box}, actions={actions_box}"
         )
-
-    frame.get_by_role("button", name="Rename thread", exact=True).click()
-    rename_input = frame.locator("#rename-thread-input")
-    expect(frame.get_by_role("dialog", name="Rename thread")).to_be_visible()
-    if rename_input.evaluate("element => parseFloat(getComputedStyle(element).fontSize)") < 16:
-        raise AssertionError("mobile thread rename input would trigger iOS focus zoom")
-    frame.locator("#rename-thread-cancel").click()
-
-    _open_mobile_host_navigation(page)
-    drawer = page.locator("#sidebar").bounding_box()
-    viewport_height = page.evaluate("() => window.innerHeight")
-    if not drawer or abs(drawer["y"]) > 1 or abs(drawer["height"] - viewport_height) > 1:
-        raise AssertionError(
-            f"Chat host navigation does not fill the viewport: {drawer}, viewport={viewport_height}"
-        )
-    page.locator("#nav-backdrop").click(position={"x": 380, "y": 400})
+    for button in frame.locator(".chat-head-actions > button:visible").all():
+        expect(button).to_be_in_viewport()
+        box = button.bounding_box()
+        if not box or box["height"] < 44:
+            raise AssertionError(f"mobile Chat action lost its touch target: {box}")
+        if (box["x"] < header_box["x"] - 1
+                or box["x"] + box["width"] > header_box["x"] + header_box["width"] + 1
+                or box["y"] + box["height"] > header_box["y"] + header_box["height"] + 1):
+            raise AssertionError(f"mobile Chat action escaped the header: {box}")
 
 
 def _open_host_thread(page: Any, thread_id: str) -> None:

@@ -1513,9 +1513,10 @@ def desktop_smoke(page, url: str) -> None:
     expect(page.locator("[data-guide-section='github']")).to_contain_text(
         "results-receiver.actions.githubusercontent.com"
     )
-    expect(page.locator("[data-guide-section='github']")).to_contain_text(
-        "productionresultssa{0..19}.blob.core.windows.net"
-    )
+    for accounts in ("0..19", "30..49", "100..199"):
+        expect(page.locator("[data-guide-section='github']")).to_contain_text(
+            f"productionresultssa{{{accounts}}}.blob.core.windows.net"
+        )
     expect(page.locator("#integration-detail-kind")).to_have_text("Direct network integration")
     expect(page.locator("[data-guide-section='github'] .guide-network-scope")).to_be_visible()
     expect(page.locator("[data-guide-section='github'] details.guide-network-scope")).to_have_count(0)

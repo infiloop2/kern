@@ -6,6 +6,7 @@ import base64
 from http import HTTPStatus
 import json
 from pathlib import Path
+import re
 from typing import Any
 import unittest
 from unittest.mock import patch
@@ -1066,8 +1067,11 @@ class AdminUiStaticTests(unittest.TestCase):
         self.assertIn(".tab-button svg { display: block; height: 19px; width: 19px; }", css)
         self.assertIn(".memory-swap-values", css)
         self.assertIn("button.icon-button svg", css)
-        self.assertEqual(html.count('<span class="home-card-icon'), 6)
-        self.assertEqual(html.count('<svg viewBox="0 0 20 20" aria-hidden="true">'), 6)
+        home_cards = re.findall(r'<button class="home-card"[^>]*>.*?</button>', html, re.DOTALL)
+        self.assertTrue(home_cards)
+        for card in home_cards:
+            self.assertEqual(card.count('<span class="home-card-icon'), 1)
+            self.assertEqual(card.count('<svg viewBox="0 0 20 20" aria-hidden="true">'), 1)
         self.assertIn(".home-card-icon svg {", css)
         self.assertIn("const runtime = button.dataset.runtime;", app_js)
         self.assertIn('"start-login": () => startLogin(runtime)', app_js)

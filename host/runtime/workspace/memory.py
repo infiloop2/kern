@@ -1549,9 +1549,15 @@ def _description(value: Any) -> str:
 def _content(value: Any, page_id: str) -> str:
     maximum = MAX_SELF_CONTENT_CHARS if is_individual_page_id(page_id) else MAX_CONTENT_CHARS
     if not isinstance(value, str) or len(value) > maximum:
+        message = f"content must be at most {maximum} characters"
+        if isinstance(value, str) and is_individual_page_id(page_id):
+            message += (
+                ". You can also use private notes for additional topic memories: "
+                'PUT /agent/self/notes/{note_id} with {"content":"..."}.'
+            )
         raise WorkspaceError(
             HTTPStatus.BAD_REQUEST,
-            f"content must be at most {maximum} characters",
+            message,
         )
     return value
 

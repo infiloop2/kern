@@ -49,7 +49,11 @@ GITHUB_STRIP_ONLY_DOMAINS = {
     "results-receiver.actions.githubusercontent.com",
 }
 GITHUB_ACTIONS_BLOB_APEX = "blob.core.windows.net"
-GITHUB_ACTIONS_BLOB_ACCOUNT_RE = re.compile(r"productionresultssa(?:[0-9]|1[0-9])")
+# GitHub expanded its documented Actions storage accounts on 2026-10-22:
+# https://github.blog/changelog/2026-10-22-meta-api-endpoints-updated-for-actions-blob-storage/
+GITHUB_ACTIONS_BLOB_ACCOUNT_RE = re.compile(
+    r"productionresultssa(?:[0-9]|1[0-9]|[34][0-9]|1[0-9]{2})"
+)
 GITHUB_ACTIONS_BLOB_ROUTE = (("GET", "HEAD"), ())
 AZURE_SAS_SIGNATURE_RE = re.compile(r"[A-Za-z0-9+/]{43}=")
 # Actions names a run and its job with canonical UUIDs in this fixed log path.
