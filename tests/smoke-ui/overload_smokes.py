@@ -5,6 +5,10 @@ def run(page, url, log_in):
 
     log_in(page, url)
     expect(page.locator('#app')).to_be_visible()
+    # Startup mounts Chat, Apps, then Global asynchronously. A later successful
+    # HTML read legitimately clears older failures, so finish those mounts
+    # before injecting the controlled failure sequence below.
+    page.wait_for_function('() => Boolean(window.KernWorkspaceGlobal)')
     page.set_viewport_size({'width': 390, 'height': 844})
     page.clock.install()
     app_top = page.locator('#app').evaluate('(element) => element.getBoundingClientRect().top')

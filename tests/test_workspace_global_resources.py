@@ -15,7 +15,7 @@ from unittest.mock import patch
 import pg_harness
 
 from host.runtime.core import db, pgclient, state
-from host.runtime.workspace import agent_api, getting_started, memory, schedules
+from host.runtime.workspace import agent_api, getting_started, memory, memory_ranking, schedules
 from host.runtime.workspace.chat import backend as chat
 from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.web_apps import backend as web_apps
@@ -130,8 +130,8 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
         self.enterContext(patch.object(schedules, "call_admin_api", return_value={"thread": {"status": "idle"}}))
         self.addCleanup(db.close_pool)
         # Retrieval tests keep hybrid order; reranker tests cover Jev outcomes.
-        self.enterContext(patch.object(memory, "judge", side_effect=memory.HostInferenceError("disabled", reason="provider_disabled")))
-        self.enterContext(patch.object(memory, "openai_decisions", side_effect=memory.HostInferenceError("disabled", reason="provider_disabled")))
+        self.enterContext(patch.object(memory_ranking, "judge", side_effect=memory_ranking.HostInferenceError("disabled", reason="provider_disabled")))
+        self.enterContext(patch.object(memory_ranking, "openai_decisions", side_effect=memory_ranking.HostInferenceError("disabled", reason="provider_disabled")))
 
     def test_onboarding_status_is_derived_from_live_resources(self) -> None:
         active = patch.object(

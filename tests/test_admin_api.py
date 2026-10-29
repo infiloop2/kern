@@ -25,6 +25,7 @@ from urllib.parse import quote
 import urllib.request
 
 import pg_harness
+from http_harness import start_admin_http_server, raw_admin_request
 
 from host.agent_messages import memory_context_message
 from host.runtime.memory_context import MemoryDelivery
@@ -190,83 +191,32 @@ def _add_session_auth(request: "urllib.request.Request", token: str) -> None:
         request.add_header(name, value)
 
 
-# The agent's loopback TCP egress is firewalled on Kern hosts, so the test
-# admin server listens on a Unix socket and requests reach it through a
-# urllib opener that dials that socket. The HTTP request/response layer under
-# test (auth headers, cookies, raw request bytes) is unchanged.
-ADMIN_TEST_ORIGIN = "http://kern-admin.test"
+class AdminStartupOrderTests(unittest.TestCase):
+    def test_credentials_converge_after_unmanaged_status_before_loops_and_admission(self) -> None:
+        order = []
+        with orchestrator._RUNTIME_STATUS_LOCK:
+            orchestrator._RUNTIME_STATUSES.clear()
+        self.addCleanup(orchestrator._RUNTIME_STATUSES.clear)
 
+        def reconcile():
+            self.assertEqual(orchestrator.runtime_status("script"), "active")
+            order.append("credentials")
 
-class UnixSocketHTTPServer(socketserver.ThreadingMixIn, socketserver.UnixStreamServer):
-    daemon_threads = True
-
-    def get_request(self):  # type: ignore[override]
-        request, _ = super().get_request()
-        # BaseHTTPRequestHandler (and the login throttle's client key) expect
-        # a TCP-shaped (host, port) peer address.
-        return request, ("127.0.0.1", 0)
-
-
-class _UnixSocketHTTPConnection(http.client.HTTPConnection):
-    def __init__(self, socket_path: str, host: str, timeout: Any = None) -> None:
-        super().__init__(host)
-        self._socket_path = socket_path
-        self._timeout_value = timeout
-
-    def connect(self) -> None:
-        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        if isinstance(self._timeout_value, (int, float)):
-            self.sock.settimeout(self._timeout_value)
-        self.sock.connect(self._socket_path)
-
-
-class _UnixSocketHTTPHandler(urllib.request.HTTPHandler):
-    def __init__(self, socket_path: str) -> None:
-        super().__init__()
-        self._socket_path = socket_path
-
-    def http_open(self, req: Any) -> Any:
-        def connection(host: str, timeout: Any = None) -> _UnixSocketHTTPConnection:
-            return _UnixSocketHTTPConnection(self._socket_path, host, timeout=timeout)
-
-        return self.do_open(connection, req)
-
-
-def start_admin_http_server(test: unittest.TestCase) -> str:
-    """Serve admin_api.Handler for one test case and route urllib to it.
-
-    Returns the base URL test requests should target."""
-    socket_dir = tempfile.TemporaryDirectory()
-    test.addCleanup(socket_dir.cleanup)
-    socket_path = str(Path(socket_dir.name) / "admin-api.sock")
-    server = UnixSocketHTTPServer(socket_path, admin_api.Handler)
-    # Frequent polling speeds shutdown without shortening request deadlines.
-    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
-    test.addCleanup(server.server_close)
-    test.addCleanup(server.shutdown)
-    urllib.request.install_opener(urllib.request.build_opener(_UnixSocketHTTPHandler(socket_path)))
-    test.addCleanup(urllib.request.install_opener, urllib.request.build_opener())
-    test.admin_socket_path = socket_path  # type: ignore[attr-defined]
-    return ADMIN_TEST_ORIGIN
-
-
-def raw_admin_request(socket_path: str, request: bytes) -> bytes:
-    """One raw HTTP exchange against the test admin server."""
-    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
-        sock.settimeout(5)
-        sock.connect(socket_path)
-        try:
-            sock.sendall(request)
-            sock.shutdown(socket.SHUT_WR)
-        except (BrokenPipeError, ConnectionResetError):
-            # The server may reject and close before the whole request lands
-            # (e.g. an oversized body); its buffered response is still readable.
-            pass
-        chunks: list[bytes] = []
-        while chunk := sock.recv(65536):
-            chunks.append(chunk)
-        return b"".join(chunks)
-
+        with (
+            patch.object(admin_api, "BoundedThreadingHTTPServer") as http,
+            patch.object(admin_api.workspace_admin_api, "create_workspace_admin_server"),
+            patch.object(admin_api.workspace_admin_api, "unlink_workspace_admin_socket"),
+            patch.object(admin_api, "initialize_state", return_value=[]),
+            patch.object(admin_api.admin_auth, "preload_password_verifier"),
+            patch.object(admin_api.github_maintenance.github_credential, "reconcile", side_effect=reconcile),
+            patch.object(admin_api.threading, "Thread") as thread,
+        ):
+            thread.side_effect = lambda **kwargs: order.append("loop") or MagicMock()
+            http.return_value.serve_forever.side_effect = lambda: order.append("serve")
+            self.assertEqual(admin_api.main(), 0)
+        self.assertEqual(order[0], "credentials")
+        self.assertEqual(order[-1], "serve")
+        self.assertIn("loop", order)
 
 
 class AdminRouteTableTests(unittest.TestCase):
@@ -723,7 +673,7 @@ class ThreadAdmissionHelpersTests(unittest.TestCase):
         self.assertIn('"page_id": "app-7"', context)
 
 
-class AdminApiIntegrationTests(unittest.TestCase):
+class AdminApiTestCase(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
         with state.mutation() as cur:
@@ -798,33 +748,6 @@ class AdminApiIntegrationTests(unittest.TestCase):
         with urllib.request.urlopen(request, timeout=5) as response:
             return response.status, json.loads(response.read())
 
-    def test_xai_video_storage_admin_http_round_trip(self) -> None:
-        path = "/v1/network-tools/xai-video-storage"
-        value = dict(bucket="test-videos", region="us-east-1", access_key_id="AKIA" + "A" * 16, secret_access_key="a" * 40)
-        # Authentication rejects before reading a body. Keep these probes
-        # bodyless so early connection closure cannot race urllib's body send.
-        for method in ("GET", "PUT", "DELETE"):
-            with self.assertRaises(urllib.error.HTTPError) as error:
-                self.request(method, path, auth=False)
-            self.assertEqual(error.exception.code, 401)
-            self.assertIsNone(state.read_xai_video_storage())
-        self.assertEqual(self.request("GET", path), (200, {"configured": False}))
-        expected = {"configured": True, "bucket": "test-videos", "region": "us-east-1"}
-        self.assertEqual(self.request("PUT", path, value), (200, expected))
-        self.assertEqual(state.read_xai_video_storage(), value)
-        self.assertEqual(self.request("GET", path), (200, expected))
-        for method in ("PUT", "DELETE"):
-            with self.assertRaises(urllib.error.HTTPError) as error:
-                self.request(method, path, auth=False)
-            self.assertEqual(error.exception.code, 401)
-            self.assertEqual(state.read_xai_video_storage(), value)
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            self.request("PUT", path, {"bucket": "partial"})
-        self.assertEqual(error.exception.code, 400)
-        self.assertEqual(state.read_xai_video_storage(), value)
-        self.assertEqual(self.request("DELETE", path), (200, {"configured": False}))
-        self.assertIsNone(state.read_xai_video_storage())
-
     def raw_request(self, request: bytes) -> bytes:
         return raw_admin_request(self.admin_socket_path, request)
 
@@ -842,11 +765,11 @@ class AdminApiIntegrationTests(unittest.TestCase):
             "swap": {},
         }
         with (
-            patch("host.runtime.admin_api.service.host_metrics", return_value=reported_host),
-            patch("host.runtime.admin_api.service.proxy_alive", return_value=proxy_alive),
-            patch("host.runtime.admin_api.service.version_status", return_value=reported_version),
+            patch("host.runtime.admin_api.health.host_metrics", return_value=reported_host),
+            patch("host.runtime.admin_api.health.proxy_alive", return_value=proxy_alive),
+            patch("host.runtime.admin_api.health.version_status", return_value=reported_version),
             patch(
-                "host.runtime.admin_api.service.upgrade_check.status",
+                "host.runtime.admin_api.health.upgrade_check.status",
                 return_value={"available": True, "latest": "0.3.0"},
             ),
         ):
@@ -868,44 +791,6 @@ class AdminApiIntegrationTests(unittest.TestCase):
             {},
             body,
         )
-
-    def test_health_requires_auth_and_reports_state(self) -> None:
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            self.request("GET", "/v1/health", auth=False)
-        self.assertEqual(error.exception.code, 401)
-
-        status, body = self.health()
-
-        self.assertEqual(status, 200)
-        self.assertEqual(body["agent_name"], "kern-test")
-        self.assertEqual(body["status"], "ok")
-        self.assertEqual(body["issues"], [])
-        self.assertEqual(self.runtime(body)["status"], "active")
-        self.assertEqual(self.runtime(body, "claude_code")["status"], "deactivated")
-        self.assertEqual(body["network_controls"]["status"], "active")
-        self.assertEqual(body["version"], {"status": "ok", "runtime": "0.2.0", "state": "0.2.0"})
-        self.assertEqual(body["upgrade"], {"available": True, "latest": "0.3.0"})
-        self.assertEqual(
-            body["history"],
-            {"threads": 0, "messages": 0, "activities": 0},
-        )
-        self.assertEqual(body["lifetime_tokens"], {
-            "input_tokens": 0, "cached_input_tokens": 0, "cache_write_tokens": 0, "output_tokens": 0,
-        })
-
-
-    def test_agent_file_content_route_requires_operator_auth(self) -> None:
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            self.request("GET", "/v1/agent-files/content?path=%2Fworkspace%2Freel.mp4", auth=False)
-        self.assertEqual(error.exception.code, 401)
-
-    def test_workspace_header_does_not_authenticate_tcp_admin_api(self) -> None:
-        request = urllib.request.Request(f"{self.base_url}/v1/threads", method="GET")
-
-        with self.assertRaises(urllib.error.HTTPError) as error:
-            urllib.request.urlopen(request, timeout=5)
-
-        self.assertEqual(error.exception.code, 401)
 
     def login(self, password: str = "admin-secret"):
         data = json.dumps({"password": password}).encode()
@@ -985,6 +870,69 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 return response.status, json.loads(response.read())
         except urllib.error.HTTPError as error:
             return error.code, json.loads(error.read())
+
+    def assert_security_headers(self, headers: Any) -> None:
+        self.assertEqual(headers["Content-Security-Policy"], admin_api.SECURITY_HEADERS["Content-Security-Policy"])
+        self.assertIn("connect-src 'self'", headers["Content-Security-Policy"])
+        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
+        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
+        self.assertEqual(headers["X-Frame-Options"], "DENY")
+
+    def _enable_github_policy(self) -> None:
+        save_policy(
+            {
+                "network_integrations": {
+                    "github": {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "kern"}]}
+                },
+            },
+            "2026-06-08T00:00:01Z",
+        )
+
+
+class AdminApiIntegrationTests(AdminApiTestCase):
+
+
+    def test_xai_video_storage_admin_http_round_trip(self) -> None:
+        path = "/v1/network-tools/xai-video-storage"
+        value = dict(bucket="test-videos", region="us-east-1", access_key_id="AKIA" + "A" * 16, secret_access_key="a" * 40)
+        # Authentication rejects before reading a body. Keep these probes
+        # bodyless so early connection closure cannot race urllib's body send.
+        for method in ("GET", "PUT", "DELETE"):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(method, path, auth=False)
+            self.assertEqual(error.exception.code, 401)
+            self.assertIsNone(state.read_xai_video_storage())
+        self.assertEqual(self.request("GET", path), (200, {"configured": False}))
+        expected = {"configured": True, "bucket": "test-videos", "region": "us-east-1"}
+        self.assertEqual(self.request("PUT", path, value), (200, expected))
+        self.assertEqual(state.read_xai_video_storage(), value)
+        self.assertEqual(self.request("GET", path), (200, expected))
+        for method in ("PUT", "DELETE"):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                self.request(method, path, auth=False)
+            self.assertEqual(error.exception.code, 401)
+            self.assertEqual(state.read_xai_video_storage(), value)
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request("PUT", path, {"bucket": "partial"})
+        self.assertEqual(error.exception.code, 400)
+        self.assertEqual(state.read_xai_video_storage(), value)
+        self.assertEqual(self.request("DELETE", path), (200, {"configured": False}))
+        self.assertIsNone(state.read_xai_video_storage())
+
+
+    def test_agent_file_content_route_requires_operator_auth(self) -> None:
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            self.request("GET", "/v1/agent-files/content?path=%2Fworkspace%2Freel.mp4", auth=False)
+        self.assertEqual(error.exception.code, 401)
+
+    def test_workspace_header_does_not_authenticate_tcp_admin_api(self) -> None:
+        request = urllib.request.Request(f"{self.base_url}/v1/threads", method="GET")
+
+        with self.assertRaises(urllib.error.HTTPError) as error:
+            urllib.request.urlopen(request, timeout=5)
+
+        self.assertEqual(error.exception.code, 401)
+
 
     def test_login_issues_session_cookie_that_authenticates(self) -> None:
         status, headers, body = self.login()
@@ -1870,110 +1818,6 @@ class AdminApiIntegrationTests(unittest.TestCase):
                 self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
                 self.assertIn("invalid JSON", error.exception.message)
 
-    def test_health_reports_error_when_proxy_is_down(self) -> None:
-        _, body = self.health(proxy_alive=False)
-        self.assertEqual(body["network_controls"]["status"], "error")
-        self.assertEqual(body["status"], "degraded")
-        self.assertEqual(body["issues"], [{
-            "kind": "network_controls",
-            "summary": "Network controls are unavailable",
-            "detail": "The network policy is active, but the enforcing proxy is not accepting connections.",
-            "next_step": "Stop starting agents and use the operator plane to recover or upgrade the host.",
-        }])
-
-    def test_health_is_degraded_when_runtime_and_state_versions_differ(self) -> None:
-        _, body = self.health(
-            version={"status": "mismatch", "runtime": "1.8.0", "state": "1.7.0"}
-        )
-        self.assertEqual(body["version"]["status"], "mismatch")
-        self.assertEqual(body["status"], "degraded")
-        self.assertEqual(body["issues"], [{
-            "kind": "version",
-            "summary": "Host versions do not match",
-            "detail": "Runtime 1.8.0; durable state 1.7.0.",
-            "next_step": "Run a Kern upgrade or recovery from the operator plane.",
-        }])
-
-    def test_health_identifies_an_unavailable_version_file(self) -> None:
-        cases = (
-            (
-                {"status": "error", "runtime": None, "state": "1.8.0"},
-                "Unavailable or invalid: running root version (/opt/kern-host/VERSION).",
-            ),
-            (
-                {"status": "error", "runtime": "1.8.0", "state": None},
-                "Unavailable or invalid: durable-state version "
-                "(/mnt/kern-admin/admin-state/version.json).",
-            ),
-        )
-        for version, detail in cases:
-            with self.subTest(version=version):
-                _, body = self.health(version=version)
-
-                self.assertEqual(body["status"], "degraded")
-                self.assertEqual(body["issues"], [{
-                    "kind": "version",
-                    "summary": "Host version information is unavailable",
-                    "detail": detail,
-                    "next_step": (
-                        "Run a Kern recovery from the operator plane to restore the version metadata."
-                    ),
-                }])
-
-    def test_health_explains_runtime_errors_and_the_next_step(self) -> None:
-        set_runtime_statuses(codex="active", claude_code="error")
-        orchestrator._RUNTIME_STATUSES["claude_code"]["error_message"] = (
-            "Claude authentication probe timed out after 30 seconds"
-        )
-
-        _, body = self.health()
-
-        self.assertEqual(body["status"], "degraded")
-        self.assertEqual(body["issues"], [{
-            "kind": "agent_runtime",
-            "summary": "Claude Code is unavailable",
-            "detail": "Claude authentication probe timed out after 30 seconds",
-            "next_step": (
-                "Open Home > Agent runtimes > Claude Code, refresh its status, "
-                "and reconnect or revalidate the account if the error continues."
-            ),
-        }])
-
-    def test_health_is_degraded_when_root_volume_is_nearly_full(self) -> None:
-        _, body = self.health(
-            host={
-                "cpu": {},
-                "memory": {},
-                "filesystem": {
-                    "mounts": {
-                        "root": {"used_bytes": 15, "total_bytes": 16},
-                    }
-                },
-                "swap": {},
-            }
-        )
-
-        self.assertEqual(body["status"], "degraded")
-        self.assertEqual(body["issues"], [{
-            "kind": "root_filesystem",
-            "summary": "Root volume is nearly full",
-            "detail": "The root filesystem is 93.8% full.",
-            "next_step": (
-                "Stop agent work, inspect /tmp and /var/tmp, and remove unneeded temporary "
-                "files; redeploy if free space does not recover."
-            ),
-        }])
-
-    def test_health_never_spawns_codex(self) -> None:
-        # The health/status path must read cached state only — a hanging Codex
-        # app-server must never be able to block it.
-        set_runtime_statuses(codex="loading", claude_code="deactivated")
-        with patch(
-            "host.runtime.agent_runtime.orchestrator.codex_app_server.account_status",
-            side_effect=AssertionError("health must not call Codex"),
-        ):
-            _, body = self.health()
-        self.assertEqual(self.runtime(body)["status"], "loading")
 
     def test_runtime_status_loop_refreshes_cached_status(self) -> None:
         set_runtime_statuses(codex="loading", claude_code="deactivated")
@@ -2069,20 +1913,14 @@ class AdminApiIntegrationTests(unittest.TestCase):
         request = urllib.request.Request(f"{self.base_url}/v1/health")
         _add_session_auth(request, self.session_token)
         with (
-            patch("host.runtime.admin_api.service.host_metrics", return_value={"cpu": {}, "memory": {}, "filesystem": {}, "swap": {}}),
-            patch("host.runtime.admin_api.service.proxy_alive", return_value=True),
-            patch("host.runtime.admin_api.service.version_status", return_value={"status": "ok", "runtime": "0.2.0", "state": "0.2.0"}),
+            patch("host.runtime.admin_api.health.host_metrics", return_value={"cpu": {}, "memory": {}, "filesystem": {}, "swap": {}}),
+            patch("host.runtime.admin_api.health.proxy_alive", return_value=True),
+            patch("host.runtime.admin_api.health.version_status", return_value={"status": "ok", "runtime": "0.2.0", "state": "0.2.0"}),
             urllib.request.urlopen(request, timeout=5) as response,
         ):
             self.assertEqual(response.status, 200)
             self.assert_security_headers(response.headers)
 
-    def assert_security_headers(self, headers: Any) -> None:
-        self.assertEqual(headers["Content-Security-Policy"], admin_api.SECURITY_HEADERS["Content-Security-Policy"])
-        self.assertIn("connect-src 'self'", headers["Content-Security-Policy"])
-        self.assertEqual(headers["Referrer-Policy"], "no-referrer")
-        self.assertEqual(headers["X-Content-Type-Options"], "nosniff")
-        self.assertEqual(headers["X-Frame-Options"], "DENY")
 
     def test_agent_file_routes_use_sudo_helper(self) -> None:
         calls: list[list[str]] = []
@@ -4135,15 +3973,6 @@ class AdminApiIntegrationTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(load_policy()["network_integrations"], {"openai": {"enabled": True}})
 
-    def _enable_github_policy(self) -> None:
-        save_policy(
-            {
-                "network_integrations": {
-                    "github": {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "kern"}]}
-                },
-            },
-            "2026-06-08T00:00:01Z",
-        )
 
     def test_github_pending_push_approve_and_reject(self) -> None:
         state.save_proxy_github_token("ghs_working")
@@ -6427,7 +6256,6 @@ class AdminApiIntegrationTests(unittest.TestCase):
 
         _, events = self.request("GET", "/v1/threads/thread-t1/events")
         self.assertEqual(events["events"], [])
-
 
 
 class ToolRoutesTests(unittest.TestCase):

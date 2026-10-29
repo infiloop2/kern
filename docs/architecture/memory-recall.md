@@ -185,6 +185,11 @@ mid-turn suggestions retain their existing limit of three.
 
 ## Optional Jev and Luna reranking
 
+`workspace/memory_ranking.py` owns `_rerank_recall`, the Jev and Luna ranking
+functions, and their shared score validation and diagnostics. `memory.py` calls
+that helper with the existing candidates/query/details shape and retains
+search, page CRUD, and revision checks.
+
 Provider configuration and credentials stay inside the Host AI inference
 service. Workspace has no read grant on the provider configuration table.
 Every recall with candidates requests TypeSafe Jev and Luna Decisions rankings

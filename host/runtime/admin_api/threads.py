@@ -17,6 +17,12 @@ from host.memory_recall_rules import RELEVANT_PAGE_LIMIT
 from host.runtime.agent_runtime import agent_activity, orchestrator, turn_retries
 from host.runtime.admin_api import workspace_proxy
 from host.runtime.admin_api.errors import ApiError
+from host.runtime.admin_api.query import (
+    _event_page_limit,
+    _optional_bounded_positive_query_int,
+    _optional_non_negative_int,
+    _reject_query_keys,
+)
 from host.runtime.admin_api.request_params import clip_json_encoded_text as _clip_json_encoded_text, one as _one
 from host.runtime.core import host_errors, state
 from host.runtime.core.state import utc_now
@@ -63,57 +69,6 @@ _RUNTIME_USAGE_KEYS = {
     "hermes": "bedrock_usage",
 }
 _THREAD_SEND_LOCKS = tuple(threading.RLock() for _ in range(64))
-
-
-def _optional_non_negative_int(query: dict[str, list[str]], key: str) -> int | None:
-    value = _one(query, key)
-    if value is None:
-        return None
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be an integer") from exc
-    if parsed < 0:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be non-negative")
-    return parsed
-
-
-def _optional_bounded_positive_query_int(
-    query: dict[str, list[str]], key: str, maximum: int
-) -> int | None:
-    value = _one(query, key)
-    if value is None:
-        return None
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be an integer") from exc
-    if parsed < 1:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be positive")
-    if parsed > maximum:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"{key} must be at most {maximum}")
-    return parsed
-
-
-def _event_page_limit(query: dict[str, list[str]]) -> int:
-    value = _one(query, "limit")
-    if value is None:
-        return state.EVENT_PAGE_LIMIT
-    try:
-        parsed = int(value)
-    except ValueError as exc:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "limit must be an integer") from exc
-    if parsed < 1:
-        raise ApiError(HTTPStatus.BAD_REQUEST, "limit must be positive")
-    if parsed > state.EVENT_PAGE_LIMIT:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"limit must be at most {state.EVENT_PAGE_LIMIT}")
-    return parsed
-
-
-def _reject_query_keys(query: dict[str, list[str]], allowed: frozenset[str], label: str) -> None:
-    unexpected = sorted(set(query) - allowed)
-    if unexpected:
-        raise ApiError(HTTPStatus.BAD_REQUEST, f"unsupported {label} query parameter: {unexpected[0]}")
 
 
 def thread_route(

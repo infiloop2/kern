@@ -625,6 +625,8 @@ def _workspace_api_tool() -> dict[str, Any]:
 def _call_workspace_api(arguments: dict[str, Any]) -> dict[str, Any]:
     try:
         result = _tools_request("POST", "/call", arguments, socket_path=WORKSPACE_AGENT_SOCKET_PATH)
+    except TimeoutError:
+        return _tool_text("Workspace API timed out; outcome unknown. Read affected state before retrying a write.", is_error=True)
     except RuntimeError as exc:
         return _tool_text(f"Workspace API call failed: {exc}", is_error=True)
     except Exception as exc:
@@ -654,6 +656,8 @@ def _call_typed_workspace_tool(name: str, arguments: dict[str, Any]) -> dict[str
         )
     except RuntimeError as exc:
         return _tool_text(f"{label} call failed: {exc}", is_error=True)
+    except TimeoutError:
+        return _tool_text(f"{label} timed out; outcome unknown.", is_error=True)
     except Exception as exc:
         return _tool_text(f"{label} unavailable: {exc}", is_error=True)
     if result.get("status") != 200:
@@ -692,6 +696,8 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
             {"name": name, "input": forwarded},
             socket_path=socket_path,
         )
+    except TimeoutError:
+        return _tool_text("Tool call timed out; outcome unknown. Check the outcome before repeating a write or paid request.", is_error=True)
     except Exception as exc:
         return _tool_text(f"Tool call failed: {exc}", is_error=True)
     status = result.get("status")
@@ -707,7 +713,7 @@ def _call_tool(params: dict[str, Any]) -> dict[str, Any]:
         return _tool_text(json.dumps(pending, separators=_COMPACT_JSON))
     error = str(result.get("error") or "Tool call failed.")
     if result.get("reconnect_required"):
-        error += " (The operator needs to reconnect this tool in the admin UI.)"
+        error += " Ask the operator to reconnect this tool in Home > Integrations."
     return _tool_text(error, is_error=True)
 
 

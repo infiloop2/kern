@@ -367,6 +367,10 @@ block the operator from deciding approvals or disconnecting a tool.
 
 ## Input and output validation
 
+`host.runtime.tools.schema` owns `unsupported_schema_error`,
+`validate_against_schema`, and the supported declaration keywords.
+`tools_host` imports and re-exports the two validators for existing callers.
+
 The host schema-validates action input against the manifest `input_schema`
 before invoking the package, and validates a direct action's result against its
 `output_schema`. Per the contract, the tool still owns semantic validation and
