@@ -94,7 +94,7 @@ class UnmappedProviderError(ProviderWarning):
     """A provider failure with no curated user-facing mapping.
 
     Tool packages let it reach the host boundary, which records a warning in
-    Host diagnostics and returns a generic failure to the agent. Generic
+    Host diagnostics and returns the provider, operation and status. Generic
     provider bodies remain discarded; tool-specific mapped warnings may retain
     a bounded response when that provider integration deliberately opts in.
     """
@@ -110,7 +110,7 @@ class UnmappedProviderError(ProviderWarning):
         super().__init__(
             provider,
             operation,
-            f"Unmapped {provider} {operation} provider failure ({transport}).",
+            f"{provider} {operation} failed ({transport}). Ask the operator to check Host diagnostics.",
             status=status,
         )
 
@@ -122,7 +122,7 @@ def known_provider_transport_error(exc: WebRequestError) -> str:
 
 
 def unmapped_provider_error(provider: str, operation: str, exc: WebRequestError) -> UnmappedProviderError:
-    """Create an operator-diagnostic failure with a generic agent result."""
+    """Keep provider/status context without returning the provider body."""
 
     return UnmappedProviderError(provider, operation, status=exc.status)
 

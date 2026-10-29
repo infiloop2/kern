@@ -16,6 +16,10 @@ The trusted product chrome runs inside the authenticated admin page and calls
 `/v1/workspace/web-apps/...`. The App view presents one full-width command bar
 above the generated canvas and only the newest agent response or error; routine
 agent activity and the full conversation transcript are intentionally absent.
+`workspace/ui/composer-drafts.js` shares draft persistence with Chat while
+retaining the App storage key, the 50-draft cap, dictation receipts, and
+conditional clear-on-submit. Send state and attachments stay in this UI.
+
 Selection, composer drafts, event cursors, and asynchronous responses are keyed
 by app id so late results from one app cannot update another.
 

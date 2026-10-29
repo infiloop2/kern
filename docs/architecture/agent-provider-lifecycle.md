@@ -14,6 +14,9 @@ Each runtime carries one provider status. Status values are `deactivated`,
 OAuth login is needed or enabled Bedrock lacks a connected credential. The
 schedule-only `script` runtime has no provider credential or health probe. Startup
 initializes it to `active` synchronously before admitting turns.
+`service.main()` calls `orchestrator.publish_unmanaged_runtime_statuses()`
+before GitHub credential convergence in `admin_api/github_maintenance.py`,
+then starts the managed runtime loops through `orchestrator.start_background_loops()`.
 
 - **Status** is cached in orchestrator process memory. Managed runtimes report
   `loading` until their first provider poll; nothing persists it. The providerless
@@ -146,6 +149,12 @@ seconds for normal exit and the privileged scope check is bounded separately,
 so ordinary FINISHING is a short process-management window rather than a
 database operation. Public APIs deliberately flatten these phases: a thread is
 `running` while its live fence exists and `idle` after CLOSED.
+
+Codex `call()` uses one monotonic response-wait deadline, starting after the
+request is written and flushed, matching the Grok adapter. Unrelated
+notifications remain queued for `read_message()` but do not reset that budget.
+This call timeout does not cover lock acquisition or stdin writes and is
+separate from the execution lifecycle deadlines above.
 
 Each adapter also publishes a provider-confirmed, non-empty resumable session
 id as soon as it is safe to reuse. The orchestrator persists that callback

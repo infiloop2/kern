@@ -5,13 +5,13 @@ by exactly one package, and that package is the only code that parses
 messages arriving on it. Shared libraries live in ``core`` and serve no
 socket.
 
-- ``admin_api``     kern-admin: operator TCP API + workspace socket
+- ``admin_api``     kern-admin: operator TCP API, health, GitHub maintenance, workspace socket
 - ``agent_runtime`` kern-admin: socketless turn, trust, and harness subsystem
 - ``network_proxy`` kern-proxy: agent egress proxy (PROXY_PORT)
-- ``tools``         kern-tools: agent-facing tools socket
+- ``tools``         kern-tools: agent-facing tools socket and manifest schema validation
 - ``host_inference`` kern-host-inference: admin/Workspace-only provider socket
 - ``agent_network`` kern-agent-network: read-only introspection socket
-- ``workspace``     kern-workspace: Chat, Web Apps, and the agent Workspace API
+- ``workspace``     kern-workspace: Chat, Web Apps, memory recall/ranking, agent Workspace API
 - ``embeddings``    kern-embedding: isolated local ONNX inference + admin client
 - ``agent_shim``    kern-agent: MCP stdio shim, client-side only
 - ``core``          shared storage/state/policy libraries, no socket

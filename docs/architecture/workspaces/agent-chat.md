@@ -14,7 +14,10 @@ again.
 
 The trusted UI runs in the authenticated admin document. It calls the admin
 API directly; there is no iframe or `postMessage` bridge. Each visited thread
-keeps independent composer text, bounded event pages, and cursors. Opening a
+keeps independent composer text, bounded event pages, and cursors. Draft
+storage is shared with Apps through `workspace/ui/composer-drafts.js`, loaded
+by the admin shell before either consumer. It preserves the Chat storage key,
+the 50-draft cap, dictation receipts, and conditional clearing after submit. Opening a
 thread always lands on its newest message; background polling preserves the
 reader's current position. History loads newest-first and scrolling upward
 fetches older pages. Activity visibility changes rendering only, never stored

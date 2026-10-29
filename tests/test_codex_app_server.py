@@ -560,6 +560,28 @@ def parked_server() -> Any:
 
 
 class CodexAppServerTests(unittest.TestCase):
+    def test_call_deadline_survives_unrelated_notifications(self) -> None:
+        server = CodexAppServer()
+        notifications = [{"method": "notice", "params": {"index": i}} for i in range(3)]
+        now = 100.0
+
+        def receive(*, timeout):
+            nonlocal now
+            now += 0.4
+            return notifications.pop(0)
+
+        expected = list(notifications)
+        with (
+            patch.object(server, "_write_request_locked", return_value=1),
+            patch.object(server, "_require_proc"),
+            patch.object(server._messages, "get", side_effect=receive),
+            patch.object(codex_app_server_module.time, "monotonic", side_effect=lambda: now),
+        ):
+            with self.assertRaisesRegex(codex_app_server_module.CodexTimeout, "timed out"):
+                server.call("account/read", {}, timeout=1.0)
+            self.assertEqual([server.read_message() for _ in expected], expected)
+
+
     def test_session_size_uses_metadata_and_argv_in_the_matching_runtime(self) -> None:
         session_id = "01900000-0000-7000-8000-000000000001"
         for runtime in codex_app_server_module.CODEX_RUNTIME_TYPES:

@@ -354,7 +354,7 @@ class OpenAIImagesToolTests(unittest.TestCase):
     def test_unmapped_transport_failure_becomes_a_host_warning(self) -> None:
         # A render that outran the timeout and a refused connection are the same
         # statusless failure here, so neither invents a cause for the agent: the
-        # host records the warning and returns its generic message.
+        # host records the warning and returns provider/status context.
         def fake_json_request(method: str, url: str, **kwargs: Any) -> JSONObject:
             raise WebRequestError("failed", status=0)
 
