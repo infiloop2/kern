@@ -637,7 +637,7 @@ integration directly enforces:
 {
   "pypi.org": {
     "allow_http_methods": ["GET", "HEAD"],
-    "path_guards": ["^/simple(?:/.*)?$", "^/pypi/[^/]+/json$"]
+    "path_guards": ["^/simple(?:/.*)?$", "^/pypi/[^/]+(?:/[^/]+)?/json$"]
   },
   "files.pythonhosted.org": {
     "allow_http_methods": ["GET", "HEAD"],
@@ -647,11 +647,18 @@ integration directly enforces:
 ```
 
 Only `GET` and `HEAD` are allowed, so the integration is read-only by
-construction; package publishing is not part of it. PyPI metadata URL values
+construction; package publishing is not part of it. JSON metadata supports
+`/pypi/{project}/json` and `/pypi/{project}/{version}/json`; the latter is used
+by `pip-audit` to retrieve release-specific advisories. No query string is allowed
+on these JSON routes. PyPI metadata URL values
 take the parameter guard. Distribution-file paths on
 `files.pythonhosted.org` remain exempt because they are returned by PyPI.
 Request headers are not inspected: credential headers are removed, `User-Agent`
 is replaced with a fixed host value, and the rest are forwarded as sent.
+
+Version strings receive the same parameter checks as other metadata URL values.
+There are no version-specific exemptions: unusual releases containing long
+identifier-like numbers (including timestamps) may be denied.
 
 ## NPM Packages Integration
 

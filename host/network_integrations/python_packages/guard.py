@@ -21,10 +21,9 @@ from host.network_integrations.base import (
 from host.runtime.core.network_policy import route_allowed
 
 ROUTES = {
-    "pypi.org": (("GET", "HEAD"), (r"^/simple(?:/.*)?$", r"^/pypi/[^/]+/json$")),
+    "pypi.org": (("GET", "HEAD"), (r"^/simple(?:/.*)?$", r"^/pypi/[^/]+(?:/[^/]+)?/json$")),
     "files.pythonhosted.org": (("GET", "HEAD"), (r"^/packages(?:/.*)?$",)),
 }
-
 
 def host_allowed(config: ManagedIntegration, host: str) -> bool:
     del config

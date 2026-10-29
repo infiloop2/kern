@@ -3820,7 +3820,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
         self.assertIn("GraphQL denied", ui)
         self.assertIn("LFS uploads denied", ui)
         self.assertIn("pypi.org", ui)
-        self.assertIn("GET and HEAD only under /simple and /pypi/<package>/json", ui)
+        self.assertIn("GET and HEAD only under /simple, /pypi/<package>/json and /pypi/<package>/<version>/json", ui)
         self.assertIn("registry.npmjs.org", ui)
         self.assertIn("Add domain rule", html)
         self.assertIn("Path guards (optional)", html)

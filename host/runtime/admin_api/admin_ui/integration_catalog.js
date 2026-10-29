@@ -419,7 +419,7 @@ export const MANAGED_INTEGRATIONS = {
       "Parameter guard: requested package names and URL values are checked against deterministic rules for secrets, credentials, personal identifiers, and encoded payloads; a match denies the request before it is sent. Headers are not scanned; credential headers are removed and User-Agent is replaced with a fixed host value. Distribution download URL paths on files.pythonhosted.org are exempt and are not scanned.",
     ],
     networkScope: [
-      ["pypi.org", "GET and HEAD only under /simple and /pypi/<package>/json"],
+      ["pypi.org", "GET and HEAD only under /simple, /pypi/<package>/json and /pypi/<package>/<version>/json"],
       ["files.pythonhosted.org", "GET and HEAD only under /packages"],
     ],
   },
