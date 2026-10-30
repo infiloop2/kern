@@ -191,7 +191,7 @@ class RequestBodyLimitTests(unittest.TestCase):
 
     def test_memory_pressure_releases_slot_before_buffering(self) -> None:
         slots = MagicMock()
-        for available, admitted in ((63, False), (64, True)):
+        for available, denial in ((63, "large_body_memory_low"), (64, None)):
             slots.reset_mock()
             with (
                 self.subTest(available=available),
@@ -199,11 +199,27 @@ class RequestBodyLimitTests(unittest.TestCase):
                 patch.object(network_proxy, "MAX_BODY_BYTES", 8192),
                 patch("builtins.open", mock_open(read_data=f"MemAvailable: {available} kB\n")),
             ):
-                self.assertEqual(network_proxy.acquire_large_body_slot(), admitted)
+                self.assertEqual(network_proxy.acquire_large_body_slot(), denial)
                 slots.acquire.assert_called_once_with(blocking=False)
-                self.assertEqual(slots.release.call_count, 0 if admitted else 1)
+                self.assertEqual(slots.release.call_count, 0 if denial is None else 1)
         with patch("builtins.open", side_effect=OSError):
-            self.assertFalse(network_proxy.large_body_memory_available())
+            self.assertEqual(network_proxy.large_body_memory_denial(), "large_body_memory_unavailable")
+
+    def test_memory_failures_are_classified_and_release_slots(self) -> None:
+        for content, expected in (
+            ("MemAvailable: 0 kB\n", "large_body_memory_low"),
+            ("MemAvailable: invalid kB\n", "large_body_memory_unavailable"),
+            ("MemAvailable: -1 kB\n", "large_body_memory_unavailable"),
+            ("MemTotal: 1024 kB\n", "large_body_memory_unavailable"),
+        ):
+            slots = MagicMock()
+            with (
+                self.subTest(content=content),
+                patch.object(network_proxy, "LARGE_BODY_SLOTS", slots),
+                patch("builtins.open", mock_open(read_data=content)),
+            ):
+                self.assertEqual(network_proxy.acquire_large_body_slot(), expected)
+                slots.release.assert_called_once_with()
 
     def test_socket_reader_preserves_unconsumed_bytes_across_reads(self) -> None:
         sock = MagicMock()
@@ -229,9 +245,40 @@ class RequestBodyLimitTests(unittest.TestCase):
 class ProxyCapacityTests(unittest.TestCase):
     def setUp(self) -> None:
         # Capacity/framing regressions do not depend on the test host's load.
-        memory = patch.object(network_proxy, "large_body_memory_available", return_value=True)
+        memory = patch.object(network_proxy, "large_body_memory_denial", return_value=None)
         memory.start()
         self.addCleanup(memory.stop)
+
+    def test_memory_denials_reach_http_and_websocket_without_buffering(self) -> None:
+        from host.network_integrations.base import PROXY_DENIAL_REASONS
+
+        guidance = {reason.code: reason.guidance for reason in PROXY_DENIAL_REASONS}
+        for reason in ("large_body_memory_low", "large_body_memory_unavailable"):
+            with self.subTest(reason=reason), patch.object(network_proxy, "large_body_memory_denial", return_value=reason):
+                client = MagicMock()
+                with (
+                    patch.object(network_proxy, "SocketReader"),
+                    patch.object(network_proxy, "read_request_head", return_value=("POST", "/upload", [("Transfer-Encoding", "chunked")])),
+                    patch.object(network_proxy, "read_body") as read_body,
+                    patch.object(network_proxy, "append_network_event") as event,
+                ):
+                    network_proxy.ProxyHandler._serve_tls_request(MagicMock(), "example.com", 443, client)
+                self.assertEqual(event.call_args.args[-1], reason)
+                response = client.sendall.call_args.args[0]
+                self.assertTrue(response.startswith(b"HTTP/1.1 503 Service Unavailable\r\n"))
+                self.assertNotIn(b"Retry-After:", response)
+                self.assertIn(b"Connection: close\r\n", response)
+                self.assertTrue(response.endswith(b"\r\n\r\n" + reason.encode()))
+                read_body.assert_not_called()
+                with patch.object(network_proxy, "LARGE_BODY_THRESHOLD", 4):
+                    guard = network_proxy.WebSocketClientGuard(lambda _message: None)
+                    with self.assertRaises(network_proxy.WebSocketDenied) as caught:
+                        guard.feed(masked_frame(b"12345"))
+                self.assertEqual(caught.exception.code, reason)
+                self.assertIn(reason, guidance)
+        for code in ("large_body_memory_low", "large_body_memory_unavailable", "large_body_slots_busy"):
+            self.assertNotIn("four", guidance[code])
+            self.assertIn("reconnect before retrying", guidance[code])
 
     def test_proxy_has_room_for_all_admitted_runtime_pools(self) -> None:
         from host.runtime.agent_runtime.orchestrator import TURN_LIMIT_PER_RUNTIME
@@ -277,9 +324,10 @@ class ProxyCapacityTests(unittest.TestCase):
         slots.release.assert_not_called()
         read_body.assert_not_called()
         append_event.assert_called_once_with(
-            "https", "POST", "example.com", 443, "/upload", "", False, "request_body_capacity"
+            "https", "POST", "example.com", 443, "/upload", "", False, "large_body_slots_busy"
         )
         self.assertIn(b"429 Too Many Requests", client.sendall.call_args.args[0])
+        self.assertIn(b"Retry-After: 1\r\n", client.sendall.call_args.args[0])
 
     def test_compressed_small_wire_body_uses_large_buffer_slot(self) -> None:
         slots = MagicMock()
@@ -518,7 +566,7 @@ class ProxyCapacityTests(unittest.TestCase):
             guard = network_proxy.WebSocketClientGuard(lambda _message: None)
             with self.assertRaises(network_proxy.WebSocketDenied) as caught:
                 guard.feed(masked_frame(b"12345"))
-        self.assertEqual(caught.exception.code, "websocket_body_capacity")
+        self.assertEqual(caught.exception.code, "large_body_slots_busy")
         slots.acquire.assert_called_once_with(blocking=False)
         slots.release.assert_not_called()
 

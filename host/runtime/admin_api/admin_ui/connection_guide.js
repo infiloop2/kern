@@ -17,6 +17,7 @@ let copyFeedbackGeneration = 0;
 
 const INTEGRATION_LOGOS = {
   "tool:sec_edgar": `<span class="integration-logo-word">SEC</span>`,
+  "tool:nse_filings": `<span class="integration-logo-word">NSE</span>`,
   "tool:seo_metrics_api": `<span class="integration-logo-word">SEO</span>`,
   "tool:trustmrr": `<span class="integration-logo-word">TrustMRR</span>`,
   "tool:ahrefs_domain_rating": `<span class="integration-logo-word">ahrefs</span>`,

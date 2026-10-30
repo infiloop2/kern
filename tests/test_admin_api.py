@@ -6403,6 +6403,39 @@ class ToolRoutesTests(unittest.TestCase):
         self.assertNotIn("intent/tweet", json.dumps(body))
         self.assertNotIn("messages/compose", json.dumps(body))
 
+    def test_aeo_checker_independent_write_only_config_persists_through_routes(self) -> None:
+        from host.runtime.tools import tools_host
+        from host.tools import aeo_checker
+        from host.tools.results import ActionExecuted, ActionFailed
+        from test_tools_aeo_checker import openai_response, anthropic_response
+
+        self.request("POST", "/v1/tools/aeo_checker/enable")
+        for provider, key, other, fixture in (
+            ("openai", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", openai_response),
+            ("anthropic", "ANTHROPIC_API_KEY", "OPENAI_API_KEY", anthropic_response),
+        ):
+            secret = "aeo-route-fixture-" + provider
+            self.request("PUT", "/v1/tools/aeo_checker/config", {"key": key, "value": secret})
+            _, body = self.request("GET", "/v1/tools")
+            entry = self.tool_entry(body, "aeo_checker")
+            config = {item["key"]: item for item in entry["config"]}
+            self.assertTrue(entry["enabled"])
+            self.assertTrue(config[key]["set"])
+            self.assertFalse(config[other]["set"])
+            self.assertNotIn(secret, json.dumps(body))
+            self.assertEqual(entry["actions"][0]["id"], "check_query")
+            api = tools_host.host_api_for(aeo_checker.BUNDLED_TOOL, tools_host.NO_CONNECTION, None, action_id="check_query")
+            self.assertEqual(api.config[key], secret)
+            question = {"provider": provider, "query": "Which bookkeeping tools work for small businesses?"}
+            with patch.object(aeo_checker, "json_request", return_value=fixture()) as request:
+                result = aeo_checker.BUNDLED_TOOL.execute("check_query", question, api)
+                self.assertIsInstance(result, ActionExecuted)
+                request.assert_called_once()
+                question["provider"] = "anthropic" if provider == "openai" else "openai"
+                self.assertIsInstance(aeo_checker.BUNDLED_TOOL.execute("check_query", question, api), ActionFailed)
+                request.assert_called_once()
+            self.request("PUT", "/v1/tools/aeo_checker/config", {"key": key, "value": ""})
+
     def test_config_and_enable_flow(self) -> None:
         # Config is scoped per tool: a key must be declared by that tool.
         with self.assertRaises(urllib.error.HTTPError) as error:

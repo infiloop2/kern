@@ -188,6 +188,16 @@ SMOKE_MANAGED_DOMAINS = (
     "bedrock-runtime.us-west-2.amazonaws.com",
 )
 SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
+    "nse_filings": (
+        ("lookup_company", {"ticker": "INFY"}),
+        ("list_filings", {"ticker": "INFY", "category": "announcements", "date_from": "2025-01-16", "date_to": "2025-01-16"}),
+        ("download_document", {"ticker": "INFY", "category": "financial_results", "date_from": "2025-01-16", "date_to": "2025-01-16", "document": "INDAS_117294_1348219_16012025074210.xml"}),
+    ),
+    # Fresh hosts have neither provider key: both branches must fail locally
+    # before a paid request, while remaining discoverable through the shim.
+    "aeo_checker": tuple(("check_query", {
+        "provider": provider, "query": "Which bookkeeping tools are recommended for small businesses?",
+    }) for provider in ("openai", "anthropic")),
     "sec_edgar": (
         ("lookup_company", {"ticker": "AAPL"}),
         ("get_submissions", {"cik": "0000320193"}),
@@ -4030,12 +4040,14 @@ PY""", check=True)
                 }
                 name = f"{tool_id}_{action_id}"
                 response, parsed = shim_bundled_call(tool_id, action_id, arguments)
-                # Polymarket and Web Fetch need no credential or config. The
+                # NSE, Polymarket and Web Fetch need no credential or config. The
                 # three WhatsApp local-state reads are also valid while no
                 # account is linked; only its send must fail closed. Google Ads
                 # country lookup also reads bundled public data without OAuth.
                 direct_without_connection = (tool_id == "whatsapp" and action_id != "send_message") or (tool_id == "browser" and action_id in {"x_connection_status", "linkedin_connection_status", "screenshot_url"}) or (tool_id == "google_ads" and action_id == "list_locations")
-                if tool_id == "indexnow":
+                if tool_id == "nse_filings":
+                    self._check_nse_public_result(action_id, response, parsed)
+                elif tool_id == "indexnow":
                     if response.get("isError") or not isinstance(parsed, dict):
                         raise AssertionError(f"managed-key {name} failed")
                     if action_id == "submit_urls":
@@ -4130,6 +4142,25 @@ PY""", check=True)
             "uploads worked, non-agent peers were rejected, and only the explicitly denied "
             "managed-key IndexNow proposal was retained"
         )
+
+    @staticmethod
+    def _check_nse_public_result(action_id: str, response: dict, parsed: object) -> None:
+        if response.get("isError") or not isinstance(parsed, dict):
+            raise AssertionError(f"credential-free nse_filings_{action_id} failed: {response} {parsed}")
+        if action_id == "lookup_company":
+            matches = parsed.get("matches")
+            if parsed.get("ticker") != "INFY" or not isinstance(matches, list) or not any(
+                isinstance(row, dict) and row.get("ticker") == "INFY" and row.get("name") and row.get("series")
+                for row in matches
+            ):
+                raise AssertionError("NSE smoke lookup returned no exact Infosys equity identity")
+        else:
+            expected_mime = "application/json" if action_id == "list_filings" else "text/plain"
+            size, path = parsed.get("size_bytes"), parsed.get("filesystem_path")
+            if (parsed.get("media_type") != expected_mime or type(size) is not int or size <= 0
+                    or not isinstance(path, str) or not path.startswith("/mnt/kern-agent/agent-home/tool_assets/")
+                    or "SHA-256:" not in str(parsed.get("summary", ""))):
+                raise AssertionError("NSE smoke download returned no complete source asset")
 
     def _check_credential_free_approvals(self, denied_proposals: dict[str, set[str]]) -> None:
         # This endpoint includes terminal history. Only proposals created and

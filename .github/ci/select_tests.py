@@ -20,7 +20,7 @@ UI = frozenset({ADMIN, WORKSPACE})
 # External API tool packages supply Home manifests/guides, but do not run inside
 # the workspace or native browser. Shared tool contracts are deliberately absent.
 API_TOOLS = frozenset({
-    "ahrefs_domain_rating", "apify", "apify_developer", "brave_search",
+    "aeo_checker", "ahrefs_domain_rating", "apify", "apify_developer", "brave_search",
     "cloudwatch_logs", "elevenlabs", "fal_ai", "gmail", "google_ads",
     "google_calendar", "google_search", "google_search_console", "ibkr",
     "indexnow", "instagram", "instagram_ads", "instagram_discovery", "linkedin",

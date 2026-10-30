@@ -53,6 +53,24 @@ class CredentialFreeApprovalSmokeTests(unittest.TestCase):
             self.check([{"approval_id": "other", "status": "denied"}], {})
 
 
+class NsePublicSmokeTests(unittest.TestCase):
+    def test_credential_free_lookup_and_assets_require_successful_results(self):
+        lookup = {"ticker": "INFY", "matches": [{"ticker": "INFY", "name": "Infosys Limited", "series": "EQ"}]}
+        asset = {"media_type": "application/json", "size_bytes": 12,
+                 "filesystem_path": "/mnt/kern-agent/agent-home/tool_assets/nse.json", "summary": "SHA-256: example"}
+        AwsSmoke._check_nse_public_result("lookup_company", {}, lookup)
+        AwsSmoke._check_nse_public_result("list_filings", {}, asset)
+        AwsSmoke._check_nse_public_result("download_document", {}, {**asset, "media_type": "text/plain"})
+        for action, value in (("lookup_company", {"ticker": "INFY", "matches": []}),
+                              ("list_filings", {}), ("list_filings", {**asset, "size_bytes": 0}),
+                              ("download_document", asset)):
+            with self.assertRaises(AssertionError):
+                AwsSmoke._check_nse_public_result(action, {}, value)
+        # A network failure is a failed live read, never a missing-credentials success.
+        with self.assertRaisesRegex(AssertionError, "credential-free"):
+            AwsSmoke._check_nse_public_result("lookup_company", {"isError": True}, None)
+
+
 class GitHubWriteForwardingSmokeTests(unittest.TestCase):
     def _event(self, **overrides):
         return {
@@ -946,6 +964,25 @@ class StageAwsSmokeTests(unittest.TestCase):
                     self.assertIn("not set", result.error.lower())
                     self.assertIn("SEC_CONTACT_EMAIL", result.error)
             source.assert_not_called()
+
+    def test_fresh_smoke_aeo_provider_calls_fail_without_paid_requests(self) -> None:
+        from host.tools.aeo_checker import KEYS
+        from host.tools.results import ActionFailed
+        from host.tools.shared import web
+        from test_tools import FakeHostAPI
+
+        calls = SMOKE_TOOL_CALLS["aeo_checker"]
+        self.assertEqual({arguments["provider"] for _, arguments in calls}, {"openai", "anthropic"})
+        with patch.object(web._OPENER, "open") as request:
+            for action_id, arguments in calls:
+                with self.subTest(provider=arguments["provider"]):
+                    api = FakeHostAPI(config={})
+                    result = BUNDLED_TOOLS["aeo_checker"].execute(action_id, arguments, api)
+                    self.assertIsInstance(result, ActionFailed)
+                    self.assertIn("not set", result.error.lower())
+                    self.assertIn(KEYS[arguments["provider"]], result.error)
+                    self.assertEqual(api.costs.calls, [])
+            request.assert_not_called()
 
     def test_fresh_smoke_has_valid_input_for_every_bundled_action(self) -> None:
         covered = {
