@@ -159,7 +159,10 @@ the GitHub Actions summary. `stage_integration_checks.py` owns Codex, Claude
 Code, and GitHub checks. `stage_bedrock_checks.py` owns the Bedrock credential
 and Hermes checks. `stage_tool_checks.py` owns bundled-tool preflight and
 the deterministic live MCP scenarios. New tool coverage belongs in the tool
-module; adding a bundled tool does not require editing suite registration.
+module. Python suite registration is discovered automatically; add a new tool
+to the workflow dispatch choices, map its enable-only config secrets in
+`kern-stage.yml`, and supply fresh-host inputs in `SMOKE_TOOL_CALLS`. The
+smoke completeness tests check the workflow and action-fixture coverage.
 
 Each integration prints its start, outcome, and elapsed time. Provider checks
 print runtime state, guard outcomes, thread id/model/effort/status, and allowed or
@@ -186,6 +189,21 @@ present values through the admin API before preflight. Values already stored on
 the persistent host remain usable when the matching repository secret is absent.
 This covers API-key tools and multi-field integrations such as IBKR without
 tool-specific test code.
+
+AEO Checker accepts either `KERN_STAGE_OPENAI_API_KEY` or
+`KERN_STAGE_ANTHROPIC_API_KEY`, or the matching key saved through its stage
+Integration settings. The OpenAI repository secret also configures the separate
+OpenAI Image Generation tool in an `all` run; stored keys remain tool-scoped.
+Either AEO provider key is sufficient to enable the tool and pass preflight.
+AEO queries run directly without per-call approval and pass the parameter
+guard with only its longer-text tier enabled. Both the 5000-character and
+5120-UTF-8-byte limits apply; 5000 multibyte characters may exceed the byte cap.
+The `aeo_checker` suite runs one paid buyer-question observation for each
+configured provider and explicitly leaves unconfigured providers untested.
+It requires a complete searched answer with citation evidence; a partial,
+unsearched, or uncited answer fails the probe. A fresh-host smoke instead
+invokes both provider branches without keys and requires local missing-key
+failures, with no paid calls.
 
 OAuth tool configuration and login are persistent operator state, not CI
 secrets. Add the callback URI `http://127.0.0.1:7443/oauth/callback`, set the app
@@ -222,6 +240,7 @@ id needed by the next action.
 
 | Integration | Live calls in one run | Side effect | Expected metered usage |
 | --- | --- | --- | --- |
+| AEO Checker | `check_query` once per configured provider, up to two observations | None | Each provider: up to three native web searches ($0.01 each) plus model input/output tokens; output capped at 4096 tokens. Kern records published-rate estimates when provider usage is available. Unconfigured providers incur no query. |
 | Brave Search | `search_web` once | None | One Brave Search request. |
 | AWS CloudWatch Logs | `filter_log_events` once against `KERN_STAGE_CLOUDWATCH_LOGS_TEST_LOG_GROUP` over the preceding five minutes, limit 1 | None | One `FilterLogEvents` read; no retries, writes, unmasking, or log-group discovery. |
 | Gmail | `search_messages`, `list_labels`, and `list_drafts`; conditional `read_message` and `read_thread`; denied send, message-change, and label proposals; approved draft create and delete | One temporary draft, deleted in the same check | Three to five reads and two writes against the connected account; denied proposals make no write. |

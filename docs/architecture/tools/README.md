@@ -24,6 +24,8 @@ another host implementation of the same contract.
   private DM reads and exact text sends.
 - [WhatsApp media contract](whatsapp.md) documents private staging, approved
   native image/video sends, previews, and verification boundaries.
+- [NSE filing adapter](nse-filings.md) documents the public source mapping,
+  pagination, verified downloads and observed coverage limits.
 
 Tool-specific documentation lives on each admin UI **Home > Integrations** page
 and is rendered from the guide content owned by each package under `host/tools/`. Those

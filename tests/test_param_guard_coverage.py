@@ -31,6 +31,7 @@ from test_tools import FakeHostAPI
 # (tool_id, action_id, field) -> guarded free-text parameter. The tool's
 # package test and the behavioral tests below exercise each.
 GUARDED_FIELDS = {
+    ("aeo_checker", "check_query", "query"),
     ("trustmrr", "get_startup", "slug"),
     ("trustmrr", "list_startups", "xHandle"),
     ('prolific', 'get_filters', 'search'),
@@ -182,6 +183,19 @@ APPROVAL_GATED = "approval-gated content: the operator approval is the control"
 TYPED = "typed value: enum/id/timestamp/cursor grammar is stricter than scanning"
 
 EXEMPT_FIELDS = {
+    ("aeo_checker", "check_query", "provider"): TYPED,
+    ("nse_filings", "lookup_company", "ticker"): TYPED,
+    ("nse_filings", "list_filings", "ticker"): TYPED,
+    ("nse_filings", "list_filings", "category"): TYPED,
+    ("nse_filings", "list_filings", "date_from"): TYPED,
+    ("nse_filings", "list_filings", "date_to"): TYPED,
+    ("nse_filings", "list_filings", "page"): TYPED,
+    ("nse_filings", "download_document", "ticker"): TYPED,
+    ("nse_filings", "download_document", "category"): TYPED,
+    ("nse_filings", "download_document", "date_from"): TYPED,
+    ("nse_filings", "download_document", "date_to"): TYPED,
+    ("nse_filings", "download_document", "page"): TYPED,
+    ("nse_filings", "download_document", "document"): "Safe basename requires fresh issuer-index membership on the fixed NSE archive host.",
     ("sec_edgar", "lookup_company", "ticker"): "Matched locally against a fixed SEC directory; never sent in the request.",
     ("sec_edgar", "get_submissions", "cik"): TYPED,
     ("sec_edgar", "get_submissions", "history_file"): "Strict CIK-bound submissions filename grammar.",
