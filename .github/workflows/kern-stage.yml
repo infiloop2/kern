@@ -12,6 +12,7 @@ on:
         options:
           - all
           - all_runtimes
+          - aeo_checker
           - seo_metrics_api
           - ahrefs_domain_rating
           - apify
@@ -32,6 +33,7 @@ on:
           - instagram_ads
           - instagram_discovery
           - linkedin
+          - nse_filings
           - google_search
           - openai_images
           - openrouter
@@ -264,6 +266,7 @@ jobs:
           KERN_STAGE_RUNWAY_API_SECRET: ${{ secrets.KERN_STAGE_RUNWAY_API_SECRET }}
           KERN_STAGE_ELEVENLABS_API_KEY: ${{ secrets.KERN_STAGE_ELEVENLABS_API_KEY }}
           KERN_STAGE_OPENAI_API_KEY: ${{ secrets.KERN_STAGE_OPENAI_API_KEY }}
+          KERN_STAGE_ANTHROPIC_API_KEY: ${{ secrets.KERN_STAGE_ANTHROPIC_API_KEY }}
           KERN_STAGE_OPENROUTER_API_KEY: ${{ secrets.KERN_STAGE_OPENROUTER_API_KEY }}
           KERN_STAGE_PAGESPEED_INSIGHTS_API_KEY: ${{ secrets.KERN_STAGE_PAGESPEED_INSIGHTS_API_KEY }}
           KERN_STAGE_VERCEL_ACCESS_TOKEN: ${{ secrets.KERN_STAGE_VERCEL_ACCESS_TOKEN }}

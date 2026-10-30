@@ -96,7 +96,7 @@ LARGE_BODY_SLOTS = threading.BoundedSemaphore(MAX_LARGE_BODIES)
 METERED_RESPONSE_SLOTS = threading.BoundedSemaphore(MAX_METERED_RESPONSES)
 
 
-def large_body_memory_available() -> bool:
+def large_body_memory_denial() -> str | None:
     """Reject under memory pressure before buffering, decoding or parsing.
 
     Linux MemAvailable excludes swap and estimates reclaimable memory. The
@@ -106,19 +106,23 @@ def large_body_memory_available() -> bool:
         with open("/proc/meminfo") as handle:
             for line in handle:
                 if line.startswith("MemAvailable:"):
-                    return int(line.split()[1]) * 1024 >= 8 * MAX_BODY_BYTES > 0
+                    available = int(line.split()[1]) * 1024
+                    if available < 0:
+                        return "large_body_memory_unavailable"
+                    return None if available >= 8 * MAX_BODY_BYTES > 0 else "large_body_memory_low"
     except (OSError, ValueError, IndexError):
         pass
-    return False
+    return "large_body_memory_unavailable"
 
 
-def acquire_large_body_slot() -> bool:
+def acquire_large_body_slot() -> str | None:
+    """Reserve inspection capacity, or return a fixed, non-sensitive denial code."""
     if not LARGE_BODY_SLOTS.acquire(blocking=False):
-        return False
-    if not large_body_memory_available():
+        return "large_body_slots_busy"
+    denial = large_body_memory_denial()
+    if denial is not None:
         LARGE_BODY_SLOTS.release()
-        return False
-    return True
+    return denial
 
 
 def _is_public_ip(ip: str) -> bool:
@@ -369,11 +373,16 @@ class ProxyHandler(BaseHTTPRequestHandler):
             if ("chunked" in header_map.get("transfer-encoding", "").lower()
                     or body_length > LARGE_BODY_THRESHOLD
                     or content_encoding not in {"", "identity"}):
-                if not acquire_large_body_slot():
-                    capacity_reason = "request_body_capacity"
+                capacity_reason = acquire_large_body_slot()
+                if capacity_reason is not None:
                     append_network_event(protocol, method, host, port, path, query, False, capacity_reason)
+                    response_head = (
+                        b"HTTP/1.1 429 Too Many Requests\r\nRetry-After: 1\r\n"
+                        if capacity_reason == "large_body_slots_busy"
+                        else b"HTTP/1.1 503 Service Unavailable\r\n"
+                    )
                     client_tls.sendall(
-                        b"HTTP/1.1 429 Too Many Requests\r\nConnection: close\r\nRetry-After: 1\r\nContent-Length: "
+                        response_head + b"Connection: close\r\nContent-Length: "
                         + str(len(capacity_reason)).encode() + b"\r\n\r\n" + capacity_reason.encode()
                     )
                     return
@@ -938,8 +947,9 @@ class WebSocketClientGuard:
             raise WebSocketDenied("websocket_uninspectable")
         buffered_payload = max(0, min(length, len(buffer) - offset - 4))
         if opcode in (0x0, 0x1, 0x2) and len(self._message) + buffered_payload > LARGE_BODY_THRESHOLD and not self._large_body_slot:
-            if not acquire_large_body_slot():
-                raise WebSocketDenied("websocket_body_capacity")
+            capacity_denial = acquire_large_body_slot()
+            if capacity_denial is not None:
+                raise WebSocketDenied(capacity_denial)
             self._large_body_slot = True
             self._large_message_deadline = time.monotonic() + LARGE_MESSAGE_TIMEOUT
         total = offset + 4 + length

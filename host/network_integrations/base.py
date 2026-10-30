@@ -176,9 +176,21 @@ _CORE_PROXY_DENIAL_REASONS: tuple[DenialReason, ...] = (
         "send less data per request.",
     ),
     DenialReason(
-        "request_body_capacity",
-        "The proxy is inspecting its maximum of four large request bodies. Retry the request "
-        "when another large request finishes.",
+        "large_body_slots_busy",
+        "All shared large-body inspection slots are occupied. Retry only after another large transfer finishes. "
+        "For WebSocket clients, the connection was closed; reconnect before retrying.",
+    ),
+    DenialReason(
+        "large_body_memory_low",
+        "Available host memory is below the large-body inspection safety threshold. Ask the "
+        "operator to inspect memory pressure before retrying; finishing another transfer alone may not resolve it. "
+        "For WebSocket clients, the connection was closed; reconnect before retrying.",
+    ),
+    DenialReason(
+        "large_body_memory_unavailable",
+        "The proxy could not determine available host memory and refused large-body inspection. "
+        "Ask the operator to inspect the host memory reading before retrying. "
+        "For WebSocket clients, the connection was closed; reconnect before retrying.",
     ),
     DenialReason(
         "response_meter_capacity",
@@ -202,11 +214,6 @@ _CORE_PROXY_DENIAL_REASONS: tuple[DenialReason, ...] = (
         "A WebSocket message on this guarded domain could not be safely inspected (unsupported "
         "framing, extension, or size), so the connection was closed. Reconnect without "
         "extensions and keep messages under the inspection limit.",
-    ),
-    DenialReason(
-        "websocket_body_capacity",
-        "The proxy is inspecting its maximum of four large request bodies or WebSocket messages. "
-        "Reconnect and retry the message after another large transfer finishes.",
     ),
     DenialReason(
         "websocket_body_timeout",

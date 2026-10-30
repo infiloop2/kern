@@ -1156,6 +1156,25 @@ def _assert_mobile_composer_ergonomics(frame: Any) -> None:
         raise AssertionError("composer is clipped below the app frame viewport")
 
 
+def _resize_chat_viewport(page: Any, width: int, height: int) -> None:
+    size = {"width": width, "height": height}
+    if page.viewport_size == size:
+        return
+    # set_viewport_size can return before visualViewport dispatches resize.
+    # In particular, the usage row is visible both before and after rotation,
+    # so its visibility cannot acknowledge the new keyboard baseline. Wait for
+    # the event handlers and layout before issuing another viewport change.
+    page.evaluate("""() => {
+      window.__chatViewportResized = false;
+      window.visualViewport.addEventListener('resize', () => {
+        requestAnimationFrame(() => { window.__chatViewportResized = true; });
+      }, {once: true});
+    }""")
+    page.set_viewport_size(size)
+    page.wait_for_function("() => window.__chatViewportResized === true", timeout=5000)
+    page.evaluate("delete window.__chatViewportResized")
+
+
 def _assert_mobile_keyboard_viewport_recovery(page: Any, frame: Any) -> None:
     """The host shell follows a contracting mobile viewport and fully recovers.
 
@@ -1176,7 +1195,7 @@ def _assert_mobile_keyboard_viewport_recovery(page: Any, frame: Any) -> None:
         (390, 844, 500),
         (375, 667, 360),
     ):
-        page.set_viewport_size({"width": width, "height": full_height})
+        _resize_chat_viewport(page, width, full_height)
         # Each device size starts with the reader at the latest message; a
         # resize between devices while blurred may preserve an older anchor.
         frame.locator("#chat-scroll").evaluate("element => { element.scrollTop = element.scrollHeight; }")
@@ -1184,7 +1203,7 @@ def _assert_mobile_keyboard_viewport_recovery(page: Any, frame: Any) -> None:
         composer.fill("keyboard viewport probe")
         expect(body).to_have_class(re.compile(r"\bworkspace-input-focused\b"))
         expect(page.locator("#runtime-overview")).to_be_visible()
-        page.set_viewport_size({"width": width, "height": keyboard_height})
+        _resize_chat_viewport(page, width, keyboard_height)
         expect(page.locator("#runtime-overview")).to_be_hidden()
         _assert_mobile_app_owns_viewport(page, frame, f"{width}x{full_height} keyboard")
 
@@ -1204,20 +1223,20 @@ def _assert_mobile_keyboard_viewport_recovery(page: Any, frame: Any) -> None:
 
         # iOS can dismiss the keyboard without blurring the composer. The
         # usage row must return without navigating away from the thread.
-        page.set_viewport_size({"width": width, "height": full_height})
+        _resize_chat_viewport(page, width, full_height)
         expect(composer).to_be_focused()
         expect(page.locator("#runtime-overview")).to_be_visible()
         if width == 390:
             # Safari outside standalone mode must distinguish rotation from
             # keyboard contraction while the dismissed composer keeps focus.
-            page.set_viewport_size({"width": 844, "height": 390})
+            _resize_chat_viewport(page, 844, 390)
             expect(composer).to_be_focused()
             expect(page.locator("#runtime-overview")).to_be_visible()
-            page.set_viewport_size({"width": 844, "height": 230})
+            _resize_chat_viewport(page, 844, 230)
             expect(page.locator("#runtime-overview")).to_be_hidden()
-            page.set_viewport_size({"width": 844, "height": 390})
+            _resize_chat_viewport(page, 844, 390)
             expect(page.locator("#runtime-overview")).to_be_visible()
-            page.set_viewport_size({"width": width, "height": full_height})
+            _resize_chat_viewport(page, width, full_height)
             expect(page.locator("#runtime-overview")).to_be_visible()
             # Let the final portrait layout pin the transcript before blur
             # cancels the composer's pending animation frame.
@@ -1231,7 +1250,7 @@ def _assert_mobile_keyboard_viewport_recovery(page: Any, frame: Any) -> None:
         _assert_mobile_app_owns_viewport(page, frame, f"{width}x{full_height} restored")
 
     composer.fill("")
-    page.set_viewport_size({"width": 390, "height": 844})
+    _resize_chat_viewport(page, 390, 844)
 
     # Leaving a viewport-owned surface tears the shell mode down; reopening it
     # establishes the mode again without retaining keyboard geometry or

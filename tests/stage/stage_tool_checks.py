@@ -118,6 +118,8 @@ class StageToolChecks:
         missing_config = [
             item["key"] for item in entry.get("config", []) if not item.get("set")
         ]
+        if tool_id == "aeo_checker" and any(item.get("set") for item in entry.get("config", [])):
+            missing_config = []  # Either provider key independently enables a probe.
         connected = (entry.get("connection_status") or {}).get("connected") is True
         needs_connection = manifest.connection in {"oauth", "mcp_oauth", "whatsapp_linked_device"}
         missing_stage_inputs = []
@@ -170,7 +172,8 @@ class StageToolChecks:
             if BUNDLED_TOOLS[tool_id].manifest.connection in {"oauth", "mcp_oauth", "whatsapp_linked_device"}:
                 continue
             entry = listing[tool_id]
-            if all(item.get("set") for item in entry.get("config", [])):
+            configured = (any if tool_id == "aeo_checker" else all)(item.get("set") for item in entry.get("config", []))
+            if configured:
                 self._api("POST", f"/v1/tools/{tool_id}/enable", {})
 
     def _shim_call(self, request: dict) -> dict:
@@ -351,6 +354,7 @@ class StageToolChecks:
 
     def _check_tool_provider(self, tool_id: str) -> str:
         specialized = {
+            "aeo_checker": self._check_aeo_checker_live,
             "apify": self._check_apify_live,
             "apify_developer": self._check_apify_developer_live,
             "aurora_postgres": self._check_aurora_postgres_live,
@@ -399,6 +403,7 @@ class StageToolChecks:
             )
         else:
             calls = {
+                "nse_filings": (("lookup_company", {"ticker": "INFY"}),),
                 "sec_edgar": (("lookup_company", {"ticker": "AAPL"}),),
                 "trustmrr": (("list_startups", {"limit": 1}), ("get_startup", {"slug": "shipfast"})),
                 "seo_metrics_api": (("get_keyword_metrics", {"keywords": ["seo api"], "country": "US"}), ("get_usage", {})),
@@ -426,6 +431,23 @@ class StageToolChecks:
         suffix = "; publish proposal denied" if tool_id == "linkedin" else ""
         read_count = len(calls) + (1 if tool_id == "ibkr" else 0)
         return f"{read_count} live read(s) completed{suffix}"
+
+    def _check_aeo_checker_live(self) -> str:
+        # Only the explicitly selected stage suite runs these paid reads.
+        entry = next(item for item in self._api("GET", "/v1/tools")["tools"] if item["tool_id"] == "aeo_checker")
+        configured = {item["key"] for item in entry.get("config", []) if item.get("set")}
+        providers = [provider for provider in ("openai", "anthropic") if provider.upper() + "_API_KEY" in configured]
+        if not providers:
+            raise CredentialUnavailable("AEO Checker needs at least one configured provider key.")
+        for provider in providers:
+            result = self._successful_tool_call("aeo_checker_check_query", {
+                "provider": provider, "query": "Which bookkeeping tools are recommended for small businesses?",
+            })
+            if result.get("observation_status") != "complete" or result.get("search_status") != "completed" or not result.get("answer_text"):
+                raise AssertionError(f"AEO Checker {provider} did not return a complete searched answer.")
+            if not result.get("citations"):
+                raise AssertionError(f"AEO Checker {provider} returned no citation evidence.")
+        return f"{len(providers)} paid provider observation(s) completed; unconfigured providers not tested"
 
     def _check_instagram_ads_live(self) -> str:
         accounts = self._successful_tool_call("instagram_ads_list_accounts", {"limit": 1})["items"]
