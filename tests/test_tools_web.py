@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+from email.message import Message
 from pathlib import Path
 import unittest
 import urllib.error
@@ -47,6 +48,21 @@ def _serving(body: bytes) -> object:
 
 
 class WebResponseCapTests(unittest.TestCase):
+    def test_http_error_preserves_only_validated_aws_request_id(self) -> None:
+        valid = "12345678-abcd-1234-ABCD-123456789012"
+        for request_id in (valid, "password=private", "a" * 200, valid + "\nprivate", ""):
+            with self.subTest(request_id=request_id):
+                headers = Message()
+                headers["X-Amzn-RequestId"] = request_id
+                headers["Set-Cookie"] = "private-cookie"
+                error = urllib.error.HTTPError("https://api.example.com", 500, "error", headers, io.BytesIO(b"x" * 5000))
+                with patch.object(web._OPENER, "open", side_effect=error), self.assertRaises(WebRequestError) as caught:
+                    request_bytes("POST", "https://api.example.com", failure_message="failed")
+                self.assertEqual(caught.exception.request_id, valid if request_id == valid else "")
+                self.assertTrue(caught.exception.body_truncated)
+                self.assertEqual(len(caught.exception.body), 4096)
+                self.assertFalse(hasattr(caught.exception, "headers"))
+
     def test_streaming_http_error_body_uses_one_byte_lookahead(self) -> None:
         for size in (0, 100, 4096, 4097, 10000):
             body = b"x" * size

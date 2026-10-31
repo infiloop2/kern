@@ -2,16 +2,23 @@
 from __future__ import annotations
 
 import json
+import io
+import socket
+import ssl
+import urllib.error
+from email.message import Message
 from datetime import datetime, timezone
 import unittest
 from unittest.mock import patch
 
 from host.tools import aurora_postgres as pg
 from host.tools.aurora_postgres import client, sql
+from host.tools.aurora_postgres import diagnostics
 from host.tools.aurora_postgres.setup import BOOTSTRAP_SQL
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ApprovalExecuted
 from host.tools.shared.aws_sigv4 import sign_post
 from host.tools.shared.web import WebRequestError
+from host.tools.shared import web
 from test_tools import FakeHostAPI, assert_matches_output_schema
 
 
@@ -85,6 +92,7 @@ class AuroraTests(unittest.TestCase):
         self.api = api()
         self.aws = FakeAWS()
         self.enterContext(patch.object(client, "request_bytes", side_effect=self.aws))
+        self.diagnostics = self.enterContext(patch.object(diagnostics.host_errors, "emit_record"))
 
     def run_action(self, action, values):
         result = pg.BUNDLED_TOOL.execute(action, values, self.api)
@@ -188,6 +196,154 @@ class AuroraTests(unittest.TestCase):
         self.assertIn("may have succeeded", result.error)
         self.assertEqual(sum(url.endswith("/CommitTransaction") for url,_,_ in self.aws.calls),1)
         self.assertEqual(sum(s.startswith("INSERT") for s in self.aws.statements()),1)
+        context = self.diagnostics.call_args.args[0]["context"]
+        self.assertEqual(context["phase"], "commit")
+        self.assertEqual(context["operation"], "commit")
+        self.assertEqual(context["failure_type"], "transport_error")
+
+    def test_aws_http_failure_reaches_host_diagnostics_without_private_content(self):
+        request_id = "12345678-1234-5678-9abc-123456789abc"
+        headers = Message()
+        headers["X-Amzn-RequestId"] = request_id
+        headers["Set-Cookie"] = "private-cookie"
+        error = urllib.error.HTTPError("https://private-url", 400, "private-reason", headers,
+            io.BytesIO(b'{"__type":"com.amazonaws#UnrecognizedClientException","message":"private-row-password"}'))
+        with patch.object(client, "request_bytes", web.request_bytes), patch.object(web._OPENER, "open", side_effect=error) as opening:
+            result = self.run_action("query", {"sql":"SELECT :secret", "params":[{"name":"secret","value":"private-parameter"}]})
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("Check Host diagnostics", result.error)
+        opening.assert_called_once()
+        self.diagnostics.assert_called_once()
+        record = self.diagnostics.call_args.args[0]
+        self.assertEqual(record["component"], "tools.aurora_postgres")
+        self.assertEqual(record["severity"], "warning")
+        self.assertEqual(record["traceback"], "")
+        context = record["context"]
+        self.assertEqual(context["operation"], "begin")
+        self.assertEqual(context["phase"], "begin")
+        self.assertEqual(context["role"], "reader")
+        self.assertEqual(context["http_status"], 400)
+        self.assertEqual(context["aws_error_code"], "UnrecognizedClientException")
+        self.assertEqual(context["aws_request_id"], request_id)
+        self.assertEqual(context["failure_type"], "http_error")
+        self.assertGreaterEqual(context["elapsed_ms"], 0)
+        serialized = json.dumps(record) + result.error
+        for forbidden in ("private-", "SELECT", "arn:", "agent_store", "agent_data", "transaction-1", "AKIA", "s" * 40):
+            self.assertNotIn(forbidden, serialized)
+
+    def test_execute_failure_phases_and_secondary_rollback_are_retained(self):
+        for statement, phase in (("SET LOCAL", "transaction_setup"), ("SELECT session_user", "role_check"), ("INSERT", "statement")):
+            with self.subTest(phase=phase):
+                self.aws.calls.clear()
+                self.diagnostics.reset_mock()
+                self.aws.fail_sql = statement
+                def fail_rollback(method, url, **kwargs):
+                    if url.endswith("/RollbackTransaction"):
+                        raise WebRequestError("private cleanup error")
+                    return self.aws(method, url, **kwargs)
+                with patch.object(client, "request_bytes", side_effect=fail_rollback):
+                    result = self.run_action("insert_rows", INSERT)
+                self.assertIn("PostgreSQL rejected", result.error)
+                contexts = [call.args[0]["context"] for call in self.diagnostics.call_args_list]
+                self.assertEqual([c["phase"] for c in contexts], [phase, "rollback"])
+                self.assertEqual([c["operation"] for c in contexts], ["execute", "rollback"])
+                self.assertEqual(contexts[0]["correlation_id"], contexts[1]["correlation_id"])
+                self.assertEqual(contexts[0]["aws_error_code"], "DatabaseErrorException")
+                self.assertEqual(contexts[1]["failure_type"], "transport_error")
+
+    def test_transport_categories_do_not_log_exception_messages(self):
+        for cause, category in ((TimeoutError("private timeout"), "timeout"),
+                (ssl.SSLError("private TLS"), "tls_error"), (socket.gaierror("private DNS"), "dns_error"),
+                (ConnectionRefusedError("private connection"), "connection_error"),
+                (ValueError("private unknown"), "transport_error")):
+            with self.subTest(category=category):
+                self.diagnostics.reset_mock()
+                error = WebRequestError("private failure")
+                error.__cause__ = urllib.error.URLError(cause)
+                with patch.object(client, "request_bytes", side_effect=error):
+                    self.run_action("query", {"sql":"SELECT 1", "params":[]})
+                record = self.diagnostics.call_args.args[0]
+                self.assertEqual(record["context"]["failure_type"], category)
+                self.assertEqual(record["context"]["http_status"], 0)
+                self.assertNotIn("private", json.dumps(record))
+
+    def test_untrusted_error_metadata_and_truncation(self):
+        for body, code in ((b'{"code":"private-secret"}', "unrecognized"),
+                (b'{"__type":{"password":"private-secret"}}', "unavailable"),
+                (b'{"message":"private-secret"', "unavailable"), (b'[]', "unavailable")):
+            with self.subTest(body=body):
+                self.diagnostics.reset_mock()
+                error = WebRequestError("private error", status=500, body=body, body_truncated=True,
+                                        request_id="private-secret")
+                with patch.object(client, "request_bytes", side_effect=error):
+                    self.run_action("query", {"sql":"SELECT 1", "params":[]})
+                record = self.diagnostics.call_args.args[0]
+                self.assertEqual(record["context"]["aws_error_code"], code)
+                self.assertEqual(record["context"]["aws_request_id"], "")
+                self.assertTrue(record["context"]["error_body_truncated"])
+                self.assertNotIn("private", json.dumps(record))
+
+    def test_invalid_response_missing_transaction_and_role_mismatch_are_diagnosed(self):
+        for raw, failure in ((b'private malformed response', "invalid_response"),
+                             (b'{}', "missing_transaction_id")):
+            with self.subTest(failure=failure):
+                self.diagnostics.reset_mock()
+                with patch.object(client, "request_bytes", return_value=raw):
+                    self.assertIsInstance(self.run_action("query", {"sql":"SELECT 1", "params":[]}), ActionFailed)
+                self.assertEqual(self.diagnostics.call_args.args[0]["context"]["failure_type"], failure)
+                context = self.diagnostics.call_args.args[0]["context"]
+                self.assertEqual("elapsed_ms" in context, failure == "invalid_response")
+        self.diagnostics.reset_mock()
+        self.aws.wrong_role = True
+        self.run_action("query", {"sql":"SELECT 1", "params":[]})
+        context = self.diagnostics.call_args.args[0]["context"]
+        self.assertEqual(context["failure_type"], "role_mismatch")
+        self.assertEqual(context["phase"], "role_check")
+        self.assertNotIn("elapsed_ms", context)
+
+    def test_success_does_not_emit_failure_diagnostics(self):
+        self.run_action("query", {"sql":"SELECT 1", "params":[]})
+        self.diagnostics.assert_not_called()
+
+    def test_nested_response_validation_emits_diagnostic_before_successful_rollback(self):
+        cases = [
+            ("query", {"records": "private malformed rows"}),
+            ("query", {"records": ["private malformed row"]}),
+            ("query", {"records": [[{"stringValue": "private", "longValue": 1}]]}),
+            ("query", {"records": [[{"blobValue": "private"}]]}),
+            ("query", {"columnMetadata": "private malformed metadata"}),
+            ("query", {"columnMetadata": ["private malformed column"]}),
+            ("query", {"columnMetadata": [{"name": {"private": True}}]}),
+            ("query", {"columnMetadata": [{"name": "private", "typeName": "text"}], "records": [[]]}),
+            ("insert_rows", {"numberOfRecordsUpdated": "private malformed count"}),
+        ]
+        for action, response in cases:
+            with self.subTest(action=action, response=response):
+                self.diagnostics.reset_mock()
+                self.aws.calls.clear()
+                def malformed(method, url, **kwargs):
+                    raw = self.aws(method, url, **kwargs)
+                    statement = json.loads(kwargs["data"]).get("sql", "")
+                    if statement.startswith(("SELECT * FROM (", "INSERT")):
+                        return json.dumps(response).encode()
+                    return raw
+                with patch.object(client, "request_bytes", side_effect=malformed):
+                    result = self.run_action(action, INSERT if action == "insert_rows" else {"sql":"SELECT 1", "params":[]})
+                self.assertIsInstance(result, ActionFailed)
+                self.diagnostics.assert_called_once()
+                record = self.diagnostics.call_args.args[0]
+                self.assertEqual(record["context"]["failure_type"], "invalid_response")
+                self.assertEqual(record["context"]["phase"], "statement")
+                self.assertNotIn("elapsed_ms", record["context"])
+                self.assertNotIn("private", json.dumps(record))
+                self.assertTrue(self.aws.calls[-1][0].endswith("/RollbackTransaction"))
+                self.assertFalse(any(url.endswith("/CommitTransaction") for url, _, _ in self.aws.calls))
+
+    def test_invalid_action_input_is_not_reported_as_provider_failure(self):
+        result = self.run_action("query", {"sql":"DELETE FROM private_table", "params":[]})
+        self.assertIsInstance(result, ActionFailed)
+        self.assertFalse(self.aws.calls)
+        self.diagnostics.assert_not_called()
 
     def test_drop_is_queued_without_dropper_access_then_locked_rechecked_and_restrict(self):
         result = self.run_action("drop_table", {"table":"insights"})

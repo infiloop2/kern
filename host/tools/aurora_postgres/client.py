@@ -6,13 +6,16 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+import time
 from typing import Iterator, cast
+import uuid
 
 from host.tools.host_api import HostAPI
 from host.tools.json_types import JSONObject, JSONValue
 from host.tools.shared.aws_sigv4 import sign_post
 from host.tools.shared.web import request_bytes, WebRequestError
 from .sql import fail, identifier, json_bytes
+from .diagnostics import ResponseValidationError, aws_error_code, failure_type, invalid_response, report_failure
 
 PREFIX = "AURORA_POSTGRES_"
 CONFIG_KEYS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "CLUSTER_ARN", "DATABASE", "SCHEMA", "READER_SECRET_ARN", "WRITER_SECRET_ARN", "DDL_SECRET_ARN", "DROPPER_SECRET_ARN")
@@ -66,15 +69,15 @@ def parameter(name: str, value: str | None) -> JSONObject:
 def result_rows(response: JSONObject) -> list[list[str | None]]:
     records = response.get("records", [])
     if not isinstance(records, list):
-        fail("AWS returned an invalid result. Narrow the query or cast unsupported types to text.")
+        invalid_response("AWS returned an invalid result. Narrow the query or cast unsupported types to text.")
     rows: list[list[str | None]] = []
     for record in records:
         if not isinstance(record, list):
-            fail("AWS returned an invalid row.")
+            invalid_response("AWS returned an invalid row.")
         row: list[str | None] = []
         for field in cast(list[JSONValue], record):
             if not isinstance(field, dict) or len(field) != 1:
-                fail("AWS returned an unsupported field. Cast arrays and binary values to text.")
+                invalid_response("AWS returned an unsupported field. Cast arrays and binary values to text.")
             obj = cast(JSONObject, field)
             if obj.get("isNull") is True:
                 row.append(None)
@@ -85,7 +88,7 @@ def result_rows(response: JSONObject) -> list[list[str | None]]:
             elif type(obj.get("longValue")) is int or type(obj.get("doubleValue")) in (int, float):
                 row.append(json.dumps(next(iter(obj.values())), allow_nan=False))
             else:
-                fail("AWS returned an unsupported field. Cast arrays and binary values to text.")
+                invalid_response("AWS returned an unsupported field. Cast arrays and binary values to text.")
         rows.append(row)
     return rows
 
@@ -95,6 +98,9 @@ class Client:
         self.config = config
         self.role = role
         self.transaction_id = ""
+        self.phase = "statement"
+        # Local correlation only; never log the AWS transaction ID.
+        self.correlation_id = str(uuid.uuid4())
 
     def request(self, operation: str, extra: JSONObject) -> JSONObject:
         v = self.config.values
@@ -109,19 +115,15 @@ class Client:
         signed = sign_post(host=f"rds-data.{v['AWS_REGION']}.amazonaws.com", region=v["AWS_REGION"], service="rds-data",
                            access_key_id=v["AWS_ACCESS_KEY_ID"], secret_access_key=v["AWS_SECRET_ACCESS_KEY"],
                            body=payload, content_type="application/json", path=PATHS[operation])
+        started = time.monotonic()
+        phase = operation if operation != "execute" else self.phase
         try:
             raw = request_bytes("POST", signed.url, headers=signed.headers, data=payload,
                                 timeout=50, max_bytes=1100000, failure_message="Aurora Data API request failed.")
         except WebRequestError as exc:
-            # SQL error bodies may contain row contents. Never relay them or
-            # attach them to diagnostics. Only fixed exception codes are used.
-            code = ""
-            try:
-                error = json.loads(exc.body)
-                if isinstance(error, dict):
-                    code = str(error.get("__type", error.get("code", ""))).split("#")[-1]
-            except (ValueError, UnicodeError):
-                pass
+            report_failure(operation=operation, role=self.role, phase=phase, correlation_id=self.correlation_id,
+                           failure=failure_type(exc), elapsed_ms=int((time.monotonic() - started) * 1000), exc=exc)
+            code = aws_error_code(exc)
             messages = {
                 "DatabaseResumingException": "Aurora is resuming. Wait briefly before a new read; inspect writes before retrying.",
                 "HttpEndpointNotEnabledException": "Enable RDS Data API on the configured cluster.",
@@ -135,14 +137,16 @@ class Client:
             message = messages.get(code, "Aurora Data API failed. Check cluster availability, Data API enablement, region and database configuration.")
             if exc.status in (401, 403):
                 message = "AWS denied Aurora access. Check the dedicated IAM policy, key and role secret permissions in Home > Integrations."
-            fail(message + " No request was retried. A write or commit with a lost response may have succeeded; inspect before retrying.")
+            fail(message + " Check Host diagnostics for operation details. No request was retried. A write or commit with a lost response may have succeeded; inspect before retrying.")
         try:
             result = json.loads(raw)
             if not isinstance(result, dict):
                 raise ValueError
             json_bytes(result)
             return cast(JSONObject, result)
-        except (ValueError, UnicodeError):
+        except (ValueError, UnicodeError, RecursionError):
+            report_failure(operation=operation, role=self.role, phase=phase, correlation_id=self.correlation_id,
+                           failure="invalid_response", elapsed_ms=int((time.monotonic() - started) * 1000))
             fail("AWS returned an invalid response. Inspect write outcomes before retrying.")
         raise AssertionError("unreachable")
 
@@ -156,23 +160,33 @@ class Client:
         response = self.request("begin", {})
         transaction_id = response.get("transactionId")
         if not isinstance(transaction_id, str) or not transaction_id:
+            report_failure(operation="begin", role=self.role, phase="begin", correlation_id=self.correlation_id,
+                           failure="missing_transaction_id")
             fail("AWS did not return a transaction. No SQL was submitted.")
         self.transaction_id = cast(str, transaction_id)
         try:
+            self.phase = "transaction_setup"
             if readonly:
                 self.execute("SET TRANSACTION READ ONLY", [])
             self.execute("SET LOCAL statement_timeout = '20s'", [])
             self.execute("SET LOCAL lock_timeout = '5s'", [])
             self.execute(f'SET LOCAL search_path = pg_catalog, "{self.config.schema}"', [])
+            self.phase = "role_check"
             identity = result_rows(self.execute("SELECT session_user::text", []))
             if identity != [["kern_" + self.role]]:
+                report_failure(operation="execute", role=self.role, phase=self.phase, correlation_id=self.correlation_id,
+                               failure="role_mismatch")
                 fail("Role secret points to the wrong database user. Fix the four role secrets in Home > Integrations.")
+            self.phase = "statement"
             yield self
             if readonly:
                 self.request("rollback", {})
             else:
                 self.request("commit", {})
-        except Exception:
+        except Exception as exc:
+            if isinstance(exc, ResponseValidationError):
+                report_failure(operation="execute", role=self.role, phase=self.phase, correlation_id=self.correlation_id,
+                               failure="invalid_response")
             try:
                 self.request("rollback", {})
             except Exception:
