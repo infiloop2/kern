@@ -305,6 +305,167 @@ class AuroraTests(unittest.TestCase):
         self.run_action("query", {"sql":"SELECT 1", "params":[]})
         self.diagnostics.assert_not_called()
 
+    def test_error_header_is_allowlisted_and_has_precedence_over_body(self):
+        for header, body, expected in (
+            ("com.amazon#DatabaseResumingException:private-detail", b'{}', "DatabaseResumingException"),
+            ("AccessDeniedException", b'{"code":"DatabaseResumingException"}', "AccessDeniedException"),
+            ("PrivateSecretToken", b'{"code":"DatabaseResumingException"}', "unrecognized"),
+            ("private=secret", b'{"__type":"com.amazon#InvalidSecretException"}', "InvalidSecretException"),
+            ("", b'{"code":"DatabaseResumingException"}', "DatabaseResumingException"),
+            ("", b'{"code":"DatabaseResumingException:http://private/"}', "DatabaseResumingException"),
+            ("", b'{"__type":"com.amazon#DatabaseResumingException:http://private/"}', "DatabaseResumingException"),
+        ):
+            with self.subTest(header=header):
+                error = WebRequestError("private", status=400, body=body, aws_error_type=header)
+                self.assertEqual(diagnostics.aws_error_code(error), expected)
+                diagnostics.report_failure(operation="begin", role="reader", phase="begin", correlation_id="local", failure="http_error", exc=error)
+                self.assertNotIn("private", json.dumps(self.diagnostics.call_args.args[0]).lower())
+
+    def test_resume_then_original_read_or_write_runs_once(self):
+        for action, values in (("query", {"sql":"SELECT 1", "params":[]}), ("insert_rows", INSERT)):
+            with self.subTest(action=action):
+                self.aws.calls.clear()
+                self.diagnostics.reset_mock()
+                def resume(method, url, **kwargs):
+                    if not self.aws.calls:
+                        self.aws.calls.append((url, json.loads(kwargs["data"]), kwargs))
+                        raise WebRequestError("private", status=400, aws_error_type="DatabaseResumingException")
+                    return self.aws(method, url, **kwargs)
+                with patch.object(client, "request_bytes", side_effect=resume), patch.object(client.time, "sleep") as sleep:
+                    result = self.run_action(action, values)
+                self.assertIsInstance(result, ActionExecuted)
+                sleep.assert_called_once_with(2)
+                self.assertEqual(sum(url.endswith("/BeginTransaction") for url, _, _ in self.aws.calls), 2)
+                statements = self.aws.statements()
+                self.assertEqual(sum(s.startswith("INSERT") if action == "insert_rows" else s.startswith("SELECT * FROM (") for s in statements), 1)
+                self.assertEqual(sum(url.endswith("/CommitTransaction") for url, _, _ in self.aws.calls), int(action == "insert_rows"))
+                context = self.diagnostics.call_args.args[0]["context"]
+                self.assertEqual(context["attempt"], 1)
+                self.assertEqual(context["retry_outcome"], "will_retry")
+
+    def test_resume_budget_includes_requests_and_waits(self):
+        now = [0.0]
+        timeouts = []
+        def advance(seconds):
+            now[0] += seconds
+        def resume(*args, **kwargs):
+            timeouts.append(kwargs["timeout"])
+            advance(min(12, kwargs["timeout"]))
+            raise WebRequestError("private", status=400, body=b'{"code":"DatabaseResumingException"}')
+        with patch.object(client.time, "monotonic", side_effect=lambda: now[0]), patch.object(client.time, "sleep", side_effect=advance), patch.object(client, "request_bytes", side_effect=resume):
+            result = self.run_action("insert_rows", INSERT)
+        self.assertIsInstance(result, ActionFailed)
+        self.assertIn("startup wait budget was exhausted", result.error)
+        self.assertIn("attempted 5 times", result.error)
+        self.assertNotIn("not retried", result.error)
+        self.assertEqual(timeouts, [50, 46, 32, 18, 4])
+        self.assertEqual(now[0], 60)
+        self.assertFalse(self.aws.calls)
+        contexts = [c.args[0]["context"] for c in self.diagnostics.call_args_list]
+        self.assertEqual([c["attempt"] for c in contexts], [1, 2, 3, 4, 5])
+        self.assertEqual(contexts[-1]["retry_outcome"], "resume_budget_exhausted")
+        self.assertEqual(len({c["correlation_id"] for c in contexts}), 1)
+
+    def test_overslept_resume_wait_does_not_start_request_after_deadline(self):
+        now = [0.0]
+        def oversleep(seconds):
+            now[0] += 65
+        error = WebRequestError("private", status=400, aws_error_type="DatabaseResumingException")
+        with patch.object(client.time, "monotonic", side_effect=lambda: now[0]), patch.object(client.time, "sleep", side_effect=oversleep), patch.object(client, "request_bytes", side_effect=error) as request:
+            result = self.run_action("query", {"sql":"SELECT 1", "params":[]})
+        request.assert_called_once()
+        self.assertIn("exhausted", result.error)
+        self.assertEqual(self.diagnostics.call_args.args[0]["context"]["retry_outcome"], "resume_budget_exhausted")
+
+    def test_late_success_stops_before_sql_and_rolls_back_once(self):
+        for failed_cleanup in (False, True):
+            with self.subTest(failed_cleanup=failed_cleanup):
+                now = [0.0]
+                self.aws.calls.clear()
+                self.diagnostics.reset_mock()
+                def late_response(method, url, **kwargs):
+                    response = self.aws(method, url, **kwargs)
+                    if url.endswith("/BeginTransaction"):
+                        now[0] += 61
+                    elif failed_cleanup:
+                        raise WebRequestError("private cleanup")
+                    return response
+                instance = client.Client(client.Config.read(self.api), "writer")
+                with patch.object(client.time, "monotonic", side_effect=lambda: now[0]), patch.object(client, "request_bytes", side_effect=late_response):
+                    with self.assertRaisesRegex(sql.ToolInputValidationError, "startup wait budget was exhausted"):
+                        with instance.transaction(readonly=False):
+                            self.fail("Must not enter SQL transaction after startup expires")
+                self.assertEqual([url.rsplit("/", 1)[-1] for url, _, _ in self.aws.calls], ["BeginTransaction", "RollbackTransaction"])
+                self.assertEqual(instance.transaction_id, "")
+                context = self.diagnostics.call_args_list[0].args[0]["context"]
+                self.assertEqual(context["failure_type"], "startup_deadline_exceeded")
+                self.assertEqual(context["retry_outcome"], "resume_budget_exhausted")
+
+    def test_signing_time_counts_toward_startup_deadline(self):
+        now = [0.0]
+        sign = client.sign_post
+        def slow_sign(**kwargs):
+            now[0] += 61
+            return sign(**kwargs)
+        with patch.object(client.time, "monotonic", side_effect=lambda: now[0]), patch.object(client, "sign_post", side_effect=slow_sign), patch.object(client, "request_bytes") as request:
+            result = self.run_action("query", {"sql":"SELECT 1", "params":[]})
+        request.assert_not_called()
+        self.assertIn("startup wait budget was exhausted", result.error)
+        self.assertEqual(self.diagnostics.call_args.args[0]["context"]["attempt"], 0)
+
+    def test_malformed_success_after_body_resume_retains_final_attempt(self):
+        for body in (b'{"code":"DatabaseResumingException:http://internal/"}',
+                     b'{"__type":"com.amazon#DatabaseResumingException:http://internal/"}'):
+            with self.subTest(body=body):
+                self.diagnostics.reset_mock()
+                with patch.object(client, "request_bytes", side_effect=[WebRequestError("private", status=400, body=body), b'private malformed response']), patch.object(client.time, "sleep"):
+                    result = self.run_action("query", {"sql":"SELECT 1", "params":[]})
+                self.assertIn("invalid response", result.error)
+                contexts = [c.args[0]["context"] for c in self.diagnostics.call_args_list]
+                self.assertEqual([c["attempt"] for c in contexts], [1, 2])
+                self.assertEqual(contexts[-1]["failure_type"], "invalid_response")
+                self.assertNotIn("private", json.dumps(contexts))
+
+    def test_never_retry_other_errors_or_operations_even_if_resuming(self):
+        cases = [("begin", "", WebRequestError("private", status=status, aws_error_type=code))
+                 for status, code in ((400, "DatabaseUnavailableException"), (403, "DatabaseResumingException"),
+                                      (500, "DatabaseResumingException"), (0, "DatabaseResumingException"),
+                                      (400, "PrivateToken"), (429, "ThrottlingException"), (400, "AccessDeniedException"))]
+        cases += [(operation, txn, WebRequestError("private", status=400, aws_error_type="DatabaseResumingException"))
+                  for operation, txn in (("execute", ""), ("execute", "active"), ("commit", "active"), ("rollback", "active"), ("begin", "active"))]
+        cases += [("begin", "", WebRequestError("private transport")),
+                  ("begin", "", WebRequestError("private", status=400, body=b'{"message":"DatabaseResumingException"}'))]
+        for operation, txn, error in cases:
+            with self.subTest(operation=operation, txn=txn, status=error.status, code=error.aws_error_type):
+                instance = client.Client(client.Config.read(self.api), "writer")
+                instance.transaction_id = txn
+                with patch.object(client, "request_bytes", side_effect=error) as request, patch.object(client.time, "sleep") as sleep:
+                    with self.assertRaises(sql.ToolInputValidationError):
+                        instance.request(operation, {})
+                request.assert_called_once()
+                sleep.assert_not_called()
+
+    def test_transaction_does_not_repeat_failed_sql_commit_or_rollback(self):
+        for failing_path, action, values in (
+            ("Execute", "insert_rows", INSERT),
+            ("CommitTransaction", "insert_rows", INSERT),
+            ("RollbackTransaction", "query", {"sql":"SELECT 1", "params":[]}),
+        ):
+            with self.subTest(failing_path=failing_path):
+                self.aws.calls.clear()
+                failures = []
+                def failed_operation(method, url, **kwargs):
+                    if url.endswith("/" + failing_path):
+                        failures.append(url)
+                        raise WebRequestError("private", status=400, aws_error_type="DatabaseResumingException")
+                    return self.aws(method, url, **kwargs)
+                with patch.object(client, "request_bytes", side_effect=failed_operation), patch.object(client.time, "sleep") as sleep:
+                    result = self.run_action(action, values)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertEqual(len(failures), 1)
+                self.assertIn("This request was not retried", result.error)
+                sleep.assert_not_called()
+
     def test_nested_response_validation_emits_diagnostic_before_successful_rollback(self):
         cases = [
             ("query", {"records": "private malformed rows"}),

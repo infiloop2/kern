@@ -47,12 +47,21 @@ def _parse_json_float(value: str) -> float:
     return parsed
 
 
+def normalize_aws_error_type(value: str) -> str:
+    """Keep only a bounded restJson1 error identifier, without suffix details.
+
+    Consumers must allowlist the identifier before logging or acting on it.
+    """
+    match = re.fullmatch(r"(?:[A-Za-z0-9_.-]{1,128}#)?([A-Za-z][A-Za-z0-9]{0,127})(?::[\x21-\x7e]{1,128})?", value) if len(value) <= 256 else None
+    return match[1] if match else ""
+
+
 class WebRequestError(RuntimeError):
     """An HTTP-level failure with the status code preserved so callers can map
     provider-specific statuses (401 reconnect, 429 rate limit) without
     exposing the raw body across the tool boundary."""
 
-    def __init__(self, message: str, *, status: int = 0, body: bytes = b"", operation: str = "", body_truncated: bool = False, request_id: str = "") -> None:
+    def __init__(self, message: str, *, status: int = 0, body: bytes = b"", operation: str = "", body_truncated: bool = False, request_id: str = "", aws_error_type: str = "") -> None:
         super().__init__(message)
         self.status = status
         self.body = body
@@ -61,6 +70,10 @@ class WebRequestError(RuntimeError):
         # Retain only the UUID-shaped AWS correlation header, never arbitrary
         # response headers (which can contain cookies or credentials).
         self.request_id = request_id if re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", request_id) else ""
+        # AWS restJson1 permits namespace#Type and Type:detail forms. Keep
+        # only a bounded identifier; consumers must allowlist before logging
+        # or acting on it. Never retain arbitrary headers or suffix details.
+        self.aws_error_type = normalize_aws_error_type(aws_error_type)
 
 
 class ProviderWarning(RuntimeError):
@@ -319,7 +332,8 @@ def _request_bytes_and_headers(
         except Exception:
             pass
         raise WebRequestError(failure_message, status=exc.code, body=body[:max_error_bytes], body_truncated=len(body) > max_error_bytes,
-                              request_id=exc.headers.get("x-amzn-requestid", "") if exc.headers else "") from exc
+                              request_id=exc.headers.get("x-amzn-requestid", "") if exc.headers else "",
+                              aws_error_type=exc.headers.get("x-amzn-errortype", "") if exc.headers else "") from exc
     except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as exc:
         # Post-connect failures (socket timeout, IncompleteRead, header
         # validation on hostile values) must not escape as raw exceptions whose

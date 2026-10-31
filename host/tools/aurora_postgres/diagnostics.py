@@ -13,7 +13,7 @@ import urllib.error
 from typing import NoReturn
 
 from host.runtime.core import host_errors
-from host.tools.shared.web import RESPONSE_TOO_LARGE_MESSAGE, WebRequestError
+from host.tools.shared.web import RESPONSE_TOO_LARGE_MESSAGE, WebRequestError, normalize_aws_error_type
 from host.tools.shared.inputs import ToolInputValidationError
 
 
@@ -39,6 +39,9 @@ AWS_CODES = frozenset({
 
 
 def aws_error_code(exc: WebRequestError) -> str:
+    # restJson1 gives the header precedence; raw identifiers never reach logs.
+    if exc.aws_error_type:
+        return exc.aws_error_type if exc.aws_error_type in AWS_CODES else "unrecognized"
     try:
         body = json.loads(exc.body)
     except (ValueError, UnicodeError, RecursionError):
@@ -48,7 +51,7 @@ def aws_error_code(exc: WebRequestError) -> str:
     code = body.get("__type", body.get("code", ""))
     if not isinstance(code, str) or not code:
         return "unavailable"
-    code = code.rsplit("#", 1)[-1]
+    code = normalize_aws_error_type(code)
     return code if code in AWS_CODES else "unrecognized"
 
 
@@ -72,7 +75,8 @@ def failure_type(exc: WebRequestError) -> str:
 
 
 def report_failure(*, operation: str, role: str, phase: str, correlation_id: str,
-                   failure: str, elapsed_ms: int | None = None, exc: WebRequestError | None = None) -> None:
+                   failure: str, elapsed_ms: int | None = None, exc: WebRequestError | None = None,
+                   attempt: int = 1, retry_outcome: str = "not_retried") -> None:
     context: dict[str, str | int | bool] = {
         "operation": operation if operation in {"begin", "execute", "commit", "rollback"} else "unknown",
         "role": role if role in {"reader", "writer", "ddl", "dropper"} else "unknown",
@@ -81,6 +85,8 @@ def report_failure(*, operation: str, role: str, phase: str, correlation_id: str
         "correlation_id": correlation_id,
         # Zero means no status was recorded, not that AWS returned HTTP 0.
         "http_status": exc.status if exc else 0,
+        "attempt": attempt,
+        "retry_outcome": retry_outcome if retry_outcome in {"will_retry", "resume_budget_exhausted", "not_retried"} else "unknown",
     }
     if elapsed_ms is not None:
         context["elapsed_ms"] = elapsed_ms
