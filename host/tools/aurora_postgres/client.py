@@ -7,7 +7,7 @@ import hashlib
 import json
 import re
 import time
-from typing import Iterator, cast
+from typing import Iterator, NoReturn, cast
 import uuid
 
 from host.tools.host_api import HostAPI
@@ -19,6 +19,9 @@ from .diagnostics import ResponseValidationError, aws_error_code, failure_type, 
 
 PREFIX = "AURORA_POSTGRES_"
 CONFIG_KEYS = ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_REGION", "CLUSTER_ARN", "DATABASE", "SCHEMA", "READER_SECRET_ARN", "WRITER_SECRET_ARN", "DDL_SECRET_ARN", "DROPPER_SECRET_ARN")
+RESUME_BUDGET_SECONDS = 60
+RESUME_RETRY_DELAY_SECONDS = 2
+REQUEST_TIMEOUT_SECONDS = 50
 PATHS = {"execute": "/Execute", "begin": "/BeginTransaction", "commit": "/CommitTransaction", "rollback": "/RollbackTransaction"}
 
 
@@ -102,6 +105,22 @@ class Client:
         # Local correlation only; never log the AWS transaction ID.
         self.correlation_id = str(uuid.uuid4())
 
+    def _fail_startup_deadline(self, started: float, attempt: int, transaction_id: str = "") -> NoReturn:
+        report_failure(operation="begin", role=self.role, phase="begin", correlation_id=self.correlation_id,
+                       failure="startup_deadline_exceeded", elapsed_ms=int((time.monotonic() - started) * 1000),
+                       attempt=attempt, retry_outcome="resume_budget_exhausted")
+        if transaction_id:
+            # A slow success may have opened a transaction. Close it once,
+            # without SQL; a cleanup failure must preserve the deadline error.
+            self.transaction_id = transaction_id
+            try:
+                self.request("rollback", {})
+            except Exception:
+                pass
+            finally:
+                self.transaction_id = ""
+        fail(f"Aurora startup wait budget was exhausted (60 seconds including requests and waits). BeginTransaction was attempted {attempt} times. No SQL was submitted. Check Host diagnostics; try again after the database finishes resuming.")
+
     def request(self, operation: str, extra: JSONObject) -> JSONObject:
         v = self.config.values
         body: JSONObject = {"resourceArn": v["CLUSTER_ARN"], "secretArn": v[self.role.upper() + "_SECRET_ARN"], **extra}
@@ -112,43 +131,74 @@ class Client:
         payload = json_bytes(body)
         if len(payload) > 1024 * 1024:
             fail("AWS request exceeds 1 MiB. Use a smaller insert batch.")
-        signed = sign_post(host=f"rds-data.{v['AWS_REGION']}.amazonaws.com", region=v["AWS_REGION"], service="rds-data",
-                           access_key_id=v["AWS_ACCESS_KEY_ID"], secret_access_key=v["AWS_SECRET_ACCESS_KEY"],
-                           body=payload, content_type="application/json", path=PATHS[operation])
         started = time.monotonic()
+        # Only an explicit cancelled startup request is safe to repeat. Never
+        # retry an active transaction, SQL, commit, rollback or transport loss.
+        can_resume = operation == "begin" and not self.transaction_id
+        deadline = started + RESUME_BUDGET_SECONDS
         phase = operation if operation != "execute" else self.phase
-        try:
-            raw = request_bytes("POST", signed.url, headers=signed.headers, data=payload,
-                                timeout=50, max_bytes=1100000, failure_message="Aurora Data API request failed.")
-        except WebRequestError as exc:
-            report_failure(operation=operation, role=self.role, phase=phase, correlation_id=self.correlation_id,
-                           failure=failure_type(exc), elapsed_ms=int((time.monotonic() - started) * 1000), exc=exc)
-            code = aws_error_code(exc)
-            messages = {
-                "DatabaseResumingException": "Aurora is resuming. Wait briefly before a new read; inspect writes before retrying.",
-                "HttpEndpointNotEnabledException": "Enable RDS Data API on the configured cluster.",
-                "InvalidSecretException": "Check the role secret's username/password and SCRAM authentication in AWS Secrets Manager.",
-                "SecretsErrorException": "Check the role secret, IAM GetSecretValue permission and any customer KMS key permission.",
-                "StatementTimeoutException": "Aurora statement timed out. Narrow the query or schedule the schema operation when less busy.",
-                "UnsupportedResultException": "AWS result limit or unsupported type. Select fewer/smaller columns and cast unsupported types to text.",
-                "DatabaseErrorException": "PostgreSQL rejected the statement. Check table definitions, types, constraints, permissions and partition bounds.",
-                "TransactionNotFoundException": "Aurora transaction expired. Inspect the table before proposing another write.",
-            }
-            message = messages.get(code, "Aurora Data API failed. Check cluster availability, Data API enablement, region and database configuration.")
-            if exc.status in (401, 403):
-                message = "AWS denied Aurora access. Check the dedicated IAM policy, key and role secret permissions in Home > Integrations."
-            fail(message + " Check Host diagnostics for operation details. No request was retried. A write or commit with a lost response may have succeeded; inspect before retrying.")
+        attempt = 0
+        while True:
+            signed = sign_post(host=f"rds-data.{v['AWS_REGION']}.amazonaws.com", region=v["AWS_REGION"], service="rds-data",
+                               access_key_id=v["AWS_ACCESS_KEY_ID"], secret_access_key=v["AWS_SECRET_ACCESS_KEY"],
+                               body=payload, content_type="application/json", path=PATHS[operation])
+            remaining = deadline - time.monotonic()
+            if can_resume and remaining < 1:
+                self._fail_startup_deadline(started, attempt)
+            # Account for signing, request durations and sleeps, rather than
+            # giving every retry a fresh 50-second timeout.
+            timeout = min(REQUEST_TIMEOUT_SECONDS, max(1, int(remaining))) if can_resume else REQUEST_TIMEOUT_SECONDS
+            attempt += 1
+            attempt_started = time.monotonic()
+            try:
+                raw = request_bytes("POST", signed.url, headers=signed.headers, data=payload,
+                                    timeout=timeout, max_bytes=1100000, failure_message="Aurora Data API request failed.")
+                break
+            except WebRequestError as exc:
+                elapsed_ms = int((time.monotonic() - attempt_started) * 1000)
+                code = aws_error_code(exc)
+                resuming = can_resume and exc.status == 400 and code == "DatabaseResumingException"
+                retry = resuming and deadline - time.monotonic() >= RESUME_RETRY_DELAY_SECONDS + 1
+                if retry:
+                    time.sleep(RESUME_RETRY_DELAY_SECONDS)
+                    retry = deadline - time.monotonic() >= 1
+                outcome = "will_retry" if retry else "resume_budget_exhausted" if resuming else "not_retried"
+                report_failure(operation=operation, role=self.role, phase=phase, correlation_id=self.correlation_id,
+                               failure=failure_type(exc), elapsed_ms=elapsed_ms,
+                               exc=exc, attempt=attempt, retry_outcome=outcome)
+                if retry:
+                    continue
+                messages = {
+                    "DatabaseResumingException": "Aurora is resuming.",
+                    "HttpEndpointNotEnabledException": "Enable RDS Data API on the configured cluster.",
+                    "InvalidSecretException": "Check the role secret's username/password and SCRAM authentication in AWS Secrets Manager.",
+                    "SecretsErrorException": "Check the role secret, IAM GetSecretValue permission and any customer KMS key permission.",
+                    "StatementTimeoutException": "Aurora statement timed out. Narrow the query or schedule the schema operation when less busy.",
+                    "UnsupportedResultException": "AWS result limit or unsupported type. Select fewer/smaller columns and cast unsupported types to text.",
+                    "DatabaseErrorException": "PostgreSQL rejected the statement. Check table definitions, types, constraints, permissions and partition bounds.",
+                    "TransactionNotFoundException": "Aurora transaction expired. Inspect the table before proposing another write.",
+                }
+                message = messages.get(code, "Aurora Data API failed. Check cluster availability, Data API enablement, region and database configuration.")
+                if exc.status in (401, 403):
+                    message = "AWS denied Aurora access. Check the dedicated IAM policy, key and role secret permissions in Home > Integrations."
+                if resuming:
+                    message = "Aurora startup wait budget was exhausted (60 seconds including requests and waits). Try the action again after the database finishes resuming."
+                retry_note = "This request was not retried." if attempt == 1 else f"BeginTransaction was attempted {attempt} times; no SQL was submitted during startup."
+                safety_note = "No SQL was submitted." if can_resume else "A write or commit with a lost response may have succeeded; inspect before retrying."
+                fail(f"{message} Check Host diagnostics for operation details. {retry_note} {safety_note}")
         try:
             result = json.loads(raw)
             if not isinstance(result, dict):
                 raise ValueError
             json_bytes(result)
-            return cast(JSONObject, result)
         except (ValueError, UnicodeError, RecursionError):
             report_failure(operation=operation, role=self.role, phase=phase, correlation_id=self.correlation_id,
-                           failure="invalid_response", elapsed_ms=int((time.monotonic() - started) * 1000))
+                           failure="invalid_response", elapsed_ms=int((time.monotonic() - started) * 1000), attempt=attempt)
             fail("AWS returned an invalid response. Inspect write outcomes before retrying.")
-        raise AssertionError("unreachable")
+        if can_resume and time.monotonic() >= deadline:
+            transaction_id = result.get("transactionId")
+            self._fail_startup_deadline(started, attempt, transaction_id if isinstance(transaction_id, str) else "")
+        return cast(JSONObject, result)
 
     def execute(self, statement: str, params: list[JSONObject]) -> JSONObject:
         return self.request("execute", {"sql": statement, "parameters": cast(list[JSONValue], params),
@@ -164,6 +214,7 @@ class Client:
                            failure="missing_transaction_id")
             fail("AWS did not return a transaction. No SQL was submitted.")
         self.transaction_id = cast(str, transaction_id)
+        rollback_attempted = False
         try:
             self.phase = "transaction_setup"
             if readonly:
@@ -180,6 +231,7 @@ class Client:
             self.phase = "statement"
             yield self
             if readonly:
+                rollback_attempted = True
                 self.request("rollback", {})
             else:
                 self.request("commit", {})
@@ -187,10 +239,11 @@ class Client:
             if isinstance(exc, ResponseValidationError):
                 report_failure(operation="execute", role=self.role, phase=self.phase, correlation_id=self.correlation_id,
                                failure="invalid_response")
-            try:
-                self.request("rollback", {})
-            except Exception:
-                pass  # Preserve the original error, never repeat the SQL/commit.
+            if not rollback_attempted:
+                try:
+                    self.request("rollback", {})
+                except Exception:
+                    pass  # Preserve the original error, never repeat SQL/commit/rollback.
             raise
         finally:
             self.transaction_id = ""

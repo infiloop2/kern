@@ -48,6 +48,26 @@ def _serving(body: bytes) -> object:
 
 
 class WebResponseCapTests(unittest.TestCase):
+    def test_http_error_type_header_is_bounded_and_normalized(self) -> None:
+        for value, expected in (
+            ("DatabaseResumingException", "DatabaseResumingException"),
+            ("com.amazonaws.rds#DatabaseResumingException", "DatabaseResumingException"),
+            ("DatabaseResumingException:http://private-detail/", "DatabaseResumingException"),
+            ("com.amazonaws#DatabaseResumingException:private-detail", "DatabaseResumingException"),
+            ("private=secret", ""), ("DatabaseResumingException\nprivate", ""),
+            ("A" * 257, ""), ("", ""),
+        ):
+            with self.subTest(value=value):
+                headers = Message()
+                headers["X-AmZn-ErRoRtYpE"] = value
+                headers["Authorization"] = "private-credential"
+                error = urllib.error.HTTPError("https://api.example.com", 400, "private", headers, io.BytesIO(b"{}"))
+                with patch.object(web._OPENER, "open", side_effect=error), self.assertRaises(WebRequestError) as caught:
+                    request_bytes("POST", "https://api.example.com", failure_message="failed")
+                self.assertEqual(caught.exception.aws_error_type, expected)
+                self.assertFalse(hasattr(caught.exception, "headers"))
+                self.assertNotIn("private", str(caught.exception))
+
     def test_http_error_preserves_only_validated_aws_request_id(self) -> None:
         valid = "12345678-abcd-1234-ABCD-123456789012"
         for request_id in (valid, "password=private", "a" * 200, valid + "\nprivate", ""):
