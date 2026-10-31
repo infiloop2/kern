@@ -14,6 +14,7 @@ import http.client
 import ipaddress
 import json
 import math
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -51,12 +52,15 @@ class WebRequestError(RuntimeError):
     provider-specific statuses (401 reconnect, 429 rate limit) without
     exposing the raw body across the tool boundary."""
 
-    def __init__(self, message: str, *, status: int = 0, body: bytes = b"", operation: str = "", body_truncated: bool = False) -> None:
+    def __init__(self, message: str, *, status: int = 0, body: bytes = b"", operation: str = "", body_truncated: bool = False, request_id: str = "") -> None:
         super().__init__(message)
         self.status = status
         self.body = body
         self.operation = operation
         self.body_truncated = body_truncated
+        # Retain only the UUID-shaped AWS correlation header, never arbitrary
+        # response headers (which can contain cookies or credentials).
+        self.request_id = request_id if re.fullmatch(r"[0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", request_id) else ""
 
 
 class ProviderWarning(RuntimeError):
@@ -314,7 +318,8 @@ def _request_bytes_and_headers(
             body = exc.read(max_error_bytes + 1)
         except Exception:
             pass
-        raise WebRequestError(failure_message, status=exc.code, body=body[:max_error_bytes], body_truncated=len(body) > max_error_bytes) from exc
+        raise WebRequestError(failure_message, status=exc.code, body=body[:max_error_bytes], body_truncated=len(body) > max_error_bytes,
+                              request_id=exc.headers.get("x-amzn-requestid", "") if exc.headers else "") from exc
     except (urllib.error.URLError, OSError, http.client.HTTPException, ValueError) as exc:
         # Post-connect failures (socket timeout, IncompleteRead, header
         # validation on hostile values) must not escape as raw exceptions whose

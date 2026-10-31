@@ -10,6 +10,7 @@ from host.tools.json_types import JSONObject, JSONValue
 from host.tools.results import ActionExecuted, ActionFailed, ActionPendingApproval, ActionResult, ApprovalExecuted, ApprovalResult
 from host.tools.shared.inputs import ToolInputValidationError
 from .client import Client, Config, parameter, result_rows
+from .diagnostics import invalid_response
 from .manifest import MANIFEST
 from .sql import (DESCRIBE_TABLE, LIST_TABLES, TABLE_COUNTS, TABLE_TARGET,
     MAX_COLUMNS, MAX_INPUT_BYTES, MAX_RELATIONS, MAX_ROW_BYTES, MAX_TABLES, TYPES,
@@ -37,15 +38,17 @@ def target(client: Client, table: str) -> list[str | None]:
 
 def tabular(response: JSONObject, limit: int) -> JSONObject:
     raw_columns = response.get("columnMetadata", [])
-    if not isinstance(raw_columns, list) or len(raw_columns) > MAX_COLUMNS:
+    if not isinstance(raw_columns, list):
+        invalid_response("AWS returned invalid column metadata.")
+    if len(raw_columns) > MAX_COLUMNS:
         fail("Select at most 60 columns.")
     columns: list[JSONValue] = []
     for raw in raw_columns:
         if not isinstance(raw, dict):
-            fail("AWS returned invalid column metadata.")
+            invalid_response("AWS returned invalid column metadata.")
         name, kind = raw.get("name", raw.get("label", "")), raw.get("typeName", "")
         if not isinstance(name, str) or not isinstance(kind, str):
-            fail("AWS returned invalid column metadata.")
+            invalid_response("AWS returned invalid column metadata.")
         columns.append({"name":name, "type":kind})
     result: JSONObject = {"columns":columns, "rows":[], "truncated":False}
     if len(json_bytes(result)) > 65536:
@@ -54,7 +57,7 @@ def tabular(response: JSONObject, limit: int) -> JSONObject:
     included = cast(list[JSONValue], result["rows"])
     for row in rows:
         if len(row) != len(columns):
-            fail("AWS returned mismatched result columns and rows.")
+            invalid_response("AWS returned mismatched result columns and rows.")
         if len(included) == limit:
             result["truncated"] = True
             break
@@ -126,12 +129,14 @@ def insert(client: Client, table: str, columns: list[str], rows: list[list[str |
     metadata = client.execute(f"SELECT {','.join(map(quoted, columns))} FROM {table_name} LIMIT 0", [])
     raw_types = metadata.get("columnMetadata", [])
     if not isinstance(raw_types, list) or len(raw_types) != len(columns):
-        fail("Could not resolve insert columns. Call describe_table.")
+        invalid_response("Could not resolve insert columns. Call describe_table.")
     aliases = {"int2":"smallint", "int4":"integer", "int8":"bigint", "float8":"double precision", "bool":"boolean", "varchar":"text", "timestamp with time zone":"timestamptz"}
     kinds: list[str] = []
     for item in raw_types:
         if not isinstance(item, dict):
-            fail("AWS returned invalid column metadata.")
+            invalid_response("AWS returned invalid column metadata.")
+        if not isinstance(item.get("typeName"), str):
+            invalid_response("AWS returned invalid column metadata.")
         value = str(item.get("typeName", ""))
         value = aliases.get(value, value)
         if value not in TYPES:
@@ -154,7 +159,7 @@ def insert(client: Client, table: str, columns: list[str], rows: list[list[str |
     response = client.execute(statement, params)
     inserted = response.get("numberOfRecordsUpdated")
     if type(inserted) is not int or not 0 <= cast(int, inserted) <= len(rows):
-        fail("AWS did not return a valid insert count; the transaction will be rolled back.")
+        invalid_response("AWS did not return a valid insert count; the transaction will be rolled back.")
     return {"inserted":inserted, "skipped":len(rows)-cast(int, inserted)}
 
 
