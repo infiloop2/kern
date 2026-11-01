@@ -6,10 +6,10 @@ const MAX_WORKER_MESSAGES_PER_TURN = 128;
 const MAX_WORKER_MUTATIONS_PER_TURN = 16;
 const WORKER_START_TIMEOUT_MS = 15 * 1000;
 // App code has one end-to-end deadline after the trusted browser broker loads.
-const WORKER_TURN_TIMEOUT_MS = 5000;
+const WORKER_TURN_TIMEOUT_MS = 15000;
 const RUNTIME_REPORT_MAX_BYTES = 400;
 const MAX_COMPOSER_MESSAGE_BYTES = 50_000;
-const MAX_RENDER_HTML_BYTES = 128 * 1024;
+const MAX_RENDER_HTML_BYTES = 1024 * 1024;
 const MAX_RENDER_CSS_BYTES = 64 * 1024;
 const MAX_RENDER_NODES = 5000;
 const MAX_RENDER_DEPTH = 128;
@@ -27,6 +27,8 @@ const VIEW_STATE_LIMIT = 50;
 const ATTACHMENT_LIMIT = 10;
 const ATTACHMENT_MAX_BYTES = 25 * 1024 * 1024;
 const WORKSPACE_API_TIMEOUT_MS = 12000;
+// Let in-flight host writes settle after the worker deadline for reconciliation.
+const RUNTIME_REQUEST_TIMEOUT_MS = 30000;
 // The browser Workspace proxy can wait 50s for a synchronous provider
 // acknowledgement. Sends and Stop must outlive that hop or a retry can
 // duplicate a message the host accepted after the frame gave up.
@@ -75,6 +77,7 @@ let queuedGeneratedEvent = null;
 // Per App, the last generated-runtime failure the operator saw. It travels
 // with their next composer message so the agent learns what actually failed.
 const runtimeReports = new Map();
+const runtimeReportSaves = new Map();
 let bundleUrl = null;
 let lastRenderKey = "";
 let cssCacheKey = null;
@@ -327,6 +330,19 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
     pending.set(id, { resolve, reject });
     send({ type: "data-read", request_id: id, path: clone(path) });
   });
+  const readMany = paths => new Promise((resolve, reject) => {
+    if (!Array.isArray(paths) || paths.length < 1 || paths.length > 16
+        || !paths.every(path => Array.isArray(path) && path.length >= 1 && path.length <= 16
+          && path.every(segment => (Number.isInteger(segment) && segment >= 0)
+            || (typeof segment === "string" && segment.length > 0 && encodeText(segment).length <= 128)))
+        || new Set(paths.map(path => JSON.stringify(path))).size !== paths.length) {
+      reject(new TypeError("readMany requires 1 to 16 unique valid paths"));
+      return;
+    }
+    const id = `read-${++requestId}`;
+    pending.set(id, { resolve, reject });
+    send({ type: "data-read", request_id: id, paths: clone(paths) });
+  });
   const query = (collection, request = {}) => new Promise((resolve, reject) => {
     const id = `query-${++requestId}`;
     pending.set(id, { resolve, reject });
@@ -371,6 +387,7 @@ function capabilityWorkerBootstrap(maxRenderHtmlBytes, maxRenderCssBytes) {
       return clone(durableData);
     },
     read(path) { return read(path); },
+    readMany(paths) { return readMany(paths); },
     query(collection, request) { return query(collection, request); },
     render(html, css = "") {
       if (typeof html !== "string" || typeof css !== "string") {
@@ -551,6 +568,11 @@ const allowedCssProperties = new Set(`
 const safeCustomProperty = /^--[A-Za-z][A-Za-z0-9_-]{0,63}$/;
 const forbiddenCssValue = /url\s*\(|\bimage\s*\(|image-set\s*\(|cross-fade\s*\(|element\s*\(|paint\s*\(|src\s*\(/i;
 
+let sanitizerLogCount = 0;
+function logSanitizer(message) {
+  if (sanitizerLogCount++ < 200) console.debug(`[app-sanitizer] ${message}`);
+}
+
 function sanitizeHtml(html) {
   if (typeof html !== "string" || textEncoder.encode(html).length > MAX_RENDER_HTML_BYTES) {
     throw new Error("Generated HTML is invalid or too large");
@@ -572,16 +594,21 @@ function cloneSafeNode(node, parent, budget, depth) {
     return;
   }
   if (node.nodeType !== Node.ELEMENT_NODE) return;
-  if (droppedElements.has(node.tagName)) return;
+  if (droppedElements.has(node.tagName)) {
+    logSanitizer(`dropped tag ${node.tagName}`);
+    return;
+  }
   const rawHref = node.tagName === "A" ? node.getAttribute("href") : "";
   const filePath = node.tagName === "A" ? KernRichText.workspaceFilePath(rawHref) : "";
   const navigationHref = node.tagName === "A" ? KernRichText.safeNavigationHref(rawHref) : "";
   const copyHref = node.tagName === "A" && !navigationHref ? KernRichText.safeHref(rawHref) : "";
   if (node.tagName === "A" && !filePath && !navigationHref && !copyHref) {
+    logSanitizer("unwrapped tag A: invalid href");
     for (const child of node.childNodes) cloneSafeNode(child, parent, budget, depth + 1);
     return;
   }
   if (!allowedElements.has(node.tagName)) {
+    logSanitizer(`unwrapped tag ${node.tagName}`);
     for (const child of node.childNodes) cloneSafeNode(child, parent, budget, depth + 1);
     return;
   }
@@ -610,9 +637,15 @@ function cloneSafeNode(node, parent, budget, depth) {
     }
   }
   if (clean.hasAttribute("data-drag-value")) clean.draggable = true;
-  if (node.tagName === "BUTTON") clean.type = "button";
+  if (node.tagName === "BUTTON") {
+    if (node.hasAttribute("type") && node.getAttribute("type").toLowerCase() !== "button") {
+      logSanitizer("rewrote BUTTON.type to button");
+    }
+    clean.type = "button";
+  }
   if (node.tagName === "INPUT") {
     const type = node.getAttribute("type") || "text";
+    if (!allowedInputTypes.has(type.toLowerCase())) logSanitizer("rewrote INPUT.type to text");
     clean.type = allowedInputTypes.has(type.toLowerCase()) ? type.toLowerCase() : "text";
   }
   for (const child of node.childNodes) cloneSafeNode(child, clean, budget, depth + 1);
@@ -621,6 +654,9 @@ function cloneSafeNode(node, parent, budget, depth) {
 
 function copySafeAttribute(source, target, name, value) {
   const lower = name.toLowerCase();
+  // cloneSafeNode handles these attributes after copying ordinary attributes.
+  if ((source.tagName === "A" && lower === "href")
+      || ((source.tagName === "INPUT" || source.tagName === "BUTTON") && lower === "type")) return;
   if (globalAttributes.has(lower)) {
     target.setAttribute(lower, value.slice(0, 512));
     return;
@@ -661,6 +697,7 @@ function copySafeAttribute(source, target, name, value) {
   if ((lower === "colspan" || lower === "rowspan") && /^[1-9][0-9]?$/.test(value)) {
     target.setAttribute(lower, value);
   }
+  if (!target.hasAttribute(lower)) logSanitizer(`removed attribute ${source.tagName}.${lower}`);
 }
 
 function sanitizeCss(css) {
@@ -691,11 +728,17 @@ function sanitizeRule(rule, budget, depth) {
   if (kind === "CSSStyleRule") {
     // Shadow CSS can otherwise restyle its host and escape the generated
     // canvas. Reject escapes too, so an encoded :host cannot bypass the check.
-    if (rule.selectorText.includes("\\") || /:host(?:-context)?(?:\b|\()/i.test(rule.selectorText)) return "";
+    if (rule.selectorText.includes("\\") || /:host(?:-context)?(?:\b|\()/i.test(rule.selectorText)) {
+      logSanitizer("rejected rule selector");
+      return "";
+    }
     return `${rule.selectorText}{${sanitizeDeclarations(rule.style)}}`;
   }
   if (kind === "CSSMediaRule") {
-    if (textEncoder.encode(rule.conditionText).length > MAX_CSS_CONDITION_BYTES) return "";
+    if (textEncoder.encode(rule.conditionText).length > MAX_CSS_CONDITION_BYTES) {
+      logSanitizer("rejected media rule: condition too long");
+      return "";
+    }
     return `@media ${rule.conditionText}{${Array.from(
       rule.cssRules, child => sanitizeRule(child, budget, depth + 1)
     ).filter(Boolean).join("")}}`;
@@ -704,6 +747,7 @@ function sanitizeRule(rule, budget, depth) {
     const name = /^[A-Za-z_][A-Za-z0-9_-]{0,63}$/.test(rule.name) ? rule.name : "generated";
     return `@keyframes ${name}{${Array.from(rule.cssRules, child => `${child.keyText}{${sanitizeDeclarations(child.style)}}`).join("")}}`;
   }
+  logSanitizer(`rejected rule ${kind}`);
   return "";
 }
 
@@ -711,9 +755,15 @@ function sanitizeDeclarations(style) {
   const safe = [];
   for (const property of style) {
     const normalized = property.toLowerCase();
-    if (!allowedCssProperties.has(normalized) && !safeCustomProperty.test(property)) continue;
+    if (!allowedCssProperties.has(normalized) && !safeCustomProperty.test(property)) {
+      logSanitizer(`rejected property ${property}`);
+      continue;
+    }
     const value = style.getPropertyValue(property);
-    if (textEncoder.encode(value).length > 4096 || value.includes("\\") || forbiddenCssValue.test(value)) continue;
+    if (textEncoder.encode(value).length > 4096 || value.includes("\\") || forbiddenCssValue.test(value)) {
+      logSanitizer(`rejected property value ${property}`);
+      continue;
+    }
     const priority = style.getPropertyPriority(property) === "important" ? "!important" : "";
     safe.push(`${normalized}:${value}${priority}`);
   }
@@ -727,6 +777,7 @@ function sanitizeDeclarations(style) {
 // so patching only ever copies already-sanitized nodes and attributes.
 
 function renderGenerated(html, css) {
+  sanitizerLogCount = 0;
   const host = $("generated-host");
   if (!generatedRoot) generatedRoot = host.attachShadow({ mode: "open" });
   const renderKey = `${html}\u0000${css}`;
@@ -1152,6 +1203,7 @@ async function hydrateCapabilityData(holder, dataMode, trackRequests = false) {
     try {
       response = await api(
         "GET", `/apps/${encodeURIComponent(holder.appId)}/state/data`,
+        undefined, RUNTIME_REQUEST_TIMEOUT_MS,
       );
     } catch (_error) {
       return false;
@@ -1200,7 +1252,7 @@ function armCapabilityWorker() {
       worker.terminate();
     }
   };
-  // Broker loading is browser work; App code gets its own shorter deadline.
+  // Broker loading is browser work; App code gets its own deadline.
   armed.timer = setTimeout(discard, WORKER_START_TIMEOUT_MS);
   worker.addEventListener("broker-ready", () => {
     if (armedWorker !== armed || armed.run) return;
@@ -1312,7 +1364,7 @@ async function runCapabilityWorker(pendingEvent = null) {
         );
       } else if (current && reason === "timeout" && stage === "starting") {
         showRuntimeStatus(
-          "The app worker did not initialize within 5 seconds. Refresh and try again.",
+          "The app worker did not initialize within 15 seconds. Refresh and try again.",
           "error",
           true,
         );
@@ -1446,7 +1498,19 @@ function recordRuntimeReport(run, reason, stage) {
   else outcome = RUNTIME_FAILURE_STAGES[stage] || `failed (${String(stage).slice(0, 32)})`;
   const stamp = new Date().toISOString().slice(0, 16).replace("T", " ");
   const report = `[App runtime report: ${action} ${outcome}; revision ${run.revision}; ${stamp} UTC]`;
-  runtimeReports.set(run.appId, report.slice(0, RUNTIME_REPORT_MAX_BYTES));
+  const text = clipEncodedText(report, RUNTIME_REPORT_MAX_BYTES);
+  runtimeReports.set(run.appId, text);
+  // Preserve event order through actual HTTP settlement. The UI timeout in api()
+  // cannot release this queue: a timed-out POST may still commit afterward.
+  const previous = runtimeReportSaves.get(run.appId) || Promise.resolve();
+  const save = previous.then(() => window.KernHost.api(
+    "POST", `/v1/workspace/web-apps/apps/${encodeURIComponent(run.appId)}/runtime/report`,
+    { report: text },
+  )).catch(() => {});
+  runtimeReportSaves.set(run.appId, save);
+  void save.then(() => {
+    if (runtimeReportSaves.get(run.appId) === save) runtimeReportSaves.delete(run.appId);
+  });
 }
 
 async function handleWorkerMessage(run, message) {
@@ -1539,11 +1603,18 @@ function applyLocalDataAction(data, message) {
 }
 
 async function handleWorkerDataRead(run, message) {
+  const many = Object.hasOwn(message, "paths");
+  const validPaths = many
+    ? !Object.hasOwn(message, "path") && Array.isArray(message.paths)
+      && message.paths.length >= 1 && message.paths.length <= 16
+      && message.paths.every(validDataPath)
+      && new Set(message.paths.map(path => JSON.stringify(path))).size === message.paths.length
+    : validDataPath(message.path);
   if (
     !["initializing", "event"].includes(run.state)
     || typeof message.request_id !== "string"
     || !/^read-[1-9][0-9]{0,8}$/.test(message.request_id)
-    || !validDataPath(message.path)
+    || !validPaths
   ) {
     run.finish("error");
     return;
@@ -1554,7 +1625,8 @@ async function handleWorkerDataRead(run, message) {
     response = await api(
       "POST",
       `/apps/${encodeURIComponent(run.appId)}/runtime/data/read`,
-      { path: message.path },
+      many ? { paths: message.paths, missing: "null" } : { path: message.path },
+      RUNTIME_REQUEST_TIMEOUT_MS,
     );
   } catch (_error) {
     response = null;
@@ -1574,7 +1646,7 @@ async function handleWorkerDataRead(run, message) {
     type: "read-result",
     request_id: message.request_id,
     ok: true,
-    value: response.app.value,
+    value: many ? response.app.values.map(entry => entry.value) : response.app.value,
   });
 }
 
@@ -1599,6 +1671,7 @@ async function handleWorkerCollectionQuery(run, message) {
       "POST",
       `/apps/${encodeURIComponent(run.appId)}/runtime/collections/${encodeURIComponent(message.collection)}/query`,
       message.query,
+      RUNTIME_REQUEST_TIMEOUT_MS,
     );
   } catch (_error) {
     response = null;
@@ -1680,6 +1753,7 @@ async function performWorkerMutation(run, message, body, canonicalValue) {
       "POST",
       `/apps/${encodeURIComponent(run.appId)}/runtime/actions`,
       body,
+      RUNTIME_REQUEST_TIMEOUT_MS,
     );
   } catch (_error) {
     response = null;

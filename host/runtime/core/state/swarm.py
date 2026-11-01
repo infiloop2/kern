@@ -7,6 +7,10 @@ from datetime import datetime, timedelta, timezone
 from host.runtime.core import db
 from host.runtime.core.state._base import utc_now
 
+# Display cap only; ranking metrics always use every weekly link.
+SWARM_LINK_LIMIT = 1000
+
+
 def is_on_demand_agent(thread_id: str) -> bool:
     if not thread_id.startswith("thread-"):
         return False
@@ -97,16 +101,29 @@ def _interaction_window() -> tuple[str, str]:
 
 
 def swarm_interactions() -> dict[str, Any]:
-    """Weekly ranking metrics and up to 500 display links, never message bodies."""
+    """Weekly ranking metrics and capped display links, never message bodies."""
     since, through = _interaction_window()
     with db.transaction() as cur:
-        cur.execute(
-            "SELECT sender_thread_id, target_thread_id, SUM(interactions) AS message_count"
-            " FROM swarm_interaction_days WHERE day >= %s AND day <= %s"
-            " GROUP BY sender_thread_id, target_thread_id"
-            " ORDER BY message_count DESC, sender_thread_id, target_thread_id LIMIT 500",
-            (since, through),
-        )
+        # Links to archived or deleted agents cannot be drawn, so drop them
+        # before the cap; otherwise they crowd out links between visible agents.
+        # Thread, schedule and App ids never collide.
+        cur.execute("""
+            WITH retired AS (
+                SELECT thread_id FROM chat_threads WHERE archived
+                UNION ALL
+                SELECT app_id FROM web_apps WHERE archived
+                UNION ALL
+                SELECT thread_id FROM schedules
+                WHERE deleted_at IS NOT NULL OR agent_runtime = 'script'
+            )
+            SELECT sender_thread_id, target_thread_id, SUM(interactions) AS message_count
+            FROM swarm_interaction_days
+            WHERE day >= %s AND day <= %s
+              AND sender_thread_id NOT IN (SELECT thread_id FROM retired)
+              AND target_thread_id NOT IN (SELECT thread_id FROM retired)
+            GROUP BY sender_thread_id, target_thread_id
+            ORDER BY message_count DESC, sender_thread_id, target_thread_id LIMIT %s
+        """, (since, through, SWARM_LINK_LIMIT))
         interactions = [
             {"sender_thread_id": sender, "target_thread_id": target, "count": int(count)}
             for sender, target, count in cur.fetchall()

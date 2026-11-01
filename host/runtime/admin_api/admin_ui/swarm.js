@@ -187,7 +187,7 @@ function renderDetails() {
   }
   const agent = agentById.get(selectedId);
   if (!agent) {
-    root.append(node("h2", "", "Agent details"), node("p", "muted", "Select an agent or connection. You sit at the centre; Kern host beside you sends automated deliveries. Agents that message each other more cluster together; more involved agents sit closer to you and look larger. Arrange applies the latest ranking. Dense maps draw only the 500 strongest links."),
+    root.append(node("h2", "", "Agent details"), node("p", "muted", "Select an agent or connection. You sit at the centre; Kern host beside you sends automated deliveries. Agents that message each other more cluster together; more involved agents sit closer to you and look larger. Arrange applies the latest ranking. Dense maps draw only the 1,000 strongest links between agents on the map."),
       node("p", "muted", "Drag anywhere to explore. Scroll, pinch or + and − to zoom; 0 fits everything."));
     return;
   }

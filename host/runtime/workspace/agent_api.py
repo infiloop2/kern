@@ -33,15 +33,21 @@ from host.runtime.workspace.web_apps import backend as web_apps
 
 AGENT_PEER_USER = "kern-agent"
 MAX_REQUEST_BODY_BYTES = 256 * 1024
+# UI bundles need room for 1 MiB HTML plus CSS/JS and JSON escaping.
+# The larger body allowance applies only to publish_ui; other actions stay bounded.
+MAX_PUBLISH_UI_REQUEST_BYTES = 8 * 1024 * 1024
+MAX_CALL_BODY_BYTES = MAX_PUBLISH_UI_REQUEST_BYTES + 4096
 MAX_RESPONSE_BODY_BYTES = MAX_WORKSPACE_RESPONSE_BODY_BYTES
 MAX_CONCURRENT_CALLS = 64
 MAX_CONCURRENT_CONNECTIONS = 128
+MAX_CONCURRENT_LARGE_REQUESTS = 2
 MAX_CONCURRENT_LARGE_RESPONSES = 8
 ALLOWED_METHODS = frozenset({"GET", "POST", "PUT", "DELETE"})
 AGENT_PATH_RE = re.compile(
     r"^/agent/[A-Za-z0-9._~/-]{0,512}(?:\?[A-Za-z0-9._~=&%+-]{0,512})?$"
 )
 _CALL_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_CALLS)
+_LARGE_REQUEST_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_LARGE_REQUESTS)
 _LARGE_RESPONSE_SLOTS = threading.BoundedSemaphore(MAX_CONCURRENT_LARGE_RESPONSES)
 PROC_ROOT = Path("/proc")
 
@@ -82,8 +88,9 @@ def _require_resource_owner(method: str, path: str, caller: str | None) -> None:
     app = re.fullmatch(r"/agent/apps/(app-[1-9][0-9]*)(/.*)", path)
     if app:
         resource = app.group(2)
+        # Collection writes authorize the authenticated caller under the App row lock.
         if method == "POST" and (resource == "/state/data/read" or re.fullmatch(
-            r"/collections/[^/]+/query", resource
+            r"/collections/[^/]+/(query|actions)", resource
         )):
             return
         if caller != app.group(1):
@@ -125,8 +132,16 @@ def _dispatch_call(
     ):
         raise ValueError(f"path must match {AGENT_PATH_RE.pattern}")
     encoded = None if body is None else json.dumps(body, sort_keys=True).encode()
-    if encoded is not None and len(encoded) > MAX_REQUEST_BODY_BYTES:
-        raise ValueError(f"body exceeds {MAX_REQUEST_BODY_BYTES} bytes; reduce the request payload")
+    body_limit = MAX_REQUEST_BODY_BYTES
+    if (
+        method == "POST"
+        and re.fullmatch(r"/agent/apps/app-[1-9][0-9]*/actions", path)
+        and isinstance(body, dict)
+        and body.get("action") == "publish_ui"
+    ):
+        body_limit = MAX_PUBLISH_UI_REQUEST_BYTES
+    if encoded is not None and len(encoded) > body_limit:
+        raise ValueError(f"body exceeds {body_limit} bytes; reduce the request payload")
 
     parsed = urlparse(path)
     query = parse_qs(parsed.query, keep_blank_values=True)
@@ -197,7 +212,7 @@ def _dispatch_call(
     elif parsed.path == "/agent/schedules" or parsed.path.startswith("/agent/schedules/"):
         response = schedules.route_agent(method, parsed.path, body, query)
     else:
-        response = web_apps.route_agent(method, parsed.path, body, query)
+        response = web_apps.route_agent(method, parsed.path, body, query, peer_thread_id=peer_thread_id)
     result = {"status": HTTPStatus.OK.value, "body": response}
     # Match UnixSocketRequestHandler._send_json's wire encoding exactly; a
     # compact-size estimate could admit a response whose actual serialized
@@ -228,7 +243,7 @@ class AgentWorkspaceRequestHandler(UnixSocketRequestHandler):
         if self.path != "/call":
             self._send_json(HTTPStatus.NOT_FOUND, {"error": "Unknown path."})
             return
-        length = self.bounded_content_length(MAX_REQUEST_BODY_BYTES)
+        length = self.bounded_content_length(MAX_CALL_BODY_BYTES)
         if length is None:
             return
         if not _CALL_SLOTS.acquire(blocking=False):
@@ -237,8 +252,17 @@ class AgentWorkspaceRequestHandler(UnixSocketRequestHandler):
                 {"error": "Too many concurrent Workspace calls. This call was not started; retry after an active call finishes."},
             )
             return
+        large_request_slot = False
         large_response_slot = False
         try:
+            if length > MAX_REQUEST_BODY_BYTES:
+                if not _LARGE_REQUEST_SLOTS.acquire(blocking=False):
+                    self._send_json(
+                        HTTPStatus.TOO_MANY_REQUESTS,
+                        {"error": "Too many concurrent large Workspace requests. This call was not started; retry after an active call finishes."},
+                    )
+                    return
+                large_request_slot = True
             request = self.read_json_object_body(length)
             if request is None:
                 return
@@ -281,6 +305,8 @@ class AgentWorkspaceRequestHandler(UnixSocketRequestHandler):
         finally:
             if large_response_slot:
                 _LARGE_RESPONSE_SLOTS.release()
+            if large_request_slot:
+                _LARGE_REQUEST_SLOTS.release()
             _CALL_SLOTS.release()
 
 

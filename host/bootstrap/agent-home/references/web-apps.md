@@ -4,7 +4,7 @@ Read when the host guide directs: App creation, `/agent/apps/{app_id}/...`
 operations or diagnosis. For generated UI, also read [web-app-ui.md](web-app-ui.md).
 
 Use immutable `app-N` ids. Any agent may read Apps; only the owner may change
-its active, unlocked App. Archived or agent-locked Apps are read-only.
+its active, unlocked App, except for explicitly granted collection writes. Archived or agent-locked Apps are read-only.
 
 ## Create and configure
 
@@ -35,7 +35,8 @@ relevant state and retrying. Stop on an archived App or a 423 lock.
 ## Read state
 
 - `GET /agent/apps/{app_id}/state/meta`: revision, update time, byte sizes and
-  `agent_updates_locked`.
+  `agent_updates_locked`, plus `last_runtime_report` and `last_runtime_report_at`
+  (null until a runtime failure is reported; report text is at most 400 UTF-8 bytes).
 - `GET /agent/apps/{app_id}/state/ui`: revision, HTML, CSS and JavaScript.
 - `GET /agent/apps/{app_id}/state/data`: revision and full JSON data.
 - `GET /agent/apps/{app_id}/state/data/shape`: keys, types and branch `bytes`
@@ -67,20 +68,29 @@ data. Carry its returned revision forward. Paths contain 1–16 object keys or
 non-negative array indexes; parents must exist. `set` cannot append an array
 item: use `append`.
 
-Limits: 128 KiB HTML, 64 KiB CSS, 128 KiB JavaScript, 10 MiB document data,
-and 256 KiB per agent request. Grow large documents with targeted operations.
+Limits: 1 MiB HTML, 64 KiB CSS, 128 KiB JavaScript, 10 MiB document data,
+and 256 KiB per agent request. UI publication (`publish_ui`) allows an 8 MiB
+request for the bundle and JSON escaping; individual field limits still apply.
+Grow large documents with targeted operations.
 
 ## Collections
 
-Keep small configuration/cohesive state in the document; use collections for
-repeated records that need filtering or paging.
+Schema rules:
+- The document holds settings, view state and an optional small summary, never repeated records.
+- Repeated records belong in collections with stable ids. Keep filter/sort fields as top-level scalars and large text in separate fields so queries can omit it.
+- Published HTML is a compact shell with a summary, never a copy of the last full table.
 
 - `GET /agent/apps/{app_id}/collections`: names, row counts, byte sizes and
   current App revision.
 - `POST /agent/apps/{app_id}/collections/leads/query`: optional `filters`
   (up to 8 `eq`, `ne`, `exists` or `missing` operations on top-level fields),
-  `ids`, one `sort`, `limit` (1–100) and `offset`. Returns rows, `total` and
-  `next_offset`.
+  `ids`, one `sort`, `limit` (1–100) and `offset`. Optional `fields` selects
+  1–32 top-level field names in SQL; row ids remain, missing fields are omitted,
+  and explicit nulls remain null. Filters and ordering use the original row.
+  `count_only: true` returns `rows: []`, `total` and `next_offset: null` without
+  fetching rows. Returns rows, `total` and `next_offset`. The sum of compact
+  serialized row bytes may not exceed 1 MiB (1,048,576 bytes); a 413 response
+  asks you to use `fields` or a smaller `limit`. Unknown query keys are rejected.
 - `POST /agent/apps/{app_id}/collections/leads/actions` with
   `{"expected_revision":3,"operations":[{"action":"upsert","id":"lead-1","value":{"status":"new"}},{"action":"delete","id":"lead-2"}]}`
   applies up to 100 row operations atomically and advances the same revision
@@ -91,3 +101,20 @@ Collection names and row ids are stable. Limits per App: 64 collections,
 include collection rows.
 
 Before initiating work with the owner, read [agent-messaging.md](agent-messaging.md).
+
+## Collection-only grants
+
+Any agent may read `GET /agent/apps/{app_id}/grants`, returning `{"grants":{...}}`.
+Only the owner can `PUT /agent/apps/{app_id}/grants` with
+`{"thread_id":"thread-42","collections":["leads"]}` to replace that grantee's
+list, or `DELETE /agent/apps/{app_id}/grants/thread-42` to revoke it. An empty
+list also revokes. Up to 16 grantees and 16 unique collection names per grantee
+are allowed. Identities are `thread-N`, `schedule-N` or `app-N` with a positive
+integer; the owner cannot be a grantee. Grants do not advance the App revision.
+
+A grantee can only POST row actions to the named collections. UI, document,
+metadata and grants remain owner-only. Each batch targets one collection;
+operations cannot name another collection. Grant authorization and row writes
+share the App's database lock, so a revoked grant cannot authorize a later
+write. Archived, locked and expected-revision rules still apply. Notices record
+the authenticated caller, never a caller identity supplied in the body.

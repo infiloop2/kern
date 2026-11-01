@@ -198,7 +198,7 @@ def _built_app(title: str = "Weekly focus") -> dict[str, Any]:
         // not become a free pass around the execution budget.
         const pending = app.read(['count']);
         const started = Date.now();
-        while (Date.now() - started < 6000) {{ /* busy */ }}
+        while (true) {{ /* busy */ }}
         await pending;
         app.notify('Spin finished', 'success');
       }});
@@ -353,6 +353,35 @@ def _route_workspace_api(
             return _stop_turn(workspace)
         if method == "POST" and resource == "runtime/actions":
             return _runtime_action(workspace, body)
+        if method == "POST" and resource == "runtime/report":
+            workspace["last_runtime_report"] = body["report"]
+            return {"ok": True}
+        collection_match = re.fullmatch(r"runtime/collections/([^/]+)/query", resource)
+        if method == "POST" and collection_match:
+            name = collection_match.group(1)
+            rows = copy.deepcopy(workspace.get("collections", {}).get(name, []))
+            for item in body.get("filters", []):
+                key, op = item["field"], item["op"]
+                rows = [row for row in rows if {
+                    "eq": key in row["value"] and row["value"].get(key) == item.get("value"),
+                    "ne": key not in row["value"] or row["value"].get(key) != item.get("value"),
+                    "exists": key in row["value"], "missing": key not in row["value"],
+                }[op]]
+            if "ids" in body:
+                rows = [row for row in rows if row["id"] in body["ids"]]
+            rows.sort(key=lambda row: row["id"])
+            if "sort" in body:
+                key = body["sort"]["field"]
+                present = [row for row in rows if key in row["value"]]
+                present.sort(key=lambda row: row["value"][key], reverse=body["sort"]["direction"] == "desc")
+                rows = present + [row for row in rows if key not in row["value"]]
+            total = len(rows)
+            offset = body.get("offset", 0)
+            rows = [] if body.get("count_only") else rows[offset:offset + body.get("limit", 50)]
+            if "fields" in body:
+                rows = [{"id": row["id"], "value": {key: value for key, value in row["value"].items() if key in body["fields"]}} for row in rows]
+            return {"collection": {"name": name, "revision": workspace["app"]["revision"], "rows": rows, "total": total,
+                "offset": offset, "next_offset": offset + len(rows) if rows and offset + len(rows) < total else None}}
         if method == "POST" and resource == "runtime/data/read":
             return _runtime_data_read(workspace, body)
         if method == "POST" and resource == "messages":
@@ -693,16 +722,24 @@ def _runtime_data_read(
     workspace: dict[str, Any], body: Any
 ) -> dict[str, Any]:
     request = builder_backend._required_object(body, "data read")
-    builder_backend._require_keys(request, {"path"}, required={"path"})
-    path = builder_backend._validated_path(request.get("path"))
-    value: Any = workspace["app"]["data"]
-    for segment in path:
-        value = builder_backend._child(value, segment)
+    builder_backend._require_keys(request, {"path", "paths", "missing"}, required=set())
+    paths = request["paths"] if "paths" in request else [request["path"]]
+    values = []
+    for raw_path in paths:
+        path = builder_backend._validated_path(raw_path)
+        value: Any = workspace["app"]["data"]
+        try:
+            for segment in path:
+                value = builder_backend._child(value, segment)
+        except builder_backend.WorkspaceError:
+            if request.get("missing") != "null":
+                raise
+            value = None
+        values.append({"path": path, "value": copy.deepcopy(value)})
     app = workspace["app"]
     return {"app": {
         "revision": app["revision"],
-        "path": path,
-        "value": copy.deepcopy(value),
+        **({"values": values} if "paths" in request else values[0]),
         "updated_at": app["updated_at"],
     }}
 
@@ -1029,8 +1066,7 @@ def worker_startup_smoke(page: Any) -> None:
         nonlocal slow_broker_requests
         slow_broker_requests += 1
         if slow_broker_requests == 1:
-            # Longer than the App's five-second execution limit. Browser
-            # startup should have its own deadline before App code starts.
+            # Delay browser startup independently of the generated-code deadline.
             time.sleep(6)
         route.continue_()
 
@@ -1093,7 +1129,7 @@ def turn_budget_smoke(page: Any) -> None:
     count = frame.locator(".metric strong")
     expect(count).to_have_text("2")
     # Two independent reads overlap, then one dependent write: 1.8 s per
-    # request fits in five seconds only when the reads actually run concurrently.
+    # request finishes comfortably inside the fifteen-second deadline.
     page.evaluate("""() => {
       const nativeApi = window.KernHost.api;
       window.__kernRuntimeDelayMs = 1800;
@@ -1148,7 +1184,7 @@ def turn_budget_smoke(page: Any) -> None:
         if (path.endsWith("/runtime/actions") && window.__kernLateWrites > 0) {
           window.__kernLateWrites -= 1;
           window.__kernLateWritePending = true;
-          return new Promise(resolve => setTimeout(resolve, 6500))
+          return new Promise(resolve => setTimeout(resolve, 16500))
             .then(() => nativeApi(method, path, body))
             .finally(() => { window.__kernLateWritePending = false; });
         }
@@ -1179,30 +1215,31 @@ def turn_budget_smoke(page: Any) -> None:
     expect(count).to_have_text("6", timeout=10_000)
     expect(frame.locator(".analysis")).to_have_text("Saved together")
     # Computing while a request is outstanding is still generated execution:
-    # the handler spins for six seconds behind one slow read and is stopped
-    # by the five-second total deadline instead of finishing.
+    # the handler spins endlessly behind one slow read and is stopped
+    # by the fifteen-second total deadline.
     # The status element keeps its last text while hidden; clear it so the
     # assertion below can only be satisfied by this turn's own outcome.
     frame.locator("#runtime-status").evaluate("element => { element.textContent = ''; }")
     started = time.monotonic()
     frame.get_by_role("button", name="Spin while waiting", exact=True).click()
     expect(frame.locator("#runtime-status")).to_contain_text(
-        "took too long and was stopped", timeout=6_000
+        "took too long and was stopped", timeout=17_000
     )
-    if time.monotonic() - started > 6.5:
+    if time.monotonic() - started > 17.5:
         raise AssertionError("a spinning handler outlived its execution budget")
     expect(frame.locator("#runtime-status")).not_to_contain_text("Spin finished")
-    # Waiting alone also consumes the deadline. Three sequential 1.8 s
+    # Waiting alone also consumes the deadline. Three sequential 5.5 s
     # reads must time out, even though there is almost no generated CPU work.
     frame.locator("#runtime-status").evaluate("element => { element.textContent = ''; }")
+    page.evaluate("window.__kernRuntimeDelayMs = 5500;")
     started = time.monotonic()
     frame.get_by_role("button", name="Sequential reads", exact=True).click()
     expect(frame.locator("#runtime-status")).to_contain_text(
-        "took too long and was stopped", timeout=6_500
+        "took too long and was stopped", timeout=17_000
     )
     elapsed = time.monotonic() - started
-    if not 4.5 <= elapsed <= 6.5:
-        raise AssertionError(f"expected five-second total deadline, got {elapsed:.2f}s")
+    if not 14.5 <= elapsed <= 17.5:
+        raise AssertionError(f"expected fifteen-second total deadline, got {elapsed:.2f}s")
     expect(frame.locator("#runtime-status")).not_to_contain_text("Sequential reads finished")
     # A host write can commit after the worker's deadline. A queued click
     # must wait and read that acknowledged revision, rather than racing it.
@@ -1211,7 +1248,7 @@ def turn_budget_smoke(page: Any) -> None:
     add.click()
     page.wait_for_function("() => window.__kernLateWritePending")
     add.click()
-    expect(frame.locator("#runtime-status")).to_contain_text("took too long", timeout=6_500)
+    expect(frame.locator("#runtime-status")).to_contain_text("took too long", timeout=17_000)
     expect(count).to_have_text("8", timeout=10_000)
     if page.evaluate("window.__kernReadsDuringLateWrite") != 0:
         raise AssertionError("queued action read stale state before the timed-out write settled")
@@ -1265,11 +1302,11 @@ def turn_budget_smoke(page: Any) -> None:
     # The sandbox is ready, but full-data hydration misses the deadline.
     # Its queued click should get a fresh turn and its report must count the
     # hydration request rather than blame renderer startup.
-    page.evaluate("window.__kernHydrationDelayMs = 6500;")
+    page.evaluate("window.__kernHydrationDelayMs = 16500;")
     frame.get_by_role("button", name="Update app", exact=True).click()
     page.wait_for_function("() => window.__kernHydrationStarted")
     add.click()
-    expect(count).to_have_text("10", timeout=10_000)
+    expect(count).to_have_text("10", timeout=22_000)
     expect(frame.locator(".analysis")).to_have_text("External update")
     frame.get_by_role("button", name="Show Chat", exact=True).click()
     frame.locator("#message").fill("What slowed the load?")

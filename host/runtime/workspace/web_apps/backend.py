@@ -64,7 +64,7 @@ from host.session_options import (
 
 APP_ID_RE = re.compile(r"app-([1-9][0-9]*)")
 MAX_REQUEST_BODY_BYTES = 768 * 1024
-MAX_HTML_BYTES = 128 * 1024
+MAX_HTML_BYTES = 1024 * 1024
 MAX_CSS_BYTES = 64 * 1024
 MAX_JAVASCRIPT_BYTES = 128 * 1024
 MAX_DATA_BYTES = 10 * 1024 * 1024
@@ -200,6 +200,10 @@ def _route_browser(
             "app": load_app_ui(app_id) if resource == "ui" else load_app_data(app_id)
         }
 
+    match = re.fullmatch(r"/apps/([^/]+)/runtime/report", path)
+    if method == "POST" and match:
+        return save_runtime_report(_path_segment(match.group(1)), body)
+
     match = re.fullmatch(r"/apps/([^/]+)/runtime/data/read", path)
     if method == "POST" and match:
         return {
@@ -296,11 +300,12 @@ def route_agent(
     path: str,
     body: Any,
     query: dict[str, list[str]] | None = None,
+    *, peer_thread_id: str | None = None,
 ) -> dict[str, Any]:
     """Route one explicit agent request.
 
     App reads are host-wide. The agent API authenticates ownership before
-    routing mutations; the immutable app id is the target. Archived apps remain readable but reject every mutation.
+    routing mutations, except collection writes that authorize grants under lock; the immutable app id is the target. Archived apps remain readable but reject every mutation.
     Revert remains absent because restoring operator-visible state is a human
     control.
     """
@@ -339,6 +344,18 @@ def route_agent(
             "this agent route does not accept query parameters",
         )
 
+    if method == "GET" and resource == "/grants":
+        with db.transaction() as cur:
+            cur.execute("SELECT collection_grants FROM web_apps WHERE app_id = %s", (app_id,))
+            row = cur.fetchone()
+            if row is None:
+                raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
+            return {"grants": row[0]}
+    grant_match = re.fullmatch(r"/grants/([^/]+)", resource)
+    if (method == "PUT" and resource == "/grants") or (method == "DELETE" and grant_match):
+        with _workspace_lock(app_id):
+            _require_agent_writable_web_app(app_id)
+            return update_collection_grants(app_id, body, grant_match.group(1) if grant_match else None)
     if method == "GET" and resource == "/state/meta":
         return {"app": load_app_state_meta(app_id)}
     if method == "GET" and resource == "/state/ui":
@@ -366,7 +383,7 @@ def route_agent(
         if method == "POST" and collection_resource == "actions":
             with _workspace_lock(app_id):
                 _require_agent_writable_web_app(app_id)
-                return apply_collection_actions(app_id, collection, body)
+                return apply_collection_actions(app_id, collection, body, peer_thread_id)
     if method == "POST" and resource == "/actions":
         with _workspace_lock(app_id):
             _require_agent_writable_web_app(app_id)
@@ -925,7 +942,7 @@ def load_app_state_meta(app_id: str) -> dict[str, Any]:
         cur.execute(
             "SELECT revision, updated_at, agent_updates_locked,"
             " octet_length(html), octet_length(css), octet_length(javascript),"
-            " octet_length(data_json) FROM web_apps WHERE app_id = %s",
+            " octet_length(data_json), last_runtime_report, last_runtime_report_at FROM web_apps WHERE app_id = %s",
             (app_id,),
         )
         row = cur.fetchone()
@@ -935,6 +952,8 @@ def load_app_state_meta(app_id: str) -> dict[str, Any]:
         "revision": row[0],
         "updated_at": row[1],
         "agent_updates_locked": bool(row[2]),
+        "last_runtime_report": row[7],
+        "last_runtime_report_at": row[8],
         "bytes": {
             "html": row[3],
             "css": row[4],
@@ -1331,6 +1350,61 @@ def _apply_data_operations(
     return {"revision": changed[0], "updated_at": changed[5]}
 
 
+def save_runtime_report(app_id: str, body: Any) -> dict[str, Any]:
+    _require_web_app(app_id)
+    request = _required_object(body, "runtime report")
+    _require_keys(request, {"report"}, required={"report"})
+    report = _required_text(request.get("report"), "report")
+    report_bytes = _utf8_length(report)
+    if report_bytes is None:
+        raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "runtime report must be valid UTF-8")
+    if report_bytes > 400:
+        raise WorkspaceError(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, "runtime report exceeds 400 bytes")
+    with db.transaction() as cur:
+        cur.execute(
+            "UPDATE web_apps SET last_runtime_report = %s, last_runtime_report_at = %s WHERE app_id = %s",
+            (report, _utc_now(), app_id),
+        )
+    return {"ok": True}
+
+
+def update_collection_grants(app_id: str, body: Any, deleted_thread_id: str | None) -> dict[str, Any]:
+    if deleted_thread_id is None:
+        request = _required_object(body, "collection grant")
+        _require_keys(request, {"thread_id", "collections"}, required={"thread_id", "collections"})
+        thread_id = request.get("thread_id")
+        names = request.get("collections")
+        if not isinstance(names, list) or len(names) > 16:
+            raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "collections must contain 0 to 16 names")
+        names = [collection_store._validated_collection_name(name) for name in names]
+        if len(set(names)) != len(names):
+            raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "collections must be unique")
+    else:
+        thread_id, names = deleted_thread_id, []
+    if not isinstance(thread_id, str) or re.fullmatch(r"(thread|schedule|app)-[1-9][0-9]*", thread_id) is None:
+        raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "thread_id must be a thread, schedule or app identity")
+    if thread_id == app_id:
+        raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "the owner cannot be a grantee")
+    with db.transaction() as cur:
+        cur.execute("SELECT collection_grants, archived, agent_updates_locked FROM web_apps WHERE app_id = %s FOR UPDATE", (app_id,))
+        row = cur.fetchone()
+        if row is None:
+            raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
+        if row[1]:
+            raise WorkspaceError(HTTPStatus.CONFLICT, "archived apps are read-only")
+        if row[2]:
+            raise WorkspaceError(HTTPStatus.LOCKED, AGENT_UPDATES_LOCKED_MESSAGE)
+        grants = dict(row[0])
+        if names:
+            grants[thread_id] = names
+        else:
+            grants.pop(thread_id, None)
+        if len(grants) > 16:
+            raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "at most 16 grantees are allowed")
+        cur.execute("UPDATE web_apps SET collection_grants = %s WHERE app_id = %s", (db.jsonb(grants), app_id))
+    return {"grants": grants}
+
+
 # --- Row-oriented collections -----------------------------------------------
 
 
@@ -1350,12 +1424,13 @@ def query_collection(app_id: str, collection: str, body: Any) -> dict[str, Any]:
 
 
 def apply_collection_actions(
-    app_id: str, collection: str, body: Any
+    app_id: str, collection: str, body: Any, peer_thread_id: str | None
 ) -> dict[str, Any]:
     return collection_store.apply_collection_actions(
         app_id,
         collection,
         body,
+        peer_thread_id,
         require_web_app=_require_web_app,
         record_revision=_record_state_row_revision,
         utc_now=_utc_now,
