@@ -77,10 +77,12 @@ class QueryGrantContractTests(unittest.TestCase):
             self.assertEqual(route.call_args.kwargs["peer_thread_id"], "thread-42")
             self.assertEqual(notice.call_args.args[0], "thread-42")
 
+    GRANTS = {"thread-42": {"collections": ["leads"], "actions": ["upsert", "merge", "delete"]}}
+
     def test_non_grantee_and_wrong_collection_fail_under_row_lock(self):
-        for caller, collection in [(None, "leads"), ("thread-9", "leads"), ("thread-42", "private")]:
+        for caller, collection, grants in [(None, "leads", self.GRANTS), ("thread-9", "leads", self.GRANTS), ("thread-42", "private", self.GRANTS), ("thread-42", "private", {"thread-42": ["leads"]})]:
             with self.subTest(caller=caller, collection=collection):
-                cursor = self.cursor([(1, "", "", "", "{}", "now", False, {"thread-42": ["leads"]}, False)])
+                cursor = self.cursor([(1, "", "", "", "{}", "now", False, grants, False)])
                 with self.assertRaises(backend.WorkspaceError) as error:
                     backend.apply_collection_actions("app-1", collection, {"expected_revision": 1, "operations": [{"action": "upsert", "id": "one", "value": {}}]}, caller)
                 self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
@@ -88,14 +90,80 @@ class QueryGrantContractTests(unittest.TestCase):
                 self.assertIn("FOR UPDATE", cursor.execute.call_args.args[0])
                 self.assertEqual(cursor.execute.call_count, 1)
 
+    def test_grant_action_allowlist_blocks_other_actions_before_any_row_read(self):
+        grants = {"thread-42": {"collections": ["leads"], "actions": ["merge"]}}
+        for operation in ({"action": "upsert", "id": "one", "value": {}}, {"action": "delete", "id": "one"}):
+            with self.subTest(action=operation["action"]):
+                cursor = self.cursor([(1, "", "", "", "{}", "now", False, grants, False)])
+                with self.assertRaises(backend.WorkspaceError) as error:
+                    backend.apply_collection_actions("app-1", "leads", {"expected_revision": 1, "operations": [{"action": "merge", "id": "two", "value": {"a": 1}}, operation]}, "thread-42")
+                self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
+                self.assertIn(operation["action"], error.exception.message)
+                self.assertIn("merge", error.exception.message)
+                self.assertEqual(cursor.execute.call_count, 1)
+        # Legacy list-shaped grants keep allowing every action.
+        self.assertEqual(collections.collection_grant({"thread-42": ["leads"]}, "thread-42"), {"collections": ["leads"], "actions": ["upsert", "merge", "delete"]})
+        self.assertEqual(collections.collection_grant({}, "thread-42"), {"collections": [], "actions": []})
+
+    def test_merge_resolves_to_an_upsert_of_the_patched_stored_row(self):
+        cursor = self.cursor([(3, "", "", "", "{}", "now", False, {}, False), (2, 300), (4, "", "", "", "{}", "later", False)])
+        cursor.fetchall.side_effect = [[("kept", 40, {"title": "Old", "score": 1, "note": "n"}), ("new", 10, {"x": 1})]]
+        with patch.object(collections.recovery, "record_collection_changes") as recorded, patch.object(backend, "_record_state_row_revision"):
+            result = backend.apply_collection_actions("app-1", "leads", {"expected_revision": 3, "operations": [
+                {"action": "merge", "id": "kept", "value": {"score": 7, "extra": None}},
+                {"action": "merge", "id": "fresh", "value": {"title": "Created"}},
+                {"action": "upsert", "id": "new", "value": {"y": 2}},
+            ]}, "app-1")
+        self.assertEqual(result["revision"], 4)
+        operations = recorded.call_args.args[4]
+        self.assertEqual([(name, row_id, value) for name, row_id, value, _size in operations], [
+            ("upsert", "kept", {"title": "Old", "score": 7, "note": "n", "extra": None}),
+            ("upsert", "fresh", {"title": "Created"}),
+            ("upsert", "new", {"y": 2}),
+        ])
+        select_sql = cursor.execute.call_args_list[2].args[0]
+        self.assertIn("value_json", select_sql)
+        self.assertIn("row_id IN", select_sql)
+
+    def test_merge_rejects_bad_actions_and_oversized_results(self):
+        self.enterContext(patch.object(backend, "_require_web_app"))
+        for operations in ([{"action": "merge", "id": "a"}], [{"action": "patch", "id": "a", "value": {}}], [{"action": "merge", "id": "a", "value": "x"}]):
+            with self.subTest(operations=operations):
+                with self.assertRaises(backend.WorkspaceError) as error:
+                    backend.apply_collection_actions("app-1", "leads", {"expected_revision": 1, "operations": operations}, "app-1")
+                self.assertIn(error.exception.status, {HTTPStatus.BAD_REQUEST, HTTPStatus.UNPROCESSABLE_ENTITY})
+        cursor = self.cursor([(1, "", "", "", "{}", "now", False, {}, False), (1, 100)])
+        cursor.fetchall.side_effect = [[("big", 100, {"body": "x" * (collections.MAX_COLLECTION_ROW_BYTES - 20)})]]
+        with self.assertRaises(backend.WorkspaceError) as error:
+            backend.apply_collection_actions("app-1", "leads", {"expected_revision": 1, "operations": [{"action": "merge", "id": "big", "value": {"more": "y" * 40}}]}, "app-1")
+        self.assertEqual(error.exception.status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+
     def test_grant_bounds_rejected(self):
-        for body in ({"thread_id": "app-1", "collections": ["leads"]}, {"thread_id": "thread-0", "collections": []}, {"thread_id": "thread-2", "collections": ["leads"] * 17}, {"thread_id": "thread-2", "collections": ["UPPER"]}):
-            with self.subTest(body=body), self.assertRaises(backend.WorkspaceError):
+        for body in ({"thread_id": "app-1", "collections": ["leads"]}, {"thread_id": "thread-0", "collections": []}, {"thread_id": "thread-2", "collections": ["leads"] * 17}, {"thread_id": "thread-2", "collections": ["UPPER"]},
+                     {"thread_id": "thread-2", "collections": ["leads"], "actions": []}, {"thread_id": "thread-2", "collections": ["leads"], "actions": ["replace"]}, {"thread_id": "thread-2", "collections": ["leads"], "actions": ["merge", "merge"]}, {"thread_id": "thread-2", "collections": ["leads"], "actions": "merge"},
+                     {"thread_id": "thread-2", "collections": ["leads"], "actions": [{}]}, {"thread_id": "thread-2", "collections": ["leads"], "actions": [["merge"]]}, {"thread_id": "thread-2", "collections": ["leads"], "actions": [None]}):
+            with self.subTest(body=body), self.assertRaises(backend.WorkspaceError) as error:
                 backend.update_collection_grants("app-1", body, None)
+            self.assertIn(error.exception.status, {HTTPStatus.BAD_REQUEST, HTTPStatus.UNPROCESSABLE_ENTITY})
         cursor = self.cursor([({f"thread-{n}": ["leads"] for n in range(1, 17)}, False, False)])
         with self.assertRaises(backend.WorkspaceError):
             backend.update_collection_grants("app-1", {"thread_id": "thread-99", "collections": ["leads"]}, None)
         self.assertEqual(cursor.execute.call_count, 1)
+
+    def test_grant_entries_store_collections_and_ordered_actions(self):
+        cursor = self.cursor([({}, False, False)])
+        result = backend.update_collection_grants("app-1", {"thread_id": "schedule-64", "collections": ["post_metrics"], "actions": ["delete", "merge"]}, None)
+        self.assertEqual(result, {"grants": {"schedule-64": {"collections": ["post_metrics"], "actions": ["merge", "delete"]}}})
+        cursor = self.cursor([({"schedule-64": {"collections": ["post_metrics"], "actions": ["merge"]}, "thread-9": ["old"]}, False, False)])
+        result = backend.update_collection_grants("app-1", {"thread_id": "thread-7", "collections": ["leads"]}, None)
+        self.assertEqual(result["grants"]["thread-7"], {"collections": ["leads"], "actions": ["upsert", "merge", "delete"]})
+        self.assertEqual(result["grants"]["schedule-64"]["actions"], ["merge"])
+        # Legacy list entries are normalized on every write and read, never returned as lists.
+        self.assertEqual(result["grants"]["thread-9"], {"collections": ["old"], "actions": ["upsert", "merge", "delete"]})
+        cursor = self.cursor([({"thread-9": ["old"]},)])
+        with patch.object(backend.db, "transaction") as transaction:
+            transaction.return_value.__enter__.return_value = cursor
+            self.assertEqual(backend.route_agent("GET", "/agent/apps/app-1/grants", None), {"grants": {"thread-9": {"collections": ["old"], "actions": ["upsert", "merge", "delete"]}}})
 
     def test_render_storage_caps_match(self):
         source = (ROOT / "host/runtime/workspace/web_apps/ui/personal_web_app_builder.js").read_text()
@@ -128,6 +196,30 @@ class PreviewLintTests(unittest.TestCase):
         self.assertIn("missing-onload", [f["code"] for f in findings])
         if preview.shutil.which("node"):
             self.assertIn("javascript-syntax", [f["code"] for f in preview.lint_ui({"javascript": "app.onLoad(() => {"})])
+
+    def test_dynamic_actions_and_registrations_do_not_warn(self):
+        # Template button helpers and loop registrations are the common generated patterns.
+        javascript = """app.onLoad(() => {});
+const btn = (action, label) => `<button data-action="${action}">${label}</button>`;
+for (const key of ['prev', 'next']) app.on(key + '_page', () => {});
+const on = (name, fn) => app.on(name, fn);
+on('open', () => {});"""
+        codes = [f["code"] for f in preview.lint_ui({"html": '<button data-action="open"></button><button data-action="\'+action+\'"></button>', "javascript": javascript})]
+        self.assertEqual(codes, [])
+        # A static mismatch still warns when nothing is dynamic.
+        codes = [f["code"] for f in preview.lint_ui({"html": '<button data-action="open"></button>', "javascript": "app.onLoad(() => {}); app.on('close', () => {});"})]
+        self.assertEqual(sorted(codes), ["missing-handler", "unused-handler"])
+        self.assertFalse(set(codes) & preview.BLOCKING_LINT_CODES)
+
+    def test_mock_sort_tolerates_mixed_null_and_string_keys(self):
+        rows = [{"id": "a", "value": {"created_at": None}}, {"id": "b", "value": {"created_at": "2026-01-02"}}, {"id": "c", "value": {}}, {"id": "d", "value": {"created_at": 5}}]
+        smoke.reset_mock_state()
+        app_id = smoke._create_app()["app_id"]
+        smoke.WORKSPACES[app_id]["collections"] = {"notes": rows}
+        page = smoke._route_workspace_api("POST", f"apps/{app_id}/runtime/collections/notes/query", {"sort": {"field": "created_at", "direction": "desc"}})
+        self.assertEqual([row["id"] for row in page["collection"]["rows"]], ["d", "b", "a", "c"])
+        page = smoke._route_workspace_api("POST", f"apps/{app_id}/runtime/collections/notes/query", {"sort": {"field": "created_at", "direction": "asc"}})
+        self.assertEqual([row["id"] for row in page["collection"]["rows"]], ["a", "b", "d", "c"])
 
     def test_cli_loads_saved_bodies_and_lints_before_serving(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -180,6 +272,22 @@ class PreviewLintTests(unittest.TestCase):
             self.assertEqual(preview.lint_ui(ui), [])
         with self.assertRaises(ValueError):
             preview.create_server({}, {}, {}, 9000)
+
+    def test_port_zero_takes_the_first_free_preview_port(self):
+        ui = {"revision": 1, "html": "", "css": "", "javascript": "app.onLoad(() => {});"}
+        first = preview.create_server(ui, {"revision": 1, "data": {}}, {}, 0)
+        try:
+            second = preview.create_server(ui, {"revision": 1, "data": {}}, {}, 0)
+            try:
+                ports = {first.server_address[1], second.server_address[1]}
+                self.assertEqual(len(ports), 2)
+                self.assertTrue(ports <= set(preview.PREVIEW_PORTS))
+                with self.assertRaises(OSError):
+                    preview.create_server(ui, {"revision": 1, "data": {}}, {}, first.server_address[1])
+            finally:
+                second.server_close()
+        finally:
+            first.server_close()
 
 
 class BuilderChromiumTests(unittest.TestCase):

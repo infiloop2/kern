@@ -86,22 +86,27 @@ Save the response bodies from `GET /agent/apps/{id}/state/ui` and
 revision. From a Kern repository checkout run:
 
 ```sh
-python3 tests/workspaces/web_apps/preview.py --ui ui.json --data data.json --collection leads=rows.json --port 8000 --lint
+python3 tests/workspaces/web_apps/preview.py --ui ui.json --data data.json --collection leads=rows.json --lint
 ```
 
 Collection files contain `[{"id":"lead-1","value":{"title":"Example"}}]`.
-Lint reports a code, message and snippet for forbidden globals, missing onLoad,
-unmatched actions/handlers and JavaScript syntax errors (`node --check` when
-Node is available). It is a conservative source check, not a JavaScript parser;
-review findings in comments/strings too. Findings exit nonzero before serving.
+Without `--port` the preview takes the first free port from 8000 to 8015 and
+prints it; several agents can preview at once. Lint reports a severity, code,
+message and snippet. Forbidden globals, missing onLoad and JavaScript syntax
+errors (`node --check` when Node is available) are errors that exit nonzero
+before serving. Unmatched actions/handlers are warnings, skipped when action
+names or registrations are built dynamically; verify those by clicking in the
+preview. It is a conservative source check, not a JavaScript parser; review
+findings in comments/strings too.
 The preview serves the real builder with an in-memory mock; writes never reach
 the saved files or live App. Open the printed loopback URL using your own
 Playwright with the durable browser install, log in with mock password `dev`,
 open **App preview**, capture a screenshot, and read console messages prefixed
 `[app-sanitizer]` (at most 200 per render) plus `#runtime-status`. Inspect both
 initial and interactive renders, then publish. Stop the preview with Ctrl-C.
-The mock supports scalar collection queries for preview; PostgreSQL remains the
-authority for JSON ordering and storage behavior.
+The mock supports scalar collection queries for preview and orders mixed
+null/string/number sort keys like jsonb; PostgreSQL remains the authority for
+JSON ordering and storage behavior.
 
 ## Starter examples
 

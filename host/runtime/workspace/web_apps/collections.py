@@ -17,6 +17,7 @@ MAX_COLLECTION_ROWS = 100_000
 MAX_COLLECTION_DATA_BYTES = 50 * 1024 * 1024
 MAX_COLLECTION_ROW_BYTES = 128 * 1024
 MAX_COLLECTION_BATCH_OPERATIONS = 100
+COLLECTION_ROW_ACTIONS = ("upsert", "merge", "delete")
 MAX_COLLECTION_RESTORE_BATCH_ROWS = 100
 MAX_COLLECTION_RESTORE_BATCH_BYTES = 1024 * 1024
 MAX_COLLECTION_QUERY_FILTERS = 8
@@ -35,6 +36,26 @@ def _required_object(value: Any, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, f"{label} must be an object")
     return value
+
+
+def collection_grant(grants: Any, thread_id: str | None) -> dict[str, Any]:
+    """Return one grantee's {"collections", "actions"}; absent grants allow nothing."""
+    entry = grants.get(thread_id) if isinstance(grants, dict) and thread_id else None
+    if isinstance(entry, list):  # grants saved before action allowlists existed
+        return {"collections": entry, "actions": list(COLLECTION_ROW_ACTIONS)}
+    if not isinstance(entry, dict):
+        return {"collections": [], "actions": []}
+    return {
+        "collections": list(entry.get("collections") or []),
+        "actions": list(entry.get("actions") or []),
+    }
+
+
+def normalized_grants(grants: Any) -> dict[str, dict[str, Any]]:
+    """Every grantee entry in the documented {"collections", "actions"} shape."""
+    if not isinstance(grants, dict):
+        return {}
+    return {thread_id: collection_grant(grants, thread_id) for thread_id in grants}
 
 
 def _require_keys(
@@ -324,11 +345,11 @@ def apply_collection_actions(
     for raw_operation in raw_operations:
         operation = _required_object(raw_operation, "collection row action")
         name = _required_text(operation.get("action"), "action")
-        required = {"action", "id", "value"} if name == "upsert" else {"action", "id"}
+        required = {"action", "id"} if name == "delete" else {"action", "id", "value"}
         _require_keys(operation, {"action", "id", "value"}, required=required)
-        if name not in {"upsert", "delete"}:
+        if name not in COLLECTION_ROW_ACTIONS:
             raise WorkspaceError(
-                HTTPStatus.UNPROCESSABLE_ENTITY, "row action must be upsert or delete"
+                HTTPStatus.UNPROCESSABLE_ENTITY, "row action must be upsert, merge or delete"
             )
         row_id = _validated_collection_row_id(operation.get("id"))
         if row_id in seen_ids:
@@ -337,11 +358,14 @@ def apply_collection_actions(
                 "a row id may appear only once in one batch",
             )
         seen_ids.add(row_id)
-        if name == "upsert":
+        if name == "delete":
+            operations.append((name, row_id, None, 0))
+        else:
+            # A merge patch is validated like a row now and again after merging.
             row_value, value_bytes = _validated_collection_row(operation.get("value"))
             operations.append((name, row_id, row_value, value_bytes))
-        else:
-            operations.append((name, row_id, None, 0))
+    requested_actions = {name for name, *_rest in operations}
+    merges = "merge" in requested_actions
 
     now = utc_now()
     with db.transaction() as cur:
@@ -353,12 +377,21 @@ def apply_collection_actions(
         app_state = cur.fetchone()
         if app_state is None:
             raise WorkspaceError(HTTPStatus.INTERNAL_SERVER_ERROR, "app state is unavailable")
-        if peer_thread_id != app_id and collection not in app_state[7].get(peer_thread_id, []):
-            raise WorkspaceError(
-                HTTPStatus.FORBIDDEN,
-                f"Only the owner, {app_id}, can modify this App. "
-                f'Use send_agent_message with thread_id="{app_id}" to ask the owner to make the change.',
-            )
+        if peer_thread_id != app_id:
+            grant = collection_grant(app_state[7], peer_thread_id)
+            if collection not in grant["collections"]:
+                raise WorkspaceError(
+                    HTTPStatus.FORBIDDEN,
+                    f"Only the owner, {app_id}, can modify this App. "
+                    f'Use send_agent_message with thread_id="{app_id}" to ask the owner to make the change.',
+                )
+            denied = sorted(requested_actions - set(grant["actions"]))
+            if denied:
+                raise WorkspaceError(
+                    HTTPStatus.FORBIDDEN,
+                    f"The grant from {app_id} allows only {', '.join(grant['actions'])} on {collection};"
+                    f" {', '.join(denied)} is not allowed.",
+                )
         if app_state[8]:
             raise WorkspaceError(HTTPStatus.CONFLICT, "archived apps are read-only")
         if app_state[6]:
@@ -383,11 +416,25 @@ def apply_collection_actions(
             )
         placeholders = ",".join("%s" for _ in seen_ids)
         cur.execute(
-            "SELECT row_id, value_bytes FROM web_app_collection_rows"
+            f"SELECT row_id, value_bytes{', value_json' if merges else ''} FROM web_app_collection_rows"
             f" WHERE app_id = %s AND collection = %s AND row_id IN ({placeholders})",
             (app_id, collection, *seen_ids),
         )
-        existing = {str(row_id): int(size) for row_id, size in cur.fetchall()}
+        fetched = cur.fetchall()
+        existing = {str(row[0]): int(row[1]) for row in fetched}
+        if merges:
+            # Merge resolves to an upsert of the stored row with the patch's
+            # top-level fields replaced, so recovery and storage see one shape.
+            stored = {str(row[0]): row[2] for row in fetched}
+            resolved: list[tuple[str, str, dict[str, Any] | None, int]] = []
+            for name, row_id, value, value_bytes in operations:
+                if name == "merge":
+                    base = stored.get(row_id)
+                    merged = {**(base if isinstance(base, dict) else {}), **(value or {})}
+                    value, value_bytes = _validated_collection_row(merged)
+                    name = "upsert"
+                resolved.append((name, row_id, value, value_bytes))
+            operations = resolved
         row_count = int(collection_state[0])
         data_bytes = int(collection_state[1])
         for name, row_id, _value, value_bytes in operations:

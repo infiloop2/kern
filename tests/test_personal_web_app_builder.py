@@ -2936,16 +2936,28 @@ class AgenticWebAppDbTests(unittest.TestCase):
                     agent_api.dispatch_call("POST", "/agent/apps/app-1/collections/leads/actions", body, peer_thread_id=caller)
                 self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
             agent_api.dispatch_call("PUT", "/agent/apps/app-1/grants", {"thread_id": "thread-42", "collections": ["leads"]}, peer_thread_id="app-1")
-            self.assertEqual(backend.route_agent("GET", "/agent/apps/app-1/grants", None), {"grants": {"thread-42": ["leads"]}})
+            self.assertEqual(backend.route_agent("GET", "/agent/apps/app-1/grants", None), {"grants": {"thread-42": {"collections": ["leads"], "actions": ["upsert", "merge", "delete"]}}})
             result = agent_api.dispatch_call("POST", "/agent/apps/app-1/collections/leads/actions", body, peer_thread_id="thread-42")
             self.assertEqual(result["body"]["revision"], 1)
             self.assertEqual(notice.call_args.args[0], "thread-42")
             body["expected_revision"] = 1
+            # merge keeps unpatched fields and only the allowed action passes a merge-only grant.
+            agent_api.dispatch_call("PUT", "/agent/apps/app-1/grants", {"thread_id": "thread-42", "collections": ["leads"], "actions": ["merge"]}, peer_thread_id="app-1")
+            merged = {"expected_revision": 1, "operations": [{"action": "merge", "id": "a", "value": {"score": 5}}, {"action": "merge", "id": "b", "value": {"title": "B"}}]}
+            self.assertEqual(agent_api.dispatch_call("POST", "/agent/apps/app-1/collections/leads/actions", merged, peer_thread_id="thread-42")["body"]["revision"], 2)
+            rows = {row["id"]: row["value"] for row in backend.query_collection("app-1", "leads", {})["rows"]}
+            self.assertEqual(rows, {"a": {"title": "A", "score": 5}, "b": {"title": "B"}})
+            with self.assertRaises(backend.WorkspaceError) as error:
+                agent_api.dispatch_call("POST", "/agent/apps/app-1/collections/leads/actions", {"expected_revision": 2, "operations": [{"action": "delete", "id": "b"}]}, peer_thread_id="thread-42")
+            self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
+            self.assertEqual(backend.load_app_state_meta("app-1")["revision"], 2)
+            agent_api.dispatch_call("PUT", "/agent/apps/app-1/grants", {"thread_id": "thread-42", "collections": ["leads"]}, peer_thread_id="app-1")
+            body["expected_revision"] = 2
             # A batch cannot smuggle an operation for a different collection.
             mixed = {**body, "operations": [*body["operations"], {"action": "upsert", "id": "b", "collection": "private", "value": {}}]}
             with self.assertRaises(backend.WorkspaceError):
                 backend.apply_collection_actions("app-1", "leads", mixed, "thread-42")
-            self.assertEqual(backend.load_app_state_meta("app-1")["revision"], 1)
+            self.assertEqual(backend.load_app_state_meta("app-1")["revision"], 2)
             with self.assertRaises(backend.WorkspaceError) as error:
                 backend.apply_collection_actions("app-1", "private", body, "thread-42")
             self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
@@ -2955,7 +2967,7 @@ class AgenticWebAppDbTests(unittest.TestCase):
                 with self.assertRaises(backend.WorkspaceError) as error:
                     backend.apply_collection_actions("app-1", "leads", body, "thread-42")
                 self.assertEqual(error.exception.status, status)
-                self.assertEqual(backend.load_app_state_meta("app-1")["revision"], 1)
+                self.assertEqual(backend.load_app_state_meta("app-1")["revision"], 2)
                 with db.transaction() as cur:
                     cur.execute(f"UPDATE web_apps SET {column} = FALSE WHERE app_id = 'app-1'")
             with self.assertRaises(backend.WorkspaceError) as error:
@@ -2965,4 +2977,4 @@ class AgenticWebAppDbTests(unittest.TestCase):
             with self.assertRaises(backend.WorkspaceError) as error:
                 backend.apply_collection_actions("app-1", "leads", body, "thread-42")
             self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
-            self.assertEqual(backend.load_app_state_meta("app-1")["revision"], 1)
+            self.assertEqual(backend.load_app_state_meta("app-1")["revision"], 2)

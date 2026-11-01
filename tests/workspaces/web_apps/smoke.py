@@ -240,6 +240,27 @@ def reset_mock_state() -> None:
 reset_mock_state()
 
 
+def _jsonb_sort_key(value: Any) -> tuple[int, Any]:
+    """Approximate PostgreSQL jsonb ordering so mixed-type sort keys never raise.
+
+    jsonb orders Object > Array > Boolean > Number > String > Null. Rows missing
+    the field are kept last by the caller (NULLS LAST); explicit null sorts
+    lowest. Arrays and objects compare by length only; PostgreSQL stays the
+    authority for their exact order.
+    """
+    if value is None:
+        return (0, 0)
+    if isinstance(value, str):
+        return (1, value)
+    if isinstance(value, bool):
+        return (3, int(value))
+    if isinstance(value, (int, float)):
+        return (2, value)
+    if isinstance(value, list):
+        return (4, len(value))
+    return (5, len(value))
+
+
 def route_workspace_api(
     method: str,
     relative: str,
@@ -373,7 +394,7 @@ def _route_workspace_api(
             if "sort" in body:
                 key = body["sort"]["field"]
                 present = [row for row in rows if key in row["value"]]
-                present.sort(key=lambda row: row["value"][key], reverse=body["sort"]["direction"] == "desc")
+                present.sort(key=lambda row: _jsonb_sort_key(row["value"][key]), reverse=body["sort"]["direction"] == "desc")
                 rows = present + [row for row in rows if key not in row["value"]]
             total = len(rows)
             offset = body.get("offset", 0)
