@@ -47,7 +47,7 @@ def _changes(operations: Any) -> str:
         return ""
     ops = [op for op in operations if isinstance(op, dict)]
     counts = Counter(op.get("action") for op in ops if isinstance(op.get("action"), str))
-    labels = {"set": "set", "append": "appended", "delete": "deleted", "upsert": "saved"}
+    labels = {"set": "set", "append": "appended", "delete": "deleted", "upsert": "saved", "merge": "merged"}
     parts = [f"{count} {labels[action]}" for action, count in counts.items() if action in labels]
     paths = []
     for op in ops:
@@ -185,5 +185,15 @@ def record(caller: str | None, method: Any, path: Any, body: Any,
         call_admin_api("POST", f"/v1/threads/{caller}/notices", {
             "kind": kind, "summary": summary, "details": details,
         })
+        owner = re.fullmatch(r"/agent/apps/(app-[1-9][0-9]*)/collections/[^/]+/actions", path.split("?", 1)[0])
+        if kind == "app_collection_changed" and error is None and owner and owner[1] != caller:
+            # A granted write also lands in the owner's thread as an audit
+            # notice. Caller first, so truncation can never hide who wrote.
+            # Notices neither start a turn nor enter the model's context; the
+            # owner reconciles from a marker field it queries on its next turn.
+            call_admin_api("POST", f"/v1/threads/{owner[1]}/notices", {
+                "kind": kind, "summary": compact(f"{thread_name(caller)}: {summary}"),
+                "details": f"Caller: {caller}\n\n{details}",  # immutable id; display names are not unique
+            })
     except Exception as exc:
         host_errors.report_warning("workspace.agent_notice", exc, context={"thread_id": caller})

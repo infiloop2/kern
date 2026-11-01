@@ -92,9 +92,12 @@ Schema rules:
   serialized row bytes may not exceed 1 MiB (1,048,576 bytes); a 413 response
   asks you to use `fields` or a smaller `limit`. Unknown query keys are rejected.
 - `POST /agent/apps/{app_id}/collections/leads/actions` with
-  `{"expected_revision":3,"operations":[{"action":"upsert","id":"lead-1","value":{"status":"new"}},{"action":"delete","id":"lead-2"}]}`
+  `{"expected_revision":3,"operations":[{"action":"upsert","id":"lead-1","value":{"status":"new"}},{"action":"merge","id":"lead-3","value":{"score":7}},{"action":"delete","id":"lead-2"}]}`
   applies up to 100 row operations atomically and advances the same revision
-  as UI/document writes. The same archived/locked/conflict rules apply.
+  as UI/document writes. `upsert` replaces the whole row; `merge` replaces only
+  the patch's top-level fields and keeps the rest (a missing row becomes the
+  patch; a null field is stored as null). The merged row must stay within the
+  128 KiB row cap. The same archived/locked/conflict rules apply.
 
 Collection names and row ids are stable. Limits per App: 64 collections,
 100,000 rows and 50 MiB of collection data; 128 KiB per row. Recovery points
@@ -104,17 +107,27 @@ Before initiating work with the owner, read [agent-messaging.md](agent-messaging
 
 ## Collection-only grants
 
-Any agent may read `GET /agent/apps/{app_id}/grants`, returning `{"grants":{...}}`.
+Any agent may read `GET /agent/apps/{app_id}/grants`, returning
+`{"grants":{"thread-42":{"collections":["leads"],"actions":["merge"]}}}`.
 Only the owner can `PUT /agent/apps/{app_id}/grants` with
-`{"thread_id":"thread-42","collections":["leads"]}` to replace that grantee's
-list, or `DELETE /agent/apps/{app_id}/grants/thread-42` to revoke it. An empty
-list also revokes. Up to 16 grantees and 16 unique collection names per grantee
-are allowed. Identities are `thread-N`, `schedule-N` or `app-N` with a positive
+`{"thread_id":"thread-42","collections":["leads"],"actions":["merge"]}` to
+replace that grantee's entry, or `DELETE /agent/apps/{app_id}/grants/thread-42`
+to revoke it. An empty collection list also revokes. `actions` is optional and
+defaults to all of `upsert`, `merge`, `delete`; list only `merge` when the
+grantee owns some fields of rows you curate, so it can never replace or delete
+a row. Up to 16 grantees and 16 unique collection names per grantee are
+allowed. Identities are `thread-N`, `schedule-N` or `app-N` with a positive
 integer; the owner cannot be a grantee. Grants do not advance the App revision.
 
-A grantee can only POST row actions to the named collections. UI, document,
-metadata and grants remain owner-only. Each batch targets one collection;
-operations cannot name another collection. Grant authorization and row writes
-share the App's database lock, so a revoked grant cannot authorize a later
-write. Archived, locked and expected-revision rules still apply. Notices record
-the authenticated caller, never a caller identity supplied in the body.
+A grantee can only POST the allowed row actions to the named collections. UI,
+document, metadata and grants remain owner-only. Each batch targets one
+collection; operations cannot name another collection. Grant authorization and
+row writes share the App's database lock, so a revoked grant cannot authorize a
+later write. Archived, locked and expected-revision rules still apply. Notices
+record the authenticated caller, never a caller identity supplied in the body.
+A successful granted write also leaves an `app_collection_changed` notice in
+the owner's thread, caller first, as an audit record: it starts no turn and is
+not delivered to the owner's model. Nothing needs to be delivered: the App UI
+reads collections live, and an owner that keeps derived state checks for rows
+without its own validation stamp when it next runs. Agree the collection, id
+scheme and merged fields before granting; no per-batch message is needed.

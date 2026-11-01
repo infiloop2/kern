@@ -21,8 +21,19 @@ if str(REPO_ROOT) not in sys.path:
 from host.runtime.workspace.host_api import WorkspaceError
 
 
+BLOCKING_LINT_CODES = frozenset({"forbidden-global", "missing-onload", "javascript-syntax"})
+PREVIEW_PORTS = range(8000, 8016)
+_STATIC_ACTION = re.compile(r"[A-Za-z][A-Za-z0-9_-]*")
+
+
 def lint_ui(ui: dict[str, Any]) -> list[dict[str, str]]:
-    """Conservative source checks, not a replacement for the runtime sanitizer."""
+    """Conservative source checks, not a replacement for the runtime sanitizer.
+
+    Codes in BLOCKING_LINT_CODES stop the preview. Handler cross-reference codes
+    (missing-handler, unused-handler) are warnings: generated action names and
+    loop registrations cannot be resolved from source, so they are skipped when
+    the code builds action names dynamically.
+    """
     javascript = ui.get("javascript", "")
     findings = []
 
@@ -37,22 +48,31 @@ def lint_ui(ui: dict[str, Any]) -> list[dict[str, str]]:
 
     class Actions(HTMLParser):
         names: set[str] = set()
+        dynamic = False
 
         def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
             for key, value in attrs:
                 if key in {"data-action", "data-enter-action", "data-drop-action"} and value:
-                    self.names.add(value)
+                    if _STATIC_ACTION.fullmatch(value):
+                        self.names.add(value)
+                    else:
+                        self.dynamic = True  # template expression or concatenation
 
     parser = Actions()
     parser.names = set()
     parser.feed(ui.get("html", ""))
     # Include generated HTML literals as well as the saved compact shell.
     parser.feed(javascript)
-    handlers = set(re.findall(r'''\bapp\s*\.\s*on\s*\(\s*["']([A-Za-z][A-Za-z0-9_-]*)["']''', javascript))
-    for name in sorted(parser.names - handlers):
-        finding("missing-handler", f"Action {name!r} needs app.on({name!r}, handler)", name)
-    for name in sorted(handlers - parser.names):
-        finding("unused-handler", f"Handler {name!r} has no HTML action", name)
+    # Count registrations through app.on and through a local alias such as on(name, fn).
+    registration = r"""(?<![A-Za-z0-9_$.])(?:app\s*\.\s*)?on\s*\(\s*"""
+    handlers = set(re.findall(registration + r"""["']([A-Za-z][A-Za-z0-9_-]*)["']""", javascript))
+    dynamic_handlers = any(not re.match(r"""["']""", javascript[match.end():match.end() + 1]) for match in re.finditer(registration, javascript))
+    if not dynamic_handlers:
+        for name in sorted(parser.names - handlers):
+            finding("missing-handler", f"Action {name!r} needs app.on({name!r}, handler)", name)
+    if not parser.dynamic:
+        for name in sorted(handlers - parser.names):
+            finding("unused-handler", f"Handler {name!r} has no HTML action", name)
     node = shutil.which("node")
     if node:
         result = subprocess.run([node, "--check"], input=javascript, text=True, capture_output=True, timeout=10)
@@ -62,8 +82,9 @@ def lint_ui(ui: dict[str, Any]) -> list[dict[str, str]]:
 
 
 def create_server(ui: dict[str, Any], data: dict[str, Any], collections: dict[str, Any], port: int) -> ThreadingHTTPServer:
-    if not 8000 <= port <= 8015:
-        raise ValueError("port must be from 8000 to 8015")
+    """Serve the saved App on a loopback preview port; port 0 takes the first free one."""
+    if port != 0 and port not in PREVIEW_PORTS:
+        raise ValueError("port must be 0 (first free) or from 8000 to 8015")
     sys.path.insert(0, str(REPO_ROOT / "tests/smoke-ui"))
     import run_admin_ui_mock as mock
     from tests.workspaces.web_apps import smoke
@@ -80,7 +101,13 @@ def create_server(ui: dict[str, Any], data: dict[str, Any], collections: dict[st
     workspace["app"].update(ui)
     workspace["app"]["data"] = data["data"]
     workspace["collections"] = collections
-    return ThreadingHTTPServer(("127.0.0.1", port), mock.Handler)
+    for candidate in [port] if port else PREVIEW_PORTS:
+        try:
+            return ThreadingHTTPServer(("127.0.0.1", candidate), mock.Handler)
+        except OSError:
+            if port:
+                raise
+    raise OSError("every preview port from 8000 to 8015 is in use")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -88,7 +115,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--ui", type=Path, required=True)
     parser.add_argument("--data", type=Path, required=True)
     parser.add_argument("--collection", action="append", default=[], metavar="NAME=ROWS.JSON")
-    parser.add_argument("--port", type=int, choices=range(8000, 8016), default=8000)
+    parser.add_argument("--port", type=int, choices=[0, *PREVIEW_PORTS], default=0, help="0 (default) picks the first free port from 8000 to 8015")
     parser.add_argument("--lint", action="store_true")
     args = parser.parse_args(argv)
     try:
@@ -119,13 +146,15 @@ def main(argv: list[str] | None = None) -> int:
         if args.lint:
             findings = lint_ui(ui)
             for finding in findings:
-                print(json.dumps(finding, ensure_ascii=False), flush=True)
-            if findings:
+                severity = "error" if finding["code"] in BLOCKING_LINT_CODES else "warning"
+                print(json.dumps({"severity": severity, **finding}, ensure_ascii=False), flush=True)
+            if any(finding["code"] in BLOCKING_LINT_CODES for finding in findings):
                 return 1
         server = create_server(ui, data, collections, args.port)
     except (ValueError, KeyError, OSError, WorkspaceError) as exc:
         parser.error(str(exc))
-    print(f"App preview: http://127.0.0.1:{args.port}/ (mock password: dev; open App preview)", flush=True)
+    port = server.server_address[1]
+    print(f"App preview: http://127.0.0.1:{port}/ (mock password: dev; open App preview)", flush=True)
     print("Writes affect this in-memory mock only. Stop with Ctrl-C.", flush=True)
     try:
         server.serve_forever()

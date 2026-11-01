@@ -84,6 +84,33 @@ class KernActionNoticeTests(TestCase):
                         threads.thread_route("POST", f"/v1/threads/{caller}/notices", {}, notice, None, False)
                         self.assertEqual(append.call_args.args[2], caller)
 
+    def test_granted_collection_writes_copy_the_notice_to_the_owner_without_a_turn(self):
+        path, body = "/agent/apps/app-1/collections/leads/actions", {"expected_revision": 1, "operations": [{"action": "merge", "id": "a", "value": {"score": 1}}]}
+        with patch.object(agent_notices, "thread_name", return_value="Metrics refresh"), patch.object(agent_notices, "call_admin_api") as record, patch.object(agent_api.web_apps, "route_agent", return_value={"revision": 2}):
+            agent_api.dispatch_call("POST", path, body, peer_thread_id="schedule-64")
+        self.assertEqual([call.args[1] for call in record.call_args_list], ["/v1/threads/schedule-64/notices", "/v1/threads/app-1/notices"])
+        owner_notice = record.call_args_list[1].args[2]
+        self.assertEqual(owner_notice["kind"], "app_collection_changed")
+        self.assertTrue(owner_notice["summary"].startswith("Metrics refresh: "))
+        self.assertIn("1 merged", owner_notice["summary"])
+        self.assertTrue(owner_notice["details"].startswith("Caller: schedule-64\n"))
+        with patch.object(agent_notices, "thread_name", return_value="Metrics refresh"), patch.object(agent_notices, "call_admin_api") as record, patch.object(agent_api.web_apps, "route_agent", return_value={"revision": 2}):
+            agent_api.dispatch_call("POST", "/agent/apps/app-1/collections/" + "a" * 60 + "/actions", body, peer_thread_id="schedule-64")
+        self.assertTrue(record.call_args_list[1].args[2]["summary"].startswith("Metrics refresh: "))
+        self.assertLessEqual(len(record.call_args_list[1].args[2]["summary"]), 100)
+        with patch.object(threads.state, "mutation"), patch.object(threads.state, "thread_session_config", return_value={}), patch.object(threads.state, "append_agent_event") as append, patch.object(threads, "send_thread_message") as send:
+            threads.thread_route("POST", "/v1/threads/app-1/notices", {}, owner_notice, None, False)
+            self.assertEqual(append.call_args.args[2], "app-1")
+            send.assert_not_called()
+        # Owner writes and failed granted writes stay in the caller's thread only.
+        for caller, route in (("app-1", {"return_value": {"revision": 2}}), ("schedule-64", {"side_effect": WorkspaceError(HTTPStatus.FORBIDDEN, "no grant")})):
+            with self.subTest(caller=caller), patch.object(agent_notices, "call_admin_api") as record, patch.object(agent_api.web_apps, "route_agent", **route):
+                try:
+                    agent_api.dispatch_call("POST", path, body, peer_thread_id=caller)
+                except WorkspaceError:
+                    pass
+                self.assertEqual([call.args[1] for call in record.call_args_list], [f"/v1/threads/{caller}/notices"])
+
     def test_outgoing_message_and_spawn_record_only_after_acceptance(self):
         for path, name, summary in (("/agent/messages", "send_agent_message", "Sent message to Chat agent: <img src=x> hello"),
                                     ("/agent/agents", "spawn_agent", "Started agent: <img src=x> hello")):

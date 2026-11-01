@@ -350,7 +350,7 @@ def route_agent(
             row = cur.fetchone()
             if row is None:
                 raise WorkspaceError(HTTPStatus.NOT_FOUND, "app not found")
-            return {"grants": row[0]}
+            return {"grants": collection_store.normalized_grants(row[0])}
     grant_match = re.fullmatch(r"/grants/([^/]+)", resource)
     if (method == "PUT" and resource == "/grants") or (method == "DELETE" and grant_match):
         with _workspace_lock(app_id):
@@ -1369,9 +1369,10 @@ def save_runtime_report(app_id: str, body: Any) -> dict[str, Any]:
 
 
 def update_collection_grants(app_id: str, body: Any, deleted_thread_id: str | None) -> dict[str, Any]:
+    actions = list(collection_store.COLLECTION_ROW_ACTIONS)
     if deleted_thread_id is None:
         request = _required_object(body, "collection grant")
-        _require_keys(request, {"thread_id", "collections"}, required={"thread_id", "collections"})
+        _require_keys(request, {"thread_id", "collections", "actions"}, required={"thread_id", "collections"})
         thread_id = request.get("thread_id")
         names = request.get("collections")
         if not isinstance(names, list) or len(names) > 16:
@@ -1379,6 +1380,16 @@ def update_collection_grants(app_id: str, body: Any, deleted_thread_id: str | No
         names = [collection_store._validated_collection_name(name) for name in names]
         if len(set(names)) != len(names):
             raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "collections must be unique")
+        if "actions" in request:
+            requested = request.get("actions")
+            if (
+                not isinstance(requested, list)
+                or not requested
+                or any(action not in collection_store.COLLECTION_ROW_ACTIONS for action in requested)
+                or len(set(requested)) != len(requested)
+            ):
+                raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "actions must list unique names from upsert, merge, delete")
+            actions = [action for action in collection_store.COLLECTION_ROW_ACTIONS if action in requested]
     else:
         thread_id, names = deleted_thread_id, []
     if not isinstance(thread_id, str) or re.fullmatch(r"(thread|schedule|app)-[1-9][0-9]*", thread_id) is None:
@@ -1394,9 +1405,9 @@ def update_collection_grants(app_id: str, body: Any, deleted_thread_id: str | No
             raise WorkspaceError(HTTPStatus.CONFLICT, "archived apps are read-only")
         if row[2]:
             raise WorkspaceError(HTTPStatus.LOCKED, AGENT_UPDATES_LOCKED_MESSAGE)
-        grants = dict(row[0])
+        grants = collection_store.normalized_grants(row[0])
         if names:
-            grants[thread_id] = names
+            grants[thread_id] = {"collections": names, "actions": actions}
         else:
             grants.pop(thread_id, None)
         if len(grants) > 16:
