@@ -114,6 +114,12 @@ class FakeServer:
         return delivered
 
 
+def swarm_links() -> list[dict[str, object]]:
+    """Drawn Swarm links without their date-dependent recency fields."""
+    return [{key: edge[key] for key in ("sender_thread_id", "target_thread_id", "count")}
+            for edge in state.swarm_interactions()["interactions"]]
+
+
 def read_agent_events() -> list[dict[str, object]]:
     """Every agent event, oldest first (tests inspect whole logs; the runtime
     only ever pages)."""
@@ -524,7 +530,7 @@ class OrchestratorTests(unittest.TestCase):
         with patch.object(orchestrator.codex_app_server, "run_turn", self.run_turn_stub()):
             self.send_message("thread-1", pasted)
             self.wait_until_idle("thread-1")
-        self.assertEqual(state.swarm_interactions()["interactions"], [{
+        self.assertEqual(swarm_links(), [{
             "sender_thread_id": "operator", "target_thread_id": "thread-1", "count": 1,
         }])
 
@@ -538,7 +544,7 @@ class OrchestratorTests(unittest.TestCase):
             "thread-1", "codex", "Approval outcome", operator_sent_message=False,
             input_notice={"kind": "approval_outcome", "summary": "Approved and completed: action"},
         ))
-        self.assertEqual(state.swarm_interactions()["interactions"], [{
+        self.assertEqual(swarm_links(), [{
             "sender_thread_id": "kern-host", "target_thread_id": "thread-1", "count": 2,
         }])
         values = state.swarm_interactions()["metrics"]["thread-1"]
@@ -559,7 +565,7 @@ class OrchestratorTests(unittest.TestCase):
             self.wait_until_idle("thread-1")
         self.register_live_turn("codex", "thread-1", FakeServer())
         self.assertTrue(orchestrator.steer_live_turn("thread-1", "codex", "follow-up", operator_sent_message=True, input_notice={"kind": "operator"}))
-        self.assertEqual(state.swarm_interactions()["interactions"], [{
+        self.assertEqual(swarm_links(), [{
             "sender_thread_id": "operator", "target_thread_id": "thread-1", "count": 2,
         }])
 
@@ -574,7 +580,7 @@ class OrchestratorTests(unittest.TestCase):
         message = state.swarm_interactions()["interactions"][0]
         self.assertEqual((message["sender_thread_id"], message["target_thread_id"]),
                          ("thread-2", "thread-chat"))
-        self.assertEqual(set(message), {"sender_thread_id", "target_thread_id", "count"})
+        self.assertEqual(set(message), {"sender_thread_id", "target_thread_id", "count", "weight", "last_day"})
 
     def test_silent_codex_completion_records_no_error_message_or_retry(self) -> None:
         with patch.object(orchestrator.codex_app_server, "run_turn", return_value=("codex-silent", "")):

@@ -2,7 +2,6 @@ name: test-lima-host
 
 # Explicit manual dispatch or a newly created /lima-smoke (or lima-smoke) PR comment only.
 # Existing admin/review-stamp authorization applies; clean review alone never launches Lima.
-# The private October pause still suppresses all Lima jobs.
 on:
   workflow_dispatch:
   issue_comment:
@@ -14,12 +13,9 @@ permissions: {}
 jobs:
   authorize:
     name: Authorize Lima smoke
-    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
     if: >-
-      github.repository != 'infiversehq/kern' && (
-        github.repository == 'infiversehq/kern' && (github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request &&
-          (github.event.comment.body == '/lima-smoke' || github.event.comment.body == 'lima-smoke')))
-      )
+      github.repository == 'infiversehq/kern' && (github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request &&
+        (github.event.comment.body == '/lima-smoke' || github.event.comment.body == 'lima-smoke')))
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.resolve.outputs.ref }}
@@ -93,11 +89,8 @@ jobs:
   smoke:
     needs: authorize
     name: Run Lima host end-to-end smoke
-    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
     if: >-
-      github.repository != 'infiversehq/kern' && (
-        needs.authorize.result == 'success'
-      )
+      needs.authorize.result == 'success'
     runs-on: ubuntu-24.04
     permissions:
       attestations: read
@@ -157,11 +150,8 @@ jobs:
     # A newer run for the same SHA cancels the older smoke. Only the newer run
     # may replace its pending status; otherwise the canceled run can race the
     # active run and overwrite that shared status context with an error.
-    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
     if: >-
-      github.repository != 'infiversehq/kern' && (
-        always() && needs.authorize.result == 'success' && needs.smoke.result != 'cancelled'
-      )
+      always() && needs.authorize.result == 'success' && needs.smoke.result != 'cancelled'
     runs-on: ubuntu-latest
     permissions:
       statuses: write

@@ -1,7 +1,7 @@
 name: kern-stage-stop
 
 # Manual main dispatch stops the private stage instance after repo-admin authorization.
-# No PR/review trigger. The private October pause remains in the job.
+# No PR/review trigger.
 on:
   workflow_dispatch:
 
@@ -14,11 +14,8 @@ concurrency:
 
 jobs:
   stop-stage:
-    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
     if: >-
-      github.repository != 'infiversehq/kern' && (
-        github.repository == 'infiversehq/kern'
-      )
+      github.repository == 'infiversehq/kern'
     name: Stop stage instance
     runs-on: ubuntu-latest
     steps:

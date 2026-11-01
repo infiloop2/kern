@@ -4,8 +4,7 @@ name: test-all-host
 # Private PR suites wait for a clean current-head Codex comment. run-reviewed-ci
 # starts the deferred run once, preserving its merge ref and required check names.
 # Public PR suites remain automatic; public main pushes always select every suite.
-# Private main never runs this suite automatically. October guards remain in every paid private job.
-# On restoration, remove pause guards only; retain review dependencies and aggregate checks.
+# Private main never runs this suite automatically.
 on:
   pull_request:
   push:
@@ -25,8 +24,7 @@ concurrency:
 jobs:
   review:
     name: Cheap checks and review gate
-    # October pause: remove only the leading false guard in the November 1 PR.
-    if: false && github.repository == 'infiversehq/kern' && github.event_name == 'pull_request'
+    if: github.repository == 'infiversehq/kern' && github.event_name == 'pull_request'
     permissions:
       contents: read
       issues: read
@@ -64,10 +62,9 @@ jobs:
 
   select:
     needs: review
-    # October pause: remove only the repository-name guard in the November 1 PR.
     # Main pushes permanently run only in public repositories.
     if: >-
-      always() && github.repository != 'infiversehq/kern' &&
+      always() &&
       (github.event_name == 'pull_request' || github.event.repository.private == false) &&
       (github.repository != 'infiversehq/kern' || needs.review.result == 'success')
     name: Select host test suites
@@ -98,12 +95,10 @@ jobs:
           fi
 
   suites:
-    # October pause: remove only the repository-name guard in the November 1 PR.
     # Public CI skips review; override skip propagation through select while
     # still requiring a valid matrix and honoring workflow cancellation.
     if: >-
       always() && !cancelled() && needs.select.result == 'success' &&
-      github.repository != 'infiversehq/kern' &&
       (github.event_name == 'pull_request' || github.event.repository.private == false)
     name: Host tests (${{ matrix.suite }})
     needs: select
@@ -202,9 +197,8 @@ jobs:
       pull-requests: read
     name: Run all host tests
     needs: [review, select, suites]
-    # October pause: remove only the repository-name guard in the November 1 PR.
     if: >-
-      always() && github.repository != 'infiversehq/kern' &&
+      always() &&
       (github.event_name == 'pull_request' || github.event.repository.private == false)
     runs-on: ubuntu-latest
     timeout-minutes: 3

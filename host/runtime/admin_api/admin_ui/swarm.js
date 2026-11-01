@@ -9,9 +9,11 @@ const TONES = { operator: "operator", "kern-host": "host" };
 // Minimap dots mirror the status colours used on the map.
 const DOT_COLORS = { busy: "#45d6c4", failed: "#f0708a", approval: "#e8c268", operator: "#f4c26b", host: "#8ea3bd", idle: "#5b677a" };
 const MIN_ZOOM = .08, MAX_ZOOM = 2.5;
+const WINDOW = "last 30 UTC days";
 let snapshot = null;
 let agentById = new Map();
 let interactions = [];
+let earlier = [];
 let metrics = null;
 let scores = new Map();
 let selectedId = null;
@@ -52,6 +54,23 @@ function svg(tag, attrs) {
 // All paths are repository-authored. Names and AI text only enter textContent.
 const operator = { thread_id: "operator", name: "Operator", kind: "operator", state: "", pending_approval_count: 0 };
 const kernHost = { thread_id: "kern-host", name: "Kern host", kind: "host", state: "", pending_approval_count: 0 };
+const day = value => new Date(`${value}T00:00:00Z`).toLocaleDateString([], { month: "short", day: "numeric", timeZone: "UTC" });
+// Ranking and springs use recency-weighted values; details show raw counts.
+function rankingMetrics() {
+  return Object.fromEntries(Object.entries(metrics || {}).map(([id, values]) => [id, values.weighted]));
+}
+// Spawned agents always connect to a parent on the map, even when they have
+// not messaged it within the window or the link fell outside the cap.
+function lineage() {
+  const linked = new Set(interactions.flatMap(edge => [`${edge.sender_thread_id} ${edge.target_thread_id}`, `${edge.target_thread_id} ${edge.sender_thread_id}`]));
+  return [...agentById.values()].filter(agent => agent.kind === "spawned" && agentById.has(agent.spawned_by_thread_id)
+    && !linked.has(`${agent.spawned_by_thread_id} ${agent.thread_id}`))
+    .map(agent => ({ parent: agent.spawned_by_thread_id, child: agent.thread_id }));
+}
+function layoutLinks() {
+  return [...interactions.map(edge => ({ ...edge, count: edge.weight })),
+    ...lineage().map(({ parent, child }) => ({ sender_thread_id: parent, target_thread_id: child, count: 1 }))];
+}
 // Each agent type is its own robot; poses change only the eyes and props.
 function eyes(pose, points, size = 3) {
   if (pose === "failed") return points.map(([x, y]) => `<path d="m${x - 2.5} ${y - 2.5} 5 5m0-5-5 5"/>`).join("");
@@ -182,12 +201,13 @@ function renderDetails() {
   if (selectedEdge) {
     const name = id => agentById.get(id)?.name || id;
     root.append(node("h2", "", "Communication"), node("p", "", `${name(selectedEdge.sender_thread_id)} → ${name(selectedEdge.target_thread_id)}`),
-      node("p", "", `${selectedEdge.count} accepted messages · last 7 UTC days`));
+      node("p", "", `${selectedEdge.count} accepted messages · ${WINDOW}`),
+      node("p", "muted", `Last message ${day(selectedEdge.last_day)}. Recent days count more: each day's messages count half as much for every 7 days of age.`));
     return;
   }
   const agent = agentById.get(selectedId);
   if (!agent) {
-    root.append(node("h2", "", "Agent details"), node("p", "muted", "Select an agent or connection. You sit at the centre; Kern host beside you sends automated deliveries. Agents that message each other more cluster together; more involved agents sit closer to you and look larger. Arrange applies the latest ranking. Dense maps draw only the 1,000 strongest links between agents on the map."),
+    root.append(node("h2", "", "Agent details"), node("p", "muted", "Select an agent or connection. You sit at the centre; Kern host beside you sends automated deliveries. Agents that message each other more cluster together; more involved agents sit closer to you and look larger. Recent activity counts more: each day counts half as much for every 7 days of age. Dashed lines join spawned agents to their parent. Dense maps draw only the 1,000 strongest links between agents on the map."),
       node("p", "muted", "Drag anywhere to explore. Scroll, pinch or + and − to zoom; 0 fits everything."));
     return;
   }
@@ -196,7 +216,7 @@ function renderDetails() {
   const synthetic = ["operator", "host"].includes(agent.kind);
   if (!synthetic) root.append(node("p", "muted", `${runtimeLabel(agent.agent_runtime)}${agent.model ? ` · ${agent.model}` : ""}`));
   if (!synthetic) {
-    root.append(node("h3", "", "Involvement · last 7 UTC days"));
+    root.append(node("h3", "", `Involvement · ${WINDOW}`));
     if (metrics) {
       const values = metrics[agent.thread_id];
       const count = value => (value || 0).toLocaleString();
@@ -204,7 +224,7 @@ function renderDetails() {
       root.append(node("p", "", `Direct operator messages: ${count(values?.operator_messages)}`),
         node("p", "", `Other agents interacted with: ${count(values?.agent_peers)}`),
         node("p", "", `Tokens processed: ${values?.total_tokens == null ? "Unavailable" : count(values.total_tokens) + (values.tokens_partial ? " (partial)" : "")}`),
-        node("p", "muted", `Current involvement score: ${(score * 100).toFixed(1)}/100 · ${tierOf(score)} tier. Operator messages 60%, agent connections 25%, tokens 15%; each uses diminishing returns and is scaled across this swarm. Arrange applies this ranking.`));
+        node("p", "muted", `Current involvement score: ${(score * 100).toFixed(1)}/100 · ${tierOf(score)} tier. Operator messages 60%, agent connections 25%, tokens 15%; recent days count more, each uses diminishing returns and is scaled across this swarm. Arrange applies this ranking.`));
     } else root.append(node("p", "muted", "Ranking metrics unavailable. Arrange after they load to apply the hierarchy."));
   }
   if (agent.pending_approval_count > 0) {
@@ -216,16 +236,23 @@ function renderDetails() {
   }
   if (agent.next_run_at) root.append(node("p", "muted", `Next trigger: ${new Date(agent.next_run_at).toLocaleString()}`));
   const edges = interactions.filter(edge => edge.sender_thread_id === agent.thread_id || edge.target_thread_id === agent.thread_id);
+  const peer = edge => {
+    const outgoing = edge.sender_thread_id === agent.thread_id;
+    const otherId = outgoing ? edge.target_thread_id : edge.sender_thread_id;
+    return `${outgoing ? "→" : "←"} ${agentById.get(otherId)?.name || otherId} · ${edge.count} · last ${day(edge.last_day)}`;
+  };
   if (edges.length) {
-    root.append(node("h3", "", "Strongest connections · last 7 UTC days"));
-    for (const edge of edges.sort((a, b) => b.count - a.count)) {
-      const outgoing = edge.sender_thread_id === agent.thread_id;
-      const otherId = outgoing ? edge.target_thread_id : edge.sender_thread_id;
-      const other = agentById.get(otherId);
-      const link = node("button", "swarm-connection", `${outgoing ? "→" : "←"} ${other?.name || otherId} · ${edge.count}`);
+    root.append(node("h3", "", `Strongest connections · ${WINDOW}`));
+    for (const edge of edges.sort((a, b) => b.weight - a.weight)) {
+      const link = node("button", "swarm-connection", peer(edge));
       link.addEventListener("click", () => { selectedEdge = edge; render(); });
       root.append(link);
     }
+  }
+  const older = earlier.filter(edge => edge.sender_thread_id === agent.thread_id || edge.target_thread_id === agent.thread_id);
+  if (older.length) {
+    root.append(node("h3", "", "Earlier contacts · 31–90 UTC days ago"));
+    for (const edge of older) root.append(node("p", "swarm-connection is-earlier", peer(edge)));
   }
   if (agent.kind === "operator") {
     root.append(node("p", "muted", "Counts include accepted operator messages. Automated triggers and agent replies are excluded from operator links."));
@@ -272,6 +299,16 @@ function renderEdges() {
   const { center, width, height } = layout;
   root.append(svg("circle", { cx: center.x, cy: center.y, r: Math.min(Math.max(width, height) / 2, 1400), fill: "url(#swarm-glow)", class: "swarm-glow" }));
   const focus = selectedEdge ? [selectedEdge.sender_thread_id, selectedEdge.target_thread_id] : selectedId ? [selectedId] : [];
+  const family = lineage();
+  for (const { parent, child } of family) {
+    const source = layout.positions.get(parent), target = layout.positions.get(child);
+    const touchesSelection = [parent, child].includes(selectedId);
+    const muted = selectedEdge || (selectedId && !touchesSelection);
+    const path = svg("path", { d: `M${source.x},${source.y} L${target.x},${target.y}`, fill: "none",
+      class: `swarm-lineage${muted ? " is-muted" : ""}${touchesSelection ? " is-related" : ""}`, "aria-hidden": true });
+    const title = svg("title", {}); title.textContent = `${agentById.get(child).name} was spawned by ${agentById.get(parent).name}`; path.append(title);
+    root.append(path);
+  }
   const flows = [], labels = [];
   for (const edge of interactions) {
     const source = layout.positions.get(edge.sender_thread_id);
@@ -290,12 +327,14 @@ function renderEdges() {
     const touchesSelection = [edge.sender_thread_id, edge.target_thread_id].includes(selectedId);
     const muted = selectedEdge ? !isSelected : selectedId && !touchesSelection;
     const tone = isSelected ? "selected" : TONES[edge.sender_thread_id] || "agent";
-    const width = Math.min(9, 1.5 + Math.log2(1 + edge.count));
+    // Recency-weighted volume: older links fade and thin out.
+    const strength = Math.log2(1 + edge.weight);
+    const width = Math.min(9, 1.5 + strength);
     const path = svg("path", { d, fill: "none", "stroke-width": width,
       "marker-end": `url(#swarm-arrow${tone === "agent" ? "" : `-${tone}`})`, tabindex: 0, role: "button", "data-edge": `${edge.sender_thread_id} ${edge.target_thread_id}`,
       class: `swarm-edge tone-${tone}${muted ? " is-muted" : ""}${isSelected ? " is-selected" : ""}${touchesSelection ? " is-related" : ""}`,
       "aria-label": `${agentById.get(edge.sender_thread_id)?.name} to ${agentById.get(edge.target_thread_id)?.name}: ${edge.count} messages`,
-      opacity: Math.min(.9, .35 + Math.log2(1 + edge.count) * .08) });
+      opacity: Math.min(.9, .2 + strength * .14) });
     const title = svg("title", {}); title.textContent = path.getAttribute("aria-label"); path.append(title);
     const select = () => { selectedEdge = edge; selectedId = null; render(); };
     path.addEventListener("click", select);
@@ -308,7 +347,7 @@ function renderEdges() {
     if (!muted && (live || isSelected) && flows.length < 12) {
       const flow = node("span", `swarm-edge-flow tone-${tone}`);
       flow.setAttribute("aria-hidden", "true"); flow.style.offsetPath = `path("${d}")`;
-      flow.style.animationDuration = `${Math.max(.9, 3 - Math.log2(1 + edge.count) * .35).toFixed(2)}s`;
+      flow.style.animationDuration = `${Math.max(.9, 3 - strength * .35).toFixed(2)}s`;
       flows.push(flow);
     }
     if (!muted && (interactions.length <= 12 || isSelected || touchesSelection)) {
@@ -321,7 +360,7 @@ function renderEdges() {
   pulseLayer.append(...flows); root.append(...labels);
   // Selecting an agent or link fades agents outside that neighbourhood.
   const related = new Set(focus);
-  if (selectedId) for (const edge of interactions) {
+  if (selectedId) for (const edge of [...interactions, ...family.map(({ parent, child }) => ({ sender_thread_id: parent, target_thread_id: child }))]) {
     if (edge.sender_thread_id === selectedId) related.add(edge.target_thread_id);
     if (edge.target_thread_id === selectedId) related.add(edge.sender_thread_id);
   }
@@ -578,7 +617,7 @@ function render() {
   const key = JSON.stringify([...agentById.keys()].sort());
   if (key !== layoutKey || !layout) {
     const old = layout;
-    layout = layoutAgents(agents, interactions, metrics || {}, old?.positions); layoutKey = key;
+    layout = layoutAgents(agents, layoutLinks(), rankingMetrics(), old?.positions); layoutKey = key;
     // Extents may grow after a roster change; keep the same world origin on
     // screen instead of moving every existing agent with the new margin.
     if (old) { camera.x += (old.center.x - layout.center.x) * camera.k; camera.y += (old.center.y - layout.center.y) * camera.k; }
@@ -633,7 +672,7 @@ function render() {
     filter.setAttribute("aria-pressed", String(activeFilter === state));
   }
   const visibleEdges = interactions.filter(edge => ids.has(edge.sender_thread_id) && ids.has(edge.target_thread_id));
-  $("swarm-total").textContent = `${snapshot.agents.length} agents + you + Kern host · ${visibleEdges.length} connections shown · last 7 UTC days`;
+  $("swarm-total").textContent = `${snapshot.agents.length} agents + you + Kern host · ${visibleEdges.length} connections shown · ${WINDOW}`;
   $("swarm-empty").hidden = snapshot.agents.length > 0;
   renderEdges(); renderAttention(); renderDetails(); requestCamera();
 }
@@ -650,13 +689,13 @@ export async function refreshSwarm() {
     // Communication is optional: a failed count request must not hide agents.
     const [next, counts] = await Promise.all([api("GET", "/v1/swarm"), api("GET", "/v1/swarm/interactions").catch(() => null)]);
     const first = !snapshot;
-    const changed = JSON.stringify([snapshot?.agents, interactions, metrics]) !== JSON.stringify([next.agents, counts?.interactions || interactions, counts ? counts.metrics || null : metrics]);
+    const changed = JSON.stringify([snapshot?.agents, interactions, earlier, metrics]) !== JSON.stringify([next.agents, counts?.interactions || interactions, counts?.earlier || earlier, counts ? counts.metrics || null : metrics]);
     snapshot = next;
     agentById = new Map([operator, kernHost, ...next.agents].map(agent => [agent.thread_id, agent]));
     // A selected agent that left the roster must not keep the rest faded.
     if (selectedId && !agentById.has(selectedId)) selectedId = null;
-    if (counts) { interactions = counts.interactions; metrics = counts.metrics || null; }
-    scores = rankAgents([...agentById.values()], metrics || {});
+    if (counts) { interactions = counts.interactions; earlier = counts.earlier || []; metrics = counts.metrics || null; }
+    scores = rankAgents([...agentById.values()], rankingMetrics());
     if (selectedEdge) selectedEdge = interactions.find(edge => edge.sender_thread_id === selectedEdge.sender_thread_id && edge.target_thread_id === selectedEdge.target_thread_id) || null;
     if (changed) render();
     if (first) initialView();

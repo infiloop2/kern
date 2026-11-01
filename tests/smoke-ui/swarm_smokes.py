@@ -78,7 +78,8 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(page.locator('.swarm-ring, .swarm-ring-label')).to_have_count(0)
     original_counts = page.request.get(url + 'v1/swarm/interactions', headers={'X-Kern-Csrf': '1'}).json()
     changed_counts = {**original_counts, 'metrics': {**original_counts['metrics'],
-        'app-30': {'operator_messages': 10000, 'agent_peers': 100, 'total_tokens': 10000000, 'tokens_partial': False}}}
+        'app-30': {'operator_messages': 10000, 'agent_peers': 100, 'total_tokens': 10000000, 'tokens_partial': False,
+                   'weighted': {'operator_messages': 10000, 'agent_peers': 100, 'total_tokens': 10000000}}}}
     page.route('**/v1/swarm/interactions', lambda route: route.fulfill(json=changed_counts))
     refresh()
     assert positions == page.locator('.swarm-card').evaluate_all(
@@ -94,7 +95,8 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     # A capped dense graph still retains every node and exposes all returned links.
     agents = page.request.get(url + 'v1/swarm', headers={'X-Kern-Csrf': '1'}).json()['agents']
     ids = [agent['thread_id'] for agent in agents]
-    dense = [{'sender_thread_id': ids[i % 100], 'target_thread_id': ids[(i % 100 + 1 + i // 100) % 100], 'count': i + 1} for i in range(500)]
+    dense = [{'sender_thread_id': ids[i % 100], 'target_thread_id': ids[(i % 100 + 1 + i // 100) % 100],
+              'count': i + 1, 'weight': i + 1, 'last_day': '2026-10-02'} for i in range(500)]
     page.route('**/v1/swarm/interactions', lambda route: route.fulfill(json={'interactions': dense}))
     refresh()
     expect(page.locator('.swarm-edge')).to_have_count(500)
@@ -106,6 +108,13 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     page.unroute('**/v1/swarm/interactions')
     refresh()
     expect(page.locator('.swarm-edge')).to_have_count(9)
+    # Spawned agents always join their parent; a message link replaces the dashed line.
+    expect(page.locator('.swarm-lineage')).to_have_count(9)
+    expect(page.locator('.swarm-lineage title').first).to_contain_text('was spawned by Release notes')
+    # Older links fade: equal counts draw fainter when their messages are older.
+    faded = page.get_by_role('button', name='Kern host to On-Demand agent 66: 1 messages', exact=True)
+    fresh = page.get_by_role('button', name='Release notes to Spawned agent 56: 3 messages', exact=True)
+    assert float(faded.get_attribute('opacity')) < float(fresh.get_attribute('opacity'))
     # Arrowheads stay subtle even on high-volume connections.
     marker = page.locator('#swarm-arrow')
     expect(marker).to_have_attribute('markerUnits', 'userSpaceOnUse')
@@ -279,7 +288,9 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     expect(page.locator('#swarm-detail')).to_contain_text('Direct operator messages: 24')
     expect(page.locator('#swarm-detail')).to_contain_text('Other agents interacted with: 2')
     expect(page.locator('#swarm-detail')).to_contain_text('Tokens processed: 123,456')
-    expect(page.locator('#swarm-detail')).to_contain_text('→ Billing desk · 18')
+    expect(page.locator('#swarm-detail')).to_contain_text('→ Billing desk · 18 · last')
+    expect(page.locator('#swarm-detail')).to_contain_text('Earlier contacts · 31–90 UTC days ago')
+    expect(page.locator('#swarm-detail')).to_contain_text('→ Spawned agent 60 · 4 · last Aug 20')
     expect(page.locator('#swarm-detail')).to_contain_text('← Kern host · 3')
     expect(first).to_have_css('background-color', 'rgba(0, 0, 0, 0)')
     expect(first.locator('.swarm-avatar > svg')).to_have_count(1)
@@ -404,9 +415,9 @@ def run(page, url: str, log_in, *, mobile: bool = False) -> None:
     # agents outside each team's complete label footprint.
     community_agents = payload['agents'][:42]
     teams = [[community_agents[i * 3 + t]['thread_id'] for i in range(7)] for t in range(3)]
-    team_edges = [{'sender_thread_id': team[0], 'target_thread_id': id, 'count': 100}
+    team_edges = [{'sender_thread_id': team[0], 'target_thread_id': id, 'count': 100, 'weight': 100, 'last_day': '2026-10-02'}
                   for team in teams for id in team[1:]]
-    team_edges += [{'sender_thread_id': teams[t][0], 'target_thread_id': teams[t + 1][0], 'count': 1}
+    team_edges += [{'sender_thread_id': teams[t][0], 'target_thread_id': teams[t + 1][0], 'count': 1, 'weight': 1, 'last_day': '2026-10-02'}
                    for t in range(2)]
     page.route('**/v1/swarm/interactions', lambda route: route.fulfill(json={'interactions': team_edges}))
     apply_snapshot({**payload, 'agents': community_agents})

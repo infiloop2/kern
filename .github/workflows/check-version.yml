@@ -2,7 +2,6 @@ name: check-version
 
 # Every PR open, synchronize or reopen checks VERSION and immutable migrations.
 # This inexpensive workflow is independent of Codex review.
-# Private-repo October pause still applies; public PR checks remain automatic.
 on:
   pull_request:
 
@@ -11,8 +10,6 @@ permissions:
 
 jobs:
   version:
-    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
-    if: github.repository != 'infiversehq/kern'
     name: Check VERSION increment
     runs-on: ubuntu-latest
     timeout-minutes: 5

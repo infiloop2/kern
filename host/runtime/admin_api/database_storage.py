@@ -71,7 +71,7 @@ POLICIES: dict[str, tuple[str, str]] = {
     "workspace_navigation_order": ("Sidebar ordering", "Current App and Standing agent ordering; reconciled with existing items."),
     "workspace_onboarding_dismissal": ("Getting-started dismissal", "One optional record; no automatic deletion."),
     "swarm_agent_ai": ("Current agent summaries", "Replaced or invalidated by agent activity; removed when the parent runtime session is deleted."),
-    "swarm_interaction_days": ("Daily agent interaction counts", "Keeps today and the preceding six UTC dates. Older counts are excluded on reads and deleted on accepted delivery."),
+    "swarm_interaction_days": ("Daily agent interaction counts", "Keeps today and the preceding 89 UTC dates. Older counts are excluded on reads and deleted on accepted delivery."),
     "web_app_collection_state": ("App collection quota totals", "One record per App; removed with its App. No age-based pruning."),
     "web_app_collection_rows": ("Current App collection data", "Limits per App: 64 collections, 100,000 rows, 50 MiB. Excess writes are rejected, not automatically pruned. Rows change through App edits or restoration; deletion of an App removes its rows."),
     "workspace_seen": ("Conversation read markers", "Schedule markers are removed after the deleted schedule's 90-day restore window. Other markers follow their retained Chat or App."),

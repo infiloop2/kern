@@ -4,7 +4,6 @@ name: Start reviewed PR CI
 # A first-attempt completion closes the race where that comment arrived mid-run.
 # Only one automatic rerun is allowed; later retries use GitHub Re-run jobs.
 # No /ci command, concurrency queue, deployment or approval side effects.
-# The October pause remains; remove only the leading false guard on restoration.
 on:
   issue_comment:
     types: [created, edited]
@@ -22,9 +21,8 @@ permissions:
 # pending completion event. The helper checks current status/attempt to dedupe.
 jobs:
   start:
-    # October pause: remove only the leading false guard in the November 1 PR.
     if: >-
-      false && github.repository == 'infiversehq/kern' && (
+      github.repository == 'infiversehq/kern' && (
         (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.run_attempt == 1 && github.event.workflow_run.conclusion == 'failure') ||
         (github.event.issue.pull_request && github.event.comment.user.login == 'chatgpt-codex-connector[bot]' && (startsWith(github.event.comment.body, 'Codex Review: Didn''t find any major issues.') || (startsWith(github.event.comment.body, '<!-- codex-review-receipt:v1 -->') && contains(github.event.comment.body, 'Codex Review: Didn''t find any major issues.'))))
       )

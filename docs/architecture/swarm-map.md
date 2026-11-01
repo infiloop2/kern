@@ -15,23 +15,27 @@ or keyboard focus shows the type and task or purpose.
 
 ## Automatic involvement hierarchy
 
-The last seven UTC dates determine placement, using three signals:
+The last 30 UTC dates determine placement. Recent days count more: each
+day's messages and tokens count half as much for every seven days of age
+(today 1, a week ago 0.5, 30 days ago about 0.05). Three signals:
 
 - 60% direct accepted operator messages received (automated triggers excluded).
 - 25% distinct other agents contacted in either direction. Reciprocal traffic
-  counts as one peer; operator and self-links do not count toward breadth.
+  counts as one peer, weighted by its most recent contact; operator and
+  self-links do not count toward breadth.
 - 15% known tokens processed, summed across the four non-overlapping usage
   buckets described in [Token analytics](token-analytics.md). This includes
   cache reads and writes without counting them again as plain input.
 
-For each signal, take `log(1 + count)` and divide by the largest transformed
+For each recency-weighted signal, take `log(1 + value)` and divide by the largest transformed
 value among the agents on the map. An absent or all-zero signal contributes
 zero; its weight is not redistributed. Sum the three weighted values. Operator
 attention can contribute 60 points, while breadth and tokens together contribute
 at most 40. This is an involvement heuristic, not reporting authority or a
 measurement of output quality. Changing the active roster changes normalization.
 
-Metrics aggregate all recorded weekly pairs in SQL before the drawing limit.
+Metrics aggregate all recorded pairs in the window in SQL before the drawing
+limit. Details show the raw 30-day counts.
 A peer can count even if it has since been archived. Token accounting uses the
 existing turn's latest measurement date, including its known partial buckets;
 missing measurements are not reconstructed. Details distinguish unavailable,
@@ -40,14 +44,17 @@ partial, and measured zero token counts and show the current score and inputs.
 Agents are sorted by score, with immutable IDs breaking ties, and orb size grows
 with score. Placement uses a deterministic spring layout with a soft
 involvement-based pull toward the operator. Operator and host remain fixed and
-do not create springs. Bidirectional message counts are combined and log-scaled.
+do not create springs. Bidirectional recency-weighted message counts are
+combined and log-scaled. A spawned agent with no drawn message link to its
+parent gets a unit spring to it.
 
 The available agent links also identify communication communities using greedy
 weighted modularity: merge groups when their traffic exceeds the expectation
 from their total activity. This can keep busy teams separate despite occasional
 cross-team messages. It uses no name matching or configured team membership;
-it is a heuristic over the same at-most-500 weekly links, not an org chart.
-Quiet agents remain visible as independent nodes.
+it is a heuristic over the same at-most-1,000 drawn links plus spawn lineage,
+not an org chart. Agents without messages in the window remain visible as
+independent nodes unless they were spawned by an agent on the map.
 
 On a fresh arrangement, community members start together. Springs and a gentle
 pull toward their community centre keep specialists close even when they only
@@ -67,10 +74,20 @@ the latest available metrics, which may differ from the last arrangement.
 
 ## Connection display and failures
 
-At most 500 directed message links are drawn, chosen by weekly count. This
-bounds browser work and clutter; it never omits agents or limits ranking
-metrics. Small, fixed-size arrows show direction, thickness and opacity show
-volume, and selection shows exact counts. Link colour follows the sender: gold
+At most 1,000 directed message links are drawn, chosen by recency-weighted
+count after dropping links to archived Chats and Apps and deleted or Bash
+schedules, which cannot be drawn. This bounds browser work and clutter; it
+never omits agents or limits ranking metrics. Small, fixed-size arrows show
+direction, thickness and opacity show recency-weighted volume so older links
+fade, and selection shows exact 30-day counts and the last message date.
+
+Each spawned agent whose parent is on the map gets a faint dashed lineage line
+to it, regardless of the window or cap, unless a message link already joins
+them. Lineage lines are not selectable and carry no counts.
+
+Daily counts are retained for 90 UTC dates. Details list a selected agent's
+earlier contacts from 31-90 days ago with their message count and last date;
+these are not drawn and do not affect ranking. Link colour follows the sender: gold
 for operator messages, slate for Kern host deliveries, and teal between agents.
 Moving pulses run along links whose sender or target is working now, faster for
 busier links. Selecting an agent fades agents outside its direct neighbourhood.

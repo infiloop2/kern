@@ -37,7 +37,7 @@ class SelectionTests(unittest.TestCase):
         self.assertIn("always()", condition)
         self.assertIn("!cancelled()", condition)
         self.assertIn("needs.select.result == 'success'", condition)
-        self.assertIn("github.repository != 'infiversehq/kern'", condition)
+        self.assertNotIn("github.repository != 'infiversehq/kern'", condition)
         self.assertIn("github.event_name == 'pull_request' || github.event.repository.private == false", condition)
 
     def test_aggregate_rejects_missing_or_failed_selected_suites(self):

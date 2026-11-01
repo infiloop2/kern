@@ -1353,22 +1353,32 @@ def swarm_snapshot() -> dict[str, Any]:
 
 
 def swarm_interactions() -> dict[str, Any]:
+    today = STATE.now()[:10]
+    links = [
+        ("operator", "app-1", 24, 24), ("operator", "thread-66", 2, 1.2),
+        ("kern-host", "schedule-31", 14, 9.5), ("kern-host", "app-1", 3, 3),
+        ("kern-host", "thread-66", 1, .1), ("app-1", "app-2", 18, 16), ("app-2", "app-1", 5, 5),
+        ("app-1", "thread-56", 3, 3), ("schedule-31", "app-2", 11, 7),
+    ]
+
+    def weighted(messages: float, peers: float, tokens: float | None) -> dict[str, Any]:
+        return {"operator_messages": messages, "agent_peers": peers, "total_tokens": tokens}
     return {"interactions": [
-        {"sender_thread_id": "operator", "target_thread_id": "app-1", "count": 24},
-        {"sender_thread_id": "operator", "target_thread_id": "thread-66", "count": 2},
-        {"sender_thread_id": "kern-host", "target_thread_id": "schedule-31", "count": 14},
-        {"sender_thread_id": "kern-host", "target_thread_id": "app-1", "count": 3},
-        {"sender_thread_id": "kern-host", "target_thread_id": "thread-66", "count": 1},
-        {"sender_thread_id": "app-1", "target_thread_id": "app-2", "count": 18},
-        {"sender_thread_id": "app-2", "target_thread_id": "app-1", "count": 5},
-        {"sender_thread_id": "app-1", "target_thread_id": "thread-56", "count": 3},
-        {"sender_thread_id": "schedule-31", "target_thread_id": "app-2", "count": 11},
+        {"sender_thread_id": sender, "target_thread_id": target, "count": count, "weight": weight, "last_day": today}
+        for sender, target, count, weight in links
+    ], "earlier": [
+        {"sender_thread_id": "app-1", "target_thread_id": "thread-60", "count": 4, "last_day": "2026-08-20"},
     ], "metrics": {
-        "app-1": {"operator_messages": 24, "agent_peers": 2, "total_tokens": 123456, "tokens_partial": False},
-        "app-2": {"operator_messages": 0, "agent_peers": 2, "total_tokens": 500000, "tokens_partial": True},
-        "thread-66": {"operator_messages": 2, "agent_peers": 0, "total_tokens": None, "tokens_partial": True},
-        "thread-56": {"operator_messages": 0, "agent_peers": 1, "total_tokens": None, "tokens_partial": True},
-        "schedule-31": {"operator_messages": 0, "agent_peers": 1, "total_tokens": 0, "tokens_partial": False},
+        "app-1": {"operator_messages": 24, "agent_peers": 2, "total_tokens": 123456, "tokens_partial": False,
+                  "weighted": weighted(24, 2, 123456)},
+        "app-2": {"operator_messages": 0, "agent_peers": 2, "total_tokens": 500000, "tokens_partial": True,
+                  "weighted": weighted(0, 2, 400000)},
+        "thread-66": {"operator_messages": 2, "agent_peers": 0, "total_tokens": None, "tokens_partial": True,
+                      "weighted": weighted(1.2, 0, None)},
+        "thread-56": {"operator_messages": 0, "agent_peers": 1, "total_tokens": None, "tokens_partial": True,
+                      "weighted": weighted(0, 1, None)},
+        "schedule-31": {"operator_messages": 0, "agent_peers": 1, "total_tokens": 0, "tokens_partial": False,
+                        "weighted": weighted(0, .8, 0)},
     }}
 
 
