@@ -13,7 +13,7 @@ import tempfile
 import threading
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import ANY, patch
 
 from host.runtime.agent_shim.mcp_shim import UnixHTTPConnection
 from host.runtime.core import unix_socket_service
@@ -30,18 +30,19 @@ class AgentWorkspaceSocketTests(unittest.TestCase):
             ('PUT', '/agent/apps/app-2/name'),
             ('PUT', '/agent/apps/app-2/agent-settings'),
             ('POST', '/agent/apps/app-2/actions'),
-            ('POST', '/agent/apps/app-2/collections/leads/actions'),
+            ('PUT', '/agent/apps/app-2/grants'),
+            ('DELETE', '/agent/apps/app-2/grants/thread-1'),
         ]
         for method, path in mutations:
             for caller in (None, 'thread-1', 'app-1', 'schedule-2'):
                 with (self.subTest(method=method, path=path, caller=caller),
                       patch.object(web_apps, 'route_agent') as route,
                       self.assertRaises(agent_api.WorkspaceError) as error):
-                    agent_api.dispatch_call(method, path, {'thread_id': 'app-2'}, peer_thread_id=caller)
+                    agent_api.dispatch_call(method, path, None if method == 'DELETE' else {'thread_id': 'app-2'}, peer_thread_id=caller)
                 self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
                 route.assert_not_called()
             with patch.object(web_apps, 'route_agent', return_value={}) as route:
-                agent_api.dispatch_call(method, path, {}, peer_thread_id='app-2')
+                agent_api.dispatch_call(method, path, None if method == 'DELETE' else {}, peer_thread_id='app-2')
                 route.assert_called_once()
 
     def test_cross_agent_reads_remain_available(self) -> None:
@@ -130,7 +131,7 @@ class AgentWorkspaceSocketTests(unittest.TestCase):
                 self.assertEqual(response, b"")
         route.assert_not_called()
 
-    def test_explicit_agent_route_is_dispatched_without_thread_attribution(self) -> None:
+    def test_explicit_agent_route_forwards_authenticated_identity(self) -> None:
         socket_path = self.start_server()
         with patch.object(
             web_apps, "route_agent", return_value={"app": {"app_id": "app-2"}}
@@ -144,7 +145,7 @@ class AgentWorkspaceSocketTests(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertEqual(body, {"status": 200, "body": {"app": {"app_id": "app-2"}}})
         route.assert_called_once_with(
-            "GET", "/agent/apps/app-2/state/meta", None, {}
+            "GET", "/agent/apps/app-2/state/meta", None, {}, peer_thread_id=ANY
         )
 
     def test_agent_app_creation_is_dispatched_without_a_request_body(self) -> None:
@@ -159,7 +160,7 @@ class AgentWorkspaceSocketTests(unittest.TestCase):
             )
         self.assertEqual(status, 200)
         self.assertEqual(body, {"status": 200, "body": created})
-        route.assert_called_once_with("POST", "/agent/apps", None, {})
+        route.assert_called_once_with("POST", "/agent/apps", None, {}, peer_thread_id=ANY)
 
     def test_conversation_history_route_is_dispatched_to_host_proxy(self) -> None:
         socket_path = self.start_server()
@@ -225,6 +226,38 @@ class AgentWorkspaceSocketTests(unittest.TestCase):
 
         self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
         admin_call.assert_not_called()
+
+    def test_large_ui_publication_passes_socket_but_other_actions_stay_bounded(self) -> None:
+        socket_path = self.start_server()
+        html = "é" * (web_apps.MAX_HTML_BYTES // 2)
+        action = {"action": "publish_ui", "expected_revision": 0,
+                  "html": html, "css": "", "javascript": ""}
+        request = {"method": "POST", "path": "/agent/apps/app-1/actions", "body": action}
+        with (
+            patch.object(agent_api, "peer_thread_id", return_value="app-1"),
+            patch.object(web_apps, "_require_web_app"),
+            patch.object(web_apps, "_require_agent_writable_web_app"),
+            patch.object(web_apps, "_publish_ui", return_value={"revision": 1}) as publish,
+        ):
+            status, response = self.http(socket_path, "POST", "/call", request)
+            self.assertEqual(status, 200)
+            self.assertEqual(response, {"status": 200, "body": {"ok": True, "revision": 1}})
+            self.assertEqual(publish.call_args.args[2], html)
+            publish.reset_mock()
+            for caller in ("thread-1", "app-2"):
+                with self.subTest(caller=caller), patch.object(agent_api, "peer_thread_id", return_value=caller):
+                    status, response = self.http(socket_path, "POST", "/call", request)
+                    self.assertEqual(response["status"], 403)
+            publish.assert_not_called()
+            action["html"] += "é"
+            status, response = self.http(socket_path, "POST", "/call", request)
+            self.assertEqual(response["status"], 413)
+            publish.assert_not_called()
+            request["body"] = {"action": "set", "expected_revision": 0,
+                               "path": ["text"], "value": html}
+            status, response = self.http(socket_path, "POST", "/call", request)
+            self.assertEqual(status, 400)
+            self.assertIn("body exceeds 262144 bytes", response["error"])
 
     def test_workspace_bounds_history_requests_before_dispatch(self) -> None:
         with patch.object(conversation_history, "route_agent") as route:
@@ -378,6 +411,42 @@ class AgentWorkspaceSocketTests(unittest.TestCase):
         finally:
             for _ in range(agent_api.MAX_CONCURRENT_LARGE_RESPONSES):
                 agent_api._LARGE_RESPONSE_SLOTS.release()
+
+    def test_large_request_cap_rejects_before_read_and_preserves_small_calls(self) -> None:
+        socket_path = self.start_server()
+        for _ in range(agent_api.MAX_CONCURRENT_LARGE_REQUESTS):
+            self.assertTrue(agent_api._LARGE_REQUEST_SLOTS.acquire(blocking=False))
+        try:
+            with patch.object(agent_api.AgentWorkspaceRequestHandler, "read_json_object_body") as read:
+                connection = UnixHTTPConnection(socket_path)
+                try:
+                    connection.putrequest("POST", "/call")
+                    connection.putheader("Content-Length", str(agent_api.MAX_REQUEST_BODY_BYTES + 1))
+                    connection.endheaders()
+                    response = connection.getresponse()
+                    self.assertEqual(response.status, 429)
+                    response.read()
+                    read.assert_not_called()
+                finally:
+                    connection.close()
+            with patch.object(agent_api, "_peer_thread_id", return_value="thread-1"):
+                status, body = self.http(socket_path, "POST", "/call",
+                                         {"method": "GET", "path": "/agent/identity"})
+                self.assertEqual(status, 200)
+                self.assertEqual(body["body"], {"thread_id": "thread-1"})
+        finally:
+            for _ in range(agent_api.MAX_CONCURRENT_LARGE_REQUESTS):
+                agent_api._LARGE_REQUEST_SLOTS.release()
+
+    def test_large_request_slot_is_released_after_invalid_requests(self) -> None:
+        socket_path = self.start_server()
+        # More sequential invalid calls than available slots must all reach
+        # validation, rather than leaking slots and eventually returning 429.
+        for _ in range(agent_api.MAX_CONCURRENT_LARGE_REQUESTS + 2):
+            status, body = self.http(socket_path, "POST", "/call",
+                                     {"unsupported": "x" * agent_api.MAX_REQUEST_BODY_BYTES})
+            self.assertEqual(status, 400)
+            self.assertEqual(body["error"], "Request has unsupported fields.")
 
     def test_large_response_slot_is_released_after_dispatch_failure(self) -> None:
         socket_path = self.start_server()

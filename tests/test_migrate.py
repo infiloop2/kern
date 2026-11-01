@@ -623,7 +623,7 @@ class MigrateRunnerTests(unittest.TestCase):
                     "expected_revision": 10, "operations": [
                         {"action": "delete", "id": "a"},
                     ],
-                })
+                }, peer_thread_id=app_id)
                 restored = backend.restore_revision(app_id, 10)["app"]
                 self.assertEqual(restored["html"], state["html"])
                 self.assertEqual(restored["data"], state["data"])

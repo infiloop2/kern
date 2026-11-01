@@ -117,7 +117,7 @@ def action_summary(method: str, path: str, body: Any, response: dict[str, Any],
         app = response.get("app", {})
         name = _text(app.get("name"), "App") if isinstance(app, dict) else "App"
         kind, label = "app_created", f"Created {name}"
-    elif method in {"PUT", "POST"} and (match := re.fullmatch(r"/agent/apps/(app-[1-9][0-9]*)(/.*)", path)):
+    elif method in {"PUT", "POST", "DELETE"} and (match := re.fullmatch(r"/agent/apps/(app-[1-9][0-9]*)(/.*)", path)):
         app_id, resource = match.groups()
         # Select supported writes before querying a name. Reads never create notices.
         if method == "PUT" and resource == "/name":
@@ -127,6 +127,12 @@ def action_summary(method: str, path: str, body: Any, response: dict[str, Any],
             settings = " · ".join(_text(request.get(key)) for key in ("agent_runtime", "model", "effort") if _text(request.get(key)))
             if settings:
                 label += f": {settings}"
+        elif method == "PUT" and resource == "/grants":
+            kind = "app_collection_grants_updated"
+            label = f"Updated {thread_name(app_id)} collection grants for {_text(request.get('thread_id'), 'agent')}"
+        elif method == "DELETE" and (grant := re.fullmatch(r"/grants/([^/]+)", resource)):
+            kind = "app_collection_grants_revoked"
+            label = f"Revoked {thread_name(app_id)} collection grants for {unquote(grant[1])}"
         elif method == "POST" and resource == "/actions":
             name = thread_name(app_id)
             if request.get("action") == "publish_ui":

@@ -353,7 +353,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
     def test_worker_turns_use_one_revision_and_deny_timers(self) -> None:
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
         self.assertIn("const WORKER_START_TIMEOUT_MS = 15 * 1000", source)
-        self.assertIn("const WORKER_TURN_TIMEOUT_MS = 5000", source)
+        self.assertIn("const WORKER_TURN_TIMEOUT_MS = 15000", source)
         self.assertIn("body.expected_revision = run.revision;", source)
         self.assertIn('"setTimeout", "setInterval", "clearTimeout", "clearInterval", "setImmediate"', source)
         self.assertIn('"MessageChannel", "MessagePort"', source)
@@ -384,7 +384,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
 
     def test_worker_deadline_includes_host_waits_and_explains_failures(self) -> None:
         source = (APP_DIR / "ui" / "personal_web_app_builder.js").read_text()
-        self.assertIn("const WORKER_TURN_TIMEOUT_MS = 5000", source)
+        self.assertIn("const WORKER_TURN_TIMEOUT_MS = 15000", source)
         self.assertIn('state: armed ? "event" : "broker-starting"', source)
         self.assertIn('armed ? WORKER_TURN_TIMEOUT_MS : WORKER_START_TIMEOUT_MS', source)
         self.assertIn('worker.addEventListener("broker-ready", () => {', source)
@@ -670,7 +670,8 @@ class AgentActionValidationTests(unittest.TestCase):
             self.assertRaises(backend.WorkspaceError) as empty,
         ):
             backend.apply_collection_actions(
-                "app-1", "leads", {"expected_revision": 0, "operations": []}
+                "app-1", "leads", {"expected_revision": 0, "operations": []},
+                peer_thread_id="app-1",
             )
         self.assertEqual(empty.exception.status, HTTPStatus.UNPROCESSABLE_ENTITY)
 
@@ -688,6 +689,7 @@ class AgentActionValidationTests(unittest.TestCase):
                         {"action": "upsert", "id": "lead-1", "value": too_large}
                     ],
                 },
+                peer_thread_id="app-1",
             )
         self.assertEqual(large.exception.status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
 
@@ -1272,7 +1274,7 @@ class BrowserRoutingTests(unittest.TestCase):
         list_all.assert_called_once_with("app-9")
         query.assert_called_once_with("app-9", "leads", {"limit": 10})
         writable.assert_called_once_with("app-9")
-        apply.assert_called_once_with("app-9", "leads", action)
+        apply.assert_called_once_with("app-9", "leads", action, None)
 
     def test_data_path_read_returns_only_the_requested_branch(self) -> None:
         with patch.object(
@@ -2362,6 +2364,19 @@ class AgenticWebAppDbTests(unittest.TestCase):
             ],
         )
 
+    def test_one_mib_html_is_persisted_and_read_back_without_truncation(self) -> None:
+        backend.create_web_app()
+        html = "é" * (1024 * 1024 // 2)
+        self.assertEqual(len(html.encode()), 1024 * 1024)
+        action = {"action": "publish_ui", "expected_revision": 0,
+                  "html": html, "css": "", "javascript": ""}
+        self.assertEqual(backend.apply_agent_action(action, "app-1"), {"ok": True, "revision": 1})
+        self.assertEqual(backend.load_app_ui("app-1")["html"], html)
+        with self.assertRaises(backend.WorkspaceError) as error:
+            backend.apply_agent_action({**action, "expected_revision": 1, "html": html + "x"}, "app-1")
+        self.assertEqual(error.exception.status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+        self.assertEqual(backend.load_app_ui("app-1")["revision"], 1)
+
     def test_ui_and_data_share_one_optimistic_revision(self) -> None:
         backend.create_web_app()
         published = backend.apply_agent_action(
@@ -2433,6 +2448,7 @@ class AgenticWebAppDbTests(unittest.TestCase):
                     },
                 ],
             },
+            peer_thread_id="app-1",
         )
         self.assertEqual(changed["revision"], 1)
         page = backend.query_collection(
@@ -2502,6 +2518,7 @@ class AgenticWebAppDbTests(unittest.TestCase):
                     {"action": "upsert", "id": "lead-1", "value": {"status": "new"}}
                 ],
             },
+            peer_thread_id="app-1",
         )
         with self.assertRaises(backend.WorkspaceError) as stale:
             backend.apply_collection_actions(
@@ -2514,6 +2531,7 @@ class AgenticWebAppDbTests(unittest.TestCase):
                         {"action": "upsert", "id": "lead-2", "value": {}},
                     ],
                 },
+                peer_thread_id="app-1",
             )
         self.assertEqual(stale.exception.status, HTTPStatus.CONFLICT)
         rows = backend.query_collection("app-1", "leads", {})["rows"]
@@ -2714,7 +2732,7 @@ class AgenticWebAppDbTests(unittest.TestCase):
                 {"action": "upsert", "id": "a", "value": {"status": "new"}},
                 {"action": "upsert", "id": "b", "value": {"status": "unchanged"}},
             ],
-        })
+        }, peer_thread_id="app-1")
         for revision in range(1, 26):
             backend.apply_agent_action({
                 "action": "set", "expected_revision": revision,
@@ -2743,13 +2761,13 @@ class AgenticWebAppDbTests(unittest.TestCase):
                 {"action": "upsert", "id": str(i), "value": {"v": 0}}
                 for i in range(100)
             ],
-        })
+        }, peer_thread_id="app-1")
         for revision in [1, 2]:
             backend.apply_collection_actions("app-1", "leads", {
                 "expected_revision": revision, "operations": [
                     {"action": "upsert", "id": "5", "value": {"v": 1}},
                 ],
-            })
+            }, peer_thread_id="app-1")
         with db.transaction() as cur:
             cur.execute("SELECT count(*) FROM web_app_collection_versions WHERE app_id = 'app-1'")
             self.assertEqual(cur.fetchone()[0], 101)
@@ -2772,14 +2790,14 @@ class AgenticWebAppDbTests(unittest.TestCase):
         ]):
             backend.apply_collection_actions("app-1", "leads", {
                 "expected_revision": revision, "operations": [operation],
-            })
+            }, peer_thread_id="app-1")
         with patch.object(backend.recovery, "component_versions", side_effect=RuntimeError("failed")):
             with self.assertRaises(RuntimeError):
                 backend.apply_collection_actions("app-1", "leads", {
                     "expected_revision": 3, "operations": [
                         {"action": "upsert", "id": "a", "value": {"v": 999}},
                     ],
-                })
+                }, peer_thread_id="app-1")
         self.assertEqual(backend.load_app_state("app-1")["revision"], 3)
         expected = {0: [], 1: [{"id": "a", "value": {"v": 1}}],
                     2: [], 3: [{"id": "a", "value": {"v": 2}}]}
@@ -2827,6 +2845,7 @@ class AgenticWebAppDbTests(unittest.TestCase):
                     }
                 ],
             },
+            peer_thread_id="app-1",
         )
         backend.apply_agent_action(
             {
@@ -2862,6 +2881,7 @@ class AgenticWebAppDbTests(unittest.TestCase):
                     },
                 ],
             },
+            peer_thread_id="app-1",
         )
         restored = backend.restore_revision("app-1", 2)["app"]
         self.assertEqual(restored["revision"], 5)
@@ -2876,3 +2896,73 @@ class AgenticWebAppDbTests(unittest.TestCase):
         newest = backend.list_revisions("app-1", {})["revisions"][0]
         self.assertEqual(newest["kind"], "restore")
         self.assertEqual(newest["restored_from"], 2)
+
+    def test_projected_queries_preserve_missing_null_sort_and_count(self) -> None:
+        backend.create_web_app()
+        backend.apply_collection_actions("app-1", "leads", {"expected_revision": 0, "operations": [
+            {"action": "upsert", "id": "a", "value": {"title": None, "score": 2, "large": "x" * 100}},
+            {"action": "upsert", "id": "b", "value": {"score": 2}},
+            {"action": "upsert", "id": "c", "value": {"title": "C", "score": 1}},
+        ]}, "app-1")
+        result = backend.query_collection("app-1", "leads", {"fields": ["title"], "sort": {"field": "score", "direction": "desc"}})
+        self.assertEqual(result["rows"], [{"id": "a", "value": {"title": None}}, {"id": "b", "value": {}}, {"id": "c", "value": {"title": "C"}}])
+        result = backend.query_collection("app-1", "leads", {"count_only": True, "filters": [{"field": "score", "op": "eq", "value": 2}]})
+        self.assertEqual(result["total"], 2)
+        self.assertEqual(result["rows"], [])
+        with patch.object(backend.collection_store, "MAX_COLLECTION_QUERY_RESPONSE_BYTES", 100):
+            with self.assertRaises(backend.WorkspaceError) as error:
+                backend.query_collection("app-1", "leads", {})
+            self.assertEqual(error.exception.status, HTTPStatus.REQUEST_ENTITY_TOO_LARGE)
+            self.assertEqual(len(backend.query_collection("app-1", "leads", {"fields": ["title"]})["rows"]), 3)
+
+    def test_runtime_report_persists_and_is_readable_in_meta(self) -> None:
+        backend.create_web_app()
+        self.assertIsNone(backend.load_app_state_meta("app-1")["last_runtime_report"])
+        backend.route_browser("POST", "/apps/app-1/runtime/report", {"report": "Action timed out"})
+        meta = backend.route_agent("GET", "/agent/apps/app-1/state/meta", None)["app"]
+        self.assertEqual(meta["last_runtime_report"], "Action timed out")
+        self.assertTrue(meta["last_runtime_report_at"])
+        self.assertEqual(meta["revision"], 0)
+        backend.save_runtime_report("app-1", {"report": "New report"})
+        self.assertEqual(backend.load_app_state_meta("app-1")["last_runtime_report"], "New report")
+
+    def test_collection_grants_authorize_revoke_and_preserve_write_guards(self) -> None:
+        from host.runtime.workspace import agent_api
+        backend.create_web_app()
+        body = {"expected_revision": 0, "operations": [{"action": "upsert", "id": "a", "value": {"title": "A"}}]}
+        with patch.object(agent_api.agent_notices, "record") as notice:
+            for caller in (None, "thread-42", "app-2"):
+                with self.assertRaises(backend.WorkspaceError) as error:
+                    agent_api.dispatch_call("POST", "/agent/apps/app-1/collections/leads/actions", body, peer_thread_id=caller)
+                self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
+            agent_api.dispatch_call("PUT", "/agent/apps/app-1/grants", {"thread_id": "thread-42", "collections": ["leads"]}, peer_thread_id="app-1")
+            self.assertEqual(backend.route_agent("GET", "/agent/apps/app-1/grants", None), {"grants": {"thread-42": ["leads"]}})
+            result = agent_api.dispatch_call("POST", "/agent/apps/app-1/collections/leads/actions", body, peer_thread_id="thread-42")
+            self.assertEqual(result["body"]["revision"], 1)
+            self.assertEqual(notice.call_args.args[0], "thread-42")
+            body["expected_revision"] = 1
+            # A batch cannot smuggle an operation for a different collection.
+            mixed = {**body, "operations": [*body["operations"], {"action": "upsert", "id": "b", "collection": "private", "value": {}}]}
+            with self.assertRaises(backend.WorkspaceError):
+                backend.apply_collection_actions("app-1", "leads", mixed, "thread-42")
+            self.assertEqual(backend.load_app_state_meta("app-1")["revision"], 1)
+            with self.assertRaises(backend.WorkspaceError) as error:
+                backend.apply_collection_actions("app-1", "private", body, "thread-42")
+            self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
+            for column, status in (("archived", HTTPStatus.CONFLICT), ("agent_updates_locked", HTTPStatus.LOCKED)):
+                with db.transaction() as cur:
+                    cur.execute(f"UPDATE web_apps SET {column} = TRUE WHERE app_id = 'app-1'")
+                with self.assertRaises(backend.WorkspaceError) as error:
+                    backend.apply_collection_actions("app-1", "leads", body, "thread-42")
+                self.assertEqual(error.exception.status, status)
+                self.assertEqual(backend.load_app_state_meta("app-1")["revision"], 1)
+                with db.transaction() as cur:
+                    cur.execute(f"UPDATE web_apps SET {column} = FALSE WHERE app_id = 'app-1'")
+            with self.assertRaises(backend.WorkspaceError) as error:
+                backend.apply_collection_actions("app-1", "leads", {**body, "expected_revision": 0}, "thread-42")
+            self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
+            agent_api.dispatch_call("DELETE", "/agent/apps/app-1/grants/thread-42", None, peer_thread_id="app-1")
+            with self.assertRaises(backend.WorkspaceError) as error:
+                backend.apply_collection_actions("app-1", "leads", body, "thread-42")
+            self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
+            self.assertEqual(backend.load_app_state_meta("app-1")["revision"], 1)

@@ -64,6 +64,26 @@ class KernActionNoticeTests(TestCase):
             agent_api.dispatch_call("GET", "/agent/identity", None, peer_thread_id="thread-1")
             record.assert_not_called()
 
+    def test_grant_notices_record_owner_success_and_nonowner_failure(self):
+        for method, path, body, kind in (
+            ("PUT", "/agent/apps/app-1/grants", {"thread_id": "thread-2", "collections": ["leads"]}, "app_collection_grants_updated"),
+            ("DELETE", "/agent/apps/app-1/grants/thread-2", None, "app_collection_grants_revoked"),
+        ):
+            for caller in ("app-1", "thread-42"):
+                with self.subTest(method=method, caller=caller), patch.object(agent_notices, "thread_name", return_value="Portfolio"), patch.object(agent_notices, "call_admin_api") as record, patch.object(agent_api.web_apps, "route_agent", return_value={"grants": {}}):
+                    if caller == "app-1":
+                        agent_api.dispatch_call(method, path, body, peer_thread_id=caller)
+                    else:
+                        with self.assertRaises(WorkspaceError):
+                            agent_api.dispatch_call(method, path, body, peer_thread_id=caller)
+                    self.assertEqual(record.call_args.args[1], f"/v1/threads/{caller}/notices")
+                    notice = record.call_args.args[2]
+                    self.assertEqual(notice["kind"], kind)
+                    self.assertEqual(notice["summary"].startswith("Failed:"), caller != "app-1")
+                    with patch.object(threads.state, "mutation"), patch.object(threads.state, "thread_session_config", return_value={}), patch.object(threads.state, "append_agent_event") as append:
+                        threads.thread_route("POST", f"/v1/threads/{caller}/notices", {}, notice, None, False)
+                        self.assertEqual(append.call_args.args[2], caller)
+
     def test_outgoing_message_and_spawn_record_only_after_acceptance(self):
         for path, name, summary in (("/agent/messages", "send_agent_message", "Sent message to Chat agent: <img src=x> hello"),
                                     ("/agent/agents", "spawn_agent", "Started agent: <img src=x> hello")):
@@ -127,6 +147,8 @@ class NoticeSummaryTests(TestCase):
             ("POST", "/agent/schedules", {"name": "Release checker", "triggers": []}, {}, "standing_agent_created", "Created standing agent Release checker: 0 triggers"),
             ("PUT", "/agent/schedules/1", {"name": "Release checker", "triggers": [{"prompt": "Check releases"}]}, {}, "standing_agent_updated", "Updated standing agent Release checker: 1 trigger: Check releases"),
             ("DELETE", "/agent/schedules/1", None, {}, "standing_agent_deleted", "Deleted standing agent Portfolio"),
+            ("PUT", "/agent/apps/app-1/grants", {"thread_id": "thread-2", "collections": ["leads"]}, {}, "app_collection_grants_updated", "Updated Portfolio collection grants for thread-2"),
+            ("DELETE", "/agent/apps/app-1/grants/thread-2", None, {}, "app_collection_grants_revoked", "Revoked Portfolio collection grants for thread-2"),
             ("POST", "/agent/apps", {}, {"app": {"name": "Portfolio"}}, "app_created", "Created Portfolio"),
             ("PUT", "/agent/apps/app-1/name", {"name": "Portfolio"}, {}, "app_renamed", "Renamed App to Portfolio"),
             ("PUT", "/agent/apps/app-1/agent-settings", {"agent_runtime": "codex", "model": "gpt-6.1-sol", "effort": "high"}, {}, "app_agent_updated", "Updated Portfolio agent: codex · gpt-6.1-sol · high"),

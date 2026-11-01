@@ -26,6 +26,7 @@ ACTION_KINDS = frozenset({
     "shared_memory_saved", "shared_memory_deleted", "private_note_saved", "private_note_deleted", "standing_agent_created",
     "standing_agent_updated", "standing_agent_deleted", "app_created", "app_renamed",
     "app_agent_updated", "app_ui_published", "app_data_changed", "app_collection_changed",
+    "app_collection_grants_updated", "app_collection_grants_revoked",
 })
 
 NOTICE_KINDS = frozenset(INPUT_KINDS + CONTEXT_KINDS) | ACTION_KINDS

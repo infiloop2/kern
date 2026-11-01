@@ -21,6 +21,7 @@ MAX_COLLECTION_RESTORE_BATCH_ROWS = 100
 MAX_COLLECTION_RESTORE_BATCH_BYTES = 1024 * 1024
 MAX_COLLECTION_QUERY_FILTERS = 8
 MAX_COLLECTION_QUERY_LIMIT = 100
+MAX_COLLECTION_QUERY_RESPONSE_BYTES = 1024 * 1024
 MAX_COLLECTION_QUERY_OFFSET = 1_000_000
 MAX_COLLECTION_FIELD_BYTES = 128
 COLLECTION_NAME_RE = re.compile(r"[a-z][a-z0-9_-]{0,63}")
@@ -114,9 +115,18 @@ def query_collection(
     request = {} if body is None else _required_object(body, "collection query")
     _require_keys(
         request,
-        {"filters", "ids", "sort", "limit", "offset"},
+        {"filters", "ids", "sort", "limit", "offset", "fields", "count_only"},
         required=set(),
     )
+    fields = None
+    if "fields" in request:
+        fields = request["fields"]
+        if not isinstance(fields, list) or not 1 <= len(fields) <= 32:
+            raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "fields must contain 1 to 32 field names")
+        fields = [_validated_collection_field(field) for field in fields]
+    count_only = request.get("count_only", False)
+    if not isinstance(count_only, bool):
+        raise WorkspaceError(HTTPStatus.UNPROCESSABLE_ENTITY, "count_only must be boolean")
     raw_filters = request.get("filters", [])
     if (
         not isinstance(raw_filters, list)
@@ -240,16 +250,32 @@ def query_collection(
         )
         count_row = cur.fetchone()
         total = int(count_row[0]) if count_row is not None else 0
-        cur.execute(
-            "SELECT row_id, value_json FROM web_app_collection_rows"
-            f" WHERE {where_sql} ORDER BY {order_sql} LIMIT %s OFFSET %s",
-            (*parameters, *order_parameters, limit, offset),
-        )
-        rows = [
-            {"id": str(row_id), "value": value}
-            for row_id, value in cur.fetchall()
-        ]
-    next_offset = offset + len(rows) if offset + len(rows) < total else None
+        rows = []
+        if not count_only:
+            projection = "value_json"
+            projection_parameters = []
+            if fields is not None:
+                projection = (
+                    "(SELECT COALESCE(jsonb_object_agg(key, value), '{}'::jsonb)"
+                    f" FROM jsonb_each(value_json) WHERE key IN ({','.join('%s' for _ in fields)}))"
+                )
+                projection_parameters.extend(fields)
+            cur.execute(
+                f"SELECT row_id, {projection} FROM web_app_collection_rows"
+                f" WHERE {where_sql} ORDER BY {order_sql} LIMIT %s OFFSET %s",
+                (*projection_parameters, *parameters, *order_parameters, limit, offset),
+            )
+            response_bytes = 0
+            for row_id, value in cur.fetchall():
+                row = {"id": str(row_id), "value": value}
+                response_bytes += len(json.dumps(row, separators=(",", ":")).encode())
+                if response_bytes > MAX_COLLECTION_QUERY_RESPONSE_BYTES:
+                    raise WorkspaceError(
+                        HTTPStatus.REQUEST_ENTITY_TOO_LARGE,
+                        f"collection query rows exceed {MAX_COLLECTION_QUERY_RESPONSE_BYTES} bytes (1 MiB); use fields or a smaller limit",
+                    )
+                rows.append(row)
+    next_offset = offset + len(rows) if not count_only and offset + len(rows) < total else None
     return {
         "name": collection,
         "revision": int(state[0]),
@@ -264,6 +290,7 @@ def apply_collection_actions(
     app_id: str,
     collection: str,
     body: Any,
+    peer_thread_id: str | None,
     *,
     require_web_app: Callable[[str], Any],
     record_revision: Callable[..., None],
@@ -319,13 +346,27 @@ def apply_collection_actions(
     now = utc_now()
     with db.transaction() as cur:
         cur.execute(
-            f"SELECT {STATE_COLUMNS} FROM web_apps"
+            f"SELECT {STATE_COLUMNS}, collection_grants, archived FROM web_apps"
             " WHERE app_id = %s FOR UPDATE",
             (app_id,),
         )
         app_state = cur.fetchone()
         if app_state is None:
             raise WorkspaceError(HTTPStatus.INTERNAL_SERVER_ERROR, "app state is unavailable")
+        if peer_thread_id != app_id and collection not in app_state[7].get(peer_thread_id, []):
+            raise WorkspaceError(
+                HTTPStatus.FORBIDDEN,
+                f"Only the owner, {app_id}, can modify this App. "
+                f'Use send_agent_message with thread_id="{app_id}" to ask the owner to make the change.',
+            )
+        if app_state[8]:
+            raise WorkspaceError(HTTPStatus.CONFLICT, "archived apps are read-only")
+        if app_state[6]:
+            raise WorkspaceError(
+                HTTPStatus.LOCKED,
+                "The user has locked agent updates for this app. Do not change the app now; "
+                "retry again in a while after the user unlocks updates.",
+            )
         if int(app_state[0]) != expected_revision:
             raise WorkspaceError(
                 HTTPStatus.CONFLICT, "the app changed; reread affected state, reconcile changes and use its revision as expected_revision"

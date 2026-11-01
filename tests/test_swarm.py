@@ -265,27 +265,59 @@ class SwarmPersistenceTests(unittest.TestCase):
         with patch.object(swarm, '_interaction_window', return_value=('2026-10-03', '2026-10-09')):
             self.assertEqual(state.swarm_interactions()['interactions'], [])
 
-    def test_dense_interactions_return_strongest_500_without_pruning_counts(self) -> None:
+    def test_dense_interactions_return_strongest_links_without_pruning_counts(self) -> None:
         with patch.object(swarm, '_interaction_window', return_value=('2026-09-26', '2026-10-02')):
             with state.mutation() as cur:
                 cur.execute("INSERT INTO swarm_interaction_days SELECT '2026-10-02',"
-                            " 'thread-' || n, 'app-1', n FROM generate_series(1,600) AS n")
+                            " 'thread-' || n, 'app-1', n FROM generate_series(1,1200) AS n")
                 # Ranking uses the whole week's aggregate, not the largest day.
-                cur.execute("INSERT INTO swarm_interaction_days VALUES ('2026-09-26','thread-1','app-1',1000)")
+                cur.execute("INSERT INTO swarm_interaction_days VALUES ('2026-09-26','thread-1','app-1',2000)")
             counts = state.swarm_interactions()['interactions']
-            self.assertEqual(len(counts), 500)
-            self.assertEqual(counts[0], {'sender_thread_id': 'thread-1', 'target_thread_id': 'app-1', 'count': 1001})
-            self.assertEqual(counts[-1], {'sender_thread_id': 'thread-102', 'target_thread_id': 'app-1', 'count': 102})
+            self.assertEqual(len(counts), 1000)
+            self.assertEqual(counts[0], {'sender_thread_id': 'thread-1', 'target_thread_id': 'app-1', 'count': 2001})
+            self.assertEqual(counts[-1], {'sender_thread_id': 'thread-202', 'target_thread_id': 'app-1', 'count': 202})
             with db.transaction() as cur:
                 cur.execute('SELECT COUNT(*) FROM swarm_interaction_days')
-                self.assertEqual(cur.fetchone(), (601,))
+                self.assertEqual(cur.fetchone(), (1201,))
+
+    def test_retired_agents_do_not_crowd_visible_links_out_of_the_cap(self) -> None:
+        from host.runtime.workspace import schedules
+        schedule = schedules.create_schedule({
+            "name": "Deleted research", "triggers": [{"type": "daily", "times": ["12:00"], "prompt": "Research"}],
+            "agent_runtime": "codex", "model": "gpt-6-sol", "effort": "high",
+        }, actor="user")
+        retired_schedule = schedule['thread_id']
+        with patch.object(swarm, '_interaction_window', return_value=('2026-09-26', '2026-10-02')), \
+                patch.object(swarm, 'SWARM_LINK_LIMIT', 2):
+            with state.mutation() as cur:
+                cur.execute("UPDATE schedules SET deleted_at = 'now' WHERE thread_id = %s", (retired_schedule,))
+                cur.execute("INSERT INTO chat_threads (thread_id, archived, spawned_by_thread_id)"
+                            " VALUES ('thread-2', TRUE, 'thread-1'), ('thread-3', FALSE, 'thread-1')")
+                cur.execute(
+                    "INSERT INTO web_apps (app_id, name, revision, created_at, updated_at, archived,"
+                    " agent_runtime, agent_model, agent_effort) VALUES ('app-9', 'Old app', 0,"
+                    " '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z', TRUE, 'codex', 'gpt-5.6-sol', 'high')")
+                # Strong links to retired agents would fill the whole cap before.
+                cur.execute("INSERT INTO swarm_interaction_days VALUES"
+                            " ('2026-10-02','thread-1','thread-2',50),"
+                            " ('2026-10-02','app-9','thread-1',40),"
+                            " ('2026-10-02','kern-host',%s,30),"
+                            " ('2026-10-02','thread-1','thread-3',1),"
+                            " ('2026-10-02','operator','thread-1',1)", (retired_schedule,))
+            result = state.swarm_interactions()
+            self.assertEqual(result['interactions'], [
+                {'sender_thread_id': 'operator', 'target_thread_id': 'thread-1', 'count': 1},
+                {'sender_thread_id': 'thread-1', 'target_thread_id': 'thread-3', 'count': 1},
+            ])
+            # Ranking still counts the retired peers.
+            self.assertEqual(result['metrics']['thread-1']['agent_peers'], 3)
 
     def test_ranking_metrics_use_all_links_and_known_token_buckets_in_window(self) -> None:
         with patch.object(swarm, '_interaction_window', return_value=('2026-09-26', '2026-10-02')):
             with state.mutation() as cur:
-                # The operator link is too weak to survive the 500-link display cap.
+                # The operator link is too weak to survive the 1,000-link display cap.
                 cur.execute("INSERT INTO swarm_interaction_days SELECT '2026-10-02',"
-                            " 'thread-' || n, 'app-1', 100 FROM generate_series(1,600) AS n")
+                            " 'thread-' || n, 'app-1', 100 FROM generate_series(1,1200) AS n")
                 cur.execute("INSERT INTO swarm_interaction_days VALUES"
                             " ('2026-09-26','operator','app-1',3),"
                             " ('2026-10-02','operator','app-1',4),"
@@ -309,10 +341,10 @@ class SwarmPersistenceTests(unittest.TestCase):
                                 " VALUES (%s,%s,'codex','test',%s,%s,%s,%s,%s,%s)",
                                 (thread_id, run, measured, measured, *buckets))
             result = state.swarm_interactions()
-            self.assertEqual(len(result['interactions']), 500)
+            self.assertEqual(len(result['interactions']), 1000)
             self.assertFalse(any(edge['sender_thread_id'] == 'operator' for edge in result['interactions']))
             self.assertEqual(result['metrics']['app-1'], {
-                'operator_messages': 7, 'agent_peers': 600, 'total_tokens': 1030, 'tokens_partial': True,
+                'operator_messages': 7, 'agent_peers': 1200, 'total_tokens': 1030, 'tokens_partial': True,
             })
             self.assertEqual(result['metrics']['app-2'], {
                 'operator_messages': 0, 'agent_peers': 0, 'total_tokens': 0, 'tokens_partial': False,
