@@ -59,7 +59,8 @@ def clean_verdict(head, comments, reviews, resolve_commit):
     if not verdicts:
         return None
     latest = max(verdicts, key=lambda entry: (entry[0], entry[1]))[2]
-    if latest.get('state') == 'DISMISSED' or not latest['body'].startswith(CLEAN):
+    body = latest['body'].removeprefix('<!-- codex-review-receipt:v1 -->').lstrip()
+    if latest.get('state') == 'DISMISSED' or not body.startswith(CLEAN):
         return None
     # The stamping workflow is triggered by a top-level Codex comment.
     return latest if 'updated_at' in latest else None

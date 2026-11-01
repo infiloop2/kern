@@ -2,7 +2,6 @@ name: kern-smoke
 
 # Explicit manual dispatch or a newly created /smoke (or smoke) PR comment only.
 # Authorization/rate limits still apply; clean review alone never launches AWS smoke.
-# During the private October pause, only authorized manual dispatch on main remains available.
 on:
   workflow_dispatch:
   issue_comment:
@@ -19,13 +18,9 @@ permissions:
 jobs:
   authorize:
     name: Authorize AWS smoke
-    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
-    # A manual dispatch on main stays available during the pause.
     if: >-
-      (github.repository != 'infiversehq/kern' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && (
-        github.repository == 'infiversehq/kern' && (github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request &&
-          (github.event.comment.body == '/smoke' || github.event.comment.body == 'smoke')))
-      )
+      github.repository == 'infiversehq/kern' && (github.event_name == 'workflow_dispatch' || (github.event.issue.pull_request &&
+        (github.event.comment.body == '/smoke' || github.event.comment.body == 'smoke')))
     runs-on: ubuntu-latest
     outputs:
       ref: ${{ steps.resolve.outputs.ref }}
@@ -138,12 +133,8 @@ jobs:
   smoke:
     needs: authorize
     name: Fresh AWS smoke (${{ needs.authorize.outputs.ref }})
-    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
-    # A manual dispatch on main stays available during the pause.
     if: >-
-      (github.repository != 'infiversehq/kern' || (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main')) && (
-        needs.authorize.result == 'success'
-      )
+      needs.authorize.result == 'success'
     runs-on: ubuntu-latest
     concurrency:
       group: kern-smoke

@@ -2,7 +2,6 @@ name: ci-sandbox-image
 
 # Publish sandbox dependencies on main changes to the listed image inputs, or manual dispatch.
 # PRs only consume/build images; a clean review never grants registry write access.
-# The private-repo October pause remains in the publishing job.
 on:
   workflow_dispatch:
   push:
@@ -25,12 +24,9 @@ concurrency:
 
 jobs:
   publish:
-    # Private-repo budget pause for October 2026; remove this guard in a November 1 PR.
     if: >-
-      github.repository != 'infiversehq/kern' && (
-        (github.repository == 'infiversehq/kern' || github.repository == 'infiloop2/kern') &&
-        github.ref == 'refs/heads/main'
-      )
+      (github.repository == 'infiversehq/kern' || github.repository == 'infiloop2/kern') &&
+      github.ref == 'refs/heads/main'
     name: Publish CI dependency image
     runs-on: ubuntu-latest
     # Allow two bounded eight-minute builds plus image publication.

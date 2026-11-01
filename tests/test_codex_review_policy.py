@@ -127,6 +127,19 @@ class CodexReviewPolicyTests(unittest.TestCase):
             'commit_id': HEAD, 'event': 'APPROVE', 'body': policy.stamp_body(VERDICT)})])
         self.assertEqual(self.invoke(mode='stamp'), [])
 
+    def test_receipt_prefixed_verdict_stamps_exact_head(self):
+        verdict = {**VERDICT, 'body': '<!-- codex-review-receipt:v1 -->\n\n' + VERDICT['body']}
+        writes = self.invoke(mode='stamp', comments=[verdict], reviews=[])
+        self.assertEqual(writes, [(f'/repos/{REPO}/pulls/1/reviews', {
+            'commit_id': HEAD, 'event': 'APPROVE', 'body': policy.stamp_body(verdict)})])
+
+    def test_receipt_does_not_authorize_quoted_negative_or_unknown_prefix(self):
+        for body in ('<!-- codex-review-receipt:v1 -->\n> ' + VERDICT['body'],
+                     '<!-- codex-review-receipt:v1 -->\nFound issues\n' + VERDICT['body'],
+                     '<!-- unknown-marker -->\n' + VERDICT['body']):
+            with self.subTest(body=body), self.assertRaisesRegex(RuntimeError, 'clean Codex verdict'):
+                self.invoke(mode='stamp', comments=[{**VERDICT, 'body': body}], reviews=[])
+
     def test_stamp_never_rebinds_a_verdict_to_a_different_commit(self):
         with self.assertRaisesRegex(RuntimeError, 'already bound'):
             self.invoke(mode='stamp', reviews=[{**STAMP, 'commit_id': HEAD[:10] + 'b' * 30}])

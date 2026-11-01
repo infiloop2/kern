@@ -1,4 +1,4 @@
-"""Swarm identities, on-demand annotations, and weekly counters."""
+"""Swarm identities, on-demand annotations, and recency-weighted counters."""
 from __future__ import annotations
 
 import threading
@@ -245,37 +245,54 @@ class SwarmPersistenceTests(unittest.TestCase):
         self.assertIsNone(self.agent()['task'])
         self.assertEqual(self.agent()['pending_approval_count'], 0)
 
-    def test_interactions_aggregate_by_direction_and_expire(self) -> None:
+    def test_interactions_aggregate_by_direction_decay_and_expire(self) -> None:
+        decay = .5 ** (6 / 7)
         with patch.object(swarm, '_interaction_window', return_value=('2026-09-26', '2026-10-02')):
             with state.mutation() as cur:
+                # Retained for earlier contacts but outside the drawn window.
                 cur.execute("INSERT INTO swarm_interaction_days VALUES ('2026-09-25','thread-2','thread-1',8)")
                 cur.execute("INSERT INTO swarm_interaction_days VALUES ('2026-09-26','thread-2','thread-1',3)")
+                # Past 90-day retention: removed on the next accepted delivery.
+                cur.execute("INSERT INTO swarm_interaction_days VALUES ('2026-07-04','thread-3','thread-1',8)")
                 for _ in range(6):
                     swarm.record_swarm_interaction(cur, 'thread-2', 'thread-1')
                 swarm.record_swarm_interaction(cur, 'thread-1', 'thread-2')
             counts = state.swarm_interactions()['interactions']
-            self.assertEqual(counts, [
-                {'sender_thread_id': 'thread-2', 'target_thread_id': 'thread-1', 'count': 9},
-                {'sender_thread_id': 'thread-1', 'target_thread_id': 'thread-2', 'count': 1},
+            self.assertEqual([(edge['sender_thread_id'], edge['target_thread_id'], edge['count'], edge['last_day'])
+                              for edge in counts], [
+                ('thread-2', 'thread-1', 9, '2026-10-02'),
+                ('thread-1', 'thread-2', 1, '2026-10-02'),
             ])
+            # Today's messages count fully; six days ago counts 0.5^(6/7).
+            self.assertAlmostEqual(counts[0]['weight'], 6 + 3 * decay, places=3)
+            self.assertEqual(counts[1]['weight'], 1)
             with state.mutation() as cur:
                 cur.execute('SELECT MIN(day), COUNT(*) FROM swarm_interaction_days')
-                self.assertEqual(cur.fetchone(), ('2026-09-26', 3))
-        # Reads expire the visible counts even when no new messages arrive.
+                self.assertEqual(cur.fetchone(), ('2026-09-25', 4))
+        # Reads move links past the window into earlier contacts without new messages.
         with patch.object(swarm, '_interaction_window', return_value=('2026-10-03', '2026-10-09')):
-            self.assertEqual(state.swarm_interactions()['interactions'], [])
+            result = state.swarm_interactions()
+            self.assertEqual(result['interactions'], [])
+            self.assertEqual(result['earlier'], [
+                {'sender_thread_id': 'thread-2', 'target_thread_id': 'thread-1', 'count': 17, 'last_day': '2026-10-02'},
+                {'sender_thread_id': 'thread-1', 'target_thread_id': 'thread-2', 'count': 1, 'last_day': '2026-10-02'},
+            ])
+        with patch.object(swarm, '_interaction_window', return_value=('2026-12-31', '2027-01-06')):
+            self.assertEqual(state.swarm_interactions()['earlier'], [])
 
     def test_dense_interactions_return_strongest_links_without_pruning_counts(self) -> None:
         with patch.object(swarm, '_interaction_window', return_value=('2026-09-26', '2026-10-02')):
             with state.mutation() as cur:
                 cur.execute("INSERT INTO swarm_interaction_days SELECT '2026-10-02',"
                             " 'thread-' || n, 'app-1', n FROM generate_series(1,1200) AS n")
-                # Ranking uses the whole week's aggregate, not the largest day.
-                cur.execute("INSERT INTO swarm_interaction_days VALUES ('2026-09-26','thread-1','app-1',2000)")
+                # Ranking uses the whole window's decayed aggregate, not the largest day.
+                cur.execute("INSERT INTO swarm_interaction_days VALUES ('2026-09-26','thread-1','app-1',3000)")
             counts = state.swarm_interactions()['interactions']
             self.assertEqual(len(counts), 1000)
-            self.assertEqual(counts[0], {'sender_thread_id': 'thread-1', 'target_thread_id': 'app-1', 'count': 2001})
-            self.assertEqual(counts[-1], {'sender_thread_id': 'thread-202', 'target_thread_id': 'app-1', 'count': 202})
+            self.assertEqual((counts[0]['sender_thread_id'], counts[0]['count']), ('thread-1', 3001))
+            self.assertAlmostEqual(counts[0]['weight'], 1 + 3000 * .5 ** (6 / 7), places=3)
+            self.assertEqual(counts[-1], {'sender_thread_id': 'thread-202', 'target_thread_id': 'app-1',
+                                          'count': 202, 'weight': 202, 'last_day': '2026-10-02'})
             with db.transaction() as cur:
                 cur.execute('SELECT COUNT(*) FROM swarm_interaction_days')
                 self.assertEqual(cur.fetchone(), (1201,))
@@ -306,8 +323,8 @@ class SwarmPersistenceTests(unittest.TestCase):
                             " ('2026-10-02','operator','thread-1',1)", (retired_schedule,))
             result = state.swarm_interactions()
             self.assertEqual(result['interactions'], [
-                {'sender_thread_id': 'operator', 'target_thread_id': 'thread-1', 'count': 1},
-                {'sender_thread_id': 'thread-1', 'target_thread_id': 'thread-3', 'count': 1},
+                {'sender_thread_id': 'operator', 'target_thread_id': 'thread-1', 'count': 1, 'weight': 1, 'last_day': '2026-10-02'},
+                {'sender_thread_id': 'thread-1', 'target_thread_id': 'thread-3', 'count': 1, 'weight': 1, 'last_day': '2026-10-02'},
             ])
             # Ranking still counts the retired peers.
             self.assertEqual(result['metrics']['thread-1']['agent_peers'], 3)
@@ -343,13 +360,22 @@ class SwarmPersistenceTests(unittest.TestCase):
             result = state.swarm_interactions()
             self.assertEqual(len(result['interactions']), 1000)
             self.assertFalse(any(edge['sender_thread_id'] == 'operator' for edge in result['interactions']))
-            self.assertEqual(result['metrics']['app-1'], {
+            app = dict(result['metrics']['app-1'])
+            weighted = app.pop('weighted')
+            self.assertEqual(app, {
                 'operator_messages': 7, 'agent_peers': 1200, 'total_tokens': 1030, 'tokens_partial': True,
             })
+            # Older days fade: six days ago counts 0.5^(6/7); a peer counts by its latest contact.
+            decay = .5 ** (6 / 7)
+            self.assertAlmostEqual(weighted['operator_messages'], 4 + 3 * decay, places=3)
+            self.assertEqual(weighted['agent_peers'], 1200)
+            self.assertAlmostEqual(weighted['total_tokens'], 30 + 1000 * decay, places=3)
             self.assertEqual(result['metrics']['app-2'], {
                 'operator_messages': 0, 'agent_peers': 0, 'total_tokens': 0, 'tokens_partial': False,
+                'weighted': {'operator_messages': 0, 'agent_peers': 0, 'total_tokens': 0},
             })
             self.assertIsNone(result['metrics']['app-3']['total_tokens'])
+            self.assertIsNone(result['metrics']['app-3']['weighted']['total_tokens'])
             self.assertTrue(result['metrics']['app-3']['tokens_partial'])
             self.assertEqual(result['metrics']['thread-1']['agent_peers'], 1)
             self.assertIsNone(result['metrics']['thread-1']['total_tokens'])
@@ -357,9 +383,10 @@ class SwarmPersistenceTests(unittest.TestCase):
             self.assertNotIn('kern-host', result['metrics'])
             self.assertEqual(result['metrics']['schedule-1'], {
                 'operator_messages': 0, 'agent_peers': 0, 'total_tokens': None, 'tokens_partial': True,
+                'weighted': {'operator_messages': 0, 'agent_peers': 0, 'total_tokens': None},
             })
-            self.assertIn({'sender_thread_id': 'kern-host', 'target_thread_id': 'app-1', 'count': 10000},
-                          result['interactions'])
+            self.assertIn({'sender_thread_id': 'kern-host', 'target_thread_id': 'app-1', 'count': 10000,
+                           'weight': 10000, 'last_day': '2026-10-02'}, result['interactions'])
 
     def test_only_on_demand_has_a_task_and_spawned_parent_is_visible(self) -> None:
         self.assertTrue(state.is_on_demand_agent('thread-1'))

@@ -913,18 +913,33 @@ Each agent has `thread_id`, `kind` (`app`, `on-demand`, `standing`, `spawned`),
   attributed to the thread, independent of runtime status.
 
 `GET /v1/swarm/interactions` is operator-only, without query parameters. It
-returns `since`, `through` (UTC dates) and `interactions`: directed pairs with
-`sender_thread_id`, `target_thread_id`, and integer `count`. Return at most 500
-directed pairs ranked by aggregate count descending, then sender/target ID for
-stable ties. This bounds layout springs and SVG paths; all agents stay on the map
-and stored daily counts are not truncated. The window is today
-plus the previous six UTC dates. Counts are recorded atomically on accepted
+returns `since`, `through` (UTC dates), `interactions`, `earlier` and `metrics`.
+The window is today plus the previous 29 UTC dates; daily counts are retained
+for 90 UTC dates. Each day's messages and tokens are weighted by
+`0.5 ^ (age_days / 7)`.
+
+- `interactions`: directed pairs with at least one message in the window, as
+  `sender_thread_id`, `target_thread_id`, integer `count` (window messages),
+  float `weight` (recency-weighted count) and `last_day` (UTC date). At most
+  1,000 pairs ranked by `weight` descending, then count and sender/target ID for
+  stable ties. Pairs with an archived Chat or App, or a deleted or Bash
+  schedule, are dropped before the cap.
+- `earlier`: pairs with retained messages but none in the window, as
+  `sender_thread_id`, `target_thread_id`, integer `count`, `last_day`; the same
+  endpoint filter, at most 1,000 by `last_day` descending.
+- `metrics`: per identity, raw window `operator_messages`, `agent_peers`,
+  `total_tokens`, `tokens_partial`, plus `weighted` with the same three signals
+  recency-weighted (a peer counts by its latest contact). Ranking uses
+  `weighted`; metrics include links that are not returned.
+
+This bounds layout springs and SVG paths; all agents stay on the map and stored
+daily counts are not truncated. Counts are recorded atomically on accepted
 agent message delivery, including spawning/steering, and accepted operator
 messages. Operator sends use the reserved sender ID `operator`, derived from the
 authenticated operator or trusted Workspace browser path, never message text.
 Scheduled wake-ups, rejected sends and generated replies do not create operator links. Daily buckets contain no message text,
-event IDs or summaries. Old buckets are removed on the next accepted delivery;
-reads always exclude expired dates. Counting starts at upgrade.
+event IDs or summaries. Buckets older than 90 days are removed on the next
+accepted delivery; reads always exclude expired dates. Counting starts at upgrade.
 
 Accepted automated deliveries use the reserved sender ID `kern-host` when
 neither a trusted peer sender nor operator provenance is present. This covers
@@ -935,12 +950,13 @@ counts nor distinct agent peers in involvement metrics.
 
 The Swarm map shows all active agent characters plus synthetic Operator and
 Kern host nodes. These sender nodes sit at the centre of the map and have no agent
-runtime, involvement score or conversation link. Weekly involvement determines how
+runtime, involvement score or conversation link. Recency-weighted 30-day involvement determines how
 closely each agent orbits the operator and its orb size (60% direct operator messages,
 25% distinct agent peers, 15% known tokens, each scaled with diminishing returns
 across active identities); rings mark involvement tiers. Combined bidirectional
-message volume draws collaborators together using bounded passes. The canvas pans
-without bounds. Arrow width shows directed volume; select
+message volume draws collaborators together using bounded passes; spawned agents
+also join their parent with a dashed lineage line. The canvas pans
+without bounds. Arrow width shows recency-weighted directed volume; select
 a node or link to inspect exact counts. This represents communication, not formal
 reporting lines. Status/count refreshes preserve positions; roster changes
 or Arrange recalculate the layout using current weights. Zoom/fit controls and a
