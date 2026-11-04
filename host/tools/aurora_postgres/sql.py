@@ -15,7 +15,13 @@ MAX_CELL_BYTES = 5120
 MAX_ROW_BYTES = 32768
 MAX_INPUT_BYTES = 65536
 TYPES = ("text", "boolean", "smallint", "integer", "bigint", "numeric", "double precision", "date", "timestamptz", "uuid", "jsonb")
-OPERATIONS = ("create_table", "add_column", "create_index", "create_partition", "detach_partition")
+OPERATIONS = ("create_table", "add_column", "create_index", "create_partition", "detach_partition",
+              "add_foreign_key", "add_check", "set_not_null")
+MAX_ALLOWED_VALUES = 100
+MAX_LITERAL_BYTES = 500
+# Same narrow grammar as partition bounds: integers, decimals, ISO dates and timestamps.
+BOUND = r"[0-9T Z:+.\-]{1,40}"
+DOLLAR_TAG = "$kern_literal$"
 
 
 def fail(message: str) -> NoReturn:
@@ -41,9 +47,9 @@ def fields(value: JSONObject, allowed: set[str], required: set[str]) -> None:
         fail("Unsupported or missing fields. Use the exact action input schema.")
 
 
-def names(value: JSONValue, label: str) -> list[str]:
-    if not isinstance(value, list) or not 1 <= len(value) <= MAX_COLUMNS:
-        fail(f"{label} requires 1-60 column names.")
+def names(value: JSONValue, label: str, maximum: int = MAX_COLUMNS) -> list[str]:
+    if not isinstance(value, list) or not 1 <= len(value) <= maximum:
+        fail(f"{label} requires 1-{maximum} column names.")
     result = [identifier(item, label) for item in cast(list[JSONValue], value)]
     if len(set(result)) != len(result):
         fail(f"{label} must not repeat column names.")
@@ -70,12 +76,64 @@ def column(value: JSONValue) -> tuple[str, str]:
     return name, definition
 
 
-def ddl(values: JSONObject, schema: str) -> tuple[str, str, str]:
-    """Return operation, table and generated SQL; reject irrelevant fields."""
+def bound(value: JSONValue, label: str) -> str:
+    # DDL cannot use bind parameters. No quotes or SQL expressions pass this grammar.
+    if not isinstance(value, str) or not re.fullmatch(BOUND, value):
+        fail(f"{label} must be integer, decimal, ISO date or ISO timestamp text (at most 40 ASCII characters).")
+    return "'" + cast(str, value) + "'"
+
+
+def literal(value: JSONValue, label: str) -> str:
+    """Dollar-quote agent text for DDL; the fixed tag cannot occur inside it."""
+    if not isinstance(value, str) or len(value.encode("utf-8")) > MAX_LITERAL_BYTES:
+        fail(f"{label} must be text of at most {MAX_LITERAL_BYTES} UTF-8 bytes.")
+    # The tag's prefix also ends it, so "$kern_literal" at the end would close early.
+    if DOLLAR_TAG[:-1] in value or "\x00" in value:
+        fail(f"{label} cannot contain {DOLLAR_TAG[:-1]} or NUL characters.")
+    return DOLLAR_TAG + cast(str, value) + DOLLAR_TAG
+
+
+def check_expression(value: JSONValue, name: str) -> tuple[str, list[str]]:
+    """Return a CHECK expression and any statements that must succeed first."""
+    if not isinstance(value, dict):
+        fail("check must be an object.")
+    rule = cast(JSONObject, value)
+    fields(rule, {"pattern", "allowed_values", "min", "max", "not_blank"}, set())
+    kinds = {"pattern" if "pattern" in rule else "", "allowed_values" if "allowed_values" in rule else "",
+             "range" if "min" in rule or "max" in rule else "", "not_blank" if "not_blank" in rule else ""} - {""}
+    if len(kinds) != 1:
+        fail("check requires exactly one rule: pattern, allowed_values, min/max or not_blank.")
+    target = quoted(name)
+    if "pattern" in rule:
+        if rule["pattern"] == "":
+            fail("pattern must be non-empty.")
+        pattern = literal(rule["pattern"], "pattern")
+        # An empty table never evaluates the CHECK, so compile the regex now.
+        return f"{target} ~ {pattern}", [f"SELECT '' ~ {pattern}"]
+    if "allowed_values" in rule:
+        raw = rule["allowed_values"]
+        if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_ALLOWED_VALUES:
+            fail(f"allowed_values requires 1-{MAX_ALLOWED_VALUES} values.")
+        values = [literal(item, "Each allowed value") for item in cast(list[JSONValue], raw)]
+        if len(set(values)) != len(values):
+            fail("allowed_values must not repeat values.")
+        return f"{target} IN (" + ",".join(values) + ")", []
+    if "not_blank" in rule:
+        if rule["not_blank"] is not True:
+            fail("not_blank must be true.")
+        return f"{target} ~ '[^[:space:]]'", []
+    limits = [f"{target} >= {bound(rule['min'], 'min')}"] if "min" in rule else []
+    limits += [f"{target} <= {bound(rule['max'], 'max')}"] if "max" in rule else []
+    return " AND ".join(limits), []
+
+
+def ddl(values: JSONObject, schema: str) -> tuple[str, str, list[str]]:
+    """Return operation, table and generated SQL statements; reject irrelevant fields."""
     op = values.get("operation")
     table = identifier(values.get("table"), "Table")
     target = relation(schema, table)
     base = {"operation", "table"}
+    statements: list[str] = []
     if op == "create_table":
         fields(values, base | {"columns", "primary_key", "partition_by"}, base | {"columns", "primary_key"})
         raw = values["columns"]
@@ -113,22 +171,40 @@ def ddl(values: JSONObject, schema: str) -> tuple[str, str, str]:
     elif op == "create_partition":
         fields(values, base | {"partition", "from", "to"}, base | {"partition", "from", "to"})
         partition = relation(schema, identifier(values["partition"], "Partition"))
-        # DDL cannot use bind parameters here. This narrow literal grammar covers
-        # integer, date and ISO timestamp bounds; no quotes or SQL expressions.
-        bounds: list[str] = []
-        for key in ("from", "to"):
-            value = values[key]
-            if not isinstance(value, str) or not re.fullmatch(r"[0-9T Z:+.\-]{1,40}", value):
-                fail("Partition bounds must be integer, ISO date or ISO timestamp strings (at most 40 ASCII characters).")
-            bounds.append("'" + cast(str, value) + "'")
+        bounds = [bound(values[key], "Partition bounds") for key in ("from", "to")]
         statement = f"CREATE TABLE {partition} PARTITION OF {target} FOR VALUES FROM ({bounds[0]}) TO ({bounds[1]})"
     elif op == "detach_partition":
         fields(values, base | {"partition"}, base | {"partition"})
         partition = relation(schema, identifier(values["partition"], "Partition"))
         statement = f"ALTER TABLE {target} DETACH PARTITION {partition}"
+    elif op == "add_foreign_key":
+        fields(values, base | {"name", "columns", "references_table", "references_columns"},
+               base | {"name", "columns", "references_table", "references_columns"})
+        name = identifier(values["name"], "Constraint name")
+        cols = names(values["columns"], "Foreign key columns", 32)
+        parent = relation(schema, identifier(values["references_table"], "references_table"))
+        parent_cols = names(values["references_columns"], "references_columns", 32)
+        if len(cols) != len(parent_cols):
+            fail("columns and references_columns must have the same length.")
+        # RESTRICT only: deleting a referenced row fails; nothing is cascaded or nulled.
+        statement = (f"ALTER TABLE {target} ADD CONSTRAINT {quoted(name)} FOREIGN KEY ({','.join(map(quoted, cols))}) "
+                     f"REFERENCES {parent} ({','.join(map(quoted, parent_cols))}) ON UPDATE RESTRICT ON DELETE RESTRICT")
+    elif op == "add_check":
+        fields(values, base | {"name", "columns", "check"}, base | {"name", "columns", "check"})
+        name = identifier(values["name"], "Constraint name")
+        cols = names(values["columns"], "Check columns")
+        if len(cols) != 1:
+            fail("add_check applies to exactly one column.")
+        expression, statements = check_expression(values["check"], cols[0])
+        statement = f"ALTER TABLE {target} ADD CONSTRAINT {quoted(name)} CHECK ({expression})"
+    elif op == "set_not_null":
+        fields(values, base | {"columns"}, base | {"columns"})
+        cols = names(values["columns"], "Required columns")
+        statement = f"ALTER TABLE {target} " + ", ".join(f"ALTER COLUMN {quoted(c)} SET NOT NULL" for c in cols)
     else:
-        fail("Unsupported schema operation. Use create_table, add_column, create_index, create_partition or detach_partition.")
-    return cast(str, op), table, statement
+        fail("Unsupported schema operation. Use " + ", ".join(OPERATIONS[:-1]) + " or " + OPERATIONS[-1] + ".")
+    return cast(str, op), table, statements + [statement]
+
 
 
 def json_bytes(value: JSONValue) -> bytes:
@@ -182,4 +258,65 @@ SELECT 'constraint', k.conname::text, pg_catalog.pg_get_constraintdef(k.oid)
 FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_class c ON c.oid=k.conrelid
 JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname=:schema AND c.relname=:table
 ORDER BY kind,name LIMIT 201
+"""
+PRIMARY_KEY = """
+SELECT a.attname::text, pg_catalog.format_type(a.atttypid,a.atttypmod)
+FROM pg_catalog.pg_constraint k JOIN pg_catalog.pg_attribute a ON a.attrelid=k.conrelid AND a.attnum=ANY(k.conkey)
+WHERE k.conrelid=CAST(:relation AS regclass) AND k.contype='p'
+ORDER BY array_position(k.conkey,a.attnum)
+"""
+# Drop approvals bind these identities; execution rechecks them under lock.
+INDEX_TARGET = """
+SELECT i.indexrelid::text,
+       EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.conindid=i.indexrelid AND k.conrelid=i.indrelid AND k.contype <> 'f')::text,
+       EXISTS (SELECT 1 FROM pg_catalog.pg_inherits h WHERE h.inhrelid=i.indexrelid)::text,
+       EXISTS (
+         WITH RECURSIVE index_tree(oid) AS (
+           SELECT i.indexrelid
+           UNION ALL SELECT h.inhrelid FROM pg_catalog.pg_inherits h JOIN index_tree t ON h.inhparent=t.oid
+         )
+         SELECT 1 FROM pg_catalog.pg_constraint k JOIN index_tree t ON k.conindid=t.oid
+         WHERE k.contype='f')::text
+FROM pg_catalog.pg_index i JOIN pg_catalog.pg_class c ON c.oid=i.indexrelid
+WHERE i.indrelid=CAST(:relation AS regclass) AND c.relname=:name
+"""
+CONSTRAINT_TARGET = """
+SELECT k.oid::text, k.contype::text, (k.coninhcount > 0 OR k.conparentid <> 0)::text
+FROM pg_catalog.pg_constraint k
+WHERE k.conrelid=CAST(:relation AS regclass) AND k.conname=:name
+"""
+NOT_NULL_TARGET = """
+SELECT a.attnum::text, a.attnotnull::text,
+       EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.conrelid=a.attrelid
+               AND k.contype='p' AND a.attnum=ANY(k.conkey))::text,
+       EXISTS (SELECT 1 FROM pg_catalog.pg_inherits i
+               JOIN pg_catalog.pg_attribute parent ON parent.attrelid=i.inhparent
+               WHERE i.inhrelid=a.attrelid AND parent.attname=a.attname
+                 AND parent.attnotnull AND NOT parent.attisdropped)::text,
+       a.xmin::text
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid=CAST(:relation AS regclass) AND a.attname=:name AND a.attnum>0 AND NOT a.attisdropped
+"""
+
+COLUMN_TARGET = """
+WITH relations AS (
+    SELECT CAST(:relation AS regclass)::oid AS relid
+    UNION SELECT p.relid::oid FROM pg_catalog.pg_partition_tree(CAST(:relation AS regclass)) p
+), columns AS (
+    SELECT a.*, a.xmin::text AS version FROM relations r JOIN pg_catalog.pg_attribute a ON a.attrelid=r.relid
+    WHERE a.attname=:name AND a.attnum>0 AND NOT a.attisdropped
+)
+SELECT a.attnum::text,
+       md5((SELECT jsonb_agg(jsonb_build_array(c.attrelid, c.attnum, c.version, c.atttypid,
+         c.atttypmod, c.attcollation, c.attnotnull,
+         (SELECT jsonb_agg(jsonb_build_array(k.oid, pg_catalog.pg_get_constraintdef(k.oid)) ORDER BY k.oid)
+          FROM pg_catalog.pg_constraint k WHERE k.conrelid=c.attrelid AND c.attnum=ANY(k.conkey)),
+         (SELECT jsonb_agg(jsonb_build_array(i.indexrelid, pg_catalog.pg_get_indexdef(i.indexrelid)) ORDER BY i.indexrelid)
+          FROM pg_catalog.pg_index i WHERE i.indrelid=c.attrelid AND c.attnum=ANY(i.indkey)))
+         ORDER BY c.attrelid) FROM columns c)::text),
+       EXISTS (SELECT 1 FROM pg_catalog.pg_constraint k WHERE k.conrelid=a.attrelid
+               AND k.contype='p' AND a.attnum=ANY(k.conkey))::text,
+       (a.attinhcount > 0)::text
+FROM pg_catalog.pg_attribute a
+WHERE a.attrelid=CAST(:relation AS regclass) AND a.attname=:name AND a.attnum>0 AND NOT a.attisdropped
 """

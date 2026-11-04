@@ -46,6 +46,9 @@ class FakeAWS:
         self.fail_commit = False
         self.wrong_role = False
         self.counts = [["0","0"]]
+        self.primary_key = [["id","bigint"]]
+        self.deleted = [['{"id": 1, "note": "A dated insight"}']]
+        self.objects = {sql.INDEX_TARGET:[["200","false","false","false"]], sql.CONSTRAINT_TARGET:[["300","f","false"]], sql.NOT_NULL_TARGET:[["2","true","false","false","42"]], sql.COLUMN_TARGET:[["2","definition","false","false"]]}
 
     def __call__(self, method, url, **kwargs):
         body = json.loads(kwargs["data"])
@@ -68,6 +71,12 @@ class FakeAWS:
                 result = records([self.identity])
             elif statement == sql.TABLE_COUNTS:
                 result = records(self.counts)
+            elif statement == sql.PRIMARY_KEY:
+                result = records(self.primary_key)
+            elif statement in self.objects:
+                result = records(self.objects[statement])
+            elif statement.startswith("DELETE"):
+                result = records(self.deleted)
             elif statement.startswith("SELECT * FROM ("):
                 result = records(self.query_rows, ["id","note"])
             elif statement.startswith("SELECT ") and statement.endswith("LIMIT 0"):
@@ -574,6 +583,179 @@ class AuroraTests(unittest.TestCase):
             with self.subTest(operation=values.get("operation")):
                 self.assertIsInstance(self.run_action("manage_schema",values),ActionFailed)
         self.assertFalse(self.aws.calls)
+
+    def test_constraint_ddl_is_restrict_only_and_check_text_is_dollar_quoted(self):
+        cases = [
+            ({"operation":"add_foreign_key","table":"listings","name":"listings_company","columns":["company_id"],
+              "references_table":"companies","references_columns":["company_id"]},
+             'ALTER TABLE "agent_data"."listings" ADD CONSTRAINT "listings_company" FOREIGN KEY ("company_id") '
+             'REFERENCES "agent_data"."companies" ("company_id") ON UPDATE RESTRICT ON DELETE RESTRICT'),
+            ({"operation":"add_check","table":"companies","name":"cik_digits","columns":["cik"],"check":{"pattern":"^[0-9]{10}$"}},
+             'ALTER TABLE "agent_data"."companies" ADD CONSTRAINT "cik_digits" CHECK ("cik" ~ $kern_literal$^[0-9]{10}$$kern_literal$)'),
+            ({"operation":"add_check","table":"companies","name":"kind_values","columns":["kind"],"check":{"allowed_values":["it's", "b;--"]}},
+             'ALTER TABLE "agent_data"."companies" ADD CONSTRAINT "kind_values" CHECK ("kind" IN ($kern_literal$it\'s$kern_literal$,$kern_literal$b;--$kern_literal$))'),
+            ({"operation":"add_check","table":"facts","name":"year_range","columns":["fiscal_year"],"check":{"min":"1990","max":"2100"}},
+             'ALTER TABLE "agent_data"."facts" ADD CONSTRAINT "year_range" CHECK ("fiscal_year" >= \'1990\' AND "fiscal_year" <= \'2100\')'),
+            ({"operation":"add_check","table":"companies","name":"name_present","columns":["name"],"check":{"not_blank":True}},
+             'ALTER TABLE "agent_data"."companies" ADD CONSTRAINT "name_present" CHECK ("name" ~ \'[^[:space:]]\')'),
+            ({"operation":"set_not_null","table":"companies","columns":["name","cik"]},
+             'ALTER TABLE "agent_data"."companies" ALTER COLUMN "name" SET NOT NULL, ALTER COLUMN "cik" SET NOT NULL'),
+        ]
+        for values, expected in cases:
+            with self.subTest(operation=values["operation"], name=values.get("name")):
+                self.aws.calls.clear()
+                self.assertIsInstance(self.run_action("manage_schema", values), ActionExecuted)
+                self.assertEqual(self.aws.statements()[-1], expected)
+                self.assertTrue(all(body["secretArn"].endswith("ddl-abcdef") for _,body,_ in self.aws.calls))
+        # A pattern on an empty table is still compiled before the constraint exists.
+        self.aws.calls.clear()
+        self.run_action("manage_schema", cases[1][0])
+        self.assertEqual(self.aws.statements()[-2], "SELECT '' ~ $kern_literal$^[0-9]{10}$$kern_literal$")
+
+    def test_allowed_values_can_include_empty_string(self):
+        result = self.run_action("manage_schema", {"operation":"add_check","table":"insights","name":"allowed_note","columns":["note"],"check":{"allowed_values":["","known"]}})
+        self.assertIsInstance(result,ActionExecuted)
+        self.assertIn("$kern_literal$$kern_literal$",self.aws.statements()[-1])
+
+    def test_constraint_inputs_rejected_before_aws(self):
+        check = {"operation":"add_check","table":"companies","name":"rule","columns":["cik"]}
+        fk = {"operation":"add_foreign_key","table":"listings","name":"fk","columns":["company_id"],
+              "references_table":"companies","references_columns":["company_id"]}
+        bad = [{**check,"check":{}}, {**check,"check":{"pattern":"a","not_blank":True}},
+            {**check,"check":{"pattern":"x$kern_literal"}}, {**check,"check":{"pattern":"a$kern_literal$); DROP TABLE x; --"}},
+            {**check,"check":{"pattern":""}}, {**check,"check":{"pattern":"a"*501}}, {**check,"check":{"pattern":"a\x00"}},
+            {**check,"check":{"allowed_values":[]}}, {**check,"check":{"allowed_values":["a","a"]}},
+            {**check,"check":{"min":"1'); DROP TABLE x; --"}}, {**check,"check":{"not_blank":False}},
+            {**check,"columns":["cik","name"],"check":{"not_blank":True}}, {**check,"check":{"sql":"true"}},
+            {**fk,"references_columns":["company_id","name"]}, {**fk,"references_table":"other.companies"},
+            {**fk,"on_delete":"cascade"}, {"operation":"set_not_null","table":"companies","columns":[]}]
+        for values in bad:
+            with self.subTest(values=repr(values)[:100]):
+                self.assertIsInstance(self.run_action("manage_schema", values), ActionFailed)
+        self.assertFalse(self.aws.calls)
+
+    def test_delete_row_uses_owner_and_complete_primary_key(self):
+        result = self.run_action("delete_row", {"table":"insights","key":[{"column":"id","value":"1"}]})
+        self.assertIsInstance(result, ActionExecuted)
+        self.assertEqual(result.result, {"deleted":1,"row":'{"id": 1, "note": "A dated insight"}'})
+        statement = self.aws.statements()[-1]
+        self.assertEqual(statement, 'DELETE FROM "agent_data"."insights" AS kern_row WHERE "id"=CAST(:k0 AS bigint) RETURNING CASE WHEN octet_length(to_jsonb(kern_row)::text) <= 60000 THEN to_jsonb(kern_row)::text ELSE NULL END')
+        self.assertTrue(all(body["secretArn"].endswith("ddl-abcdef") for _,body,_ in self.aws.calls))
+        self.assertEqual(pg.MANIFEST.action("delete_row").limit_runs_per_day, 100)
+        self.aws.primary_key = [["company_id","text"],["accession_number","text"]]
+        self.aws.calls.clear()
+        self.run_action("delete_row", {"table":"filings","key":[{"column":"accession_number","value":"0000320193-25-000079"},{"column":"company_id","value":"apple"}]})
+        self.assertIn('"company_id"=CAST(:k0 AS text) AND "accession_number"=CAST(:k1 AS text)', self.aws.statements()[-1])
+
+    def test_foreign_key_column_limit_before_aws(self):
+        base = {"operation":"add_foreign_key", "table":"child", "name":"fk", "references_table":"parent"}
+        columns = [f"c{i}" for i in range(33)]
+        for child, parent in ((columns, columns[:32]), (columns[:32], columns)):
+            result = self.run_action("manage_schema", {**base,"columns":child,"references_columns":parent})
+            self.assertIsInstance(result, ActionFailed)
+            self.assertIn("1-32", result.error)
+        self.assertFalse(self.aws.calls)
+        self.assertIsInstance(self.run_action("manage_schema", {**base,"columns":columns[:32],"references_columns":columns[:32]}), ActionExecuted)
+
+    def test_delete_row_accepts_sql_null_for_large_row(self):
+        self.aws.deleted = [[None]]
+        result = self.run_action("delete_row", {"table":"insights","key":[{"column":"id","value":"1"}]})
+        self.assertEqual(result.result, {"deleted":1,"row":None})
+        self.assertIn("CASE WHEN octet_length", self.aws.statements()[-1])
+
+    def test_column_drop_approval_discloses_data_loss_and_rejects_pending(self):
+        proposal = self.run_action("drop_column", {"table":"insights","column":"note"})
+        self.assertIn("ALL values", proposal.summary)
+        self.assertIn("indexes and constraints", proposal.summary)
+        pending = self.api.approvals.get(proposal.approval_id)
+        self.aws.calls.clear()
+        self.assertIsInstance(pg.BUNDLED_TOOL.execute_approved(pending, self.api), ActionFailed)
+        self.assertFalse(self.aws.calls)
+        approved = self.api.approvals.approve(proposal.approval_id)
+        self.aws.objects[sql.COLUMN_TARGET] = [["2","changed definition","false","false"]]
+        self.assertIsInstance(pg.BUNDLED_TOOL.execute_approved(approved, self.api), ActionFailed)
+        self.assertFalse(any("DROP COLUMN" in s for s in self.aws.statements()))
+
+    def test_delete_row_never_runs_partial_or_missing_keys(self):
+        self.aws.primary_key = [["company_id","text"],["accession_number","text"]]
+        for key in ([{"column":"company_id","value":"apple"}],
+                    [{"column":"company_id","value":"apple"},{"column":"note","value":"x"}]):
+            with self.subTest(key=key):
+                result = self.run_action("delete_row", {"table":"filings","key":key})
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn("company_id, accession_number", result.error)
+        self.aws.primary_key = []
+        self.assertIn("no primary key", self.run_action("delete_row", {"table":"logs","key":[{"column":"id","value":"1"}]}).error)
+        self.assertFalse(any(s.startswith("DELETE") for s in self.aws.statements()))
+        self.aws.primary_key = [["id","bigint"]]
+        self.aws.deleted = []
+        missing = self.run_action("delete_row", {"table":"insights","key":[{"column":"id","value":"9"}]})
+        self.assertIn("Nothing was deleted", missing.error)
+        self.aws.calls.clear()
+        for values in ({"table":"insights","key":[]}, {"table":"insights","key":[{"column":"id","value":None}]},
+                       {"table":"insights","key":[{"column":"id","value":"1"},{"column":"id","value":"2"}]},
+                       {"table":"insights","key":[{"column":"id","value":"1"}],"where":"true"}):
+            self.assertIsInstance(self.run_action("delete_row", values), ActionFailed)
+        self.assertFalse(self.aws.calls)
+
+    def test_index_and_constraint_drops_need_approval_and_recheck(self):
+        cases = [("drop_column", {"table":"insights","column":"note"}, sql.COLUMN_TARGET,
+                  'ALTER TABLE "agent_data"."insights" DROP COLUMN "note" RESTRICT'),
+                 ("drop_index", {"table":"insights","name":"insights_score"}, sql.INDEX_TARGET,
+                  'DROP INDEX "agent_data"."insights_score" RESTRICT'),
+                 ("drop_constraint", {"table":"insights","constraint":"note_present"}, sql.CONSTRAINT_TARGET,
+                  'ALTER TABLE "agent_data"."insights" DROP CONSTRAINT "note_present" RESTRICT'),
+                 ("drop_constraint", {"table":"insights","not_null_column":"note"}, sql.NOT_NULL_TARGET,
+                  'ALTER TABLE "agent_data"."insights" ALTER COLUMN "note" DROP NOT NULL')]
+        for action, values, query, expected in cases:
+            with self.subTest(action=action, values=values):
+                self.aws.calls.clear()
+                proposal = self.run_action(action, values)
+                self.assertIsInstance(proposal, ActionPendingApproval)
+                self.assertTrue(all(body["secretArn"].endswith("reader-abcdef") for _,body,_ in self.aws.calls))
+                approval = self.api.approvals.approve(proposal.approval_id)
+                original = self.aws.objects[query]
+                self.aws.objects[query] = [["999", *original[0][1:]]]
+                self.aws.calls.clear()
+                self.assertIsInstance(pg.BUNDLED_TOOL.execute_approved(approval, self.api), ActionFailed)
+                self.assertNotIn(expected, self.aws.statements())
+                self.aws.objects[query] = original
+                self.aws.calls.clear()
+                self.assertIsInstance(pg.BUNDLED_TOOL.execute_approved(approval, self.api), ApprovalExecuted)
+                statements = self.aws.statements()
+                self.assertLess(next(i for i,s in enumerate(statements) if s.startswith("LOCK TABLE")), statements.index(query))
+                self.assertEqual(statements[-1], expected)
+                self.assertTrue(all(body["secretArn"].endswith("dropper-abcdef") for _,body,_ in self.aws.calls))
+        refused = [("drop_index", {"table":"leaf","name":"leaf_idx"}, sql.INDEX_TARGET, [["200","false","true","false"]], "Attached partition indexes"),
+                   ("drop_index", {"table":"parent","name":"parent_unique"}, sql.INDEX_TARGET, [["200","false","false","true"]], "Foreign keys depend"),
+                   ("drop_constraint", {"table":"leaf","constraint":"check_parent"}, sql.CONSTRAINT_TARGET, [["3","c","true"]], "Inherited constraints"),
+                   ("drop_constraint", {"table":"leaf","not_null_column":"note"}, sql.NOT_NULL_TARGET, [["2","true","false","true","42"]], "Inherited constraints"),
+                   ("drop_column", {"table":"leaf","column":"note"}, sql.COLUMN_TARGET, [["2","definition","false","true"]], "Inherited columns"),
+                   ("drop_column", {"table":"insights","column":"id"}, sql.COLUMN_TARGET, [["1","definition","true","false"]], "Primary key"),
+                   ("drop_constraint", {"table":"insights","not_null_column":"id"}, sql.NOT_NULL_TARGET, [["1","true","true","false","42"]], "Primary key"),
+                   ("drop_constraint", {"table":"insights","constraint":"insights_pkey"}, sql.CONSTRAINT_TARGET, [["300","p","false"]], "Primary keys"),
+                   ("drop_index", {"table":"insights","name":"insights_pkey"}, sql.INDEX_TARGET, [["200","true","false","false"]], "enforces a constraint"),
+                   ("drop_constraint", {"table":"insights","not_null_column":"note"}, sql.NOT_NULL_TARGET, [["2","false","false","false","42"]], "already nullable"),
+                   ("drop_index", {"table":"insights","name":"missing"}, sql.INDEX_TARGET, [], "does not exist")]
+        for action, values, query, rows, message in refused:
+            with self.subTest(refused=values):
+                self.aws.objects[query] = rows
+                result = self.run_action(action, values)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn(message, result.error)
+        self.aws.calls.clear()
+        for values in ({"table":"insights"}, {"table":"insights","constraint":"a","not_null_column":"b"}):
+            self.assertIsInstance(self.run_action("drop_constraint", values), ActionFailed)
+        self.assertFalse(self.aws.calls)
+
+    def test_not_null_generation_change_invalidates_approval(self):
+        values = {"table":"insights","not_null_column":"note"}
+        proposal = self.run_action("drop_constraint",values)
+        approval = self.api.approvals.approve(proposal.approval_id)
+        self.aws.objects[sql.NOT_NULL_TARGET] = [["2","true","false","false","43"]]
+        self.aws.calls.clear()
+        self.assertIsInstance(pg.BUNDLED_TOOL.execute_approved(approval,self.api),ActionFailed)
+        self.assertFalse(any("DROP NOT NULL" in s for s in self.aws.statements()))
 
     def test_input_bounds_and_unknown_fields_before_aws(self):
         bad = [({**INSERT,"rows":[["1","é"*16384]]}),
