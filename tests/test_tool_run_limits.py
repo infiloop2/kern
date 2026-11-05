@@ -104,7 +104,7 @@ class RunLimitUnitTests(unittest.TestCase):
         declared = [(tool_id, spec.id, spec.limit_runs_per_day)
                     for tool_id, tool in tools_host.BUNDLED_TOOLS.items()
                     for spec in tool.manifest.actions if spec.limit_runs_per_day is not None]
-        self.assertEqual(declared, [("aurora_postgres", "delete_row", 100), ("aurora_postgres", "drop_table", 20),
+        self.assertEqual(declared, [("aurora_postgres", "delete_row", 1000), ("aurora_postgres", "update_row", 1000), ("aurora_postgres", "drop_table", 20),
                                     ("aurora_postgres", "drop_column", 20), ("aurora_postgres", "drop_index", 20), ("aurora_postgres", "drop_constraint", 20),
                                     ("zoho_mail", "send_email", 50)])
 

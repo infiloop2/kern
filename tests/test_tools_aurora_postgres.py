@@ -47,6 +47,8 @@ class FakeAWS:
         self.wrong_role = False
         self.counts = [["0","0"]]
         self.primary_key = [["id","bigint"]]
+        self.update_types = ["text"]
+        self.updated = [['{"id": 1, "note": "Corrected"}']]
         self.deleted = [['{"id": 1, "note": "A dated insight"}']]
         self.objects = {sql.INDEX_TARGET:[["200","false","false","false"]], sql.CONSTRAINT_TARGET:[["300","f","false"]], sql.NOT_NULL_TARGET:[["2","true","false","false","42"]], sql.COLUMN_TARGET:[["2","definition","false","false"]]}
 
@@ -75,6 +77,10 @@ class FakeAWS:
                 result = records(self.primary_key)
             elif statement in self.objects:
                 result = records(self.objects[statement])
+            elif statement.startswith("UPDATE"):
+                result = records(self.updated)
+            elif statement.startswith('SELECT "note"') and statement.endswith("LIMIT 0"):
+                result = records([], ["note"]*len(self.update_types), self.update_types)
             elif statement.startswith("DELETE"):
                 result = records(self.deleted)
             elif statement.startswith("SELECT * FROM ("):
@@ -641,11 +647,76 @@ class AuroraTests(unittest.TestCase):
         statement = self.aws.statements()[-1]
         self.assertEqual(statement, 'DELETE FROM "agent_data"."insights" AS kern_row WHERE "id"=CAST(:k0 AS bigint) RETURNING CASE WHEN octet_length(to_jsonb(kern_row)::text) <= 60000 THEN to_jsonb(kern_row)::text ELSE NULL END')
         self.assertTrue(all(body["secretArn"].endswith("ddl-abcdef") for _,body,_ in self.aws.calls))
-        self.assertEqual(pg.MANIFEST.action("delete_row").limit_runs_per_day, 100)
+        self.assertEqual(pg.MANIFEST.action("delete_row").limit_runs_per_day, 1000)
         self.aws.primary_key = [["company_id","text"],["accession_number","text"]]
         self.aws.calls.clear()
         self.run_action("delete_row", {"table":"filings","key":[{"column":"accession_number","value":"0000320193-25-000079"},{"column":"company_id","value":"apple"}]})
         self.assertIn('"company_id"=CAST(:k0 AS text) AND "accession_number"=CAST(:k1 AS text)', self.aws.statements()[-1])
+
+    def test_update_row_binds_values_and_uses_owner(self):
+        value = "Corrected'); DELETE FROM insights; -- :value"
+        result = self.run_action("update_row", {"table":"insights","key":[{"column":"id","value":"1"}],"set":[{"column":"note","value":value}]})
+        self.assertIsInstance(result, ActionExecuted)
+        self.assertEqual(result.result, {"updated":1,"row":'{"id": 1, "note": "Corrected"}'})
+        statement = self.aws.statements()[-1]
+        self.assertEqual(statement, 'UPDATE "agent_data"."insights" AS kern_row SET "note"=CAST(:v0 AS text) WHERE "id"=CAST(:k0 AS bigint) RETURNING CASE WHEN octet_length(to_jsonb(kern_row)::text) <= 60000 THEN to_jsonb(kern_row)::text ELSE NULL END')
+        self.assertEqual(self.aws.calls[-2][1]["parameters"], [client.parameter("k0","1"),client.parameter("v0",value)])
+        self.assertTrue(all(body["secretArn"].endswith("ddl-abcdef") for _,body,_ in self.aws.calls))
+        self.assertEqual(pg.MANIFEST.action("update_row").limit_runs_per_day, 1000)
+
+    def test_update_composite_key_null_and_multiple_columns(self):
+        self.aws.primary_key = [["company_id","text"],["accession_number","text"]]
+        self.aws.update_types = ["text","int8"]
+        self.aws.updated = [[None]]
+        result = self.run_action("update_row", {"table":"filings","key":[{"column":"accession_number","value":"a:1"},{"column":"company_id","value":"apple"}],"set":[{"column":"note","value":None},{"column":"count","value":"2"}]})
+        self.assertEqual(result.result, {"updated":1,"row":None})
+        self.assertIn('SET "note"=CAST(:v0 AS text),"count"=CAST(:v1 AS bigint) WHERE "company_id"=CAST(:k0 AS text) AND "accession_number"=CAST(:k1 AS text)', self.aws.statements()[-1])
+        self.assertEqual(self.aws.calls[-2][1]["parameters"], [client.parameter("k0","apple"),client.parameter("k1","a:1"),client.parameter("v0",None),client.parameter("v1","2")])
+
+    def test_update_rejects_invalid_input_before_aws(self):
+        base = {"table":"insights","key":[{"column":"id","value":"1"}],"set":[{"column":"note","value":"x"}]}
+        bad_sets = [[], None, ["note"], [{"column":"note"}], [{"column":"note","value":1}],
+                    [{"column":"other.note","value":"x"}], [{"column":"note","value":"x","sql":"x"}],
+                    [{"column":"note","value":"x"}]*2, [{"column":f"c{i}","value":"x"} for i in range(61)]]
+        bad = [{**base,"set":value} for value in bad_sets]
+        bad += [{**base,"key":key} for key in ([], [{"column":"id","value":None}], base["key"]*2)]
+        bad += [{**base,"table":"outside.insights"}, {**base,"extra":True}]
+        for values in bad:
+            with self.subTest(values=repr(values)[:120]):
+                self.assertIsInstance(self.run_action("update_row", values), ActionFailed)
+        self.assertFalse(self.aws.calls)
+
+    def test_update_rejects_wrong_key_primary_key_edits_and_unsupported_types(self):
+        base = {"table":"insights","key":[{"column":"id","value":"1"}],"set":[{"column":"note","value":"x"}]}
+        cases = [([], base, "no primary key"),
+                 ([["id","bigint"],["tenant","text"]], base, "exactly"),
+                 ([["id","bigint"]], {**base,"key":[{"column":"other","value":"1"}]}, "exactly"),
+                 ([["id","bigint"]], {**base,"set":[{"column":"id","value":"2"}]}, "cannot be updated"),
+                 ([["id","custom_type"]], base, "unsupported type")]
+        for primary, values, message in cases:
+            with self.subTest(message=message):
+                self.aws.calls.clear()
+                self.aws.primary_key = primary
+                result = self.run_action("update_row", values)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertIn(message, result.error)
+                self.assertFalse(any(q.startswith("UPDATE") for q in self.aws.statements()))
+                self.assertTrue(self.aws.calls[-1][0].endswith("RollbackTransaction"))
+        self.aws.primary_key = [["id","bigint"]]
+        self.aws.update_types = ["custom_type"]
+        self.assertIn("unsupported type", self.run_action("update_row", base).error)
+
+    def test_update_missing_or_invalid_results_roll_back(self):
+        base = {"table":"insights","key":[{"column":"id","value":"1"}],"set":[{"column":"note","value":"x"}]}
+        for rows in ([], [["{}"],["{}"]], [["{}","unexpected"]]):
+            with self.subTest(rows=rows):
+                self.aws.updated = rows
+                result = self.run_action("update_row", base)
+                self.assertIsInstance(result, ActionFailed)
+                self.assertTrue(self.aws.calls[-1][0].endswith("RollbackTransaction"))
+        self.aws.fail_sql = "UPDATE"
+        self.assertIsInstance(self.run_action("update_row", base), ActionFailed)
+        self.assertTrue(self.aws.calls[-1][0].endswith("RollbackTransaction"))
 
     def test_foreign_key_column_limit_before_aws(self):
         base = {"operation":"add_foreign_key", "table":"child", "name":"fk", "references_table":"parent"}
