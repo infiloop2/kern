@@ -1,4 +1,4 @@
-"""Generic PostgreSQL storage through Aurora's HTTPS Data API: inserts, single-row deletes and approved drops."""
+"""Generic PostgreSQL storage through Aurora's HTTPS Data API: inserts, single-row updates/deletes and approved drops."""
 from __future__ import annotations
 
 import json
@@ -18,7 +18,7 @@ from .sql import (COLUMN_TARGET, CONSTRAINT_TARGET, DESCRIBE_TABLE, INDEX_TARGET
 
 
 TYPE_ALIASES = {"int2":"smallint", "int4":"integer", "int8":"bigint", "float8":"double precision", "bool":"boolean", "varchar":"text", "timestamp with time zone":"timestamptz"}
-MAX_DELETED_ROW_BYTES = 60000
+MAX_RETURNED_ROW_BYTES = 60000
 # Approval-gated drop actions: payload kind and the catalog query binding its identity.
 DROP_OBJECTS = {"index":INDEX_TARGET, "constraint":CONSTRAINT_TARGET, "not_null":NOT_NULL_TARGET, "column":COLUMN_TARGET}
 
@@ -202,12 +202,69 @@ def delete_row(client: Client, table: str, key: dict[str, str]) -> JSONObject:
     condition = " AND ".join(f"{quoted(name)}=CAST(:k{i} AS {kind})" for i, (name, kind) in enumerate(kinds.items()))
     # The supported schema is managed exclusively by this tool. Its foreign keys are RESTRICT,
     # so a referenced row fails instead of deleting or changing other rows.
-    rows = result_rows(client.execute(f"DELETE FROM {table_name} AS kern_row WHERE {condition} RETURNING CASE WHEN octet_length(to_jsonb(kern_row)::text) <= {MAX_DELETED_ROW_BYTES} THEN to_jsonb(kern_row)::text ELSE NULL END", params))
+    rows = result_rows(client.execute(f"DELETE FROM {table_name} AS kern_row WHERE {condition} RETURNING CASE WHEN octet_length(to_jsonb(kern_row)::text) <= {MAX_RETURNED_ROW_BYTES} THEN to_jsonb(kern_row)::text ELSE NULL END", params))
     if not rows:
         fail("No row has that primary key. Nothing was deleted.")
     if len(rows) != 1 or len(rows[0]) != 1 or (rows[0][0] is not None and not isinstance(rows[0][0], str)):
         invalid_response("AWS returned an unexpected delete result; the transaction will be rolled back.")
     return {"deleted":1, "row":rows[0][0]}
+
+
+def update_input(values: JSONObject) -> tuple[str, dict[str, str], dict[str, str | None]]:
+    fields(values, {"table","key","set"}, {"table","key","set"})
+    table, key = delete_input({"table":values["table"], "key":values["key"]})
+    raw = values["set"]
+    if not isinstance(raw, list) or not 1 <= len(raw) <= MAX_COLUMNS:
+        fail("set requires 1-60 non-primary-key columns.")
+    changes: dict[str, str | None] = {}
+    for item in cast(list[JSONValue], raw):
+        if not isinstance(item, dict):
+            fail("Each set entry requires column and value.")
+        fields(item, {"column","value"}, {"column","value"})
+        name = identifier(item["column"], "Set column")
+        if name in changes:
+            fail("set must not repeat column names.")
+        changes[name] = cell(item["value"])
+    return table, key, changes
+
+
+def update_row(client: Client, table: str, key: dict[str, str], changes: dict[str, str | None]) -> JSONObject:
+    table_name = relation(client.config.schema, table)
+    target(client, table)
+    # Hold ACCESS SHARE until commit so column types and the primary key cannot
+    # change between validation and the generated UPDATE.
+    metadata = client.execute(f"SELECT {','.join(map(quoted, changes))} FROM {table_name} LIMIT 0", [])
+    primary = result_rows(client.execute(PRIMARY_KEY, [parameter("relation", table_name)]))
+    if not primary:
+        fail("Table has no primary key; update_row requires one.")
+    kinds = {cast(str, name): TYPE_ALIASES.get(cast(str, kind), cast(str, kind)) for name, kind in primary}
+    if set(kinds) != set(key):
+        fail("key must name exactly the primary key columns: " + ", ".join(kinds) + ".")
+    if set(changes) & set(kinds):
+        fail("Primary key columns cannot be updated. Supply only non-primary-key columns in set.")
+    if not set(kinds.values()) <= set(TYPES):
+        fail("Primary key has an unsupported type. Use tool-created columns with supported built-in types.")
+    raw_types = metadata.get("columnMetadata", [])
+    if not isinstance(raw_types, list) or len(raw_types) != len(changes):
+        invalid_response("Could not resolve update columns. Call describe_table.")
+    params = [parameter(f"k{i}", key[name]) for i, name in enumerate(kinds)]
+    assignments: list[str] = []
+    for i, ((name, value), item) in enumerate(zip(changes.items(), raw_types)):
+        if not isinstance(item, dict) or not isinstance(item.get("typeName"), str):
+            invalid_response("AWS returned invalid column metadata.")
+        kind = str(item["typeName"])
+        kind = TYPE_ALIASES.get(kind, kind)
+        if kind not in TYPES:
+            fail("Update column has an unsupported type. Use tool-created columns with supported built-in types.")
+        params.append(parameter(f"v{i}", value))
+        assignments.append(f"{quoted(name)}=CAST(:v{i} AS {kind})")
+    condition = " AND ".join(f"{quoted(name)}=CAST(:k{i} AS {kind})" for i, (name, kind) in enumerate(kinds.items()))
+    rows = result_rows(client.execute(f"UPDATE {table_name} AS kern_row SET {','.join(assignments)} WHERE {condition} RETURNING CASE WHEN octet_length(to_jsonb(kern_row)::text) <= {MAX_RETURNED_ROW_BYTES} THEN to_jsonb(kern_row)::text ELSE NULL END", params))
+    if not rows:
+        fail("No row has that primary key. Nothing was updated.")
+    if len(rows) != 1 or len(rows[0]) != 1 or (rows[0][0] is not None and not isinstance(rows[0][0], str)):
+        invalid_response("AWS returned an unexpected update result; the transaction will be rolled back.")
+    return {"updated":1, "row":rows[0][0]}
 
 
 def drop_object(values: JSONObject, action: str) -> tuple[str, str, str]:
@@ -238,7 +295,7 @@ def object_identity(client: Client, table: str, kind: str, name: str) -> list[st
     if kind == "index" and identity[3] == "true":
         fail("Foreign keys depend on this index. Remove the referencing foreign key constraints first.")
     if kind == "constraint" and identity[1] == "p":
-        fail("Primary keys cannot be dropped; inserts and delete_row depend on them.")
+        fail("Primary keys cannot be dropped; inserts, update_row and delete_row depend on them.")
     if kind in ("not_null", "column") and identity[2] == "true":
         fail("Primary key columns cannot be dropped or made nullable.")
     if kind == "column" and identity[3] == "true":
@@ -305,6 +362,12 @@ class AuroraPostgresTool:
                 operation, table, statements = ddl(tool_input, config.schema)
                 with Client(config, "ddl").transaction(False) as client:
                     result = manage(client, operation, table, statements)
+                return ActionExecuted(result)
+            if action == "update_row":
+                table, key, changes = update_input(tool_input)
+                # Only generated single-row writes run as owner; writer stays insert-only.
+                with Client(config, "ddl").transaction(False) as client:
+                    result = update_row(client, table, key, changes)
                 return ActionExecuted(result)
             if action == "delete_row":
                 table, key = delete_input(tool_input)

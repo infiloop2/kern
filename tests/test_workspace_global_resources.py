@@ -55,6 +55,28 @@ def thread_events(thread_id: str) -> list[tuple[Any, ...]]:
         return cur.fetchall()
 
 
+class ScheduleBatchTests(unittest.TestCase):
+    def test_poll_claims_the_full_active_quota_in_individual_transactions(self) -> None:
+        now = datetime(2026, 11, 4, 10, 0, tzinfo=timezone.utc)
+        delivery = {"due_triggers": [(0, {"prompt":"Review work"})]}
+        with (
+            patch.object(db, "transaction") as transaction,
+            patch.object(schedules, "_claim_delivery", return_value=delivery) as claim,
+            patch.object(schedules, "_deliver_message") as deliver,
+        ):
+            cursor = transaction.return_value.__enter__.return_value
+            cursor.fetchall.return_value = [(i,) for i in range(1, 1001)]
+            def claim_after_selection(schedule_id, instant):
+                transaction.return_value.__exit__.assert_called_once()
+                return delivery
+            claim.side_effect = claim_after_selection
+            self.assertEqual(schedules.run_due(now), 1000)
+            self.assertEqual(cursor.execute.call_args.args[1], ("2026-11-04T10:00:00Z", 1000))
+            self.assertEqual([call.args[0] for call in claim.call_args_list], list(range(1, 1001)))
+            self.assertEqual(deliver.call_count, 1000)
+        self.assertEqual(schedules.MAX_SCHEDULES, 1000)
+
+
 class MemoryRecallQueryTests(unittest.TestCase):
     def test_recall_preserves_prose_with_a_utf8_byte_budget(self) -> None:
         from host.memory_recall import conversation_query

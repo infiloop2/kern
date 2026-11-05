@@ -19,7 +19,7 @@ from host.runtime.workspace.query import one as _one
 from host.session_options import SCRIPT_RUNTIME, schedule_session_options, session_config_error
 
 
-MAX_SCHEDULES = 100
+MAX_SCHEDULES = 1000
 MAX_NAME_CHARS = 100
 MAX_MESSAGE_CHARS = 12_000
 MAX_SESSION_VALUE_CHARS = 100

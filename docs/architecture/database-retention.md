@@ -81,7 +81,7 @@ The categories are:
 | `memory_page_revisions` | retention | Newest 100 revisions per retained page; cascades with its page. |
 | `memory_page_embeddings` | quota | At most one current derived vector per retained page and model; soft deletion removes it and page deletion also cascades. |
 | `memory_page_links` | quota | At most 100 current outgoing links per retained swarm page; source-page deletion cascades. |
-| `schedules` | quota | At most 100 active schedules. Deleted definitions remain restorable for 90 days, then are removed independently of their stable `schedule-N` host thread. |
+| `schedules` | quota | At most 1000 active schedules. Deleted definitions remain restorable for 90 days, then are removed independently of their stable `schedule-N` host thread. |
 | `schedule_revisions` | retention | Newest 100 revisions per retained schedule; cascades with its schedule. |
 | `web_app_revisions` | retention | Newest 5 exact revisions, then one recovery point per four-hour interval during the first day and one per day from day two through day seven, capped at 17 revisions; cascades with its quota-bounded App. |
 | `web_app_ui_versions`, `web_app_document_versions` | reachability | Immutable components shared by App checkpoints; removed when no retained checkpoint references them. Cascade with the App. |

@@ -175,6 +175,29 @@ class AuroraPostgresDatabaseTests(unittest.TestCase):
         self.assertIsInstance(outcome,ApprovalExecuted,msg=self.transport.last_error)
         self.assertEqual(self.execute("list_tables",{})["rows"],[])
 
+    def test_update_row_preserves_keys_and_other_rows_with_constraints(self):
+        self.execute("manage_schema", {"operation":"create_table","table":"update_rows","columns":[
+            {"name":"tenant","type":"text","nullable":False}, {"name":"id","type":"bigint","nullable":False},
+            {"name":"note","type":"text","nullable":True}, {"name":"score","type":"numeric","nullable":True}],
+            "primary_key":["tenant","id"]})
+        self.execute("insert_rows", {"table":"update_rows","columns":["tenant","id","note","score"],
+            "rows":[["a","1","Original","1.5"],["b","1","Untouched","2.5"]],"on_conflict":"error"})
+        base = {"table":"update_rows","key":[{"column":"id","value":"1"},{"column":"tenant","value":"a"}]}
+        literal = "Corrected'); DELETE FROM update_rows; -- :text"
+        result = self.execute("update_row", {**base,"set":[{"column":"note","value":literal},{"column":"score","value":"3.25"}]})
+        self.assertEqual(result["updated"],1)
+        self.assertEqual(json.loads(result["row"]), {"tenant":"a","id":1,"note":literal,"score":3.25})
+        self.assertEqual(self.execute("query", {"sql":"SELECT tenant, note, score FROM update_rows ORDER BY tenant","params":[]})["rows"], [["a",literal,"3.25"],["b","Untouched","2.5"]])
+        for changes in ([{"column":"id","value":"2"}], [{"column":"tenant","value":"c"}],
+                        [{"column":"note","value":"x"*5121}], [{"column":"score","value":"invalid"}],
+                        [{"column":"missing","value":"x"}]):
+            self.fails("update_row", {**base,"set":changes})
+        self.fails("update_row", {**base,"key":[{"column":"id","value":"1"}],"set":[{"column":"note","value":"x"}]})
+        self.fails("update_row", {**base,"key":[{"column":"id","value":"9"},{"column":"tenant","value":"a"}],"set":[{"column":"note","value":"x"}]})
+        result = self.execute("update_row", {**base,"set":[{"column":"note","value":None}]})
+        self.assertEqual(json.loads(result["row"]), {"tenant":"a","id":1,"note":None,"score":3.25})
+        self.approve("drop_table", {"table":"update_rows"})
+
     def test_native_partition_creation_rollup_detach_and_drop(self):
         self.execute("manage_schema",{**CREATE,"table":"snapshots","partition_by":"id"})
         self.execute("manage_schema",{"operation":"create_partition","table":"snapshots","partition":"snapshots_one","from":"0","to":"100"})
@@ -221,6 +244,9 @@ class AuroraPostgresDatabaseTests(unittest.TestCase):
         self.execute("manage_schema",{"operation":"set_not_null","table":"listings","columns":["company_id"]})
         self.fails("insert_rows",listing("y:Y",None))
 
+        self.fails("update_row", {**key("listings","listing_id","apple:AAPL"),"set":[{"column":"company_id","value":"missing"}]})
+        self.fails("update_row", {**key("listings","listing_id","apple:AAPL"),"set":[{"column":"company_id","value":None}]})
+        self.fails("update_row", {**key("companies","company_id","apple"),"set":[{"column":"cik","value":"123"}]})
         self.fails("delete_row",key("companies","company_id","apple"))
         self.assertEqual(self.execute("query",{"sql":"SELECT count(*) FROM companies","params":[]})["rows"],[["2"]])
         deleted = self.execute("delete_row",key("listings","listing_id","apple:AAPL"))
@@ -384,6 +410,8 @@ class AuroraPostgresDatabaseTests(unittest.TestCase):
                 owner.execute(f"UPDATE agent_data.wide_row SET c{i}=%s",["x"*5000])
         finally:
             owner.close()
+        updated = self.execute("update_row",{"table":"wide_row","key":[{"column":"id","value":"1"}],"set":[{"column":"note","value":"Corrected"}]})
+        self.assertEqual(updated, {"updated":1,"row":None})
         result = self.execute("delete_row",{"table":"wide_row","key":[{"column":"id","value":"1"}]})
         self.assertEqual(result,{"deleted":1,"row":None})
         self.assertEqual(self.execute("query",{"sql":"SELECT count(*) FROM wide_row","params":[]})["rows"],[["0"]])

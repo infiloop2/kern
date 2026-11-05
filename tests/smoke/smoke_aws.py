@@ -214,6 +214,7 @@ SMOKE_TOOL_CALLS: dict[str, tuple[tuple[str, dict], ...]] = {
         ("manage_schema", {"operation": "create_table", "table": "kern_smoke",
                            "columns": [{"name": "id", "type": "bigint", "nullable": False}], "primary_key": ["id"]}),
         ("delete_row", {"table": "kern_smoke", "key": [{"column": "id", "value": "1"}]}),
+        ("update_row", {"table": "kern_smoke", "key": [{"column": "id", "value": "1"}], "set": [{"column": "note", "value": "Corrected"}]}),
         ("drop_column", {"table": "kern_smoke", "column": "note"}),
         ("drop_index", {"table": "kern_smoke", "name": "kern_smoke_id"}),
         ("drop_constraint", {"table": "kern_smoke", "constraint": "kern_smoke_check"}),
