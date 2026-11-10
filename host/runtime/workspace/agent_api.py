@@ -3,7 +3,7 @@
 The MCP shim sends one bounded JSON call over this Unix socket. Caller identity
 proves only that the request came from ``kern-agent``. The current thread is
 derived from its root-created cgroup for identity, self-memory, and ownership
-of App and standing-agent mutations. Operator routes remain separate.
+of App content mutations. App/Standing controls are shared; operator routes stay separate.
 """
 
 from __future__ import annotations
@@ -78,12 +78,14 @@ def _require_resource_owner(method: str, path: str, caller: str | None) -> None:
     """Enforce ownership only on the agent surface; operator routes stay separate."""
     if method == "GET":
         return
-    schedule = re.fullmatch(r"/agent/schedules/([1-9][0-9]*)", path)
-    if schedule and caller != f"schedule-{schedule.group(1)}":
+    management = re.fullmatch(r"/agent/schedules/[1-9][0-9]*(?:/stop)?", path) or re.fullmatch(
+        r"/agent/apps/app-[1-9][0-9]*/(?:name|agent-settings|stop|archive)", path
+    )
+    if management:
+        if caller is not None:
+            return
         raise WorkspaceError(
-            HTTPStatus.FORBIDDEN,
-            f"Only the owner, schedule-{schedule.group(1)}, can change this standing agent and its triggers. "
-            f'Use send_agent_message with thread_id="schedule-{schedule.group(1)}" to ask the owner to make the change.',
+            HTTPStatus.CONFLICT, "agent thread identity is unavailable",
         )
     app = re.fullmatch(r"/agent/apps/(app-[1-9][0-9]*)(/.*)", path)
     if app:

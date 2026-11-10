@@ -107,6 +107,13 @@ def route_agent(
             return list_active_schedules(query)
         if method == "POST":
             return {"schedule": create_schedule(body, actor="agent")}
+    match = re.fullmatch(rf"/agent/schedules/{ID_CAPTURE}/stop", path)
+    if match and method == "POST":
+        if query or body not in (None, {}):
+            raise WorkspaceError(HTTPStatus.BAD_REQUEST, "schedule stop accepts no fields or query")
+        schedule_id = _positive_id(match.group(1))
+        load_schedule(schedule_id)
+        return call_admin_api("POST", f"/v1/threads/schedule-{schedule_id}/stop")
     match = re.fullmatch(rf"/agent/schedules/{ID_CAPTURE}", path)
     if match:
         schedule_id = _positive_id(match.group(1))

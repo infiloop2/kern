@@ -96,8 +96,10 @@ latest coalesced revision. The first build of an empty App loads automatically.
 
 The host-global `workspace_api` instructions document explicit
 `/agent/apps/{app_id}/...` routes. Any agent thread may target any existing app
-for reads by immutable id. Only the owning App agent may mutate it via MCP;
-other agents request changes through messaging. Archived apps remain readable but
+for reads by immutable id. Any agent may change its name/purpose or agent
+settings, stop or archive it directly. App UI/data and collection-grant writes
+remain owner-controlled; other agents request those content changes through
+messaging unless an explicit collection grant permits the action. Archived apps remain readable but
 reject writes. Editable names never select authority.
 
 The backend sends the human's message to the host thread exactly as submitted;

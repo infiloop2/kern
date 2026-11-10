@@ -84,6 +84,8 @@ def action_summary(method: str, path: str, body: Any, response: dict[str, Any],
             label += f": {preview}"
     elif method == "POST" and path == "/agent/agents/archive":
         kind, label = "agent_archived", f"Archived {thread_name(_text(request.get('thread_id')))}"
+    elif method == "POST" and (match := re.fullmatch(r"/agent/schedules/([1-9][0-9]*)/stop", path)):
+        kind, label = "agent_stopped", f"Stopped {thread_name('schedule-' + match[1])}"
     elif method == "PUT" and path == "/agent/self/memory":
         kind, label = "self_memory_saved", "Saved self memory"
         description = _text(request.get("description"))
@@ -127,6 +129,9 @@ def action_summary(method: str, path: str, body: Any, response: dict[str, Any],
             settings = " · ".join(_text(request.get(key)) for key in ("agent_runtime", "model", "effort") if _text(request.get(key)))
             if settings:
                 label += f": {settings}"
+        elif method == "POST" and resource in {"/stop", "/archive"}:
+            kind, verb = ("agent_stopped", "Stopped") if resource == "/stop" else ("agent_archived", "Archived")
+            label = f"{verb} {thread_name(app_id)}"
         elif method == "PUT" and resource == "/grants":
             kind = "app_collection_grants_updated"
             label = f"Updated {thread_name(app_id)} collection grants for {_text(request.get('thread_id'), 'agent')}"

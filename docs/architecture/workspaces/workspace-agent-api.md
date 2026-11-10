@@ -173,8 +173,9 @@ archive and other writes, then rechecks that the app is active. Optimistic UI
 and data counters reject stale changes. Restore remains operator-only because
 it rewinds the App's UI/data state.
 
-The agent API requires the authenticated caller's thread id to equal the App
-id for mutations, including metadata, UI, data, and collections. Other agents
+The agent API retains ownership checks for App content and collection grants.
+Any authenticated agent may change App name/purpose and agent settings, or use
+`POST /agent/apps/{app_id}/{stop|archive}` through the existing browser handlers. Other agents
 may read/discover the App and message its owner to request changes. Editable
 display names never grant authority; operator browser controls remain available.
 
@@ -327,9 +328,9 @@ transcripts under Standing agents; they do not expose manual messaging or
 self-memory controls.
 
 Memory and schedule writes use an `expected_revision` compare-and-swap so
-concurrent edits cannot silently overwrite each other. Agents may update only
-their own standing-agent definition. Agents can create new standing agents;
-the new agent owns subsequent edits. Memory
+concurrent edits cannot silently overwrite each other. Any authenticated agent
+may update/delete Standing definitions, including Bash jobs.
+`POST /agent/schedules/{id}/stop` stops current work without changing triggers. Memory
 CRUD remains shared; the browser-only API exposes deleted resources, revision history, and
 restoration. The stable schedule conversation uses the ordinary Chat event
 API. Memory

@@ -3,14 +3,15 @@
 Read when the host guide directs: App creation, `/agent/apps/{app_id}/...`
 operations or diagnosis. For generated UI, also read [web-app-ui.md](web-app-ui.md).
 
-Use immutable `app-N` ids. Any agent may read Apps; only the owner may change
-its active, unlocked App, except for explicitly granted collection writes. Archived or agent-locked Apps are read-only.
+Use immutable `app-N` ids. Any agent may read Apps and manage their name,
+purpose and agent settings. Only the owner may change App UI/data or collection
+grants, except for explicitly granted collection writes. Archived or agent-locked Apps are read-only.
 
 ## Create and configure
 
 - `POST /agent/apps` takes no body and requires an explicit operator request.
   It returns `app_id` and the host-selected `agent_settings`. Message that
-  App agent to build/configure it; creation gives you no write access.
+  App agent to build its content; creation gives you no content write access.
 - `PUT /agent/apps/{app_id}/name` takes `{"name":"Research desk"}` and optionally
   `"purpose":"Review company research"`. Name is nonblank, at most 100
   characters. Purpose is one line, at most 100 characters; omit to preserve,
@@ -24,6 +25,10 @@ its active, unlocked App, except for explicitly granted collection writes. Archi
   Use a currently supported combination. Saving does not start a turn;
   the current turn and its follow-ups keep their configuration, and the next
   turn uses the new settings.
+
+- `POST /agent/apps/{app_id}/{stop|archive}` takes no fields. Any agent may
+  use these controls on an unlocked, active App. Stop cancels current work;
+  archive requires an idle agent without automatic retry and retains history.
 
 Both PUTs return `{"app":...}` including name/settings; neither takes
 `expected_revision` nor advances the UI/data revision.

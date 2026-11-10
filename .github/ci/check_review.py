@@ -14,6 +14,42 @@ import subprocess
 
 CODEX = "chatgpt-codex-connector[bot]"
 CLEAN = "Codex Review: Didn't find any major issues."
+SUMMARY = "<!-- codex-pull-request-review-summary -->"
+
+
+def summary_state(body):
+    """Read only the anchored bot metadata, never the rendered summary text."""
+    match = re.match(re.escape(SUMMARY) + r"\n<!-- codex-review-state:v1 (\{[^\r\n]*\}) -->", body)
+    if not match:
+        return None
+    try:
+        state = json.loads(match[1])
+    except ValueError:
+        return None
+    code = state.get("code_review") if isinstance(state, dict) else None
+    if not isinstance(code, dict) or not isinstance(code.get("commit_sha"), str):
+        return None
+    if not re.fullmatch(r"[0-9a-f]{40}", code["commit_sha"]):
+        return None
+    return state
+
+
+def clean_summary(state):
+    head = state["code_review"]["commit_sha"]
+    for name in ("code_review", "security_review"):
+        review = state.get(name)
+        # Security review is optional until requested. An active/pending one
+        # cannot grant a clean verdict from an earlier completed code review.
+        if name == "security_review" and (review is None or isinstance(review, dict)
+                and all(review.get(key) is None for key in
+                        ("status", "commit_sha", "has_any_findings", "has_unresolved_findings"))):
+            continue
+        if (not isinstance(review, dict) or review.get("commit_sha") != head
+                or review.get("status") != "completed"
+                or review.get("has_any_findings") is not False
+                or review.get("has_unresolved_findings") is not False):
+            return False
+    return True
 
 
 def request(path):
@@ -44,40 +80,59 @@ def eligible(pr, repo, head, base):
 
 
 def clean_body(body):
+    if body.startswith(SUMMARY):
+        state = summary_state(body)
+        return state is not None and clean_summary(state)
     # Current Codex receipts prepend this exact marker; older comments do not.
     body = body.removeprefix("<!-- codex-review-receipt:v1 -->").lstrip()
     return body.startswith(CLEAN)
 
 
-def clean_review(root, number, head):
+def current_verdict(head, comments, reviews, resolve_commit):
+    """Return the latest unambiguous clean bot comment for this full SHA."""
     verdicts = []
-    for item in pages(f"{root}/issues/{number}/comments"):
+    for item in comments:
         if item["user"]["login"] != CODEX:
+            continue
+        if item["body"].startswith(SUMMARY):
+            state = summary_state(item["body"])
+            if state is not None and state["code_review"]["commit_sha"] != head:
+                continue
+            verdicts.append((item["updated_at"], item["id"], item,
+                             state is not None and clean_summary(state)))
             continue
         match = re.search(r"\*\*Reviewed commit:\*\* `([0-9a-f]{10,40})`", item["body"])
         if not match or not head.startswith(match[1]):
             continue
         ref = match[1]
-        # The commits endpoint accepts ref names too. Refuse shadowing names,
-        # then let GitHub reject ambiguous abbreviated object IDs.
-        for namespace in ("heads", "tags"):
-            if request(f"{root}/git/matching-refs/{namespace}/{ref}"):
-                raise RuntimeError("Reviewed SHA conflicts with a named ref")
-        if request(f"{root}/commits/{ref}")["sha"] != head:
+        if resolve_commit(ref) != head:
             raise RuntimeError("Reviewed abbreviation resolved to another commit")
-        verdicts.append((item["updated_at"], item["id"], item))
-    for item in pages(f"{root}/pulls/{number}/reviews"):
+        verdicts.append((item["updated_at"], item["id"], item, clean_body(item["body"])))
+    for item in reviews:
         if item["user"]["login"] == CODEX and item.get("commit_id") == head:
-            verdicts.append((item["submitted_at"], item["id"], item))
+            verdicts.append((item["submitted_at"], item["id"], item, False))
     if not verdicts:
-        return False
+        return None
     # Issue-comment IDs and review IDs have no common chronological ordering.
     # GitHub timestamps have second precision: a conflict within the latest
     # second must fail closed until a later unambiguous clean verdict arrives.
     latest_time = max(entry[0] for entry in verdicts)
-    return all("updated_at" in item and item.get("state") != "DISMISSED"
-               and clean_body(item["body"])
-               for timestamp, _, item in verdicts if timestamp == latest_time)
+    latest = [entry for entry in verdicts if entry[0] == latest_time]
+    if not all(clean and item.get("state") != "DISMISSED" for _, _, item, clean in latest):
+        return None
+    return max(latest, key=lambda entry: entry[1])[2]
+
+
+def clean_review(root, number, head):
+    def resolve(ref):
+        # Refuse named refs shadowing hexadecimal abbreviations. Full SHAs in
+        # structured summaries are compared directly, without ref resolution.
+        for namespace in ("heads", "tags"):
+            if request(f"{root}/git/matching-refs/{namespace}/{ref}"):
+                raise RuntimeError("Reviewed SHA conflicts with a named ref")
+        return request(f"{root}/commits/{ref}")["sha"]
+    return current_verdict(head, pages(f"{root}/issues/{number}/comments"),
+                           pages(f"{root}/pulls/{number}/reviews"), resolve) is not None
 
 
 def gate(event, repo):

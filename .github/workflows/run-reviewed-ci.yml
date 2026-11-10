@@ -1,6 +1,6 @@
 name: Start reviewed PR CI
 
-# Automatically start the original deferred PR test run on a clean Codex comment.
+# Automatically start deferred PR tests on a clean Codex comment or summary edit.
 # A first-attempt completion closes the race where that comment arrived mid-run.
 # Only one automatic rerun is allowed; later retries use GitHub Re-run jobs.
 # No /ci command, concurrency queue, deployment or approval side effects.
@@ -24,7 +24,7 @@ jobs:
     if: >-
       github.repository == 'infiversehq/kern' && (
         (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.run_attempt == 1 && github.event.workflow_run.conclusion == 'failure') ||
-        (github.event.issue.pull_request && github.event.comment.user.login == 'chatgpt-codex-connector[bot]' && (startsWith(github.event.comment.body, 'Codex Review: Didn''t find any major issues.') || (startsWith(github.event.comment.body, '<!-- codex-review-receipt:v1 -->') && contains(github.event.comment.body, 'Codex Review: Didn''t find any major issues.'))))
+        (github.event.issue.pull_request && github.event.comment.user.login == 'chatgpt-codex-connector[bot]' && (startsWith(github.event.comment.body, '<!-- codex-pull-request-review-summary -->') || startsWith(github.event.comment.body, 'Codex Review: Didn''t find any major issues.') || (startsWith(github.event.comment.body, '<!-- codex-review-receipt:v1 -->') && contains(github.event.comment.body, 'Codex Review: Didn''t find any major issues.'))))
       )
     runs-on: ubuntu-latest
     timeout-minutes: 3
