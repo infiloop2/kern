@@ -12,8 +12,8 @@ Discover Apps and Standing agents with `GET /agent/apps` and
 Discovery grants no archive ownership. Known ordinary Chat ids are also valid
 message recipients.
 
-App owners apply UI, data, collection and metadata changes. Standing owners
-apply their own definition/trigger changes. A delegated task does not grant
+App owners apply UI/data and collection-grant changes. Any agent may manage
+App controls and Standing definitions directly through their existing routes. A delegated task does not grant
 access to another agent's owned resources; return the result to that owner.
 Use a Standing agent for persistent work, optionally with zero triggers;
 read [schedules.md](schedules.md) before creating one. Spawned Chats have a

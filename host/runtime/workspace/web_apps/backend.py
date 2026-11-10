@@ -304,8 +304,8 @@ def route_agent(
 ) -> dict[str, Any]:
     """Route one explicit agent request.
 
-    App reads are host-wide. The agent API authenticates ownership before
-    routing mutations, except collection writes that authorize grants under lock; the immutable app id is the target. Archived apps remain readable but reject every mutation.
+    App reads and agent controls are host-wide. Content writes require
+    ownership or collection grants. Archived apps remain read-only.
     Revert remains absent because restoring operator-visible state is a human
     control.
     """
@@ -343,6 +343,13 @@ def route_agent(
             HTTPStatus.BAD_REQUEST,
             "this agent route does not accept query parameters",
         )
+
+    if method == "POST" and resource in {"/stop", "/archive"}:
+        if body not in (None, {}):
+            raise WorkspaceError(HTTPStatus.BAD_REQUEST, "stop and archive accept no fields")
+        with _workspace_lock(app_id):
+            _require_agent_writable_web_app(app_id)
+            return route_browser(method, f"/apps/{app_id}{resource}", None)
 
     if method == "GET" and resource == "/grants":
         with db.transaction() as cur:

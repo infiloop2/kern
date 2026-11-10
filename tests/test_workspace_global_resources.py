@@ -56,6 +56,19 @@ def thread_events(thread_id: str) -> list[tuple[Any, ...]]:
 
 
 class ScheduleBatchTests(unittest.TestCase):
+    def test_agent_stop_preserves_the_schedule_and_only_stops_current_work(self) -> None:
+        with patch.object(schedules, "load_schedule") as load, patch.object(schedules, "call_admin_api", return_value={"status": "accepted"}) as stop:
+            self.assertEqual(schedules.route_agent("POST", "/agent/schedules/15/stop", None, {}), {"status": "accepted"})
+            load.assert_called_once_with(15)
+            stop.assert_called_once_with("POST", "/v1/threads/schedule-15/stop")
+        for body, query in [({"force": True}, {}), (None, {"force": ["true"]})]:
+            with self.subTest(body=body, query=query), patch.object(schedules, "call_admin_api") as stop, self.assertRaises(WorkspaceError):
+                schedules.route_agent("POST", "/agent/schedules/15/stop", body, query)
+            stop.assert_not_called()
+        with patch.object(schedules, "load_schedule", side_effect=WorkspaceError(HTTPStatus.NOT_FOUND, "schedule not found")), patch.object(schedules, "call_admin_api") as stop, self.assertRaises(WorkspaceError):
+            schedules.route_agent("POST", "/agent/schedules/15/stop", None, {})
+        stop.assert_not_called()
+
     def test_poll_claims_the_full_active_quota_in_individual_transactions(self) -> None:
         now = datetime(2026, 11, 4, 10, 0, tzinfo=timezone.utc)
         delivery = {"due_triggers": [(0, {"prompt":"Review work"})]}

@@ -1124,6 +1124,26 @@ class BrowserRoutingTests(unittest.TestCase):
                     self.assertEqual(error.exception.status, status)
                     save.assert_not_called()
 
+    def test_agent_stop_and_archive_reuse_browser_controls_with_operator_guards(self) -> None:
+        for action in ("stop", "archive"):
+            with self.subTest(action=action), patch.object(backend, "_require_web_app"), patch.object(backend, "_require_agent_writable_web_app") as writable, patch.object(backend, "route_browser", return_value={"status": "accepted"}) as control:
+                path = f"/agent/apps/app-9/{action}"
+                self.assertEqual(backend.route_agent("POST", path, None), {"status": "accepted"})
+                control.assert_called_once_with("POST", f"/apps/app-9/{action}", None)
+                control.reset_mock()
+                for status in (HTTPStatus.LOCKED, HTTPStatus.CONFLICT):
+                    writable.side_effect = backend.WorkspaceError(status, "read-only")
+                    with self.assertRaises(backend.WorkspaceError) as error:
+                        backend.route_agent("POST", path, None)
+                    self.assertEqual(error.exception.status, status)
+                    control.assert_not_called()
+
+    def test_agent_stop_and_archive_reject_extra_fields(self) -> None:
+        for action in ("stop", "archive"):
+            with self.subTest(action=action), patch.object(backend, "_require_web_app"), patch.object(backend, "route_browser") as control, self.assertRaises(backend.WorkspaceError):
+                backend.route_agent("POST", f"/agent/apps/app-9/{action}", {"force": True})
+            control.assert_not_called()
+
     def test_agent_metadata_routes_validate_before_writing(self) -> None:
         settings = {
             "agent_runtime": "codex", "model": "gpt-6.1-sol", "effort": "high",

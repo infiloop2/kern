@@ -1,6 +1,6 @@
 name: approve-codex-review
 
-# Created/edited clean Codex bot comments stamp approval on the exact reviewed PR head.
+# Created/edited clean Codex comments and summaries stamp the exact reviewed PR head.
 # This does not replace CODEOWNER approval or trigger infrastructure smoke.
 on:
   issue_comment:
@@ -21,7 +21,8 @@ jobs:
     if: >-
       github.repository == 'infiversehq/kern' && github.event.issue.pull_request &&
       github.event.comment.user.login == 'chatgpt-codex-connector[bot]' &&
-      (startsWith(github.event.comment.body, 'Codex Review: Didn''t find any major issues.') ||
+      (startsWith(github.event.comment.body, '<!-- codex-pull-request-review-summary -->') ||
+       startsWith(github.event.comment.body, 'Codex Review: Didn''t find any major issues.') ||
        (startsWith(github.event.comment.body, '<!-- codex-review-receipt:v1 -->') &&
         contains(github.event.comment.body, 'Codex Review: Didn''t find any major issues.')))
     runs-on: ubuntu-latest

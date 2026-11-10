@@ -82,9 +82,8 @@ reference only for its stated operations, and reuse guidance already in context.
 Session options return `session_options` as `{runtime: {model: [efforts]}}`
 and `active_runtimes`; choose a complete supported tuple, never guess names.
 
-Only an App’s own agent may modify its UI, data, collections or metadata;
-other agents read and message the owner for changes. Use immutable `app-N`
-ids, never editable names alone. Inspect `data/shape`,
+App UI/data and collection-grant writes remain owner-controlled; message the
+owner for content changes. Use immutable `app-N` ids, never editable names alone. Inspect `data/shape`,
 then read needed `data/read` paths. Keep queryable repeated rows in collections.
 UI/data writes carry `revision` into `expected_revision`. On 409, inspect the
 error: retry revision conflicts after re-reading relevant state; archived Apps
@@ -138,8 +137,8 @@ Routes: `GET|POST /agent/schedules`, `GET|PUT|DELETE /agent/schedules/{id}`,
 and `GET /agent/schedules/session-options`. Listing accepts `limit` and `before`;
 summaries omit trigger prompts. PUT replaces the whole definition, so fetch
 `GET /agent/schedules/{id}` before editing and preserve unchanged fields.
-Only the owning `schedule-N` agent can update/delete its definition and triggers.
-Agents may create Standing agents, then request changes from the new owner.
+Any agent may update/delete Standing definitions and triggers directly,
+including Bash jobs; no owner wakeup is needed.
 An empty trigger list leaves the agent available. Edits affect future deliveries.
 Every runtime uses one persistent `schedule-N` thread. Accepted failures use
 `thread.error`; pre-acceptance failures are operational logs.

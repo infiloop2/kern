@@ -27,8 +27,6 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 class AgentWorkspaceSocketTests(unittest.TestCase):
     def test_resource_ownership_uses_authenticated_identity(self) -> None:
         mutations = [
-            ('PUT', '/agent/apps/app-2/name'),
-            ('PUT', '/agent/apps/app-2/agent-settings'),
             ('POST', '/agent/apps/app-2/actions'),
             ('PUT', '/agent/apps/app-2/grants'),
             ('DELETE', '/agent/apps/app-2/grants/thread-1'),
@@ -56,21 +54,33 @@ class AgentWorkspaceSocketTests(unittest.TestCase):
                 agent_api.dispatch_call(method, path, None if method == 'GET' else {}, peer_thread_id='thread-1')
                 route.assert_called_once()
 
-    def test_only_standing_agent_changes_own_definition(self) -> None:
-        for method in ('PUT', 'DELETE'):
-            for caller in (None, 'thread-2', 'app-2', 'schedule-1'):
-                with (self.subTest(method=method, caller=caller),
-                      patch.object(agent_api.schedules, 'route_agent') as route,
-                      self.assertRaises(agent_api.WorkspaceError) as error):
-                    agent_api.dispatch_call(method, '/agent/schedules/2', None, peer_thread_id=caller)
-                self.assertEqual(error.exception.status, HTTPStatus.FORBIDDEN)
-                route.assert_not_called()
-            with patch.object(agent_api.schedules, 'route_agent', return_value={}) as route:
-                agent_api.dispatch_call(method, '/agent/schedules/2', None, peer_thread_id='schedule-2')
-                route.assert_called_once()
-        with patch.object(agent_api.schedules, 'route_agent', return_value={}) as route:
-            agent_api.dispatch_call('GET', '/agent/schedules/2', None, peer_thread_id='thread-1')
-            route.assert_called_once()
+    def test_authenticated_agents_can_manage_other_agents(self) -> None:
+        for method, path, target in [
+            ('PUT', '/agent/apps/app-2/name', web_apps),
+            ('PUT', '/agent/apps/app-2/agent-settings', web_apps),
+            ('POST', '/agent/apps/app-2/stop', web_apps),
+            ('POST', '/agent/apps/app-2/archive', web_apps),
+            ('PUT', '/agent/schedules/2', agent_api.schedules),
+            ('DELETE', '/agent/schedules/2', agent_api.schedules),
+            ('POST', '/agent/schedules/2/stop', agent_api.schedules),
+        ]:
+            for caller in ('thread-2', 'app-2', 'schedule-1'):
+                with self.subTest(method=method, path=path, caller=caller), patch.object(target, 'route_agent', return_value={}) as route:
+                    agent_api.dispatch_call(method, path, None, peer_thread_id=caller)
+                    route.assert_called_once()
+            with patch.object(target, 'route_agent') as route, self.assertRaises(agent_api.WorkspaceError) as error:
+                agent_api.dispatch_call(method, path, None, peer_thread_id=None)
+            self.assertEqual(error.exception.status, HTTPStatus.CONFLICT)
+            route.assert_not_called()
+
+    def test_generic_chat_management_routes_are_absent(self) -> None:
+        for method, path in [('GET', '/agent/threads'),
+                             ('PUT', '/agent/threads/thread-2/agent-settings'),
+                             ('POST', '/agent/threads/thread-2/stop'),
+                             ('POST', '/agent/threads/thread-2/archive')]:
+            with self.subTest(path=path), patch.object(agent_api.agent_notices, 'record'), self.assertRaises(agent_api.WorkspaceError) as error:
+                agent_api.dispatch_call(method, path, None, peer_thread_id='thread-1')
+            self.assertEqual(error.exception.status, HTTPStatus.NOT_FOUND)
 
     def test_response_cap_can_carry_a_complete_maximum_app_document(self) -> None:
         self.assertGreater(
@@ -515,7 +525,8 @@ class McpShimTests(unittest.TestCase):
         tools = {tool["name"]: tool for tool in listing["result"]["tools"]}
         description = tools["workspace_api"]["description"]
         self.assertIn("documented in the host instructions; use only those", description)
-        self.assertIn("Only the owning agent can modify an App", description)
+        self.assertIn("Any agent may manage App/Standing agents’ settings", description)
+        self.assertIn("App UI/data ownership remains with the App agent", description)
         guidance = (REPO_ROOT / "host/bootstrap/agent-home/agents_claude.md").read_text()
         self.assertIn("GET /agent/apps", guidance)
         self.assertIn("POST /agent/apps", guidance)
@@ -578,8 +589,8 @@ class McpShimTests(unittest.TestCase):
         shim = self.start_shim(socket_path)
         for method, path, owner in (
             ("POST", "/agent/apps/app-2/actions", "app-2"),
-            ("PUT", "/agent/schedules/2", "schedule-2"),
-            ("DELETE", "/agent/schedules/2?expected_revision=1", "schedule-2"),
+            ("PUT", "/agent/apps/app-2/grants", "app-2"),
+            ("DELETE", "/agent/apps/app-2/grants/thread-1", "app-2"),
         ):
             with (self.subTest(method=method, path=path),
                   patch.object(agent_api, "_peer_thread_id", return_value="thread-1"),
@@ -599,6 +610,22 @@ class McpShimTests(unittest.TestCase):
                 self.assertIn("ask the owner to make the change", message)
                 app_route.assert_not_called()
                 schedule_route.assert_not_called()
+
+    def test_mcp_allows_direct_cross_agent_schedule_change(self) -> None:
+        socket_path = self.start_server()
+        shim = self.start_shim(socket_path)
+        definition = {"expected_revision": 3, "name": "Research", "triggers": [],
+                      "agent_runtime": "codex-2", "model": "gpt-6.1-sol", "effort": "high"}
+        with patch.object(agent_api, "_peer_thread_id", return_value="thread-1"), patch.object(agent_api.schedules, "update_schedule", return_value={"id": 2, "revision": 4}) as update:
+            called = self.rpc(shim, {
+                "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "workspace_api", "arguments": {
+                    "method": "PUT", "path": "/agent/schedules/2", "body": definition,
+                }},
+            })
+            response = json.loads(called["result"]["content"][0]["text"])
+            self.assertEqual(response, {"status": 200, "body": {"schedule": {"id": 2, "revision": 4}}})
+            update.assert_called_once_with(2, definition, actor="agent")
 
     def test_shim_reads_memory_context_notices(self) -> None:
         socket_path = self.start_server()

@@ -4,8 +4,12 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
+import sys
+
+# The action and shared parser are both checked out from trusted main.
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'ci'))
+import check_review
 
 CODEX = 'chatgpt-codex-connector[bot]'
 ACTIONS = 'github-actions[bot]'
@@ -43,31 +47,18 @@ def resolve_reviewed_commit(root, ref):
 
 def clean_verdict(head, comments, reviews, resolve_commit):
     """Latest Codex verdict on this SHA wins, including later findings reviews."""
-    verdicts = []
-    for item in comments:
-        if item['user']['login'] != CODEX:
-            continue
-        match = re.search(r'\*\*Reviewed commit:\*\* `([0-9a-f]{10,40})`', item['body'])
-        if match and head.startswith(match[1]) and resolve_commit(match[1]) == head:
-            # Resolve Codex's abbreviated SHA through GitHub, which rejects
-            # ambiguous object names. Prefix equality alone is not authority.
-            verdicts.append((item['updated_at'], item['id'], item))
-    for item in reviews:
-        if item['user']['login'] == CODEX and item.get('commit_id') == head:
-            # A dismissed/deleted verdict cannot grant authority.
-            verdicts.append((item['submitted_at'], item['id'], item))
-    if not verdicts:
-        return None
-    latest = max(verdicts, key=lambda entry: (entry[0], entry[1]))[2]
-    body = latest['body'].removeprefix('<!-- codex-review-receipt:v1 -->').lstrip()
-    if latest.get('state') == 'DISMISSED' or not body.startswith(CLEAN):
-        return None
-    # The stamping workflow is triggered by a top-level Codex comment.
-    return latest if 'updated_at' in latest else None
+    return check_review.current_verdict(head, comments, reviews, resolve_commit)
 
 
 def stamp_body(verdict):
-    return f"{STAMP}\n\nCodex verdict: {verdict['html_url']}"
+    body = f"{STAMP}\n\nCodex verdict: {verdict['html_url']}"
+    state = check_review.summary_state(verdict['body'])
+    if state is not None:
+        # The bot edits one summary comment across commits. Bind its changing
+        # contents as well as its stable URL, so later heads can get a stamp
+        # without rebinding an earlier approval to a different commit.
+        body += f"\nReviewed commit: `{state['code_review']['commit_sha']}`"
+    return body
 
 
 def has_stamp(head, verdict, reviews):
@@ -91,6 +82,14 @@ def run():
     repo = os.environ['GITHUB_REPOSITORY']
     root = f'/repos/{repo}'
     event = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())
+    comment = event['comment']
+    if (comment['user']['login'] == CODEX
+            and comment.get('body', '').startswith(check_review.SUMMARY)
+            and not check_review.clean_body(comment['body'])):
+        # Summary edits also announce running reviews and findings. They are
+        # valid events, but grant no approval and need no failed workflow.
+        print('Codex summary is not clean and complete; no approval created.')
+        return
     number = event['issue']['number']
     pr_path = f'{root}/pulls/{number}'
     pr = request(pr_path)

@@ -2,8 +2,9 @@
 
 Read before creating, changing, deleting or diagnosing Standing agents.
 Listing, detail reads and session-option discovery use the host guide directly.
-Only the owning `schedule-N` agent may update/delete its definition; creators
-request subsequent changes from that owner.
+Any authenticated agent may update/delete a Standing agent’s definition,
+including Bash jobs. Use the immutable id and current revision; do not wake
+the owner merely to apply a settings change.
 
 ## Read, create and change
 
@@ -19,6 +20,8 @@ request subsequent changes from that owner.
   plus `expected_revision`. Fetch current detail and preserve unmentioned
   settings/triggers. One revision covers all triggers; there are no individual
   trigger update/delete/pause routes. Runtime changes retain the thread.
+- `POST /agent/schedules/{id}/stop`: no fields; stops current work and cancels
+  automatic retry, preserving future triggers.
 - `DELETE /agent/schedules/{id}?expected_revision=N`: no body; stops future
   deliveries. A firing already claimed may still be delivered once.
 
@@ -72,4 +75,4 @@ the next firing without changing the schedule. Combined output is an agent
 message; nonzero exit, timeout or launch failure is `thread.error`, with no retry.
 The persistent transcript is read-only: no operator/peer messaging or self-memory.
 
-Before initiating work with the owner, read [agent-messaging.md](agent-messaging.md).
+Before sending substantive work to an agent, read [agent-messaging.md](agent-messaging.md).

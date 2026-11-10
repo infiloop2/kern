@@ -5,6 +5,7 @@ Automatic starts are bounded; ordinary retries and permissions remain with GitHu
 """
 from copy import deepcopy
 import importlib.util
+import json
 from pathlib import Path
 import subprocess
 import tempfile
@@ -33,6 +34,15 @@ ROOT_API = f"/repos/{REPO}"
 COMMENT = {"id": 12, "user": {"login": policy.CODEX},
            "body": policy.CLEAN + f"\n\n**Reviewed commit:** `{HEAD[:10]}`",
            "created_at": "2026-10-28T01:00:00Z", "updated_at": "2026-10-28T01:00:00Z"}
+
+
+def summary_comment(**changes):
+    state = {"code_review": {"commit_sha": HEAD, "status": "completed",
+                            "has_any_findings": False, "has_unresolved_findings": False},
+             "security_review": {"commit_sha": None, "status": None,
+                                 "has_any_findings": None, "has_unresolved_findings": None}}
+    state["code_review"].update(changes)
+    return {**COMMENT, "body": policy.SUMMARY + "\n<!-- codex-review-state:v1 " + json.dumps(state) + " -->\n\nRendered summary"}
 
 
 class ReviewGateTests(unittest.TestCase):
@@ -65,6 +75,49 @@ class ReviewGateTests(unittest.TestCase):
         self.assertTrue(self.verdict(comments=[{**COMMENT, "body": body}]))
         self.assertFalse(self.verdict(comments=[{**COMMENT, "body": "> " + body}]))
         self.assertFalse(self.verdict(comments=[{**COMMENT, "body": "Unrelated text " + body}]))
+
+    def test_structured_summary_requires_completed_clean_exact_full_sha(self):
+        self.assertTrue(self.verdict(comments=[summary_comment()]))
+        for changes in ({"commit_sha": "c" * 40}, {"commit_sha": HEAD[:10]},
+                        {"status": "in_progress"}, {"status": "failed"},
+                        {"has_any_findings": True}, {"has_unresolved_findings": True},
+                        {"has_any_findings": None}, {"has_any_findings": 0},
+                        {"has_unresolved_findings": "false"}):
+            with self.subTest(changes=changes):
+                self.assertFalse(self.verdict(comments=[summary_comment(**changes)]))
+        good = summary_comment()
+        for body in ("> " + good["body"], "Other text\n" + good["body"],
+                     policy.SUMMARY + "\n<!-- codex-review-state:v1 {invalid} -->",
+                     good["body"].replace("codex-review-state:v1", "codex-review-state:v2")):
+            with self.subTest(body=body):
+                self.assertFalse(self.verdict(comments=[{**good, "body": body}]))
+        self.assertFalse(self.verdict(comments=[{**good, "user": {"login": "outside-commenter"}}]))
+
+    def test_requested_security_review_must_also_complete_clean_on_same_sha(self):
+        good = summary_comment()
+        state = policy.summary_state(good["body"])
+        for security, ready in [({"status": "in_progress"}, False),
+                                ({**state["code_review"], "has_any_findings": True}, False),
+                                ({**state["code_review"], "commit_sha": "c" * 40}, False),
+                                (state["code_review"], True)]:
+            body = policy.SUMMARY + "\n<!-- codex-review-state:v1 " + json.dumps({**state, "security_review": security}) + " -->"
+            with self.subTest(security=security):
+                self.assertEqual(self.verdict(comments=[{**good, "body": body}]), ready)
+
+    def test_pending_or_malformed_summary_revokes_earlier_clean_comment(self):
+        later = {**summary_comment(status="in_progress"), "id": 20,
+                 "updated_at": "2026-10-28T02:00:00Z"}
+        self.assertFalse(self.verdict(comments=[COMMENT, later]))
+        later["body"] = policy.SUMMARY + "\n<!-- codex-review-state:v1 {invalid} -->"
+        self.assertFalse(self.verdict(comments=[COMMENT, later]))
+
+    def test_summary_uses_update_time_and_later_findings_still_block(self):
+        summary = {**summary_comment(), "updated_at": "2026-10-28T02:00:00Z"}
+        finding = {"id": 30, "user": {"login": policy.CODEX}, "commit_id": HEAD,
+                   "submitted_at": "2026-10-28T01:30:00Z", "body": "Found bug", "state": "COMMENTED"}
+        self.assertTrue(self.verdict(comments=[summary], reviews=[finding]))
+        finding["submitted_at"] = summary["updated_at"]
+        self.assertFalse(self.verdict(comments=[summary], reviews=[finding]))
 
     def test_latest_same_sha_finding_revokes_clean_verdict(self):
         review = {"id": 13, "user": {"login": policy.CODEX}, "commit_id": HEAD,
@@ -208,6 +261,17 @@ class AutomaticStartTests(unittest.TestCase):
             start.assert_called_once()
             start.reset_mock()
             event["comment"]["user"]["login"] = "outside-commenter"
+            self.worker.handle(event, "issue_comment", REPO)
+            start.assert_not_called()
+
+    def test_structured_summary_edits_start_ci_only_when_completed_clean(self):
+        event = {"issue": {"number": 7, "pull_request": {"url": "PR"}},
+                 "comment": summary_comment()}
+        with patch.object(policy, "request", return_value=deepcopy(PR)), patch.object(self.worker, "start") as start:
+            self.worker.handle(event, "issue_comment", REPO)
+            start.assert_called_once_with(PR, REPO)
+            start.reset_mock()
+            event["comment"] = summary_comment(status="in_progress")
             self.worker.handle(event, "issue_comment", REPO)
             start.assert_not_called()
 

@@ -133,6 +133,52 @@ class CodexReviewPolicyTests(unittest.TestCase):
         self.assertEqual(writes, [(f'/repos/{REPO}/pulls/1/reviews', {
             'commit_id': HEAD, 'event': 'APPROVE', 'body': policy.stamp_body(verdict)})])
 
+    def test_structured_summary_stamps_only_clean_exact_head(self):
+        code = {'commit_sha': HEAD, 'status': 'completed',
+                'has_any_findings': False, 'has_unresolved_findings': False}
+        def verdict(review):
+            return {**VERDICT, 'body': policy.check_review.SUMMARY + '\n<!-- codex-review-state:v1 ' + json.dumps({'code_review': review}) + ' -->'}
+        good = verdict(code)
+        self.assertEqual(self.invoke(mode='stamp', comments=[good], reviews=[]),
+                         [(f'/repos/{REPO}/pulls/1/reviews', {
+                             'commit_id': HEAD, 'event': 'APPROVE', 'body': policy.stamp_body(good)})])
+        for changes in ({'commit_sha': 'b' * 40}, {'status': 'in_progress'},
+                        {'has_any_findings': True}, {'has_unresolved_findings': None}):
+            with self.subTest(changes=changes), self.assertRaisesRegex(RuntimeError, 'clean Codex verdict'):
+                self.invoke(mode='stamp', comments=[verdict({**code, **changes})], reviews=[])
+
+    def test_stamp_rejects_conflicting_verdicts_in_same_second(self):
+        finding = {'id': 1, 'user': {'login': policy.CODEX}, 'commit_id': HEAD,
+                   'state': 'COMMENTED', 'body': 'Found bug', 'submitted_at': VERDICT['updated_at']}
+        with self.assertRaisesRegex(RuntimeError, 'clean Codex verdict'):
+            self.invoke(mode='stamp', reviews=[finding])
+
+    def test_mutable_summary_url_can_stamp_new_heads_without_rebinding_old_stamp(self):
+        def verdict(head):
+            code = {'commit_sha': head, 'status': 'completed',
+                    'has_any_findings': False, 'has_unresolved_findings': False}
+            return {**VERDICT, 'body': policy.check_review.SUMMARY + '\n<!-- codex-review-state:v1 ' + json.dumps({'code_review': code}) + ' -->'}
+        old = verdict('b' * 40)
+        current = verdict(HEAD)
+        self.assertNotEqual(policy.stamp_body(old), policy.stamp_body(current))
+        old_stamp = {**STAMP, 'commit_id': 'b' * 40, 'body': policy.stamp_body(old)}
+        self.assertEqual(self.invoke(mode='stamp', comments=[current], reviews=[old_stamp]),
+                         [(f'/repos/{REPO}/pulls/1/reviews', {
+                             'commit_id': HEAD, 'event': 'APPROVE', 'body': policy.stamp_body(current)})])
+
+    def test_pending_summary_event_is_a_noop_without_api_writes(self):
+        code = {'commit_sha': HEAD, 'status': 'running',
+                'has_any_findings': None, 'has_unresolved_findings': None}
+        body = policy.check_review.SUMMARY + '\n<!-- codex-review-state:v1 ' + json.dumps({'code_review': code}) + ' -->'
+        event = {'issue': {'number': 1}, 'comment': {
+            'id': 12, 'user': {'login': policy.CODEX}, 'body': body}}
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / 'event.json'
+            path.write_text(json.dumps(event))
+            with patch.dict(os.environ, GITHUB_REPOSITORY=REPO, GITHUB_EVENT_PATH=str(path)), patch.object(policy, 'request') as api:
+                policy.run()
+                api.assert_not_called()
+
     def test_receipt_does_not_authorize_quoted_negative_or_unknown_prefix(self):
         for body in ('<!-- codex-review-receipt:v1 -->\n> ' + VERDICT['body'],
                      '<!-- codex-review-receipt:v1 -->\nFound issues\n' + VERDICT['body'],
@@ -174,6 +220,10 @@ class CodexReviewPolicyTests(unittest.TestCase):
         self.assertNotIn('pull_request.head', source)
         self.assertNotIn('secrets.', source)
         self.assertIn("github.event.comment.user.login == 'chatgpt-codex-connector[bot]'", source)
+        self.assertIn('<!-- codex-pull-request-review-summary -->', source)
+        starter = (ROOT / '.github/workflows/run-reviewed-ci.yml').read_text()
+        self.assertIn('<!-- codex-pull-request-review-summary -->', starter)
+        self.assertIn('ref: main', starter)
 
     def test_composite_falls_back_to_existing_admin_gate(self):
         source = (ROOT / '.github/actions/authorize-admin-or-codex-stamp/action.yml').read_text()

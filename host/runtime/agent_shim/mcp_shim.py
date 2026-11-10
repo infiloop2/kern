@@ -581,8 +581,8 @@ def _workspace_api_tool() -> dict[str, Any]:
             "standing agents and triggers, one-time reminders, spawned-agent discovery, and current thread identity. "
             "Routes, request shapes and limits are documented in the host instructions; use only those. "
             'Returns {"status": <HTTP status>, "body": <response JSON>} so you can read '
-            "validation errors and retry within this turn. Only the owning agent can modify an App or "
-            "standing-agent definition; ask its owner via send_agent_message for changes."
+            "validation errors and retry within this turn. Any agent may manage App/Standing agents’ settings, "
+            "schedules, stop and archive controls. App UI/data ownership remains with the App agent."
         ),
         "inputSchema": {
             "type": "object",
