@@ -578,7 +578,7 @@ def _workspace_api_tool() -> dict[str, Any]:
         "name": WORKSPACE_API_TOOL_NAME,
         "description": (
             "Call Kern's bounded agent-facing Workspace API for Web Apps, self-memory, private notes, global memory, "
-            "standing agents and triggers, one-time reminders, spawned-agent discovery, and current thread identity. "
+            "standing agents and triggers, one-time reminders, spawned-agent discovery, token usage, and current thread identity. "
             "Routes, request shapes and limits are documented in the host instructions; use only those. "
             'Returns {"status": <HTTP status>, "body": <response JSON>} so you can read '
             "validation errors and retry within this turn. Any agent may manage App/Standing agents’ settings, "

@@ -360,6 +360,25 @@ launcher. The identity route returns that thread id, while the self-memory
 alias selects only its corresponding page. Callers cannot supply or override
 the value. It does not authorize access to a Web App.
 
+## Token usage
+
+`GET /agent/usage` lets any agent read the measurements behind the operator's
+[Token analytics](../../api/AdminAPI.md#token-analytics): the same seven UTC
+days and the same four disjoint buckets, with no date parameters. It is
+read-only and derived from that report on each call.
+
+Without `thread_id` it returns `since`, `until`, `days`, `thread_count`,
+`turns`, `tokens`, and `threads`, one row per thread with usage in the window,
+heaviest first. `limit` (1–200, default 50) bounds the rows; `thread_count`,
+`turns`, and `tokens` cover every thread. Each row has `thread_id`, `name`, `kind`, `active`, the sorted `models`
+it ran on, `turns`, a `tokens` object, and `daily_tokens`, whose seven integers
+align with `days` and sum every known bucket. A `tokens` bucket is `null` when
+no turn in the window reported it; `daily_tokens` counts only known values.
+
+With `thread_id` it returns `since`, `until`, `days`, and that thread's
+Analytics `groups` unchanged, ordered by day and hour. A thread without usage
+returns an empty list. `limit` is rejected with `thread_id`.
+
 ## One-time reminders
 
 `GET|POST /agent/self/reminders` uses the authenticated thread identity.
