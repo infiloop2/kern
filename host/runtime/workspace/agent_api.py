@@ -26,7 +26,7 @@ from host.runtime.core.unix_socket_service import (
     UnixSocketServer,
     peer_uids,
 )
-from host.runtime.workspace import agent_notices, agent_messages, conversation_history, memory, private_notes, reminders, schedules
+from host.runtime.workspace import agent_notices, agent_messages, conversation_history, memory, private_notes, reminders, schedules, usage
 from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.web_apps import backend as web_apps
 
@@ -213,6 +213,8 @@ def _dispatch_call(
         response = memory.route_agent(method, parsed.path, body, query)
     elif parsed.path == "/agent/schedules" or parsed.path.startswith("/agent/schedules/"):
         response = schedules.route_agent(method, parsed.path, body, query)
+    elif parsed.path == "/agent/usage":
+        response = usage.route_agent(method, query)
     else:
         response = web_apps.route_agent(method, parsed.path, body, query, peer_thread_id=peer_thread_id)
     result = {"status": HTTPStatus.OK.value, "body": response}

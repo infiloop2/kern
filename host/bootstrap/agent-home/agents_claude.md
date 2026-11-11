@@ -147,6 +147,12 @@ There is no run/status or separate failure API.
 Use `script` for fully determined recurring work; use a model when judgement
 is required. Write and test the durable script under agent home first.
 
+### Token usage
+
+`GET /agent/usage` ranks threads by tokens over seven UTC days (`limit` 1–200,
+default 50); `?thread_id=ID` returns that thread's hourly rows. The four
+buckets are disjoint; null means unmeasured.
+
 ## Links
 
 Use Markdown HTTPS links in Chat and anchors in Apps. Safe-navigation providers

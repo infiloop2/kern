@@ -26,6 +26,63 @@ class UsageTests(unittest.TestCase):
             service.route("GET", "/v1/analytics", {}, None, principal=service.WorkspacePrincipal())
         self.assertEqual(error.exception.status.value, 403)
 
+    def test_agents_read_ranked_threads_and_one_threads_hourly_rows(self):
+        from host.runtime.workspace import agent_api
+        from host.runtime.workspace.host_api import WorkspaceError
+
+        def group(thread_id, day, hour, model, turns, *counts):
+            return {
+                "thread_id": thread_id, "name": thread_id.title(), "runtime": "codex", "model": model,
+                "day": day, "hour": hour, "turns": turns, "active": True, "kind": "schedules",
+                "tokens": dict(zip(token_usage.FIELDS, counts)),
+                "measured_turns": dict.fromkeys(token_usage.FIELDS, turns),
+            }
+        report = {
+            "since": "2026-09-06T00:00:00Z", "until": "2026-09-12T12:00:00Z",
+            "days": [f"2026-09-{day:02}" for day in range(6, 13)],
+            "groups": [
+                group("schedule-2", "2026-09-12", 9, "sol", 1, 5, None, 0, 5),
+                group("schedule-1", "2026-09-12", 8, "sol", 2, 10, 60, 0, 20),
+                group("schedule-1", "2026-09-06", 8, "astra", 1, 1, None, 0, 9),
+                group("schedule-3", "2026-09-07", 0, "sol", 1, None, None, None, None),
+            ],
+        }
+
+        def get(path):
+            return agent_api.dispatch_call("GET", path, None, peer_thread_id="schedule-9")["body"]
+
+        with patch.object(state, "usage_report", return_value=report):
+            ranked = get("/agent/usage")
+            self.assertEqual(ranked["days"], report["days"])
+            self.assertEqual((ranked["thread_count"], ranked["turns"]), (3, 5))
+            self.assertEqual(ranked["tokens"], dict(zip(token_usage.FIELDS, [16, 60, 0, 34])))
+            self.assertEqual([row["thread_id"] for row in ranked["threads"]], ["schedule-1", "schedule-2", "schedule-3"])
+            self.assertEqual(ranked["threads"][0], {
+                "thread_id": "schedule-1", "name": "Schedule-1", "kind": "schedules", "active": True,
+                "models": ["astra", "sol"], "turns": 3,
+                "tokens": dict(zip(token_usage.FIELDS, [11, 60, 0, 29])),
+                "daily_tokens": [10, 0, 0, 0, 0, 0, 90],
+            })
+            # A bucket no turn reported stays unknown instead of becoming zero.
+            self.assertIsNone(ranked["threads"][1]["tokens"]["cached_input_tokens"])
+            self.assertEqual(ranked["threads"][2]["tokens"], dict.fromkeys(token_usage.FIELDS))
+            limited = get("/agent/usage?limit=1")
+            self.assertEqual((limited["thread_count"], len(limited["threads"])), (3, 1))
+            self.assertEqual(limited["tokens"], ranked["tokens"])
+            detail = get("/agent/usage?thread_id=schedule-1")
+            self.assertEqual([(row["day"], row["model"]) for row in detail["groups"]],
+                             [("2026-09-06", "astra"), ("2026-09-12", "sol")])
+            self.assertNotIn("threads", detail)
+            self.assertEqual(get("/agent/usage?thread_id=missing")["groups"], [])
+            for method, path in [
+                ("GET", "/agent/usage?limit=0"), ("GET", "/agent/usage?limit=201"),
+                ("GET", "/agent/usage?since=2020"), ("GET", "/agent/usage?thread_id=schedule-1&limit=5"),
+                ("POST", "/agent/usage"),
+            ]:
+                with self.subTest(method=method, path=path), self.assertRaises(WorkspaceError) as error:
+                    agent_api.dispatch_call(method, path, None, peer_thread_id="schedule-9")
+                self.assertEqual(error.exception.status.value, 400)
+
     def test_normalizes_disjoint_buckets_without_adding_reasoning_twice(self):
         for provider, raw in [
             ('codex', dict(inputTokens=100, cachedInputTokens=60, cacheWriteInputTokens=10, outputTokens=20, reasoningOutputTokens=8)),
