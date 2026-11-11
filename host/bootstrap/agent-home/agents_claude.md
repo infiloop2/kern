@@ -150,8 +150,8 @@ is required. Write and test the durable script under agent home first.
 ### Token usage
 
 `GET /agent/usage` ranks threads by tokens over seven UTC days (`limit` 1–200,
-default 50); `?thread_id=ID` returns that thread's hourly rows. The four
-buckets are disjoint; null means unmeasured.
+default 50); `?thread_id=ID` returns that thread's hourly rows, or one `day`
+with `&day=YYYY-MM-DD`. The four buckets are disjoint; null means unmeasured.
 
 ## Links
 

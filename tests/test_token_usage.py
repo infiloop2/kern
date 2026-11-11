@@ -73,10 +73,15 @@ class UsageTests(unittest.TestCase):
             self.assertEqual([(row["day"], row["model"]) for row in detail["groups"]],
                              [("2026-09-06", "astra"), ("2026-09-12", "sol")])
             self.assertNotIn("threads", detail)
+            one_day = get("/agent/usage?thread_id=schedule-1&day=2026-09-12")
+            self.assertEqual([(row["day"], row["model"]) for row in one_day["groups"]], [("2026-09-12", "sol")])
+            self.assertEqual(one_day["days"], report["days"])
+            self.assertEqual(get("/agent/usage?thread_id=schedule-1&day=2026-09-08")["groups"], [])
             self.assertEqual(get("/agent/usage?thread_id=missing")["groups"], [])
             for method, path in [
                 ("GET", "/agent/usage?limit=0"), ("GET", "/agent/usage?limit=201"),
                 ("GET", "/agent/usage?since=2020"), ("GET", "/agent/usage?thread_id=schedule-1&limit=5"),
+                ("GET", "/agent/usage?day=2026-09-12"), ("GET", "/agent/usage?thread_id=schedule-1&day=2026-09-13"),
                 ("POST", "/agent/usage"),
             ]:
                 with self.subTest(method=method, path=path), self.assertRaises(WorkspaceError) as error:

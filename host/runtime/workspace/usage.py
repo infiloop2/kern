@@ -2,7 +2,8 @@
 
 The default view ranks threads over the same seven UTC days so an agent can
 find heavy spenders without loading every hourly row; `thread_id` returns one
-thread's hourly rows unchanged. Counts are best-effort measurements.
+thread's hourly rows unchanged, optionally for one `day`. Counts are
+best-effort measurements.
 """
 
 from __future__ import annotations
@@ -22,19 +23,26 @@ MAX_LIMIT = 200
 def route_agent(method: str, query: dict[str, list[str]]) -> dict[str, Any]:
     if method != "GET":
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "agent usage accepts only GET")
-    extra = sorted(set(query) - {"limit", "thread_id"})
+    extra = sorted(set(query) - {"limit", "thread_id", "day"})
     if extra:
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, f"unexpected usage query field: {extra[0]}")
     thread_id = one(query, "thread_id")
     raw_limit = one(query, "limit")
+    day = one(query, "day")
     if thread_id is not None and raw_limit is not None:
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, "limit applies only without thread_id")
+    if thread_id is None and day is not None:
+        raise WorkspaceError(HTTPStatus.BAD_REQUEST, "day applies only with thread_id")
     if raw_limit is not None and (not raw_limit.isdigit() or not 1 <= int(raw_limit) <= MAX_LIMIT):
         raise WorkspaceError(HTTPStatus.BAD_REQUEST, f"limit must be between 1 and {MAX_LIMIT}")
     report = state.usage_report()
     window = {key: report[key] for key in ("since", "until", "days")}
     if thread_id is not None:
-        groups = [group for group in report["groups"] if group["thread_id"] == thread_id]
+        # A busy thread's week is hundreds of hourly rows; one day is at most 24 per model.
+        if day is not None and day not in report["days"]:
+            raise WorkspaceError(HTTPStatus.BAD_REQUEST, "day must be one of the report's days")
+        groups = [group for group in report["groups"]
+                  if group["thread_id"] == thread_id and day in (None, group["day"])]
         groups.sort(key=lambda group: (group["day"], group["hour"], group["runtime"], group["model"]))
         return {**window, "groups": groups}
     threads = _threads(report)
