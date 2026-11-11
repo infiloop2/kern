@@ -1589,7 +1589,7 @@ def desktop_smoke(page: Any) -> None:
     # inheriting whatever the previously opened app was set to.
     frame.locator("#settings-open").click()
     frame.locator("#runtime").select_option("claude_code")
-    frame.locator("#model").select_option("claude-fable-5-1")
+    frame.locator("#model").select_option("claude-fable-5-2")
     frame.locator("#effort").select_option("ultracode")
     # _start_host_app waits for the new app to be selected, which is what
     # closes the popover left open above. Toggling before that lands would

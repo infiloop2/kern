@@ -1371,7 +1371,7 @@ class OrchestratorTests(unittest.TestCase):
                 {
                     "message": "hi",
                     "agent_runtime": "claude_code",
-                    "model": "claude-fable-5-1",
+                    "model": "claude-fable-5-2",
                     "effort": "ultracode",
                 },
                 None,
@@ -1382,7 +1382,7 @@ class OrchestratorTests(unittest.TestCase):
             self.wait_until_idle("thread-chat")
 
         self.assertEqual(seen, [None, "claude-session-1"])
-        self.assertEqual(seen_config, [("claude-fable-5-1", "ultracode")] * 2)
+        self.assertEqual(seen_config, [("claude-fable-5-2", "ultracode")] * 2)
         self.assertEqual(state.thread_session_config("thread-chat")["provider_session_id"], "claude-session-1")
 
     def test_grok_runtime_records_and_resumes_its_acp_session(self) -> None:

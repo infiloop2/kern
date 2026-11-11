@@ -2442,7 +2442,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
         seed_thread_session(
             "thread-claude-options",
             "claude_code",
-            model="claude-fable-5-1",
+            model="claude-fable-5-2",
             effort="ultracode",
         )
         with patch.object(
@@ -2469,14 +2469,14 @@ class AdminApiIntegrationTests(AdminApiTestCase):
                 {
                     "message": "claude turn",
                     "agent_runtime": "claude_code",
-                    "model": "claude-fable-5-1",
+                    "model": "claude-fable-5-2",
                     "effort": "ultracode",
                 },
             )
             self.assertEqual(status, 200)
             self.assertEqual(
                 (claude["thread"]["model"], claude["thread"]["effort"]),
-                ("claude-fable-5-1", "ultracode"),
+                ("claude-fable-5-2", "ultracode"),
             )
 
         invalid = [
@@ -3019,11 +3019,16 @@ class AdminApiIntegrationTests(AdminApiTestCase):
                     self.assertEqual(switched["thread"]["agent_runtime"], runtime)
                     self.assertEqual(switched["thread"]["model"], new_model)
 
-    def test_thread_on_superseded_fable_5_can_switch_to_an_offered_model(self) -> None:
+    def test_thread_on_superseded_fable_5_1_can_switch_to_an_offered_model(self) -> None:
+        save_policy(
+            {"network_integrations": {"claude": {"enabled": True}}},
+            "2026-06-08T00:00:00Z",
+        )
+        set_runtime_statuses(claude_code="active")
         seed_thread_session(
             "thread-fable-5-thread",
             "claude_code",
-            model="claude-fable-5",
+            model="claude-fable-5-1",
             effort="high",
             last_used_at="2026-06-08T00:00:01Z",
         )
@@ -3032,7 +3037,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
             {},
             {
                 "agent_runtime": "claude_code",
-                "model": "claude-fable-5",
+                "model": "claude-fable-5-1",
                 "effort": "high",
             },
         ):
@@ -3051,20 +3056,20 @@ class AdminApiIntegrationTests(AdminApiTestCase):
                 "/v1/threads/thread-fable-5-thread/messages",
                 {
                     "message": "continue on a current model",
-                    "agent_runtime": "codex",
-                    "model": "gpt-6-astra",
+                    "agent_runtime": "claude_code",
+                    "model": "claude-fable-5-2",
                     "effort": "high",
                 },
             )
-        self.assertEqual(switched["thread"]["agent_runtime"], "codex")
-        self.assertEqual(switched["thread"]["model"], "gpt-6-astra")
+        self.assertEqual(switched["thread"]["agent_runtime"], "claude_code")
+        self.assertEqual(switched["thread"]["model"], "claude-fable-5-2")
 
         # The same thread stays in the listing on its replacement
         # configuration, and a superseded model is still refused for new
         # threads.
         _, threads = self.request("GET", "/v1/threads")
         listed = {thread["thread_id"]: thread for thread in threads["threads"]}
-        self.assertEqual(listed["thread-fable-5-thread"]["model"], "gpt-6-astra")
+        self.assertEqual(listed["thread-fable-5-thread"]["model"], "claude-fable-5-2")
         self.assertEqual(listed["thread-fable-5-thread"]["status"], "running")
 
         with self.assertRaises(admin_api.ApiError) as new_thread_error:
@@ -3075,7 +3080,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
                     "operator_sent_message": True,
                     "message": "new thread",
                     "agent_runtime": "claude_code",
-                    "model": "claude-fable-5",
+                    "model": "claude-fable-5-1",
                     "effort": "high",
                 },
             )

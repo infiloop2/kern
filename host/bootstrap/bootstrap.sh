@@ -11,7 +11,7 @@ NODE_VERSION=22.23.4
 NODE_TARBALL_SHA256_X64=1805bcd35e6815559bd2eb97db438d3fdb0eb3a5e6a977b7c1badca76337e9ce
 NODE_TARBALL_SHA256_ARM64=6287aa46b6c375d816e63ae66d024fbbfd70404825aabdfdf898a970871d2f4b
 CODEX_CLI_VERSION=0.164.0
-CLAUDE_CODE_VERSION=2.1.310
+CLAUDE_CODE_VERSION=2.1.322
 # Grok Build, xAI's coding agent. The npm package is a JS trampoline plus a
 # per-platform optional dependency carrying a brotli-compressed binary; see
 # docs/architecture/xai-integration.md for the upgrade review checklist.
