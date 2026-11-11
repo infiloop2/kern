@@ -377,7 +377,9 @@ no turn in the window reported it; `daily_tokens` counts only known values.
 
 With `thread_id` it returns `since`, `until`, `days`, and that thread's
 Analytics `groups` unchanged, ordered by day and hour. A thread without usage
-returns an empty list. `limit` is rejected with `thread_id`.
+returns an empty list. `day=YYYY-MM-DD` narrows the rows to one of the listed
+`days`, which keeps a busy thread's response small; another date is rejected,
+as is `day` without `thread_id`. `limit` is rejected with `thread_id`.
 
 ## One-time reminders
 
