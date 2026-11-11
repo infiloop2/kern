@@ -202,6 +202,16 @@ class UsageStorageTests(unittest.TestCase):
             'chats': True, 'apps': True, 'schedules': False,
         })
 
+    def test_workspace_role_can_read_the_report_tables(self):
+        # The agent route runs as kern-workspace; this harness connects as postgres.
+        checks = [("turn_usage", "SELECT", True), ("turn_usage", "INSERT", False),
+                  ("web_apps", "SELECT", True), ("schedules", "SELECT", True), ("chat_threads", "SELECT", True)]
+        with db.transaction() as cur:
+            cur.execute("SELECT " + ", ".join(
+                f"has_table_privilege('kern-workspace', 'public.{table}', '{privilege}')"
+                for table, privilege, _ in checks))
+            self.assertEqual(cur.fetchone(), tuple(expected for _, _, expected in checks))
+
     def test_unnamed_chat_is_not_labeled_deleted(self):
         with state.mutation() as cur:
             cur.execute("INSERT INTO chat_threads (thread_id) VALUES ('thread-1')")
