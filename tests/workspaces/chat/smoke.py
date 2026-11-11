@@ -321,11 +321,11 @@ def desktop_smoke(page: Any) -> None:
     expect(
         frame.locator("#new-task-runtime option[value='codex']")
     ).to_have_text("Codex")
-    fable = frame.locator("#new-task-model option[value='claude-fable-5-1']")
-    expect(fable).to_have_text("Fable 5.1")
+    fable = frame.locator("#new-task-model option[value='claude-fable-5-2']")
+    expect(fable).to_have_text("Fable 5.2")
     expect(frame.locator("#new-task-model option[value='claude-opus-5-5']")).to_have_text("Opus 5.5")
     expect(frame.locator("#new-task-model option[value='claude-opus-5']")).to_have_count(0)
-    frame.locator("#new-task-model").select_option("claude-fable-5-1")
+    frame.locator("#new-task-model").select_option("claude-fable-5-2")
     expect(frame.locator("#session-change-warning")).to_be_visible()
     expect(frame.locator("#session-change-warning")).to_contain_text(
         "provider cache reads will be invalidated"

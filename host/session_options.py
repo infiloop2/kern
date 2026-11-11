@@ -91,7 +91,7 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
     # run no further tasks; their rows are preserved, not migrated.
     "claude_code": {
         "claude-opus-5-5": ("high", "max", "ultracode"),
-        "claude-fable-5-1": ("high", "max", "ultracode"),
+        "claude-fable-5-2": ("high", "max", "ultracode"),
         "claude-sonnet-5-5": ("high", "max", "ultracode"),
     },
     # Grok Build's subscription runtime exposes one pinned model in the

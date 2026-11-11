@@ -366,6 +366,49 @@ class MigrateRunnerTests(unittest.TestCase):
         restored_old = schedules.restore_revision(2, 1, {"expected_revision": 2})
         self.assertEqual(restored_old["triggers"], [{"type": "daily", "times": ["07:15"], "prompt": "Earlier prompt"}])
 
+    def test_fable_5_2_migration_preserves_history(self) -> None:
+        migrate.up(target=98, quiet=True)
+        with db.transaction() as cur:
+            cur.execute(
+                "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort, provider_session_id)"
+                " VALUES ('claude_code', 'thread-old-fable', 'claude-fable-5-1', 'high', 'old-provider')"
+            )
+            cur.execute(
+                "INSERT INTO web_apps (app_id, name, revision, agent_runtime, agent_model,"
+                " agent_effort, created_at, updated_at)"
+                " VALUES ('app-99', 'Fable app', 0, 'claude_code', 'claude-fable-5-1', 'high', 'now', 'now')"
+            )
+            cur.execute(
+                "INSERT INTO schedules (id, thread_id, name, triggers,"
+                " agent_runtime, model, effort, next_run_at, created_at, updated_at)"
+                " VALUES (99, 'schedule-99', 'Fable job', '[]'::jsonb,"
+                " 'claude_code', 'claude-fable-5-1', 'max', 'now', 'now', 'now')"
+            )
+        with self.assertRaises(Exception):
+            with db.transaction() as cur:
+                cur.execute(
+                    "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort)"
+                    " VALUES ('claude_code', 'thread-new-fable', 'claude-fable-5-2', 'high')"
+                )
+
+        self.assertEqual(migrate.up(target=99, quiet=True), [99])
+        with db.transaction() as cur:
+            cur.execute("SELECT agent_model, agent_effort FROM web_apps WHERE app_id = 'app-99'")
+            self.assertEqual(cur.fetchone(), ("claude-fable-5-2", "high"))
+            cur.execute("SELECT model, effort, triggers FROM schedules WHERE id = 99")
+            self.assertEqual(cur.fetchone(), ("claude-fable-5-2", "max", []))
+            cur.execute(
+                "SELECT model, provider_session_id FROM thread_sessions"
+                " WHERE thread_id = 'thread-old-fable'"
+            )
+            self.assertEqual(cur.fetchone(), ("claude-fable-5-1", "old-provider"))
+            for effort in ("high", "max", "ultracode"):
+                cur.execute(
+                    "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort)"
+                    " VALUES ('claude_code', %s, 'claude-fable-5-2', %s)",
+                    (f"thread-new-fable-{effort}", effort),
+                )
+
     def test_sonnet_5_5_migration_preserves_history(self) -> None:
         migrate.up(target=75, quiet=True)
         with db.transaction() as cur:
