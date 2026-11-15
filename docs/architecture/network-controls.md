@@ -1,5 +1,11 @@
 # Network Controls
 
+How the host enforces network policy: the firewall, the policy proxy, and the
+integration guards. The policy fields an operator or API client sets are in
+the [network policy reference](../api/NetworkControls.md).
+
+## Enforcement layers
+
 Defense in depth, fail closed at each layer:
 
 1. **nftables**: inbound is dropped except loopback, established traffic, and
@@ -7,7 +13,8 @@ Defense in depth, fail closed at each layer:
    everyone except root, `kern-proxy`, `kern-tools`, `kern-host-inference` (DNS and
    HTTPS only, for bundled tools and host-owned AI providers — see
    [tools host integration](tools/host-integration.md); `kern-admin` has
-   no egress at all), optional `cloudflared`, `systemd-resolved`, and
+   no egress at all), `kern-browser` (DNS and public TCP 443/7000 for connected browsers),
+   optional `cloudflared`, `systemd-resolved`, and
    `systemd-timesyncd`, with narrow
    loopback exceptions: the agent may reach the proxy port and the agent
    preview port range (`8000-8015`, its own HTTP servers — see
@@ -24,7 +31,7 @@ Defense in depth, fail closed at each layer:
    preview server or answer a connection the agent opened.
    Non-root DNS is blocked even toward the local `systemd-resolved` stub (DNS
    lookups are an exfiltration channel); only `systemd-resolved`, the proxy,
-   tools service, host-inference service, and optional `cloudflared` may query upstream DNS. If the
+   tools service, host-inference service, browser service, and optional `cloudflared` may query upstream DNS. If the
    proxy is down, the agent simply has no connectivity.
 2. **Proxy environment**: agent processes run with `HTTP_PROXY`/`HTTPS_PROXY`/
    `ALL_PROXY` pointing at the local proxy and trust its CA via the system
@@ -35,6 +42,8 @@ Defense in depth, fail closed at each layer:
    any upstream DNS resolution or connection happens, so a denied host name is
    never even resolved (host names are otherwise an exfiltration channel).
 
+## Where the policy lives
+
 Deployment config does not include runtime network controls. The active
 policy lives in the normalized network policy tables; a missing policy (fresh
 deploy) is the fail-closed empty default, and a preserved database keeps its
@@ -43,6 +52,8 @@ website/domain rules through the admin UI/API. See
 [`../api/NetworkControls.md`](../api/NetworkControls.md) for the runtime policy
 schema, the managed integration model, and the GitHub repo-scope decision
 tables.
+
+## Per-request proxy checks
 
 The proxy enforces, per request:
 
@@ -104,6 +115,8 @@ The proxy enforces, per request:
   gzip). Publishing and other POST routes remain denied. The complete contract
   is in [NetworkControls](../api/NetworkControls.md#npm-packages-integration).
 
+## Upstream connections, TLS inspection and capacity
+
 The proxy refuses to connect upstream to any address that is not publicly routable
 (loopback, link-local, or private ranges), so an allowed domain pointed at an
 internal address — by misconfiguration or DNS rebinding — cannot reach host-local
@@ -151,8 +164,10 @@ A request that repeats a single-valued header
 forwarded, so two instances would let the upstream act on a meaning the guards
 never saw.
 
+## Host firewall and loopback rules
+
 The host firewall accepts outbound traffic from root, the dedicated
-`kern-proxy`, `kern-tools`, and `kern-host-inference` uids, and optional `cloudflared`
+`kern-proxy`, `kern-tools`, `kern-browser`, and `kern-host-inference` uids, and optional `cloudflared`
 uid. Root egress covers bootstrap/package installation, security updates, and
 ordinary root-owned system traffic. The host does not install or configure the
 AWS SSM agent, and
@@ -160,7 +175,8 @@ snapd is explicitly stopped and masked during bootstrap. Proxy egress is limited
 to DNS and TCP 80/443, and only after a request has passed policy. Tools-service
 egress is limited to DNS and TCP 443 for the bundled packages' third-party
 calls. Host-inference egress is limited to DNS and TCP 443 for its fixed
-provider adapters. Cloudflare Tunnel egress is limited to DNS, TCP 443, and TCP/UDP 7844,
+provider adapters. Browser egress permits DNS and public TCP 443/7000;
+private-address destinations are blocked. Cloudflare Tunnel egress is limited to DNS, TCP 443, and TCP/UDP 7844,
 and the EC2 security group keeps TCP/UDP 7844 open only when a
 `cloudflare_tunnel` operator endpoint
 is configured. That 7844 allowance is outbound-only and paired with nftables uid
@@ -179,6 +195,8 @@ listener: `kern-admin` reaches its browser Unix socket through filesystem and
 peer-uid checks. `kern-workspace` may not initiate TCP connections to the proxy,
 browser-facing admin API, or other local listeners. The agent — a non-root user
 with no sudo — only inherits root's blanket path by first escalating to root.
+
+## Decision log and policy replacement
 
 Decisions are logged to the `network_events` database table, which the proxy
 writes under its own narrow database role. A denied `CONNECT` (no inner
@@ -476,7 +494,7 @@ new egress. No inbound rule is added. Deployment verification probes TCP 7000
 from the agent, tools, policy proxy, host-inference and Cloudflare users and
 requires them to remain blocked.
 
-This rule is installed by the lifecycle CLI when it creates or reapplies the
-security group, including on upgrade. An existing deployment must run the CLI
-from a checkout containing this fix; selecting a newer host payload with an
-older CLI does not update the CLI's security-group rules.
+The lifecycle CLI, not the host payload, owns security-group rules: it writes
+this rule whenever it creates or reapplies the group, including on upgrade.
+Selecting a newer host payload with an older CLI checkout therefore does not
+add it.

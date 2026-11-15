@@ -1,11 +1,15 @@
 # Services and Runtimes
 
+This page lists Kern's systemd units and the user each runs as, then the
+processes and threads inside them and what happens on reboot or restart.
+
 | systemd unit | User | Purpose |
 | --- | --- | --- |
 | `kern-network-proxy.service` | `kern-proxy` | Policy proxy on `127.0.0.1:7445`. |
 | `kern-postgres.service` | `postgres` | Admin-state PostgreSQL, Unix socket only (no TCP listener). |
 | `kern-admin-api.service` | `kern-admin` | Admin API on `127.0.0.1:7443`. Owns admin state; holds no internet egress. |
 | `kern-tools.service` | `kern-tools` | Runs the bundled tool packages and owns the agent-facing tools socket `/run/kern-tools/tools.sock` (peer-credential authenticated). Has DNS+HTTPS egress; its Postgres role is scoped to tool state plus the encryption key needed for tool secrets. |
+| `kern-browser.service` | `kern-browser` | Connected Chromium sessions behind `/run/kern-browser/browser.sock`; admin/tools peers only. Scoped browser-state database grants and DNS/public TCP 443/7000 egress. |
 | `kern-host-inference.service` | `kern-host-inference` | Runs the bounded OpenAI and TypeSafe Jev adapters behind `/run/kern-host-inference/host-inference.sock`. Admin, Workspace, and tools may use its fixed provider routes. It has direct DNS+HTTPS egress and alone reads Host AI provider credentials plus their encryption key. |
 | `kern-agent-network.service` | `kern-agent-network` | Serves read-only network integration and denial introspection on `/run/kern-agent-network/agent-network.sock`. No egress; its Postgres role has SELECT-only policy and network-event grants. |
 | `kern-host-errors.service` | `kern-admin` | Follows structured error and warning records from journald and copies them best-effort into the bounded Postgres host-diagnostics log. |
@@ -27,6 +31,7 @@
 | `kern-postgres.service` | `postgres` | systemd | Stores admin state; local Unix-socket connections only. |
 | `kern-admin-api.service` | `kern-admin` | systemd | Serves localhost API/UI, owns thread state, and supervises runtime work. |
 | `kern-tools.service` | `kern-tools` | systemd | Executes bundled tool calls and operator-delegated OAuth/approval work; owns the peer-authenticated tools socket. |
+| `kern-browser.service` | `kern-browser` | systemd | Manages connected browser accounts, isolated Chromium contexts and bounded admin/tool browser operations. |
 | `kern-host-inference.service` | `kern-host-inference` | systemd | Executes concrete host-owned OpenAI and TypeSafe Jev calls for peer-authenticated host callers; there is no agent-facing API. |
 | `kern-agent-network.service` | `kern-agent-network` | systemd | Serves the peer-authenticated network-introspection socket from SELECT-only policy and event state, without egress. |
 | `kern-host-errors.service` | `kern-admin` | systemd | Validates tagged records from trusted Kern systemd units and stores/coalesces them for the read-only Host diagnostics panel. |
@@ -160,7 +165,7 @@ only a `schedule-*` thread can run it however the request arrives.
 ## Reboot and restart
 
 The admin API, proxy, tools, network-introspection, host-diagnostics collector,
-host-inference, transcription, Postgres, Workspace service, embedding socket,
+host-inference, browser, transcription, Postgres, Workspace service, embedding socket,
 nftables, and optional Cloudflare Tunnel service are `systemctl enable`d, so
 they resume on every boot. Postgres starts before the proxy, tools, and
 network-introspection services; those services start before the admin API; the

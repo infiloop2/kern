@@ -13,6 +13,8 @@ Retention deletes make space reusable inside PostgreSQL. Normal autovacuum
 cleans dead tuples; maintenance does not run blocking table rewrites merely to
 make the database files immediately smaller.
 
+## Table inventory
+
 The categories are:
 
 - **fixed**: keys come from a finite product/configuration catalog.
@@ -93,6 +95,8 @@ The categories are:
 | `tool_action_runs` | fixed | One counter per limited tool action; resets on the first run of a new UTC day. |
 | `agent_reminders` | retention | Daily cleanup keeps newest 1,000,000 finished reminders globally; pending reminders are excluded, with five pending allowed per agent. Permanent schedule deletion removes its reminders. |
 
+## Database storage view
+
 **Home → Activity and diagnostics → Database storage** shows allocated database
 and table sizes, estimated row counts, and plain-language retention descriptions.
 It reads PostgreSQL catalogs only when opened or refreshed, not on a background
@@ -101,9 +105,13 @@ approximate: the three audit logs use sequence windows, so sequence gaps can
 cause deletion below the row target. This view cannot establish past data loss.
 See the [API contract](../api/AdminAPI.md#database-storage).
 
+## Keeping this inventory current
+
 When adding or renaming a table or changing retention, update this inventory and
 `host/runtime/admin_api/database_storage.py` in the same change. A PostgreSQL
 integration test checks that all migrated tables have a description.
+
+## Event detail expiry
 
 Admin startup/hourly maintenance clears old event details in transactions of
 at most 1,000 rows, releasing the mutation lock between batches. A pass stops
@@ -122,6 +130,8 @@ activity titles/status, notice kind/summary, timestamps and other metadata stay.
 App records and saved memories are separate and unaffected. The partial expiry
 index drops cleared rows, so later passes do not rescan compacted history.
 
+## Provider file cleanup
+
 Provider-file cleanup is separate from PostgreSQL history retention. The admin
 maintenance loop sweeps Codex sessions at startup and daily. Existing workspace
 records determine archived eligibility: seven days from `chat_threads.archived_at`
@@ -134,6 +144,8 @@ next message after restoration uses the normal history handoff. See
 The same maintenance compares native root session IDs with current/live Kern
 references and deletes old unreferenced Kern provider logs. Kern never edits
 the provider's SQLite databases.
+
+## Token usage retention
 
 `turn_usage` retains 90 days by last measurement time, pruned by the ordinary
 admin retention loop. The Analytics page queries only seven UTC calendar days.

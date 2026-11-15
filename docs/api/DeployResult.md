@@ -21,6 +21,7 @@ return this shape:
   "admin_volume_id": "vol-0123456789abcdef0",
   "agent_volume_id": "vol-0fedcba9876543210",
   "version": "x.y.z",
+  "github_source": "infiloop2/kern@0123456789abcdef0123456789abcdef01234567",
   "operator_connections": [
     {"mode": "ssh"},
     {"mode": "cloudflare_tunnel", "hostname": "kern.example.com"}
@@ -36,6 +37,7 @@ return this shape:
 | `admin_ui_local_url` | Always | Local URL after forwarding the admin port: `http://127.0.0.1:7443`. |
 | `admin_volume_id`, `agent_volume_id` | Always | Durable EBS volume ids attached to the host. |
 | `version` | Always | Target `VERSION` installed by this provisioning command. |
+| `github_source` | With `--bootstrap-from-github` | `infiloop2/kern@<commit>`: the pinned commit the instance provisions from. |
 | `operator_connections` | `deploy`, `reconfigure` | Public summary of the replacement endpoint list. Tunnel tokens and SSH key material are omitted. Upgrade/recover preserve the stored list and omit this field. |
 
 With `--provider lima`, the provisioning result is provider-neutral instead of
@@ -59,7 +61,9 @@ carrying EC2 fields:
 `host.id` is the Lima instance name, `storage.*.id` are the durable Lima disk
 names, and `ssh` is the loopback management endpoint (Lima allocates the
 port). Lima power results use the same shape plus `operation` and
-`initial_state`, and omit `version` exactly as AWS power results do.
+`initial_state`, and omit `version` exactly as AWS power results do. After
+`stop`, `host.state` is `stopped` and `ssh.port` is `null` because nothing is
+listening.
 
 No result carries the admin password. Deploy and reconfigure accept only
 `--admin-password-sha256` (the SHA-256 hex digest of the operator's chosen
@@ -75,6 +79,7 @@ existing instance's power transition:
 ```json
 {
   "agent_name": "kern-dev-agent",
+  "provider": "aws",
   "instance_id": "i-0123456789abcdef0",
   "region": "us-east-1",
   "operation": "start",
@@ -91,7 +96,7 @@ existing instance's power transition:
 
 | Field | Presence | Behavior |
 | --- | --- | --- |
-| `agent_name`, `instance_id`, `region` | Always | Input host name and existing EC2 instance identity. |
+| `agent_name`, `provider`, `instance_id`, `region` | Always | Input host name, the infrastructure provider, and existing EC2 instance identity. |
 | `operation` | Always | `start` or `stop`. |
 | `initial_state`, `state` | Always | EC2 state before the command and after the requested transition. |
 | `public_dns`, `public_ip` | When AWS reports a non-empty value | Current public address metadata. A stopped instance may omit either field. |

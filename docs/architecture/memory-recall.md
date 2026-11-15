@@ -1,5 +1,10 @@
 # Memory recall
 
+Memory recall is how the host picks which memory pages to give an agent when
+a turn starts and while it runs. This page covers the query built from recent
+conversation, when a repeated page is skipped, mid-turn suggestions, retrieval
+and ranking, and diagnostics.
+
 ## Shared conversation context
 
 Turn-start recall and mid-turn reevaluation use the same deterministic context
@@ -18,10 +23,11 @@ with its authenticated notice metadata before building the query; mid-turn check
 read it from retained events. No full transcript, tool activity or model-generated
 summary is needed.
 
-Only three `thread.notice` kinds contribute:
+Only four `thread.notice` kinds contribute:
 
 - `agent_message`: message text without its routing preamble, labeled `Peer`.
-- `scheduled_trigger`: message text without its preamble, labeled `Scheduled request`.
+- `scheduled_trigger` and `reminder`: message text without its preamble, labeled
+  `Scheduled request`.
 - `approval_outcome`: only the short action/outcome summary, labeled `Approval outcome`.
 
 These share the supporting bucket with `Assistant` messages. All notice details,

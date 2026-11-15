@@ -1,10 +1,15 @@
 # Users and Privilege Boundaries
 
+Each Kern service runs as its own Linux user. This page lists every user and
+what it may do, then the fixed helpers, sockets, and database roles that are
+the only ways to cross between them.
+
 | User | Purpose | Privileges |
 | --- | --- | --- |
 | `kern-operator` | Human SSH login. | Full passwordless sudo, and therefore intentionally equivalent to root once logged in. |
 | `kern-admin` | Runs the admin API; owns admin state (the `kern_admin` database role, full access). | sudo only for the fixed root helpers listed below. No internet egress at all. |
 | `kern-tools` | Runs the bundled tool packages in the dedicated tools service; owns the agent-facing tools socket. | No sudo. Postgres role scoped to explicit tool-state tables plus read access to `secret_keys`. DNS and outbound HTTPS (443) for tool third-party APIs; explicitly blocked from the loopback admin listener. |
+| `kern-browser` | Runs connected browser sessions. | No sudo. Browser-state DML and secret-key read grants; peer-authenticated admin/tools socket. DNS and public TCP 443/7000 egress, with private-address destinations blocked. |
 | `kern-agent-network` | Runs the network-introspection service and owns its agent-facing socket. | No sudo, secrets, or egress. Postgres role has SELECT-only access to network policy and decision-log tables. |
 | `kern-proxy` | Runs the policy proxy; owns proxy TLS and Git quarantine files. | No sudo. A narrow Postgres role reads enforcement inputs and the working token/key, inserts network and pending-push records, and prunes network events. Only nftables-approved DNS and TCP 80/443 egress; explicitly blocked from the loopback admin listener. |
 | `kern-agent` | Runs Codex, Claude Code, Grok, and Hermes runtime processes. | None. No sudo, no database role, no direct network off the host. Its only loopback egress is the policy-proxy port and its own preview range `8000-8015` (its own HTTP servers). That range is default-deny — only the agent and the operator's SSH forward are allowed, both directions dropped for everyone else — so no other principal reaches a preview server or answers a connection the agent opened. See [agent-preview-ports.md](agent-preview-ports.md). |
@@ -15,6 +20,8 @@
 | `cloudflared` | Runs the optional Cloudflare Tunnel connector. | No sudo, no database role. Only nftables-approved DNS, TCP 443, and TCP/UDP 7844 egress; one of the four trusted uids allowed to connect to the loopback admin listener. |
 | `postgres` | Runs the admin-state Postgres. | Database superuser over the local socket; no sudo, no network egress. |
 
+## Fixed user and group IDs
+
 The service accounts use fixed numeric IDs: `kern-admin` is
 `47741`, `kern-proxy` is `47742`, `kern-agent` is `47743`,
 `cloudflared` is `47744`, `postgres` is `47745` (created by bootstrap
@@ -22,7 +29,7 @@ before the PostgreSQL packages would assign a dynamic id),
 `kern-tools` is `47746`, `kern-agent-network` is `47748`, the Workspace
 admin-socket group is `47749`, `kern-workspace` is `47750`, and
 `kern-embedding` is `47751`, `kern-transcription` is `47752`, and
-`kern-host-inference` is `47753`. Stable IDs keep durable-volume and
+`kern-host-inference` is `47753`, and `kern-browser` is `47754`. Stable IDs keep durable-volume and
 Postgres ownership valid when `/etc/passwd` is replaced. Bootstrap deletes the
 retired dynamic app accounts; their UID range had no durable filesystem
 ownership and is not reserved.
@@ -128,6 +135,8 @@ the root volume as root-owned code.
   and working GitHub token on stdin; the helper uses root egress and the
   proxy-state quarantine mirror, then reports JSON success or failure.
 
+## Socket and database crossings
+
 Network policy, provider account pins, and network events need no helpers:
 they are database tables the admin service (schema owner) writes after
 validation. The proxy's narrow database role reads enforcement inputs,
@@ -173,9 +182,10 @@ already-open streams. Instagram bytes remain local until approval.
 The Workspace agent socket (`/run/kern-workspace/agent.sock`) is the second
 deliberate agent-side crossing. The main `kern-workspace` service authenticates
 the `kern-agent` peer uid before allocating a bounded handler, validates one
-bounded `/agent/` call, and requires an explicit immutable Web App id. There is
-no cgroup-derived app authority: any agent may access any existing app, while
-archived apps reject writes. It also offers swarm memory and schedule CRUD,
+bounded `/agent/` call, and requires an explicit immutable Web App id. The caller thread is derived from its cgroup: App content and collection-grant
+writes are owner-controlled, while reads remain shared. Archived or locked Apps
+reject writes. Any agent can manage Standing definitions and triggers. It also
+offers swarm memory and schedule CRUD,
 identity-derived self-memory for App and Chat threads, and an informational
 current thread id from the peer cgroup. The service
 holds no secrets and no egress; see
@@ -196,12 +206,15 @@ for `kern-admin` (full admin state), narrowly scoped roles for
 `kern-agent-network` (SELECT-only policy and network-event state),
 `kern-workspace` (explicit Workspace-table grants),
 `kern-host-inference` (provider credential reads and usage writes),
+`kern-browser` (browser-state DML and secret-key reads),
 `postgres` for operators, and an
 explicit reject for everyone else, so
 the agent user cannot read or write admin state, and a compromised tools, proxy,
 or Workspace service reaches only its granted tables, even though the socket
 path is technically reachable. Operators inspect it with
 `sudo -u postgres psql kern_admin`.
+
+## Limits on the agent and tunnel users
 
 `kern-agent` has no sudo, no login shell, and is in no privileged group,
 and it cannot write any root-owned code, config, policy, or CA file. To shrink

@@ -578,8 +578,8 @@ injection, not this local tool.
 X search options do not change its destination: `allowed_x_handles`,
 `excluded_x_handles`, `from_date`, `to_date`, `enable_image_understanding`, and
 `enable_video_understanding` all constrain or enrich searches within X posts
-and X-hosted media. The guard therefore allows them with `x_search` rather than
-maintaining a second copy of xAI's evolving option schema.
+and X-hosted media. The guard permits only these option names alongside `type: "x_search"`;
+unknown option names fail closed.
 
 Fields that shape web search (`enable_image_search`,
 `filters.allowed_domains`, and `filters.excluded_domains`) are immaterial
@@ -636,6 +636,9 @@ agent-facing guidance and joinable by the agent introspection tools.
 | `xai_web_search_denied` | Server-side web search is not available on this host, and no setting enables it. Covers both a `web_search` tool entry and a `search_parameters` object that is not an explicit `mode: "off"`. |
 | `xai_server_tool_denied` | A hosted tool outside the fixed X-search/image/video allowlist, or an unrecognised entry in a `tools` array. |
 | `xai_remote_mcp_denied` | A remote MCP server declaration. |
+| `xai_video_storage_required` | Video creation or polling requires configured private S3 storage. |
+| `xai_media_input_denied` | Unsupported Imagine fields, external media inputs, or image output destinations. |
+| `xai_video_response_invalid` | A completed video response or its signed storage URL could not be verified. |
 
 ## Stored state
 

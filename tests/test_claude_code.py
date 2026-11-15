@@ -14,7 +14,7 @@ from typing import Callable
 import unittest
 from unittest.mock import MagicMock, Mock, patch
 
-from host.runtime.agent_runtime import claude_code, thread_scope
+from host.runtime.agent_runtime import claude_code, thread_scope, token_usage
 
 
 class ClaudeCodeTests(unittest.TestCase):
@@ -1022,6 +1022,41 @@ print(json.dumps({"type":"result","session_id":"session-1","subtype":"error_duri
         self.assertEqual(len(usage), 2)
         self.assertEqual(usage[0]["source_id"], usage[1]["source_id"])
         self.assertEqual(usage[0]["usage"]["cached_input_tokens"], 50)
+        self.assertIsNone(usage[0]["usage"]["output_tokens"])
+
+    def test_stream_records_final_usage_before_success_or_error(self) -> None:
+        for failed in (False, True):
+            with self.subTest(failed=failed):
+                frames = [
+                    {"type": "assistant", "session_id": "session-1", "message": {
+                        "id": "response-1", "usage": {"input_tokens": 2, "cache_read_input_tokens": 50,
+                        "cache_creation_input_tokens": 10, "output_tokens": 1}, "content": [],
+                    }},
+                    {"type": "result", "session_id": "session-1", "uuid": "result-1",
+                     "subtype": "error_during_execution" if failed else "success", "is_error": failed,
+                     "result": "failed" if failed else "done", "usage": {"input_tokens": 3,
+                     "cache_read_input_tokens": 60, "cache_creation_input_tokens": 20, "output_tokens": 500}},
+                ]
+                script = "import json,sys\njson.loads(sys.stdin.readline())\n"
+                script += f"for frame in {frames!r}: print(json.dumps(frame), flush=True)\n"
+                emitted = []
+                with tempfile.TemporaryDirectory() as directory, patch.object(claude_code, "AGENT_CWD", directory):
+                    server = claude_code.ClaudeCodeSession([sys.executable, "-u", "-c", script], on_ready=lambda: True)
+                    try:
+                        if failed:
+                            with self.assertRaises(claude_code.ClaudeCodeError):
+                                server.run("go", "session-1", "claude-fable-5-2", "high", emitted.append)
+                        else:
+                            self.assertEqual(server.run("go", "session-1", "claude-fable-5-2", "high", emitted.append),
+                                             ("session-1", "done"))
+                    finally:
+                        server.close()
+                accumulator = token_usage.TurnUsage()
+                totals = None
+                for event in emitted:
+                    if isinstance(event, dict) and event.get("type") == "token_usage":
+                        totals = accumulator.add(event) or totals
+                self.assertEqual(totals, dict(zip(token_usage.FIELDS, [3, 60, 20, 500])))
 
     def test_close_login_process_clears_handle_when_close_fails(self) -> None:
         class FakeLoginProcess:
@@ -1142,6 +1177,28 @@ lifecycle(initial, "started")
             and message.get("activity_id") == "tool-1"
             and message.get("phase") == "started"
         )
+
+    def test_usage_from_two_results_in_one_steered_execution(self) -> None:
+        script = r"""
+usage = {"input_tokens":2,"cache_read_input_tokens":50,"cache_creation_input_tokens":10,"output_tokens":1}
+emit({"type":"assistant","message":{"id":"a","usage":usage,"content":[{"type":"text","text":"ready"}]}})
+steer = read_user_message()
+emit({"type":"result","uuid":"r1","subtype":"success","result":"first","usage":{**usage,"output_tokens":300}})
+lifecycle(steer, "started")
+emit({"type":"assistant","message":{"id":"b","usage":usage,"content":[]}})
+emit({"type":"result","uuid":"r2","subtype":"success","result":"second","usage":{**usage,"output_tokens":400}})
+sys.stdin.read()
+"""
+        result, emitted = self._run_fake_claude_turn(
+            script, lambda server: server.steer("followup"), steer_when=lambda event: event == "ready",
+        )
+        self.assertEqual(result, ("session-1", "second"))
+        accumulator = token_usage.TurnUsage()
+        totals = None
+        for event in emitted:
+            if isinstance(event, dict) and event.get("type") == "token_usage":
+                totals = accumulator.add(event) or totals
+        self.assertEqual(totals, dict(zip(token_usage.FIELDS, [4, 100, 20, 700])))
 
     def test_steer_during_a_long_tool_call_does_not_cancel_it(self) -> None:
         # Regression: a delivered agent or operator message used to interrupt

@@ -29,8 +29,9 @@ directory below. Those writable locations are not trusted code or policy inputs.
 | `/usr/local/bin`, `/usr/local/lib/node_modules` | root-owned, readable/executable, not service-writable | Node.js, Codex CLI, Claude Code CLI, and Grok Build CLI. |
 | `/usr/local/lib/kern-host/*` | root-owned, `755`, not service-writable | Fixed sudo helpers for runtime launch, account reads, auth clearing, agent-home file reads, reboot, GitHub App token minting/audits, and `.github` push approval. |
 | `/usr/local/lib/kern-{embedding,transcription}-venv/`, `/usr/local/share/kern-{embedding,transcription}-models/` | root-owned, readable/executable, not service-writable | Pinned local inference environments and models. |
+| `/usr/local/lib/kern-browser-venv/`, `/usr/local/share/kern-browsers/` | root-owned, readable/executable, not service-writable | Pinned browser runtime and Chromium binaries; session profiles use private temporary directories. |
 | `/etc/sudoers.d/kern-host` | root-owned, `440`, not service-writable | Exact helper allowlist for `kern-admin`. |
-| `/etc/systemd/system/kern*` | root-owned system config, not service-writable | Postgres, admin API, network proxy, tools, workspaces, optional Cloudflare Tunnel service units, and resource-slice definitions. |
+| `/etc/systemd/system/kern*` | root-owned system config, not service-writable | Postgres, admin API, network proxy, tools, browser, Workspace, network introspection, host inference, local embedding/transcription, optional Cloudflare Tunnel service units, and resource-slice definitions. |
 | `/etc/kern/cloudflared.token` | root-owned, `0640`, group `cloudflared` | Cloudflare Tunnel token for the optional `cloudflared` service. Directly readable only by root and `cloudflared`; the SSH operator can deliberately cross that boundary with unrestricted sudo. |
 | `/etc/kern/cloudflare_hostname` | root-owned, `644` | Configured Cloudflare Tunnel hostname used for bootstrap verification and operator diagnostics. |
 | `/etc/kern-tools-public-hostname` | `root:kern-tools`, `640` | Tools-only hostname copy for temporary public media URLs; unreadable by the agent. |
@@ -72,7 +73,7 @@ redeploys.
 | `/mnt/kern-admin/proxy-state/network_proxy_ca.crt` | mode 644, but behind proxy-state traversal controls | Proxy CA certificate copied into the system trust store for agent/runtime use. |
 | `/mnt/kern-admin/proxy-state/generated-certs/` | proxy only | Per-host leaf certificates minted by the proxy. Capped at 512 hosts, oldest evicted first, so a wildcard rule cannot turn unique subdomains into unbounded files on the volume Postgres shares. |
 | `/mnt/kern-admin/proxy-state/github-quarantine/` | proxy only | Bare per-repository Git mirrors and `refs/pending/...` objects for `.github` pushes held for operator approval. At most ten pushes may be pending, and each operator approve/reject deletes its refs and immediately runs `git gc` under the shared quarantine lock. |
-| `/mnt/kern-admin/tools-state/assets/` | tools only | Bounded temporary image/video copies for tool calls. Cleared on tools-service start; expired files are swept hourly. |
+| `/mnt/kern-admin/tools-state/assets/` | tools only | Bounded temporary image/video/audio copies for tool calls. Cleared on tools-service start; expired files are swept hourly. |
 | `/mnt/kern-admin/tools-state/whatsapp/` | tools only, mode 0700 | WhatsApp's fixed private directory for linked-device keys and its bounded text cache. The tool owns the internal format; no storage path is exposed through its manifest or the generic host API. |
 | `/mnt/kern-admin/bootstrap-cache/` | root only | Verified, bounded package/model/browser download cache. Runtime services cannot access it; deleting it only loses download savings. See [deployment](deployment.md). |
 | `/mnt/kern-admin/admin-home/` | admin only | Admin service home directory. |

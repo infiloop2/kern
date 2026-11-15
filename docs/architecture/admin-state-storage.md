@@ -33,7 +33,7 @@ tool-owned metadata and approval payloads (JSON by the tool contract).
 | `config` | Agent name and admin password hash, a single format-checked row replaced during each provisioning bootstrap; upgrade/recover carry the stored password forward. |
 | `operator_connections` | Operator access endpoints, one row per mode (duplicates impossible by key); per-mode field requirements are row constraints, and the Cloudflare tunnel token is encrypted. |
 | `admin_passkey_config`, `admin_passkeys` | The single administrator's stable WebAuthn user handle plus enrolled credential ids, RP domains, ES256 public keys, counters, transport/backup metadata, and timestamps. No private passkey material is stored. Upgrade/recover preserve these rows; only explicit root `reconfigure --reset-admin-passkeys` removes them. |
-| `agent_events` | Agent runtime and turn events with a direct `thread_id` column (`NULL` for runtime events, indexed with `seq` for per-thread paging) and typed payload columns (message/source, error, runtime, provider-neutral activity JSON); pruned to the newest 100,000,000-event sequence window. Large details expire only outside the newest 1,000,000-event window AND after three calendar months (see [retention policy](database-retention.md)). The event log is the single durable record of a thread's turn history — turns themselves are orchestrator memory, and the former `tasks`/`task_steers` tables were dropped by migration `0005_thread_only_turns.sql`, which also renamed `task.*` event types to `turn.*` and replaced the events' `task_id` with `thread_id`. A synchronous steer is appended only after provider acknowledgement; there is no steer mailbox or delivery-marker table. |
+| `agent_events` | Agent runtime and turn events with a direct `thread_id` column (`NULL` for runtime events, indexed with `seq` for per-thread paging) and typed payload columns (message/source, error, runtime, provider-neutral activity JSON); pruned to the newest 100,000,000-event sequence window. Large details expire only outside the newest 1,000,000-event window AND after three calendar months (see [retention policy](database-retention.md)). The event log is the single durable record of a thread's turn history; turns themselves are orchestrator memory. A synchronous steer is appended only after provider acknowledgement; there is no steer mailbox or delivery-marker table. |
 | `conversation_message_embeddings` | Rebuildable local pgvector encodings for the newest 250,000 user/agent message rows; activity and lifecycle events do not consume this quota. Source-event deletion cascades to vectors, and pruning is amortized across embedding batches. Relevance cursors freeze their initial semantic candidate ids so later pages do not rerun HNSW against a changing graph. |
 | `thread_sessions` | One canonical row per user `thread_id`: current runtime, provider session/thread id, model, effort, recency, and durable idle/running state. An idle configuration change atomically replaces runtime/model/effort and clears the provider session before admitting the next run; the retained `agent_events` remain the thread's handoff source. Rows referenced by retained events stay; unreferenced rows beyond the 100,000 most recently used per runtime are pruned. |
 | `chat_threads` | Immutable `thread-N` ids for user Chats and spawned agents, editable display names, archive state, and the spawning thread id when applicable. Standing agents are indexed separately by `schedules`; messages and provider state for both products remain in the host thread tables above. |
@@ -44,11 +44,17 @@ tool-owned metadata and approval payloads (JSON by the tool contract).
 | `workspace_seen`, `workspace_navigation_order`, `workspace_onboarding_dismissal` | Operator read markers, shared sidebar ordering, and onboarding dismissal. |
 | `memory_pages`, `memory_page_revisions`, `memory_page_links` | Host-global bounded memory pages plus their latest 100 immutable revisions and a replace-on-write index of current swarm-page links. Pages soft-delete for 90 days; individual pages are excluded from the link graph. |
 | `memory_page_embeddings` | One rebuildable local pgvector encoding per current memory page and model. The stored revision must match the current page revision before semantic search can use it; updates temporarily fall back to lexical search until asynchronous replacement. Soft deletion removes the vector. |
+| `turn_usage` | Provider-reported token accounting per orchestrator execution; see the token-accounting section below. |
+| `private_notes` | Per-agent private notes keyed by owner thread and note id; current text only, without revisions. |
+| `agent_reminders` | One-time thread reminders and their delivery state. |
+| `auto_approval_policies`, `auto_approval_settings`, `auto_approval_reviews` | Operator-configured automatic review policies, settings and review results. |
+| `browser_settings`, `browser_accounts` | Browser transport settings and connected-account state; secrets are encrypted. |
+| `tool_action_runs` | One daily run counter per limited tool action (`tool_id`, `action_id`, UTC `day`, `runs`), written by the tools role; the count restarts on the first run of a new UTC day. |
 | `schedules`, `schedule_revisions` | Host-global schedule definitions, their stable `schedule-N` thread identities, and latest 100 revisions. Each UTC calendar trigger independently submits its saved prompt through the ordinary host thread path; messages, errors, and activity remain in `agent_events`, with no separate run table. |
 | `oauth_logins` | In-flight OAuth logins, fully typed per flow (device code + login handle for Codex, browser code for Claude). Hermes has no row here: its Bedrock credential connect is a single API call with nothing in flight. |
 | `provider_accounts` | Admin-side provider account records: `account_id` typed, remaining provider-owned metadata as a cached document. An anchored row (`account_id` plus its provider's approval marker in metadata) is trigger-guarded: `provider_accounts_anchor_guard` refuses writes that change or delete the approved identity. The singleton `bedrock` provider row carries only cached AWS display metadata, not an anchor. |
 | `bedrock_credentials` | Hermes's singleton Bedrock connection: the synchronously validated IAM `access_key_id`, secret access key as `secretbox` ciphertext, and selected region. The admin service writes all three atomically; the trusted proxy reads this same row only for enabled Bedrock requests and re-signs requests carrying Hermes's fixed dummy access-key id. |
-| `bedrock_usage` | Live Bedrock usage counters, one row per (runtime, model, UTC day). For each allowed Bedrock response the proxy records the reported token counts plus the USD it prices that response at (`cost_usd`, fixed to 6 decimals); the admin API sums these stored values, so cost is final and a later rate edit never rewrites history. Each write is a single `INSERT ... ON CONFLICT (runtime, model_id, day) DO UPDATE SET col = col + EXCLUDED.col`, so Postgres takes the row lock and applies the increments atomically — concurrent proxy writes simply sum, with no application-level read-modify-write. The model id is normalized to the catalog (unknown ids collapse into one `other` bucket), so growth is bounded by arithmetic (runtimes x (catalog models + 1) x days) with no pruning. |
+| `bedrock_usage` | Live Bedrock usage counters, one row per (model, UTC day), retained for 400 days. Each allowed invocation atomically increments its row with `INSERT ... ON CONFLICT (model_id, day) DO UPDATE`; concurrent writes sum without an application-level read-modify-write. Responses without parsed usage increment `requests` but not `metered_requests`, making metering gaps visible. The proxy stores the priced response cost in `cost_usd`; later rate edits do not reprice history. Unknown model ids collapse into one `other` bucket. |
 | `network_policy` + `managed_integrations`, `github_repositories`, `github_settings`, `claude_settings`, `allowed_domains`, `domain_methods`, `domain_path_guards` | The active network policy as typed, ordered rows (shape defined by `host/config.py`). Bedrock policy contains only its soft enabled/disabled state; its region belongs to the connection row above. The policy is replaced atomically, and a missing `network_policy` row is the fail-closed empty default. |
 | `github_credential` | The single fixed GitHub credential (PAT, or GitHub App identity/key). Admin-owned only, with no proxy grant; secret columns hold `secretbox` ciphertext. The working token lives only in `proxy_github_token`. |
 | `proxy_provider_pins` | The proxy-readable switches for which OAuth accounts are currently allowed to make requests. Each row contains only `provider` and `account_id`; the three Codex runtimes and the two Grok runtimes each use separate provider keys, and the OpenAI and xAI guards accept any of their active pins. The admin service can clear a row automatically when its runtime is inactive without changing the durable, user-controlled anchor in `provider_accounts`; only an explicit user reset clears that anchor. OpenAI requests expose and are checked directly against an allowed identity. Claude bearer tokens expose no account field, so the proxy provider-attests each distinct token against it and caches successful token hashes only in memory. Hermes has no row because the proxy reads its validated Bedrock credential directly. |
@@ -108,8 +114,8 @@ written inside a mutation share its transaction; serial event ids are unique
 and increasing with harmless gaps after aborts.
 
 `host/runtime/core/db.py` owns a small pool in each service process, capped at 14
-active sessions per process. PostgreSQL allows 300 connections: the seven
-long-running database client processes can use at most 98, leaving 202 for
+active sessions per process. PostgreSQL allows 300 connections: the eight
+long-running database client processes can use at most 112, leaving 188 for
 operator, superuser, deployment, and future fixed-service access. Chat and Web
 Apps share the Workspace process's 14-session semaphore; a new operation fails when
 those slots or the database are unavailable. Nested
@@ -146,6 +152,8 @@ non-owner roles with table or schema grants:
   not provider credentials. It cannot enable a tool or rewrite config.
 - `kern-host-inference` reads its provider configuration and the secret-box key,
   and writes/prunes `host_inference_usage`. It cannot change provider settings.
+- `kern-browser` has DML access to `browser_settings` and `browser_accounts`
+  and read access to `secret_keys`, without general admin-state access.
 - `kern-agent-network` reads only network policy and `network_events` for
   the agent-facing introspection tools. It cannot mutate those tables, read
   credentials, or reach tool state.
@@ -212,9 +220,6 @@ Rules for changing persisted state shape from now on:
 - Include only the `-- migrate:up` section; down sections are rejected.
 - Test fresh installation, upgrades from populated historical schemas,
   repeat execution, and transaction rollback on failure.
-- The one-time forward-only cleanup removed historical down sections without
-  changing their up SQL, filenames, or versions. Applied versions stay recorded
-  and are not replayed. Historical files remain immutable after this cleanup.
 
 ## Token accounting
 

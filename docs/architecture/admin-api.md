@@ -112,6 +112,8 @@ the Workspace admin socket has its own 512 connection slots. Both share an
 8192-descriptor process limit and a 4096-task systemd limit, including turn
 supervision threads.
 
+## Workspace sockets
+
 The same process also serves the workspace Unix socket on a daemon thread, so
 both listeners draw on one fd table. That server is bounded too, but it rejects
 at capacity instead of queueing: peer credentials are checked before allocating
@@ -131,7 +133,9 @@ allocating a handler. Path prefixes select Chat or Web Apps; no operator
 credential or identity header is forwarded. Agent calls use the separately
 peer-authenticated `/run/kern-workspace/agent.sock`.
 
-The agent event log keeps the newest 10,000,000 entries. The network and tool
+## Event log limits and health
+
+The agent event log keeps the newest 100,000,000 entries. The network and tool
 event logs each keep the newest 1,000,000 entries.
 
 `admin_api/health.py` owns `health()`, `_health_issues()`, and `proxy_alive()`;
@@ -145,6 +149,8 @@ health reports `network_controls.status: error` so the operator notices and
 repairs it. This failure is safe — nftables blocks the agent's direct egress
 independently of the proxy, so a dead proxy leaves the agent with no network at
 all, never with unfiltered access.
+
+## Startup and login revalidation
 
 Startup in `admin_api/service.py` first publishes unmanaged runtime status,
 then attempts GitHub credential convergence through `github_maintenance.py`
@@ -177,6 +183,8 @@ scheduled recheck. When a new or rotated Claude token is validated by
 attestation, the same refresh reads usage once after publishing the approved
 account identity and updated admin metadata, so usage appears immediately.
 
+## Route handlers and agent files
+
 Route handlers are thin: validate the documented protocol, read or update
 admin state (the local Postgres database — see
 [Admin state storage](admin-state-storage.md)), and delegate to the
@@ -195,6 +203,8 @@ real `user-files/` directory without following symlinks, writes a hidden
 temporary file, and publishes it with a no-overwrite hard link only after all
 declared bytes are durable. This gives upload and runtime access the same
 filesystem authority and leaves no partial file at the returned path.
+
+## Turn orchestration
 
 The orchestrator has no worker pool and no queue. Sending a message runs turn
 admission in the request: the message either starts a turn immediately (an
@@ -283,6 +293,8 @@ and show up in the same agent slice.
   infers provider account metadata from the agent user's auth files and stores
   only the account id / bearer hash needed by the proxy guards.
 
+## Maintenance and steer delivery
+
 A scheduled maintenance pass (hourly, never on the request path) bounds state
 growth with indexed deletes: it caps the thread->session maps at 100,000 per
 runtime (threads with retained events keep their rows) and leaves the audit
@@ -302,6 +314,8 @@ retry may duplicate the message. This at-least-once edge is the explicit trade
 for having neither durable delivery markers nor an in-memory message queue.
 The per-runtime turn cap bounds live processes.
 
+## Execution phases and session ids
+
 Each admitted execution has four private, in-memory process phases:
 `STARTING`, `RUNNING`, `FINISHING`, and `CLOSED`. Admission commits the initial
 message and running database state before STARTING. The adapter moves to
@@ -318,6 +332,8 @@ private run number, preventing a late old process from overwriting a newer
 mapping. Empty ids are rejected and never erase a prior mapping. Reading the
 adapter's last-known id during failure is only a defensive fallback for the
 narrow interval between learning the id and completing its callback.
+
+## Upgrade advisory check
 
 A separate process-local poller checks for a newer public Kern version
 when the admin service starts and every four hours afterward. Because the admin

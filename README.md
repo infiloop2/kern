@@ -1,63 +1,50 @@
 # Kern
 
-**A permanent home for your agent swarm. Persistent. Governed. Improving over
-time.**
+**A permanent home for your AI team.**
 
-Kern gives your AI agents a permanent home where they can work continuously,
-remember what they learn, and build on past experience, all within one
-fail-closed, auditable network boundary you control. Codex, Claude Code, Grok, and
-Hermes are supported. Kern is the host, not the harness: it does not replace
-your agents or decide how they reason; bring the agents and the subscriptions
-you already pay for. Learn more at [kernai.cloud](https://kernai.cloud), and
-read the thinking behind the design on
-[the Kern blog](https://kernai.cloud/blog).
+Bring your own agents: Codex, Claude Code, Grok and Hermes (Muse and Antigravity
+coming soon). Switch between them with ease, or let them work together as a team.
+Your conversations, files, shared memory and connections stay in Kern. Kern
+carries the work forward through host-managed context and memories.
 
-Read the [Kern documentation](https://docs.kernai.cloud) for setup guides,
-core concepts, and day-to-day use. For repository references and contributor
-workflows, use the [repository documentation index](docs/README.md).
+Kern is the VM your agents live in, not one they spawn. Connect your internet
+accounts in one place and give your agents access under network and tool rules
+you control. Manage it all from a browser workspace.
 
-**Why agents need a home:**
+## Why Kern?
 
-- **Persistent and always on:** agents keep working after you close the laptop
-  and come back to work already in progress, whether the host runs in the
-  cloud or on a local machine that remains powered on and awake.
-- **Improving through memory:** the whole swarm shares one memory that each
-  agent searches before it starts and writes back to when it learns something
-  worth keeping; files, projects, and past threads stay on durable volumes,
-  so the agent working for you next month knows more than the one that
-  started today.
-- **Governed by a hard boundary:** agents run with no permission prompts as
-  unprivileged Linux users behind one fail-closed network policy: anything
-  not listed is denied by default, every request is audited with the rule
-  that decided it. GitHub and Bedrock credentials stay outside the agent and
-  are injected in transit; runtime OAuth credentials remain in agent-owned
-  provider homes and are constrained by account guards.
-- **Controlled tools:** bundled packages (Gmail, Google Calendar, Brave
-  Search, X/Twitter, LinkedIn, Instagram, Polymarket, Interactive Brokers,
-  Runway media generation, and more) connect agents to
-  third-party services through deterministic data paths, with consequential
-  actions such as sending email or publishing a post held for your approval
-  before they run.
-- **A command center, not terminals:** direct every agent from your laptop or
-  phone: **Chat** for threaded agent sessions you can step into when
-  judgment is needed, **Apps** for durable agent-built interfaces so you read
-  a queue or a board instead of scrolling a transcript, plus host-global
-  **Memory**, **Schedules**, and **Analytics** for seven-day token usage across your agents.
+- **One persistent home across agents.** Configure connections once and keep
+  conversations, files and shared memory together. Switch agents or let them
+  work together without rebuilding your setup.
+- **An internet firewall you control.** Kern enforces where agents can connect.
+  Separate tool permissions and approval rules control what they can do with
+  connected accounts.
+- **Orchestrate your team from anywhere.** Run agents in parallel, let them
+  delegate and communicate, and schedule ongoing work. Manage the team from one
+  browser command center on your laptop or phone with remote HTTPS access.
 
-These choices follow from a broader set of beliefs about running AI agents;
-see [PHILOSOPHY.md](PHILOSOPHY.md).
+Kern does not resell model tokens or add a model-token quota. Your AI
+subscription usage limits, configured controls, and any hosting or
+connected-service costs still apply.
 
-The Kern host (bootstrap, database, services, firewall, and verification) is
-identical everywhere it runs. This README builds it up in three steps, each
-optional after the first:
+Learn more at [kernai.cloud](https://kernai.cloud), read the
+[documentation](https://docs.kernai.cloud), or explore the
+[design philosophy](PHILOSOPHY.md). Contributor references live in the
+[repository documentation index](docs/README.md).
 
-1. [**Quick start:**](#quick-start-run-kern-on-your-computer) a fully local
-   host on your Mac or Linux machine. Free, private, no cloud account.
-2. [**Access from anywhere:**](#access-from-anywhere-add-a-cloudflare-tunnel)
-   add a Cloudflare Tunnel so you can open Kern from any browser, including
-   mobile.
-3. [**Always on:**](#always-on-deploy-to-aws) deploy the identical host to
-   AWS (~$23/month) if your machine isn't online all the time.
+## One Kern. Start locally, then choose your host.
+
+1. [**Try it on your computer.**](#quick-start-run-kern-on-your-computer)
+   Run the full Kern workspace on Mac or Linux, with a local browser connection
+   over SSH. No cloud account is needed for this step.
+2. **Keep running it yourself.** Leave that computer powered on and awake,
+   or [deploy to your AWS account](#always-on-deploy-to-aws). Add
+   [Cloudflare Tunnel](#access-from-anywhere-add-a-cloudflare-tunnel) for a
+   stable HTTPS address you can open on your phone. You manage the machine
+   and its upgrades, and are responsible for its running costs.
+3. **Or choose [Kern Cloud](https://app.kernai.cloud).** Managed hosting
+   provides an always-on home without maintaining your own machine. You can
+   deploy in one click, without manual setup or CLI commands.
 
 ## Quick Start: Run Kern on Your Computer
 
@@ -66,77 +53,94 @@ The fastest way to run Kern: a fully local host in a
 loopback SSH. Nothing is exposed to your LAN or the internet, and no cloud
 account or credentials are needed.
 
-**You need:**
+**You need:** macOS or Linux with hardware virtualization, Python 3.11+,
+[Lima >=2.2 and <3](https://lima-vm.io/docs/installation/), Git, curl and
+OpenSSH (`ssh`, `scp`, `ssh-keygen`). Linux also needs QEMU (`qemu-system-*`
+for your architecture and `qemu-img`).
 
-- macOS or Linux with hardware virtualization enabled. Kern defaults to 2 CPUs,
-  2 GiB of RAM, and 16 GiB each for root, admin and agent disks. Set
-  `--lima-cpus`, `--lima-memory-gib` and `--lima-root-disk-gib` to change compute;
-  fresh deploy also accepts `--lima-admin-disk-gib` and `--lima-agent-disk-gib`.
-  Omitted options preserve saved settings on subsequent lifecycle operations.
-  Durable disk sizes apply only when creating disks; they do not resize existing data.
-- [Lima](https://lima-vm.io/docs/installation/) >=2.2 and <3. On macOS:
-  `brew install lima`.
-- Python 3.11+ and OpenSSH (present by default on macOS and mainstream
-  Linux). Every Kern command is plain standard-library Python with **zero
-  dependencies**; there is nothing to `pip install`. Prefer
-  [uv](https://docs.astral.sh/uv/)? Run any `python3 -m ...` command in this
-  README as `uv run --python 3.12 python -m ...` instead.
-
-**Deploy:**
+**Run on macOS or Linux:**
 
 ```bash
-# 1. Get Kern
+curl -fsSL https://kernai.cloud/quickstart | bash
+```
+
+Quick-start guides you through dependencies and prompts to install missing ones.
+The script clones the public source into `~/kern` and runs
+`python3 quickstart.py` with your terminal attached.
+Set `KERN_SOURCE_DIR` for the Bash process to choose a different folder.
+
+**Or start from your own checkout:**
+
+```bash
 git clone https://github.com/infiloop2/kern.git
 cd kern
-
-# 2. Generate an admin password and its SHA-256 hash; save the password
-python3 -m host.cli.generate_password
-
-# 3. No SSH key yet? Create one first with:
-ssh-keygen -t ed25519
-
-# 4. Deploy (the first run downloads an Ubuntu image; allow several minutes)
-python3 -m host.cli.deploy \
-  --provider lima \
-  --agent-name my-kern \
-  --admin-password-sha256 <sha256-from-step-2> \
-  --operator-ssh-public-key "$(cat ~/.ssh/id_ed25519.pub)"
-
-# 5. Tunnel the admin UI through the SSH port printed in the result JSON.
-# For example, if the result contains `"port": 61180`:
-ssh -p 61180 -N -L 7443:127.0.0.1:7443 kern-operator@127.0.0.1
-
-# 6. Open http://127.0.0.1:7443 and sign in with the admin password
+python3 quickstart.py
 ```
 
-That's it. The admin UI guides you through connecting an AI provider,
-enabling network access, and adding optional tools.
+Quick-start creates the `my-kern` Lima host with 2 CPUs, 2 GiB RAM and three
+16 GiB disks, generates a private SSH key and admin password, then opens
+the browser through loopback
+SSH. Save the password in your password manager, then delete
+`initial-password.txt` at the displayed path.
 
-An SSH port such as `61180` is normal, but it is dynamically allocated rather
-than a fixed default and may change after a stop/start. Always use the current
-`ssh.port` value from the command's result JSON.
+Quick-start creates:
 
-What deploy created: one disposable VM plus two durable 16 GiB data disks
-that hold all Kern state and survive every upgrade. Management SSH is
-forwarded only to `127.0.0.1` on your machine.
+| Artifact | Location or name |
+| --- | --- |
+| Lima VM and system disk | `kern-my-kern-<hash>` in `limactl list` |
+| Two persistent data disks | `<instance>-admin` and `<instance>-agent` |
+| Source checkout | `~/kern` by default |
+| SSH key, initial password and connection state | `~/.local/share/kern/hosts/my-kern-<hash>/` |
+| Kern's saved VM settings | `~/.lima/.kern-config/my-kern-<hash>.json` (under `LIMA_HOME` if set) |
 
-Lima always keeps that dynamically allocated loopback management endpoint for
-provisioning and `limactl shell`; `--operator-ssh-public-key` additionally
-installs persistent `kern-operator` access.
+Connect your AI account in the UI. The first start needs downloads and may take
+several minutes; progress appears in the terminal.
 
-You may use `limactl shell <instance>` for local administrative access to the
-VM. Do not use `limactl` or filesystem tools to modify Kern-managed instances
-or disks: doing so is unsupported and may cause data loss.
-
-To permanently remove a local host, delete the disposable VM and then its two
-durable disks. This is the only supported direct resource mutation and is
-irreversible:
+Run `python3 quickstart.py` again from the same checkout to resume or reopen
+that host without replacing credentials. Use the existing Python commands for
+ongoing management:
 
 ```bash
-limactl delete --force <instance>
-limactl disk delete <instance>-admin   # deletes all admin state
-limactl disk delete <instance>-agent   # deletes the agent home
+python3 -m host.cli.stop --provider lima --agent-name my-kern
+python3 -m host.cli.start --provider lima --agent-name my-kern
+python3 -m host.cli.reconfigure --help
 ```
+
+To update a checkout without local edits and upgrade the host:
+
+```bash
+cd ~/kern
+git pull --ff-only
+python3 -m host.cli.upgrade --provider lima --agent-name my-kern
+python3 quickstart.py
+```
+
+**Delete the local host and its data:** find its exact name with `limactl list`
+and replace the value below. This permanently removes its VM and saved work.
+If resuming cleanup, skip resources that are already absent.
+
+```bash
+KERN_INSTANCE='kern-my-kern-<hash>'
+limactl stop "$KERN_INSTANCE"
+limactl delete --force "$KERN_INSTANCE"
+limactl disk list
+```
+
+Wait until both data disks show no attached instance, then delete them:
+
+```bash
+limactl disk delete "${KERN_INSTANCE}-admin"
+limactl disk delete "${KERN_INSTANCE}-agent"
+```
+
+Once both disks are gone, remove the saved credentials and configuration:
+
+```bash
+rm -rf "$HOME/.local/share/kern/hosts/${KERN_INSTANCE#kern-}"
+rm -f "${LIMA_HOME:-$HOME/.lima}/.kern-config/${KERN_INSTANCE#kern-}.json"
+```
+
+Delete the `~/kern` source checkout separately if you no longer need it.
 
 ## Access From Anywhere: Add a Cloudflare Tunnel
 
@@ -199,35 +203,40 @@ Choose the final hostname now, for example `kern.example.com`.
 
 ### 5. Deploy or Reconfigure With the Hostname
 
-Export the token, then pass the hostname to deploy, either instead of or
-alongside the SSH key:
+For a quick-start host, run these blocks in Bash on the physical computer, one
+at a time so each prompt reads your typing rather than the next pasted line.
+Replace `kern.example.com` with your configured hostname. The generated SSH
+key is retained so local management stays independent of Cloudflare:
 
 ```bash
-export KERN_CLOUDFLARE_TUNNEL_TOKEN='eyJ...'
-
-python3 -m host.cli.deploy \
-  --provider lima \
-  --agent-name my-kern \
-  --admin-password-sha256 <sha256> \
-  --operator-cloudflare-hostname kern.example.com
+cd ~/kern
+KERN_LOCAL_STATE=$(python3 -c 'import quickstart; print(quickstart.state_dir("my-kern"))')
+read -r -s -p 'Cloudflare tunnel token: ' KERN_CLOUDFLARE_TUNNEL_TOKEN; printf '\n'
 ```
 
-Already deployed in the quick start? Add the tunnel to the existing host with
-`reconfigure`. This replaces the existing SSH endpoint with Cloudflare-only
-access:
+```bash
+KERN_ADMIN_HASH=$(python3 -c 'import getpass, hashlib; print(hashlib.sha256(getpass.getpass("Admin password to set: ").encode()).hexdigest())')
+```
 
 ```bash
-export KERN_CLOUDFLARE_TUNNEL_TOKEN='eyJ...'
-
+export KERN_CLOUDFLARE_TUNNEL_TOKEN
 python3 -m host.cli.reconfigure \
-  --provider lima \
-  --agent-name my-kern \
-  --admin-password-sha256 <sha256> \
+  --provider lima --agent-name my-kern \
+  --admin-password-sha256 "$KERN_ADMIN_HASH" \
+  --operator-ssh-public-key "$(cat "$KERN_LOCAL_STATE/operator_ed25519.pub")" \
   --operator-cloudflare-hostname kern.example.com
+unset KERN_CLOUDFLARE_TUNNEL_TOKEN KERN_ADMIN_HASH
+python3 quickstart.py
 ```
 
-Once the command finishes, the tunnel shows **Healthy** in Cloudflare. Open your
-hostname and sign in with the admin password.
+Enter your current admin password to retain it, or a new one to change it.
+Reconfiguration replaces compute and may interrupt active work; durable data
+is preserved. Verify local sign-in, then open the HTTPS hostname on your phone.
+The computer must remain powered on and awake.
+
+For a custom host, use its name and SSH public key. `deploy` accepts the same
+endpoint flags for a new host; `reconfigure` replaces the full endpoint list,
+so include every endpoint you want to retain.
 
 ## Always On: Deploy to AWS
 
@@ -240,60 +249,86 @@ same commands, the same admin UI.
 of gp3 disk. A newly created
 [AWS Free Tier](https://aws.amazon.com/free/) account usually costs `$0`
 while its included credits remain; outside those credits, expect about
-`$23/month` in `us-east-1`. AI provider usage is billed separately through
-your Codex or Claude Code subscription.
+`$23/month` in `us-east-1`. AI usage is billed separately through your AI
+subscriptions or API accounts.
 
 New AWS instances use **Unlimited CPU credits**, allowing bootstrap and agent
 startup to burst above the `t3.small` baseline even when earned credits run out.
 Sustained CPU usage above the baseline can incur surplus-credit charges in
-addition to the instance cost. This applies to new deployments and replacement
-instances. Existing instances keep their credit mode until replaced or changed
-in EC2; starting an existing instance does not change its mode.
+addition to the instance cost.
 
 **You need:**
 
 - An AWS account. A newly created one works; no prior configuration is needed.
-- [AWS CLI v2.32.0 or newer](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html).
+- [AWS CLI v2](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html),
+  Python 3.11+, OpenSSH and a Kern checkout
+  (`git clone https://github.com/infiloop2/kern.git`). Run the commands below
+  from that checkout.
 - A Cloudflare Tunnel from the section above (recommended), or SSH-only
   access with `--operator-ssh-public-key`.
 
-### 1. Create Temporary AWS Administrator Credentials
+### 1. Connect Your AWS Account
 
-For a brand-new AWS account, the easiest path is to use the account owner
-for this first deployment:
+Choose either option below. Run the commands in Bash (`bash` first if your
+shell is Zsh). The region is part of the host identity; use the same region
+for later lifecycle commands.
 
-1. Open the [AWS console](https://console.aws.amazon.com/) and choose
-   **Sign in using root user email**.
-2. Sign in with the email address used to create the AWS account. Enable MFA
-   on the root user if you have not already.
-3. In your terminal, run the commands below. `aws login` opens the browser
-   and lets you select the signed-in account owner session.
+**Use your existing AWS administrator sign-in.** With AWS CLI 2.32.0 or newer,
+run [`aws login`](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html)
+and select your administrator IAM user or role in the browser:
 
 ```bash
-aws login
-eval "$(aws configure export-credentials --format env)"
+unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
+export AWS_REGION=us-east-1
+aws login --profile kern-deploy
+```
+
+After signing in, export the temporary credentials for Kern and check the account:
+
+```bash
+eval "$(aws configure export-credentials --profile kern-deploy --format env)"
 aws sts get-caller-identity
 ```
 
-`aws login` creates a temporary session. The `eval` line exports that session's
-credentials into the current terminal so Kern can use them; it does not create
-or store a root access key. The last command prints the account and identity
-that will create the Kern resources.
+Kern uses the exported credentials, with that identity's permissions. Repeat
+the login and export steps when they expire. Continue to **2. Deploy**.
 
-Set the region for the host as well; it is part of the agent's identity, so
-later lifecycle commands must use the same region:
+**Or create scoped deployment credentials.**
+
+In the AWS IAM console, create a dedicated user named `kern-host-deploy`.
+Create a policy from [`iam_policy.json`](iam_policy.json), attach it to that
+user, and generate an access key for CLI use. Keep the key in your password
+manager. The policy scopes resource changes to Kern-tagged resources; see the
+[IAM policy reference](docs/architecture/iam-policy.md) for its permissions.
+
+Run one block at a time so each prompt reads your typing rather than the next
+pasted line. This keeps the secret out of shell history:
 
 ```bash
-export AWS_REGION=us-east-1
+read -r -p "AWS access key ID: " AWS_ACCESS_KEY_ID
 ```
 
-If you use an IAM user or federated identity instead, its administrator
-needs to grant the permissions in [`iam_policy.json`](iam_policy.json). Then
-run the same commands while signed in as that identity. If `aws login` is
-unavailable, update AWS CLI v2. Existing access keys also work: export
-`AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`.
+```bash
+read -r -s -p "AWS secret access key: " AWS_SECRET_ACCESS_KEY; printf '\n'
+```
+
+```bash
+export AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY
+unset AWS_SESSION_TOKEN
+export AWS_REGION=us-east-1
+aws sts get-caller-identity
+```
 
 ### 2. Deploy
+
+Deploy uses the default VPC and needs a default subnet with public IPv4 routing.
+
+Generate an admin password, save it in your password manager, and pass its
+`sha256` value to deploy:
+
+```bash
+python3 -m host.cli.generate_password
+```
 
 ```bash
 export KERN_CLOUDFLARE_TUNNEL_TOKEN='eyJ...'   # from the tunnel section
@@ -304,17 +339,16 @@ python3 -m host.cli.deploy \
   --admin-password-sha256 <sha256>
 ```
 
-For SSH access, pass `--operator-ssh-public-key` in place of (or alongside)
-the Cloudflare hostname, exactly as in the quick start. The command creates
-the host and installs Kern, streaming progress as it runs, and finishes by
-printing a result JSON with the host's address.
+For SSH access, add `--operator-ssh-public-key "$(cat ~/.ssh/id_ed25519.pub)"`
+in place of (or alongside) the Cloudflare hostname; create the key first with
+`ssh-keygen -t ed25519` if you have none. The command creates the host and
+installs Kern, streaming progress as it runs, and finishes by printing a
+result JSON with the host's address.
 
-The AWS credentials are no longer needed after deploy. Remove them from this
-terminal and end the browser login session:
+The AWS credentials are no longer needed in this terminal after deploy:
 
 ```bash
 unset AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_SESSION_TOKEN
-aws logout
 ```
 
 ### 3. Open Kern
@@ -337,52 +371,13 @@ When an SSH endpoint is configured, Kern keeps EC2 security-group ingress
 for TCP 22 and installs the key for `kern-operator`. If SSH is omitted, the
 final host closes EC2 SSH ingress after bootstrap.
 
-### AWS Account Setup for Regular Use
-
-For a first evaluation, the short-lived `aws login` session above avoids
-creating an access key. Deploy uses the default VPC and needs a default
-subnet with public IPv4 routing.
-
-For regular use or automation, attach `iam_policy.json` to a federated IAM
-role. The policy requires Kern tags on created resources, allows EC2 updates
-and cleanup only on Kern-tagged resources, and leaves region selection to
-`AWS_REGION`. See
-[`docs/architecture/iam-policy.md`](docs/architecture/iam-policy.md) for why
-each policy statement is needed and how its resource scope is constrained.
-
-If federation is unavailable, the commands below create a dedicated IAM user
-with the same policy. AWS recommends federation instead of long-lived IAM
-user credentials for real data.
-
-```bash
-AWS_ACCOUNT_ID="$(aws sts get-caller-identity --query Account --output text)"
-
-aws iam create-policy \
-  --policy-name kern-host-deploy \
-  --policy-document file://iam_policy.json
-
-aws iam create-user --user-name kern-host-deploy
-aws iam attach-user-policy \
-  --user-name kern-host-deploy \
-  --policy-arn "arn:aws:iam::$AWS_ACCOUNT_ID:policy/kern-host-deploy"
-
-aws iam create-access-key --user-name kern-host-deploy
-
-export AWS_ACCESS_KEY_ID=...
-export AWS_SECRET_ACCESS_KEY=...
-```
-
-For temporary credentials, also export `AWS_SESSION_TOKEN`, and unset it
-when using long-lived access keys, or every AWS call fails with an
-authentication error.
-
 ## Manage Your Host
 
 Run lifecycle commands from the repository root. Each command streams
 progress on stderr and prints one result JSON on stdout, so `> result.json`
-captures the result cleanly. Every command accepts `--provider lima` to
-operate a local host; AWS commands also need `AWS_REGION` and credentials in
-the environment.
+captures the result cleanly. Every lifecycle and power command accepts
+`--provider lima` to operate a local host; AWS commands also need `AWS_REGION`
+and credentials in the environment.
 
 | Command | Behavior | Credential behavior |
 | --- | --- | --- |
@@ -417,8 +412,8 @@ disposable VM root disk plus two durable Lima data disks):
 | Volume | Lifecycle | Contents |
 | --- | --- | --- |
 | Root | Recreated on redeploy and deleted on instance termination | Ubuntu 22.04, system packages, Node.js, Python, Codex CLI, Claude Code CLI, nftables, OpenSSL, curl, jq, CA certificates, and swap. |
-| Admin | Preserved on redeploy and marked not to delete on instance termination | Postgres state for the admin API, apps, tools, tasks, audit logs, network policy, credentials, and provider pins; proxy CA/certificate, queued-push state, and a bounded temporary tool-media spool. |
-| Agent | Preserved on redeploy and marked not to delete on instance termination | Agent home directory, provider auth/session files, CLI caches, and workspace data. |
+| Admin | Preserved on redeploy and marked not to delete on instance termination | Postgres state for the admin API, apps, tools, tasks, audit logs, network policy, credentials, and approved AI account identities; proxy CA/certificate, queued-push state, and a bounded temporary tool-media spool. |
+| Agent | Preserved on redeploy and marked not to delete on instance termination | Agent home directory, AI account credentials and session files, CLI caches, and workspace data. |
 
 Every AWS resource deploy creates is tagged so it can be found and cleaned
 up:
@@ -471,8 +466,11 @@ access) and open it in your browser:
 ssh -i ~/.ssh/id_ed25519 -L 8000:127.0.0.1:8000 kern-operator@<public-dns>
 ```
 
-On a local host, use the loopback SSH endpoint instead:
-`ssh -p <port> -L 8000:127.0.0.1:8000 kern-operator@127.0.0.1`.
+On a local host, use the loopback SSH endpoint and the key installed for
+`kern-operator` instead:
+`ssh -i <private-key> -p <port> -L 8000:127.0.0.1:8000 kern-operator@127.0.0.1`.
+A quick-start host's key is `operator_ed25519` in the directory printed by
+`python3 -c 'import quickstart; print(quickstart.state_dir("my-kern"))'`.
 
 Then open **`http://preview.localhost:8000`** (matching the port you
 forwarded).
@@ -494,10 +492,11 @@ ssh -i ~/.ssh/id_ed25519 -L 127.0.0.9:8000:127.0.0.1:8000 kern-operator@<public-
 # then open http://127.0.0.9:8000  (on macOS, first: sudo ifconfig lo0 alias 127.0.0.9 up)
 ```
 
-## Admin API and File Uploads
+## Programmatic Admin API Access
 
-With an SSH tunnel to the admin UI active, log in once to get a session
-cookie, then reuse it (with the CSRF header) for API calls:
+Use the Admin API to manage Kern from your own scripts and tools. With an
+SSH tunnel to the admin UI active, log in once to get a session cookie,
+then reuse it with the CSRF header for API calls:
 
 ```bash
 curl -c cookies.txt -H "Content-Type: application/json" \
@@ -510,16 +509,6 @@ curl -b cookies.txt -H "X-Kern-Csrf: 1" \
 
 Full admin API documentation is in
 [`docs/api/AdminAPI.md`](docs/api/AdminAPI.md).
-
-Upload a file through the authenticated admin API. The host stores it in the
-durable agent workspace with a sortable UTC timestamp prefix and returns the
-relative path to reference in a task:
-
-```bash
-curl -b cookies.txt -H "X-Kern-Csrf: 1" \
-  --data-binary @./reference.png \
-  'http://127.0.0.1:7443/v1/agent-files/upload?filename=reference.png'
-```
 
 ## Internals
 
@@ -535,12 +524,5 @@ For deeper details, see the
 
 ## License
 
-Kern is source-available under the Business Source License 1.1.
-You may self-deploy and run Kern for non-commercial purposes at no charge.
-Commercial production use requires a commercial license, available on request
-from the copyright holder. Evaluation, development, and testing are free for
-everyone under the license's standard non-production grant.
-
-The Change Date is 2030-07-09, after which the Change License is the GNU
-Affero General Public License v3.0 or any later version. See [LICENSE](LICENSE)
-and [NOTICE](NOTICE).
+Kern is licensed under the [MIT License](LICENSE). Third-party software
+keeps its own license; see [NOTICE](NOTICE).

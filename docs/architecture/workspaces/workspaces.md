@@ -84,7 +84,7 @@ sessions are admitted only on stable numeric `schedule-N` identities, so a
 Chat or App thread cannot be rotated onto a runtime that would read its next
 message as a filename.
 
-Workspace retains at most 10,000 memory pages and admits at most 100 active
+Workspace retains at most 10,000 memory pages and admits at most 1,000 active
 schedules. Each resource keeps its latest 100 revisions. Deleted memory pages
 and deleted schedule definitions remain restorable for 90 days. A pruned
 schedule definition does not delete its stable host thread; that data follows
@@ -129,16 +129,18 @@ The MCP shim always lists `workspace_api`, `search_conversation_history`,
 server authenticates the `kern-agent` uid with `SO_PEERCRED` before allocating
 a bounded handler, accepts a bounded `POST /call` envelope, and routes only
 validated `/agent/...` requests. `GET /agent/identity` derives the current host
-thread from the peer process's root-created cgroup. That identity also enforces
-App and standing-agent ownership for agent-facing mutations.
+thread from the peer process's root-created cgroup. The server uses that identity
+for App content ownership and collection-grant checks.
 
 The two typed history tools search user/assistant messages across retained
 Chat threads and read bounded chronological pages with optional normalized
 activity. Natural-language search fuses the full-text index with vectors from
 the local socket-activated encoder; timestamp-only search does not invoke it.
 An agent selects an existing Web App explicitly through routes under
-`/agent/apps/{app_id}/...`. Any agent thread may read any existing app and
-write only its own active app. Other agents request changes through messaging. Archived apps remain readable but reject every agent
+`/agent/apps/{app_id}/...`. Any agent thread may read any existing app; UI,
+data and collection-grant writes are limited to the App's own thread, while any
+agent may rename an App, change its agent settings, stop or archive it. Other
+agents request content changes through messaging. Archived apps remain readable but reject every agent
 mutation. Agents can create a Chat with `spawn_agent` and send a peer-labeled message
 to a known eligible thread with `send_agent_message`. `GET /agent/spawned-agents`
 discovers active spawned Chats by name; only their authenticated
@@ -149,8 +151,9 @@ or recurring work, with optional triggers. See
 Agents can also list, search, fetch, create, edit, and delete swarm memory
 pages. Individual `app-*`, `thread-*`, and `schedule-*` pages are absent from
 those routes; App and Chat threads reach only their own page through
-self-memory, as do persistent model schedule threads. Agents may discover/read standing agents and update/delete only their own
-definition and triggers. Creation belongs to the operator. Revision history and restore stay operator-only.
+self-memory, as do persistent model schedule threads. Agents may create, discover, read, update, delete and stop Standing agents,
+including definitions and triggers owned by other threads. Revision history
+and restore stay operator-only.
 The host-wide conversation-history tools remain read-only.
 
 ## Service and database boundary

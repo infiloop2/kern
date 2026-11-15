@@ -32,8 +32,8 @@ Agent → Tool API → Browser tool → /actions/*           ┘
 `kern-browser` (UID 47754) runs separately from `kern-tools` and `kern-admin`.
 Its peer-authenticated Postgres role has access only to `browser_settings`,
 `browser_accounts`, and the existing secretbox encryption key. The agent and
-tools roles cannot read those tables. No database password or new Linux account
-is introduced. The service cannot access agent-home or the admin volume directly,
+tools roles cannot read those tables. Bootstrap creates the dedicated Linux
+account and database role; peer authentication needs no database password. The service cannot access agent-home or the admin volume directly,
 and has no public TCP/CDP listener. Postgres persists Browser state on the admin
 volume alongside other host state.
 Chromium and Playwright are root-owned deploy artifacts. Deployment installs full

@@ -3114,6 +3114,10 @@ class DeployUnitTests(unittest.TestCase):
 
             with tarfile.open(archive, "r:gz") as tar:
                 names = set(tar.getnames())
+                for name in ("LICENSE", "NOTICE"):
+                    member = tar.extractfile(name)
+                    self.assertIsNotNone(member)
+                    self.assertEqual(member.read(), (Path(__file__).parents[1] / name).read_bytes())
 
         self.assertIn("host/runtime/admin_api/service.py", names)
         self.assertIn("host/version.py", names)
