@@ -92,21 +92,23 @@ class LimaSmoke(AwsSmoke):
         self.env = os.environ.copy()
         self.env["PYTHONPATH"] = str(REPO_ROOT)
         self.env["LIMA_HOME"] = str(self.lima_home)
+        self.cli_root = workdir / "cli"
+        self.cli_home = self.cli_root / "hosts" / lima._local_key(self.agent_name)
 
     def run(self) -> None:
         self._require_tools()
-        self._generate_key()
         self._remove_owned_resources()
 
-        self._step("fresh deploy")
-        self.result = self._lifecycle(
-            "deploy",
-            "--admin-password-sha256",
-            hashlib.sha256(self.admin_password.encode()).hexdigest(),
-            "--operator-ssh-public-key",
-            self._public_key(),
-        )
-        self._assert_result(self.result, expected_state="running")
+        self._step("fresh deploy through Python quick-start and native lifecycle")
+        self._quickstart()
+        self.private_key = self.cli_home / "operator_ed25519"
+        self.ssh_key = str(self.private_key)
+        self.admin_password = (self.cli_home / "initial-password.txt").read_text().strip()
+        self._assert_cli_login()
+        # Native start is idempotent and supplies the existing JSON contract
+        # for the remaining shared live-host assertions.
+        self.result = self._lifecycle("start")
+        self._assert_result(self.result, expected_state="running", expect_version=False)
         first_host_key = self._ssh("cat /etc/ssh/ssh_host_ed25519_key.pub").strip()
         self._remember_disk_identities()
         first_definition = self._definition_signature()
@@ -125,6 +127,13 @@ class LimaSmoke(AwsSmoke):
         self._configure_network_policy()
         self._check_live_host()
         self._check_network_enforcement()
+        initial_credentials = self.private_key.read_bytes(), self.admin_password
+        self._quickstart()
+        self._assert_cli_login()
+        if initial_credentials != (self.private_key.read_bytes(), (self.cli_home / "initial-password.txt").read_text().strip()):
+            raise AssertionError("repeat CLI startup replaced credentials")
+        self._assert_root_sentinel(present=True)
+        self._check_live_host()
         self._ok("real Ubuntu host provisioned; SSH, UI, API, storage, and isolation verified")
 
         self._step("power stop and start with management-only SSH ingress")
@@ -171,7 +180,9 @@ class LimaSmoke(AwsSmoke):
         self._assert_root_sentinel(present=True)
         self._ssh("sudo mv /etc/nftables.conf.kern-smoke /etc/nftables.conf && "
                   "sudo nft -f /etc/nftables.conf")
-        self._ok("management-only SSH survived stop/start; instance, disks, and data preserved")
+        self._quickstart()
+        self._assert_cli_login()
+        self._ok("management-only SSH survived stop/start; Python quick-start reopened; instance, disks, and data preserved")
 
         self._step("upgrade from older version metadata")
         self._write_older_version_metadata()
@@ -242,6 +253,7 @@ class LimaSmoke(AwsSmoke):
         return self.agent_name
 
     def teardown(self) -> None:
+        self._close_cli_tunnel()
         self._close_tunnel()
         self._remove_owned_resources()
 
@@ -306,6 +318,26 @@ class LimaSmoke(AwsSmoke):
 
     def _public_key(self) -> str:
         return self.private_key.with_suffix(".pub").read_text().strip()
+
+    def _quickstart(self) -> None:
+        environment = {**self.env, "BROWSER": "true"}
+        code = "import quickstart; from pathlib import Path; raise SystemExit(quickstart.run(name=" + repr(self.agent_name) + ", state_root=Path(" + repr(str(self.cli_root)) + "), browser=False))"
+        subprocess.run([sys.executable, "-c", code], cwd=REPO_ROOT, env=environment, stdin=subprocess.DEVNULL, check=True, timeout=LIFECYCLE_TIMEOUT_SECONDS)
+
+    def _assert_cli_login(self) -> None:
+        tunnel = json.loads((self.cli_home / "tunnel.json").read_text())
+        if not re.fullmatch(r"http://127\.0\.0\.1:[0-9]+", tunnel["url"]):
+            raise AssertionError("CLI did not bind the browser tunnel to loopback")
+        request = urllib.request.Request(tunnel["url"] + "/v1/login", data=json.dumps({"password": self.admin_password}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(request, timeout=30) as response:
+            if response.status != 200 or not response.headers.get("Set-Cookie"):
+                raise AssertionError("generated CLI password cannot sign in through its browser tunnel")
+
+    def _close_cli_tunnel(self) -> None:
+        if self.cli_home.exists():
+            from quickstart import close_tunnel
+            close_tunnel(self.cli_home)
 
     def _lifecycle(self, module: str, *extra: str) -> dict[str, Any]:
         proc = self._run(

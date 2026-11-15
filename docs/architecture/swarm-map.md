@@ -1,5 +1,9 @@
 # Swarm map
 
+The Swarm map is the admin UI page that shows the host's active Chat, App,
+Standing, and Spawned agents in one picture. This page records how they are
+drawn, ranked, and connected.
+
 The map is a constellation. The operator sits at its centre, with Kern host
 beside it on the right at the same height. All active Chat, App, Standing and
 Spawned agents remain visible, including idle and disconnected agents; Bash

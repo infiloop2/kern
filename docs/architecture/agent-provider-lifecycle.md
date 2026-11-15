@@ -7,6 +7,10 @@ what each operator action changes. Command-level provider interfaces live in
 login, probing, and ACP details in [the xAI integration](xai-integration.md); the proxy guards that
 enforce the pins live in [Network controls](network-controls.md).
 
+On this page, provider means the AI account behind a runtime (OpenAI,
+Anthropic, xAI, or Amazon Bedrock). The AWS and Lima infrastructure providers
+are covered in [Host provider and local Lima design](host-provider-design.md).
+
 ## Runtimes, statuses, and where state lives
 
 Each runtime carries one provider status. Status values are `deactivated`,
@@ -492,7 +496,7 @@ another refresh holding the runtime's refresh lock.
 
 ## Operator actions
 
-- **Login** (`POST /v1/agent-runtime/{codex,claude}-oauth-login`): available
+- **Login** (`POST /v1/agent-runtime/{codex,codex-2,codex-3,claude,grok,grok-2}-oauth-login`): available
   while the runtime is `awaiting_login` or `error`. Completion produces the
   first-capture evidence in steps 4–5 and clears any remembered failure
   verdict.

@@ -6,6 +6,8 @@ display name, and one host conversation thread with the same immutable id. Its
 UI bundle, durable JSON data, and sparse whole-App revision history live in the
 Workspace-owned tables in `public`.
 
+## Operator UI
+
 The admin sidebar lists active apps, creates one with **New app**, shows
 running state, and provides an archived view. Archiving is allowed only while
 the agent is idle. It terminates generated code,
@@ -22,6 +24,8 @@ conditional clear-on-submit. Send state and attachments stay in this UI.
 
 Selection, composer drafts, event cursors, and asynchronous responses are keyed
 by app id so late results from one app cannot update another.
+
+## Generated code sandbox
 
 Generated markup is not trusted product code. HTML and CSS pass strict
 sanitizers with byte, node, nesting, and CSS-rule complexity limits and render
@@ -46,6 +50,8 @@ report naming the action, the elapsed time, and the host requests it waited on,
 and appends it to the operator's next composer message so the agent sees the
 actual cause.
 
+## Revisions and data limits
+
 Browser and agent writes share per-app locks and one optimistic `revision`.
 Every data operation, atomic data batch, or UI publish compares and increments
 that counter once. `publish_ui` may include up to 32 targeted data operations,
@@ -61,6 +67,8 @@ bundle without the data document, and `app.data()` is unavailable so a large
 document cannot be pulled accidentally. In that mode `set` and `append`
 resolve to the submitted value, `delete` resolves to `null`, and callers can
 read the resulting stored branch when they need the authoritative container.
+
+## Checkpoints and restore
 
 Each retained revision is one complete recovery checkpoint for the interface,
 JSON document, and all collections. Restore replaces all three atomically as
@@ -84,15 +92,19 @@ closed row intervals survive while any retained checkpoint falls inside them.
 Open intervals represent live rows and remain available for future checkpoints.
 Migration 0065 discards pre-upgrade recovery history and creates one fresh
 checkpoint per App from its current live state, keeping its revision number.
-Live data, collections, interface, and settings remain unchanged. Rollback
-materializes the retained new checkpoints for the older runtime; discarded
-pre-upgrade history does not return.
+Live data, collections, interface, and settings remain unchanged; discarded
+pre-upgrade history does not return. Migrations are forward-only; installing
+older code against the newer schema is unsupported.
+
+## Live updates
 
 Polling never swaps a newer App underneath an interactive canvas. A successful
 mutation from the displayed generated App advances it immediately. Any newer
 revision discovered from elsewhere freezes only the canvas under an update
 veil; the command bar remains usable and one **Update app** action loads the
 latest coalesced revision. The first build of an empty App loads automatically.
+
+## Agent access
 
 The host-global `workspace_api` instructions document explicit
 `/agent/apps/{app_id}/...` routes. Any agent thread may target any existing app

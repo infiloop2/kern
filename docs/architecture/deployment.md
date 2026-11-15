@@ -27,6 +27,8 @@ additionally connects inbound over a temporary SSH session, and Cloudflare
 Tunnel also needs outbound internet reachability; otherwise it errors before
 launching.
 
+## Command preconditions and effects
+
 The command is intentionally split by lifecycle intent:
 
 | Command | Preconditions checked before launch | Bootstrap version check | State effect |
@@ -37,6 +39,8 @@ The command is intentionally split by lifecycle intent:
 | `host.cli.reconfigure` | Running or stopped instance plus attached admin and agent data volumes. | Admin state version must equal the target `VERSION`. | Replaces root volume, replaces the full operator endpoint list, and installs a new admin password. |
 | `host.cli.start` | Exactly one existing Kern instance plus existing admin and agent data volumes. | None. | Starts the EC2 instance and waits for `running`; does not mutate Kern state. |
 | `host.cli.stop` | Exactly one existing Kern instance plus existing admin and agent data volumes. | None. | Stops the EC2 instance and waits for `stopped`; does not mutate Kern state. |
+
+## Instance type and target version
 
 AWS deploy and recovery accept an optional `--instance-type`, for example
 `python3 -m host.cli.recover --agent-name my-kern --instance-type m7i.xlarge`.
@@ -60,6 +64,8 @@ other types receive no credit specification.
 
 The target `VERSION` is the local checkout's `VERSION`; the GitHub delivery
 requires the pinned commit's `VERSION` to equal it.
+
+## Bootstrap download cache
 
 Bootstrap keeps a disposable, root-only download cache at
 `/mnt/kern-admin/bootstrap-cache`, preserved with the admin volume on upgrade
@@ -111,6 +117,8 @@ Each major bootstrap phase logs UTC start/completion timestamps and elapsed
 seconds, including in captured Lima output, so provisioning delays can be
 distinguished from lifecycle operations and subsequent smoke checks.
 
+## Operator endpoint arguments
+
 Deploy and reconfigure take operator endpoint arguments
 (`--operator-ssh-public-key` and `--operator-cloudflare-hostname`, the tunnel
 token from `KERN_CLOUDFLARE_TUNNEL_TOKEN`) because those commands create
@@ -119,6 +127,8 @@ per mode exists. `reconfigure` always receives the full desired endpoint list
 rather than a partial patch. Upgrade, recover, start, and stop reject
 endpoint arguments; upgrade/recover bootstrap preserves the stored endpoint
 rows from the admin-state database, while start/stop never run bootstrap.
+
+## SSH and GitHub delivery
 
 Provisioning artifacts — the payload JSON, the rendered bootstrap script, and
 the runtime code archive — are rendered by `host.bootstrap.render` and
@@ -147,8 +157,9 @@ delivered to the instance one of two ways.
    the admin-state Postgres on the
    durable admin volume and applies schema migrations, creates a 6 GiB
    swapfile, creates the proxy CA, applies the declarative durable-path
-   ownership table, installs the Postgres, proxy, tools, admin,
-   app, and optional Cloudflare systemd services. On a fresh database it leaves
+   ownership table, and installs the Kern systemd units
+   ([inventory](services-and-runtimes.md)), including the optional Cloudflare
+   Tunnel service. On a fresh database it leaves
    the network-policy row absent so the fail-closed empty default applies.
    After the services start it runs `host.bootstrap.verify_deploy`, which
    independently re-checks the provisioned state — account ids, path
@@ -203,6 +214,8 @@ and through cloud-init output in the EC2 console log; a host whose bootstrap
 failed is destroyed and recreated with a fresh lifecycle command rather than
 repaired.
 
+## Security group and SSH access
+
 Security-group access is derived the same way on both deliveries, before
 launch: deploy and reconfigure derive SSH ingress and the Cloudflare
 connector egress from the input operator connections, while upgrade and
@@ -228,6 +241,8 @@ its browser Unix socket and is not forwarded directly over SSH, the Cloudflare
 Tunnel, or the EC2 security group; operator Workspace requests go through the
 authenticated admin API proxy.
 
+## Cloudflare Tunnel endpoint
+
 For a Cloudflare Tunnel endpoint, bootstrap installs a pinned `cloudflared`
 binary and a `kern-cloudflared.service` systemd unit with `Restart=always`
 and `WantedBy=multi-user.target`, so the tunnel reconnects after service crashes
@@ -249,7 +264,9 @@ ordering, and the billable fresh-host smoke exercises the allowed and denied
 paths on real nftables; ordinary user upgrades do not wait on extra per-uid
 network probes.
 
-Egress in the security group is pinned to TCP 80, TCP 443, UDP 123 (NTP), and
+## Security-group egress and instance metadata
+
+Egress in the security group is pinned to TCP 80, TCP 443, TCP 7000 (browser transport), UDP 123 (NTP), and
 optionally TCP/UDP 7844 for Cloudflare Tunnel. The 7844 connector allowance
 is decided at launch on both deliveries, from the same derived operator
 access state, and opened only when the endpoints include a
@@ -364,12 +381,10 @@ missing, or they do not match.
 The admin service also checks the public
 `infiloop2/kern` main-branch `VERSION` on startup and every four hours.
 The result is advisory and process-local: `/v1/health` reports it under
-`upgrade`, and the admin toolbar shows a small passive upgrade icon only when
-that version is strictly newer than the running root version. Hovering or
-focusing the icon shows the available version and tells the operator to use the
-operator plane to upgrade. Equal versions and private builds ahead of public
-main are both current, so the same spot shows a small checkmark whose popup
-confirms that Kern is at the latest version. Neither icon is an action. A
+`upgrade`. Home shows an “Upgrade available” notice with the newer version
+and tells the operator to use the operator plane to upgrade. Equal versions
+and private builds ahead of public main show no upgrade notice. The notice
+does not install updates. A
 failed check hides the status only until the first successful check; later
 failures preserve the last successful version without degrading host health.
 

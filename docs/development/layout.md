@@ -56,6 +56,8 @@ Important source areas and the context that runs them:
 
 | Source | Runs as | Responsibility |
 | --- | --- | --- |
+| `quickstart.sh`, `quickstart.py` | Operator machine | Check/install prerequisites with consent, obtain source, and prepare a local host through the existing Python lifecycle commands. |
+| `host/runtime/browser/`, `host/runtime/browser_network/` | `kern-browser` | Connected Chromium accounts, browser operations, and controlled browser network transport. |
 | `host/cli/` | Operator machine | Parses and dispatches lifecycle commands; isolated AWS and Lima modules own provider resources, while shared helpers render and run bootstrap. `operation_lock.py` supplies the ephemeral same-user guard for both providers. |
 | `host/config.py` | Operator machine and host services | Validates lifecycle input and the stored/runtime network policy. |
 | `host/bootstrap/user_data_ssh.sh` | root through EC2 user data | Creates the operator account and installs only the single-use deploy SSH key. |

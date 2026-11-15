@@ -11,6 +11,8 @@ the root-owned release references those instructions point to. Tool listing
 itself is not dynamic discovery and grants no
 additional identity.
 
+## Transport and caller check
+
 The MCP shim sends `POST /call` to
 `/run/kern-workspace/agent.sock`. The main `kern-workspace` process verifies
 the caller is `kern-agent` with `SO_PEERCRED` before allocating a handler. It
@@ -21,6 +23,8 @@ socket, or PostgreSQL role.
 The socket admits 64 active calls, with a separate eight-call cap for routes
 that can return the full 24 MiB response. Identity, self-memory, and agent
 message routes return bounded small objects and use the general call cap.
+
+## History and collaboration routes
 
 Conversation history has two read-only routes used by the typed MCP tools:
 
@@ -59,6 +63,8 @@ an `agents` array: thread id, display name, parent id, runtime/model/effort,
 and status. Ordinary and archived Chats are excluded. Discovery grants no
 archive ownership. Names appear in Chat navigation. This catalog uses large-response capacity;
 spawning, messaging, and archiving return small status objects.
+
+## Conversation history search and read
 
 Search returns bounded message excerpts, the active `search_mode`, and an opaque
 relevance/time cursor. Text queries automatically use local hybrid vector and
@@ -155,6 +161,8 @@ result limit and pagination requirement in both JSON Schema (`minimum` and
 `maximum`) and prose, so clients that omit schema bounds from rendered
 signatures still receive the constraint.
 
+## Web App routes
+
 For Web Apps, `GET /agent/apps` returns active and archived apps. Every other
 route for App data contains an immutable id:
 
@@ -233,6 +241,8 @@ repeat and identifiers do not, and returning identifiers would rebuild the
 document the route exists to avoid returning; requiring only one repeated value
 would let a field of names with a single coincidental duplicate publish every
 name it holds. Keys absent from some merged records are marked `optional`.
+
+## Global routes: identity, memory and schedules
 
 Global routes are:
 

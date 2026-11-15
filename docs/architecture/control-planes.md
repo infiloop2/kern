@@ -25,8 +25,10 @@ root-owned host code if that code is broken.
 
 The admin plane is the admin API/UI reached through SSH forwarding or a
 Cloudflare Tunnel and authenticated with the admin login: the password is posted
-to `/v1/login`, which returns an `HttpOnly` session cookie used for every later
-request. It is lower authority than the
+to `/v1/login`. Public HTTPS also requires a passkey assertion when one is
+enrolled; SSH-forwarded login needs only the password after SSH authentication.
+Completed login returns an `HttpOnly` session cookie for subsequent authenticated
+requests. It is lower authority than the
 operator plane and is meant for normal host operation after deploy. It can
 send, steer, stop, and inspect agent threads; inspect agent files and
 processes; read agent, network, and tool audit events; manage runtime network

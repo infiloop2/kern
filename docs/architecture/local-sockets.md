@@ -19,10 +19,11 @@ definition.
 
 | Socket | Server (uid) | Allowed client uids | Purpose |
 | --- | --- | --- | --- |
-| `/var/run/postgresql/.s.PGSQL.5432` | `postgres` | `kern-admin`, `kern-proxy`, `kern-tools`, `kern-agent-network`, `kern-workspace`, `kern-host-inference`, and `postgres`, each mapped to its matching database role | Host and workspace state. `pg_hba.conf` admits these named peer identities and then explicitly rejects everyone else; table/schema grants narrow each non-owner role. There is no TCP listener. |
-| `/run/kern-tools/tools.sock` | `kern-tools` (tools service) | `kern-agent`, `kern-admin` (each path-scoped) | Agent-facing tools surface plus operator delegation, scoped strictly by path per peer. Only `kern-agent` reaches `GET /tools`, JSON `POST /call`, and raw-byte `POST /assets/video` and `POST /assets/image`; the MCP shim forwards calls and streams agent-opened media without sending its pathname. Only `kern-admin` reaches `/operator/...` for OAuth, revoke, and approved execution. Neither peer can call the other's routes. |
+| `/var/run/postgresql/.s.PGSQL.5432` | `postgres` | `kern-admin`, `kern-proxy`, `kern-tools`, `kern-agent-network`, `kern-workspace`, `kern-host-inference`, `kern-browser`, and `postgres`, each mapped to its matching database role | Host and workspace state. `pg_hba.conf` admits these named peer identities and then explicitly rejects everyone else; table/schema grants narrow each non-owner role. There is no TCP listener. |
+| `/run/kern-browser/browser.sock` | `kern-browser` | `kern-admin`, `kern-tools` | Peer-authenticated connected-browser operations. Admin configures accounts; tools use bounded browser actions. The agent cannot call this socket directly. |
+| `/run/kern-tools/tools.sock` | `kern-tools` (tools service) | `kern-agent`, `kern-admin` (each path-scoped) | Agent-facing tools surface plus operator delegation, scoped strictly by path per peer. Only `kern-agent` reaches `GET /tools`, JSON `POST /call`, and raw-byte `POST /assets/video`, `POST /assets/image`, and `POST /assets/audio`; the MCP shim forwards calls and streams agent-opened media without sending its pathname. Only `kern-admin` reaches `/operator/...` for OAuth, revoke, and approved execution. Neither peer can call the other's routes. |
 | `/run/kern-agent-network/agent-network.sock` | `kern-agent-network` (network-introspection service) | `kern-agent` | Agent-facing `list_network_integrations` and `recent_network_denials` tools. The service has no egress and a SELECT-only Postgres role for policy and network-event tables; the MCP shim aggregates its listing with bundled tools and `workspace_api`. |
-| `/run/kern-admin-api/workspace.sock` | `kern-admin:kern-workspace-api`, mode `0660` (admin API) | `kern-workspace` | Workspace service → host admin API. The kernel peer uid authenticates the fixed service and a narrow allowlist exposes only runtime status, thread list/detail/message/stop/clear-memory/events, and bounded conversation-history search/read operations. Thread ids pass through unchanged. |
+| `/run/kern-admin-api/workspace.sock` | `kern-admin:kern-workspace-api`, mode `0660` (admin API) | `kern-workspace` | Workspace service → host admin API. The kernel peer uid authenticates the fixed service and a narrow allowlist exposes only runtime status, thread list/detail/message/notices/stop/clear-memory/events, and bounded conversation-history search/read operations. Thread ids pass through unchanged. |
 | `/run/kern-workspace/browser.sock` | `kern-workspace:kern-workspace-api`, mode `0660` (Workspace service) | `kern-admin` | Admin API → Workspace browser routes. The server checks peer uid before allocating a handler; operator authentication and CSRF checks remain in the admin API. |
 | `/run/kern-host-inference/host-inference.sock` | `kern-host-inference` | `kern-admin`, `kern-workspace`, `kern-tools` | Fixed host-owned provider calls; credentials stay in the service. See [Host AI inference](host-ai-inference.md). |
 | `/run/kern-transcription.sock` | `kern-transcription:kern-admin`, mode `0660` (systemd socket) | `kern-admin` | Local dictation readiness and bounded PCM transcription. The model stays resident; no network or database access. |
@@ -37,10 +38,11 @@ definition.
   `RuntimeDirectory=kern-agent-network`, and the Workspace unit
   `RuntimeDirectory=kern-workspace`, all at mode `0755`, so admitted service
   uids can reach the socket paths. Most sockets rely on the server's peer-uid
-  check. `workspace.sock` and `browser.sock` additionally use mode `0660` and
+  check. `/run/kern-admin-api/workspace.sock` and
+  `/run/kern-workspace/browser.sock` additionally use mode `0660` and
   a group containing only their admin and Workspace service accounts.
 - **Every socket server bounds pre-authentication work.** Peer credentials are
-  checked before the browser socket allocates a handler. Its only admitted uid
+  checked before the Workspace browser socket allocates a handler. Its only admitted uid
   is the bounded admin API, and a read timeout limits incomplete requests.
   The agent and admin service sockets cap concurrent handlers;
   `workspace.sock` drops connections past its cap
@@ -54,8 +56,8 @@ definition.
   [`services-and-runtimes.md`](services-and-runtimes.md).
 - **workspaces share one backend process.** The browser proxy reaches the
   service through `/run/kern-workspace/browser.sock`; only `kern-admin` may connect.
-  Browser requests use `/v1/workspace/chat/...` or `/v1/workspace/web-apps/...` and are reverse
-  proxied by `workspace_proxy.py`. Calls in the other direction use
+  Browser requests under `/v1/workspace/{chat,web-apps,memory,schedules,reminders,getting-started}`
+  are reverse proxied by `workspace_proxy.py`. Calls in the other direction use
   `workspace.sock`, where peer credentials prove the fixed service account.
   Agent calls enter the same process independently through `agent.sock`.
 

@@ -1,10 +1,9 @@
 # WhatsApp linked-device messages
 
 Enable WhatsApp under Home > Integrations and link the existing phone account
-using the operator-only QR flow. This change needs a host redeploy, but no new
-API key, OAuth scope, account, public hostname, package, or reconnect solely
-because media support was added. It retains the private Baileys child and
-single-recipient approval flow; it does not switch to Meta's Cloud API.
+using the operator-only QR flow. No API key, OAuth scope or public hostname
+is required. A private Baileys child manages the linked device; each send
+uses a single-recipient approval rather than Meta's Cloud API.
 
 ## Staging and sending
 
@@ -28,7 +27,7 @@ recipient input. Existing `{"recipient": "…", "text": "…"}` sends still work
 | --- | --- |
 | `stage_image.path` | Required nonempty Files path such as `/output/frame.png`, or absolute path under agent home. Regular file, no final-component symlink. JPEG (`.jpg`/`.jpeg`) or PNG (`.png`), 512–5,000,000 **bytes** inclusive. |
 | `stage_video.path` | Same path rules; MP4 (`.mp4`), 512–16,000,000 **bytes** inclusive. MOV is unsupported for WhatsApp. |
-| Staging `for_tool` | Required; the existing enum gains `whatsapp`. Destination must be enabled. Exactly `path` and `for_tool` are accepted; unknown fields fail. |
+| Staging `for_tool` | Required; use `whatsapp`. Destination must be enabled. Exactly `path` and `for_tool` are accepted; unknown fields fail. |
 | `send_message.recipient` | Required single E.164 number matching `^\+[1-9][0-9]{1,14}$`. No list or group id. WhatsApp registration is checked only during approved execution. |
 | `send_message.text` | Optional string, defaults to `""`. At most 4,096 Unicode **characters**, not UTF-8 bytes. For text-only sends it must be nonblank. With media it is the exact caption and can be empty. No trimming or rewriting. |
 | `send_message.media_asset_id` | Optional nonempty string identifying one live, WhatsApp-owned staged image/video. Explicit null, arrays, expired ids, and other tools' ids fail. Omitting it means text-only. |

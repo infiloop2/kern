@@ -6,6 +6,8 @@ indexed separately by `schedules` under stable `schedule-N` identities.
 Messages, activity, errors, provider sessions, runtime, model, and effort
 remain authoritative in the host thread tables under the same direct id.
 
+## Operator UI
+
 The admin sidebar loads active threads through
 `GET /v1/workspace/chat/threads`, creates a blank composer with **New chat**,
 shows running state, and provides an archived list. Archive is idle-only and
@@ -29,6 +31,8 @@ offer pagination into earlier events. Those retained events are not deleted:
 the admin and conversation-history APIs remain authoritative for audit and
 history access.
 
+## Thread index
+
 The backend filters host thread-list queries with `prefix=thread-` and joins
 the results to its own index. The filter is an optimization; the product row
 is the authority for whether a thread is visible, named, archived, or writable.
@@ -39,6 +43,8 @@ An idle message starts a turn and a running message steers when supported.
 Runtime/model/effort changes remain idle-only and create the host's visible
 session-change activity. Stop and archive are separate server-validated
 operations.
+
+## Spawned agents
 
 Agents can create a Chat in the Spawned agents section through `spawn_agent`.
 The operation requires an initial message and a complete interactive
@@ -65,6 +71,8 @@ restore spawned Chats normally.
 The spawned agent can return its result to the
 authenticated sender with `send_agent_message` while it is active.
 
+## Conversation history tools
+
 Agents can search retained messages and read bounded pages from any host thread through
 the typed `search_conversation_history` and `read_thread_history` MCP tools.
 Those read-only calls use the peer-authenticated Workspace agent socket. Search
@@ -76,6 +84,8 @@ during backfill or model failure. Search covers any retained host thread without
 filtering through Chat's product index. Activity is excluded by default and,
 when requested, is reduced to bounded normalized summaries. Historical content
 is returned as untrusted data, never as a command protocol.
+
+## File links
 
 Markdown links whose target is an absolute path under
 `/mnt/kern-agent/agent-home` render as file controls. The trusted Chat surface

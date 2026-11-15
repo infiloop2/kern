@@ -1,8 +1,7 @@
 """Generate an admin password and its SHA-256 digest.
 
 Entrypoint: ``python3 -m host.cli.generate_password``. The lifecycle commands
-take only ``--admin-password-sha256``, so this is the one place a password is
-ever produced: store the password in your password manager and pass the
+take only ``--admin-password-sha256``, so this helper produces a password/hash pair: store the password in your password manager and pass the
 sha256 value to deploy or reconfigure. This command touches nothing else — no
 config, no AWS, no files.
 """

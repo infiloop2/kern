@@ -9,8 +9,9 @@ the validated AWS Bedrock credential survive across upgrades.
 Stage deploy, upgrade, and recovery use the shared AWS launcher, which selects
 Unlimited CPU credits explicitly so bootstrap and agent startup can burst even
 when earned credits run out. Surplus CPU-credit charges may apply. Starting an
-existing stage instance preserves its credit mode: upgrade it to this release
-or change its mode in EC2 to convert an existing Standard instance.
+existing stage instance preserves its credit mode: run `upgrade`, which
+reapplies the launcher's credit setting, or change the mode in EC2 to convert
+an existing Standard instance.
 
 The stage workflow first runs
 `python3 -m host.cli.upgrade --agent-name kern-stage > kern-stage.json`.

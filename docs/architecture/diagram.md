@@ -30,6 +30,7 @@ flowchart LR
             admin["kern-admin<br/>Admin API/UI + orchestrator<br/>127.0.0.1:7443<br/>no internet egress"]
             proxy["kern-proxy<br/>Network proxy<br/>127.0.0.1:7445<br/>DNS + TCP 80/443 only"]
             tools["kern-tools<br/>Tool packages + tools.sock<br/>DNS + TCP 443 only"]
+            browser["kern-browser<br/>connected Chromium sessions<br/>DNS + public TCP 443/7000"]
             agentnetwork["kern-agent-network<br/>Network introspection socket<br/>no egress"]
             workspace["kern-workspace<br/>Chat + Web Apps + Memory + Schedules + agent.sock<br/>fixed uid, Unix sockets, explicit table grants<br/>no egress"]
             embedding["kern-embedding<br/>socket-activated ONNX inference<br/>no DB or network access"]
@@ -69,6 +70,11 @@ flowchart LR
     agent -->|"network status + denials, peer uid"| agentnetwork
     admin -->|"operator tool routes, peer uid route"| tools
     tools -->|"third-party tool APIs"| outside_services
+
+    admin -->|"browser account controls, peer uid"| browser
+    tools -->|"bounded browser actions, peer uid"| browser
+    browser -->|"browser tables + secret key"| db
+    browser -->|"public browser/proxy connections"| outside_services
 
     admin -->|"browser.sock reverse proxy, peer uid"| workspace
     workspace -->|"workspace.sock bounded host routes, peer uid"| admin

@@ -342,28 +342,34 @@ policy proxy), not from harness flags, and `--strict-mcp-config` already
 ignores any MCP configuration outside the host-supplied one.
 
 Bootstrap installs the same compact
-`host/bootstrap/agent-home/agents_claude.md` contents to
+[`host/bootstrap/agent-home/agents_claude.md`](../../host/bootstrap/agent-home/agents_claude.md) contents to
 `/mnt/kern-agent/agent-home/AGENTS.md` and `CLAUDE.md`. That always-loaded core
 orients agents to Kern, states safety and failure-prone invariants, and carries
 a capability index so lazy discovery has a bootstrap. Detailed Web App,
 memory, and schedule contracts remain in the root-owned release tree under
 `/opt/kern-host/host/bootstrap/agent-home/references/`; the core requires an
-agent to read the relevant file before conditional operations. Mandatory
-memory reads and common App and schedule entrypoints remain in the core, so
+agent to read the relevant file before conditional operations. Memory search
+and refresh routes and common App and schedule entrypoints remain in the core, so
 routine work never needs a preliminary reference-file read merely to discover
 a route. Keeping the references outside the durable agent home avoids claiming
 or replacing a user-created path during an upgrade. No per-surface prompt is
 appended at process launch.
 
-Kern deliberately does not splice self-memory or swarm page bodies into a new
-provider prompt. The host cannot know which shared pages are relevant before
-seeing the request, and dynamic agent-written bodies would add stale or
-unrelated text while defeating the stable prefix this split protects. The
-forced core instead requires one identity-scoped self-memory read (outside
-schedule threads) and one request-relevant swarm search at execution start;
-the agent then loads only matching bodies. If this ritual later needs stronger
-enforcement, enforce completion of that retrieval handshake rather than
-injecting an unfiltered memory snapshot.
+The reference sources are
+[web-apps.md](../../host/bootstrap/agent-home/references/web-apps.md),
+[web-app-ui.md](../../host/bootstrap/agent-home/references/web-app-ui.md),
+[memory.md](../../host/bootstrap/agent-home/references/memory.md),
+[schedules.md](../../host/bootstrap/agent-home/references/schedules.md), and
+[agent-messaging.md](../../host/bootstrap/agent-home/references/agent-messaging.md).
+
+Kern keeps memory bodies out of these launch-time instructions, so that prefix
+stays stable. When a turn is admitted, the host instead prepends a Kern host
+context block to the message: the thread identity, then the self-memory and
+shared pages that recall selected for this request. With no selected pages the
+block carries only the thread identity. [Memory recall](memory-recall.md)
+describes selection, repeat suppression, and mid-turn suggestions. The
+selection is not comprehensive, so the core tells agents to search memory as
+new needs emerge and names the self-memory refresh route.
 
 When resuming a thread, Kern appends:
 
@@ -640,8 +646,9 @@ output, approvals disabled, and session-id reporting. Hermes starts MCP
 discovery only from its interactive TUI, gateway, and ACP entrypoints, never
 from the one-query path, so the adapter connects the shim itself with one
 synchronous ``discover_mcp_tools()`` call before the query; a shim that fails
-to serve just leaves bundled tools unregistered for that turn, the same
-omit-unavailable contract the shim applies to its own tool sockets.
+to serve cannot register its tools for that turn. Once the shim is running,
+its static listing includes tools even when their backing service is unavailable;
+such calls return an error rather than disappearing from discovery.
 Prompt content travels only over stdin, never process arguments.
 The launcher injects the Bedrock dummy credential as
 ``AWS_ACCESS_KEY_ID`` and ``AWS_SECRET_ACCESS_KEY``; it never reads the

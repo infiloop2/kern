@@ -183,6 +183,7 @@ only:
 | `GET /v1/threads` | List host threads, optionally filtered by a product-owned id prefix |
 | `GET /v1/threads/:thread_id` | Read one direct thread id |
 | `POST /v1/threads/:thread_id/messages` | Send or steer one direct thread id |
+| `POST /v1/threads/:thread_id/notices` | Deliver a bounded typed notice to a host thread |
 | `POST /v1/threads/:thread_id/stop` | Stop one direct thread id |
 | `GET /v1/threads/:thread_id/events` | Read events for one direct thread id |
 | `POST /v1/threads/:thread_id/clear-memory` | Clear working context while idle, preserving retained history |
@@ -215,10 +216,11 @@ the [Admin API reference](../api/AdminAPI.md).
 | `POST /v1/login/passkey` | Pre-session, public HTTPS only | Password-issued single-use pre-auth cookie plus WebAuthn verification |
 | `POST /v1/logout` | Session + CSRF | Revokes only the presented session |
 | `GET /v1/admin-passkeys`, `POST /v1/admin-passkeys/register/options`, `POST /v1/admin-passkeys/register` | Session + CSRF, public HTTPS only | Exact RP ID and origin from `RequestAuthContext` |
+| `POST /v1/browser/{operation}` | Session + CSRF | Operator-only; fixed browser operations, with Browser integration enablement required for active sessions |
 | `GET /v1/health` | Session + CSRF | No unauthenticated health exception on the admin listener |
 | `GET /v1/agent-runtime/{status,account}`, runtime refresh, OAuth login/completion, Bedrock credential, and linked-account reset routes | Session + CSRF | Normal shared handler on both operator paths |
 | `GET /v1/threads`, `/v1/threads/<id>`, thread message/stop/event routes, and `GET /v1/events` | Session + CSRF | Operator sees the host-wide thread namespace |
-| `GET\|POST\|PUT\|DELETE /v1/workspace/{chat,web-apps,memory,schedules}/...` | Session + CSRF | Proxy targets only the fixed Workspace backend and adds a fixed route prefix without forwarding credentials |
+| `GET\|POST\|PUT\|DELETE /v1/workspace/{chat,web-apps,memory,schedules,reminders,getting-started}/...` | Session + CSRF | Proxy targets only the fixed Workspace backend and adds a fixed route prefix without forwarding credentials |
 | `GET /v1/agent-files`, file read/content/download/upload routes, and `GET /v1/agent-processes` | Session + CSRF | Content, download, and upload use bounded streaming handlers after authentication |
 | `GET\|PUT /v1/network/policy`, `GET /v1/network/events`, and GitHub credential/audit/pending-push routes under `/v1/network-tools/` | Session + CSRF | Method-specific mutation validation and root-helper boundaries still apply |
 | Tool catalog/config/enablement/OAuth/approval routes and tool events under `/v1/tools` | Session + CSRF | Tool-specific authorization and approval state run after operator authentication |

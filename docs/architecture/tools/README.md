@@ -26,6 +26,12 @@ another host implementation of the same contract.
   native image/video sends, previews, and verification boundaries.
 - [NSE filing adapter](nse-filings.md) documents the public source mapping,
   pagination, verified downloads and observed coverage limits.
+- [Browser service](../../development/browser-sessions.md) documents connected
+  accounts, coded browser actions and their approval flow.
+- Package-level notes sit beside the code for
+  [Google Search Console](../../../host/tools/google_search_console/README.md),
+  [IndexNow](../../../host/tools/indexnow/README.md) and
+  [PageSpeed Insights](../../../host/tools/pagespeed_insights/README.md).
 
 Tool-specific documentation lives on each admin UI **Home > Integrations** page
 and is rendered from the guide content owned by each package under `host/tools/`. Those

@@ -48,8 +48,19 @@ Codex's protocol explicitly defaults omitted cache-write counts to zero.
   provider thread and turn. Use `last`, not the resumed session's lifetime
   total. The cumulative total fingerprints repeated notifications. This is
   response accounting from the protocol, not context-window occupancy.
-- Claude Code: `assistant.message.usage`, keyed by `message.id`. Repeated
-  content blocks for the same response must not multiply its token usage.
+- Claude Code: deduplicate `assistant.message.usage` input/cache samples by
+  `message.id`. Assistant output counts are placeholders and remain unknown.
+  Each main-loop `result.usage` replaces that loop's provisional totals,
+  including on error, before handling completion or failure. Successive
+  results during steering contribute separate loops to the same Kern turn;
+  repeated result UUIDs are ignored. Missing/invalid final fields retain
+  known step inputs, and zeroed crash results do not erase measured work.
+  Do not use `modelUsage`: it includes prior resumed-session and subagent
+  work. Child assistant inputs stay separate from the main-loop result;
+  child output remains unknown without a trustworthy final measurement.
+  These scopes follow the
+  [Claude stream-json usage contract](https://code.claude.com/docs/en/agent-sdk/cost-tracking).
+  No historical counters are rewritten by this forward-only fix.
 - Grok (both runtimes): the `session/prompt` response's `_meta`, preferring the
   nested `usage` object over the flat fields repeated beside it, keyed by
   `promptId`. Grok announces a turn's counts in no session update, so a killed

@@ -107,7 +107,7 @@ Agents speak MCP, so the host bridges MCP to the tool runtime with a shim:
 - The socket service authenticates by kernel peer credentials (`SO_PEERCRED`),
   the same OS-identity pattern as Postgres peer auth, and scopes each peer
   strictly by path: only the `kern-agent` uid reaches the MCP routes
-  (`GET /tools`, `POST /call`, `POST /assets/video`, `POST /assets/image`) and only the
+  (`GET /tools`, `POST /call`, `POST /assets/video`, `POST /assets/image`, `POST /assets/audio`) and only the
   `kern-admin` uid reaches the
   `/operator/...` delegation routes — neither can call the other's routes. No
   admin password is involved, so the agent gains exactly this tool surface and
@@ -165,13 +165,13 @@ context instead of rewriting its prefix:
   the terminal execution result — so another agent process cannot enumerate old
   approvals by guessing sequential ids. Direct-action results are returned inline
   on the call.
-- **`stage_video` and `stage_image`** are public MCP actions because that process
-  has the agent's filesystem access. They open a regular, non-symlink MP4/MOV
-  or JPEG/PNG/WebP as the agent, bound it to 512 bytes–200 MB, and stream raw
-  bytes through `POST /assets/video` or `POST /assets/image`. The tools service
-  returns a random, tool-scoped asset id. The agent passes that id directly to
-  the consuming Runway, OpenAI image generation, Instagram, or X action and does
-  not persist it as app state.
+- **`stage_video`, `stage_image`, and `stage_audio`** are public MCP actions
+  because that process has the agent's filesystem access. They open a regular
+  MP4/MOV, JPEG/PNG/WebP, or MP3/WAV file as the agent, reject a final-component
+  symlink, and stream raw bytes through `POST /assets/video`, `/assets/image`,
+  or `/assets/audio`. The general bound is 512–200,000,000 bytes; destinations
+  may impose tighter format and size limits. The tools service returns a random,
+  tool-scoped asset id for the consuming action, not durable App state.
   The shim stores no copy. It streams the opened descriptor over
   `/run/kern-tools/tools.sock`; the socket's kernel peer credentials
   authenticate the `kern-agent` UID, then the separate
@@ -192,19 +192,22 @@ context instead of rewriting its prefix:
   The tools service accepts only the authenticated agent peer, receives
   filename/type/length but no pathname, and stores a mode-0600 private copy in
   its mode-0700 asset directory. The returned random id is scoped to exactly one
-  destination tool: a video to Runway, falAI, Instagram, or X, an image to Runway, OpenAI
-  image generation, or Instagram. Runway deletes its input copy after Runway accepts the
+  destination tool. Images and videos support Runway, falAI, OpenRouter,
+  Instagram, X, Zoho Mail and WhatsApp; images also support OpenAI image
+  generation. Audio supports Runway, falAI and OpenRouter. The staging
+  declarations in `mcp_shim.py` and checks in `tools/assets.py` own the exact
+  destination limits. Runway deletes its input copy after Runway accepts the
   generation or editing task. OpenAI image generation deletes its reference
   copies once OpenAI has returned a usable image. Instagram deletes its copy
   after publishing.
-  Staged images and videos expire after 26 hours. The next staging/access check
+  Staged images, videos and audio expire after 26 hours. The next staging/access check
   removes it immediately after expiry, and an hourly service sweep removes it
   even when no later call touches the store. A tools-service restart deletes
   every remaining file and forgets every id. No asset metadata enters
   Postgres, and startup does not reconcile pending approvals against lost
   assets. An approval created near expiry can outlive its asset too. Approving
   either one later fails and the upload must be retried. At most 20 assets and
-  1 GB total are staged across both media types. This private spool preserves
+  1 GB total are staged across all three media types. This private spool preserves
   the Instagram approval boundary: Meta receives no image or video bytes until approval.
 
   X image/video publication uses the same private spool and revalidates the
@@ -267,7 +270,7 @@ context instead of rewriting its prefix:
   metadata, streams into an exclusive temporary file, verifies the declared
   length, fsyncs it, and atomically exposes a random host-generated filename.
   Failure removes the partial file. The final MCP result is JSON containing
-  `path`, `media_type`, and `size_bytes`, plus `summary` when the tool supplies it.
+  `path`, `filesystem_path`, `media_type`, and `size_bytes`, plus `summary` when the tool supplies it.
   The optional summary is limited to 8 KiB UTF-8, percent-encoded in
   `X-Kern-Asset-Summary`, and validated again by the shim before file creation.
   Newlines and non-ASCII preview text cannot become HTTP headers. The agent never chooses a destination
@@ -326,7 +329,7 @@ context instead of rewriting its prefix:
   later save action could re-read. The package therefore decodes the payload in
   the tools service, checks the bytes against the format the caller asked for,
   and returns them as that call's exclusive `StreamingAsset`. The agent's whole
-  view of the result is the `{path, media_type, size_bytes}` the shim reports
+  view of the result is the `{path, filesystem_path, media_type, size_bytes}` the shim reports
   after writing the file, so megabytes of base64 never enter model context or
   the tool audit log. That call also accepts staged workspace images as
   generation references, which is the staging path above run in the opposite
@@ -409,8 +412,9 @@ drifts from the code fails the pull request check before it can reach a host.
 - **Config** — the `tool_config` table, keyed by `(tool_id, key)`: config is
   scoped per tool, so Gmail and Calendar each hold their own
   `GOOGLE_OAUTH_CLIENT_ID` even though the key name repeats. Values are secretbox
-  ciphertext and never leave the host; the API/UI report only whether a key is
-  set.
+  ciphertext and are never returned to the agent or operator; the API/UI
+  report only whether a key is set. Tool code receives the decrypted values
+  for its provider calls.
 - **Approvals** — the `tool_approvals` table. The host assigns token-bearing
   `approval_<number>.<token>` capabilities; every status change is an atomic
   conditional update from the expected

@@ -4,6 +4,8 @@ The X package manifest owns action inputs, the operator connection guide and
 exact data policies. This reference supplements that guide with implementation
 and verification boundaries. Browser X actions remain text-only.
 
+## Image and video posts
+
 `post_tweet` accepts ordered private `stage_image(for_tool=twitter)` IDs for
 1–4 JPEG, PNG or WebP images, at most 5,000,000 bytes each, or the existing
 single staged MP4/MOV video. No mixed media, caller URLs or provider media IDs.
@@ -17,6 +19,8 @@ unready image processing stop publication. The existing video chunk/processing
 flow is preserved: 4 MiB chunks, a shared five-minute upload/processing deadline
 and at most 30 status checks, with the existing 200 MB staging bound. No public
 asset URLs are created.
+
+## Reading direct messages
 
 `list_dm_events` reads one explicit page from `GET /2/dm_events`.
 `read_dm_conversation` reads one page from the participant or conversation
@@ -35,6 +39,8 @@ bounded to 10,000 characters with an explicit truncation flag. No DM media is
 downloaded. Provider errors or malformed pages are surfaced rather than silently
 presented as complete reads. All JSON result objects have closed typed schemas.
 
+## Sending direct messages
+
 `send_dm` queues one exact text message (up to 10,000 characters) to a numeric
 recipient resolved by public lookup or an existing conversation ID (15–19 digits, or two 1–19 digit user IDs joined by a
 hyphen). The approval
@@ -48,6 +54,8 @@ match. Errors and ambiguous responses are terminal. Inspect history before a
 new approval; no automatic retries, media sends, group management or campaigns.
 The host approval executor already consumes decisions once.
 
+## Scopes and legacy accounts
+
 New OAuth connections request `media.write`, `dm.read` and `dm.write` alongside
 existing tweet/user/offline scopes. Legacy accounts retain public reads and
 text posting; missing feature scopes give a reconnect error without clearing a
@@ -56,12 +64,16 @@ needs the Read, write, and direct messages app permission, endpoint eligibility
 and credits, and X may deny recipients under privacy
 or account restrictions. Quote posting remains subject to X Enterprise access.
 
+## Cost ledger
+
 The host ledger records published standard DM event read pricing ($0.010 per
 resource, daily app/resource deduplication) and successful DM submission responses ($0.015), including ambiguous 2xx
 confirmations without a deduplication ID when complete confirmation is unavailable.
 DM reads do not assume the owned-resource discount. X publishes no separate
 media-upload rate; none is fabricated or mapped to the metadata rate. Existing
 post-cost handling is unchanged. No costs are added to action results.
+
+## References and tests
 
 Official references checked 2026-10-07:
 

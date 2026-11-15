@@ -19,8 +19,8 @@ must also include the CSRF header `X-Kern-Csrf: 1`. `POST /v1/logout`
 revokes the session and clears the cookie. The password is presented only at
 `/v1/login` and never replayed on later requests; there is no bearer-token path.
 
-Requests must arrive over HTTPS through the tunnel (the origin redirects or
-refuses cleartext). Repeated failed logins are throttled and return `429`; see
+Requests to the public tunnel hostname must arrive over HTTPS (the origin
+redirects or refuses cleartext). SSH-forwarded loopback requests use HTTP. Repeated failed logins are throttled and return `429`; see
 [admin login sessions](../architecture/admin-api.md#admin-login-sessions).
 
 API responses are JSON except for documented file/media streams. Static UI
@@ -43,7 +43,7 @@ request, require an authenticated caller.
 - [Agent files](#agent-files), [processes](#agent-processes), and [dictation](#dictation)
 - [Network](#network) and [Grok video storage](#grok-video-storage)
 - [Workspace](#workspace), [approvals](#approvals), and [tools](#tools)
-- [Public media capabilities](#public-media-capabilities)
+- [Connected browser controls](#connected-browser-controls) and [public media capabilities](#public-media-capabilities)
 - [Host AI providers](#host-ai-inference-providers), [diagnostics](#host-diagnostics), and [host controls](#host-runtime)
 - [Token analytics](#token-analytics) and [tool usage](#tool-usage)
 
@@ -126,7 +126,7 @@ Error status codes:
 | `413` | Request body exceeds the 1 MiB admin API limit. |
 | `415` | Login has a missing, duplicate, or unsupported `Content-Type`; it requires exactly one `application/json` media type. |
 | `429` | Too many failed admin logins from this source (retry after the lockout window), or the selected runtime is already running its maximum concurrent threads (retry when one finishes). |
-| `503` | A required local service, such as dictation, is unavailable or busy. |
+| `503` | A required local service is unavailable or busy, or the shared admin request capacity is exhausted. The latter includes `error.code: "host_busy"` and `Retry-After: 5`. |
 | `502` | The workspace backend or delegated tools service is unavailable or returned an invalid response. |
 | `500` | Host-side error. |
 
@@ -739,9 +739,10 @@ Send message request fields:
 | `model` | New thread or configuration change | enum | Model for this session. Codex accepts `gpt-6.1-sol`, `gpt-6-luna`, or `gpt-6-astra`; Claude Code accepts `claude-opus-5-5`, `claude-fable-5-2`, or `claude-sonnet-5-5`; Grok accepts `grok-4.7`; Hermes accepts the Bedrock model ids `deepseek.v3.2`, `qwen.qwen3-coder-next`, `moonshotai.kimi-k2.5`, or `zai.glm-5`. Must be supplied together with `agent_runtime` and `effort`. A thread created under an earlier catalog keeps its recorded model and stays readable. It can continue by switching to an offered complete triple while idle; the superseded value cannot start a new provider session. |
 | `effort` | New thread or configuration change | enum | Effort for this session. Codex accepts `high`, `max`, `ultra`, `high-fast`, or `high-ultrafast`, except Luna accepts only `high` and `max`. The two speed presets request High reasoning with Fast or Ultrafast processing; the other presets send no speed override. Model, plan, and workspace availability are enforced by Codex; Kern surfaces provider errors without falling back. Claude Code accepts `high`, `max`, or `ultracode`; `ultracode` enables its xhigh effort plus dynamic workflow orchestration. Grok accepts `xhigh` or `high`. Hermes accepts `high` (its headless CLI exposes no effort control). Must be supplied together with `agent_runtime` and `model`. |
 
-The path's `thread_id` must be a lowercase slug of at most 64 characters
-beginning with `app-`, `thread-`, or `schedule-`; any other value is `404` (no
-such route). The same rule applies to operator and Workspace-service callers.
+The path's `thread_id` must be at most 64 lowercase letters, digits, or
+hyphens: `app-` or `thread-` followed by a nonempty suffix, or `schedule-`
+followed by a positive decimal integer without leading zeros. Any other value
+is `404` (no such route). The same rule applies to operator and Workspace-service callers.
 Workspace marks operator relays with `operator_sent_message: true`; Kern
 deliveries instead require `kern_notice: {kind, summary}` from the trusted
 Workspace service. Operator requests cannot supply Kern notice metadata.
@@ -782,7 +783,7 @@ Send message response:
 {
   "status": "accepted",
   "thread": {
-    "thread_id": "feature-chat-1",
+    "thread_id": "thread-feature-1",
     "agent_runtime": "codex",
     "model": "gpt-6.1-sol",
     "effort": "high",
@@ -841,7 +842,7 @@ Thread list response:
 {
   "threads": [
     {
-      "thread_id": "feature-chat-1",
+      "thread_id": "thread-feature-1",
       "agent_runtime": "codex",
       "model": "gpt-6.1-sol",
       "effort": "high",
@@ -939,12 +940,13 @@ messages. Operator sends use the reserved sender ID `operator`, derived from the
 authenticated operator or trusted Workspace browser path, never message text.
 Scheduled wake-ups, rejected sends and generated replies do not create operator links. Daily buckets contain no message text,
 event IDs or summaries. Buckets older than 90 days are removed on the next
-accepted delivery; reads always exclude expired dates. Counting starts at upgrade.
+accepted delivery; reads always exclude expired dates. Earlier messages are not
+backfilled.
 
 Accepted automated deliveries use the reserved sender ID `kern-host` when
 neither a trusted peer sender nor operator provenance is present. This covers
 scheduled triggers, approval outcomes and restart notices, on admission and live
-steering. Bash jobs stay excluded. Host counts start at this upgrade, without
+steering. Bash jobs stay excluded. Host counts are recorded from delivery, without
 historical reconstruction. Host messages contribute neither operator-message
 counts nor distinct agent peers in involvement metrics.
 
@@ -1016,7 +1018,7 @@ Event list response:
       "seq": 42,
       "timestamp": "2026-06-08T00:00:00Z",
       "event_type": "thread.message",
-      "thread_id": "feature-chat-1",
+      "thread_id": "thread-feature-1",
       "payload": {
         "message": "Update from the agent.",
         "source": "agent"
@@ -1630,6 +1632,8 @@ GET|POST|PUT|DELETE /v1/workspace/chat/{backend_path}
 GET|POST|PUT|DELETE /v1/workspace/web-apps/{backend_path}
 GET|POST|PUT|DELETE /v1/workspace/memory/{backend_path}
 GET|POST|PUT|DELETE /v1/workspace/schedules/{backend_path}
+GET|POST|PUT|DELETE /v1/workspace/reminders/{backend_path}
+GET|POST|PUT|DELETE /v1/workspace/getting-started/{backend_path}
 ```
 
 These authenticated, CSRF-protected prefixes expose Kern's fixed Workspace
@@ -2091,3 +2095,17 @@ and `changed_paths`. Push status `approved` means the replay succeeded;
 `outcome: "approved"` only records the model decision. `approval_error` remains
 separate from both. Ordinary GitHub approval summaries include `has_auto_policy`
 and `auto_review`, as tool summaries do.
+
+## Connected browser controls
+
+`POST /v1/browser/{operation}` accepts an object body, no query parameters,
+and requires the normal operator session and CSRF checks. Workspace principals
+cannot use these routes. Operations are `list`, `create`, `check`, `open`,
+`frame`, `input`, `save`, `cancel`, `disconnect`, `network_get`, `network_save`
+and `network_test`. Active-session operations require Browser to be enabled;
+listing, cancellation, disconnection and network configuration remain available
+when disabled. The admin service delegates over the browser service's
+peer-authenticated socket; browser errors become HTTP 409.
+
+The [browser interface reference](../development/browser-sessions.md) describes
+operation inputs, lease rules, frames and account state.

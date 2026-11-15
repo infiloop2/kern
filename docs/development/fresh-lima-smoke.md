@@ -9,7 +9,9 @@ allow non-admin requesters with a current-head Codex approval stamp.
 
 The smoke verifies:
 
-- fresh deploy into a real Ubuntu 22.04 VM;
+- run the tested checkout's Python quick-start through the existing lifecycle
+  into a real Ubuntu 22.04 VM, verify generated-password login over its
+  loopback tunnel, and repeat startup without credential changes;
 - the generated 2-CPU / 2-GiB plain-mode definition, with no host mounts,
   dynamic forwards, lifecycle secrets, or checkout path;
 - both independently named data disks, their filesystem labels and mounts,
@@ -32,7 +34,8 @@ The smoke verifies:
 - the tampered-definition power contract: stopping remains available as the
   safe response, starting the untrusted definition is refused, and restoring
   the exact generated definition permits start again;
-- idempotent stop/start without replacing compute or changing SSH host keys,
+- Python quick-start reopening after native power cycling, plus idempotent stop/start
+  without replacing compute or changing SSH host keys,
   with unrestricted operator SSH ingress removed to exercise the management-only
   firewall policy used by Cloudflare-only hosts; Lima's own SSH command must work;
 - upgrade with the disposable root replaced and both data disks preserved;

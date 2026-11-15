@@ -2,10 +2,10 @@
 
 [`host/agent_messages.py`](../../host/agent_messages.py) owns every model-facing
 Kern preamble and the finite notice-kind catalog. It covers identity/memory
-injection, session handoff, memory suggestions, scheduled triggers, approval
+injection, session handoff, memory suggestions, one-time reminders, scheduled triggers, approval
 outcomes, restart recovery, failed-turn retries, and peer messages. Delivery, recall, permissions,
-and history bounds remain with their owning services. The suggestion helpers
-are shared with the follow-up memory-monitor PR; this base does not run a monitor.
+and history bounds remain with their owning services. The admin service runs the memory monitor, which uses the suggestion helpers
+to surface relevant context without changing agent message authority.
 
 ## Event contract
 
@@ -19,12 +19,12 @@ The standard event envelope contains `seq`, `event_id`, `timestamp`, `thread_id`
 
 | Category | Kinds | Additional payload fields |
 | --- | --- | --- |
-| Delivered input | `scheduled_trigger`, `approval_outcome`, `restart`, `retry`, `agent_message` | `source: "user"`, `message`: exact provider input, including its routing preamble |
+| Delivered input | `reminder`, `scheduled_trigger`, `approval_outcome`, `restart`, `retry`, `agent_message` | `source: "user"`, `message`: exact provider input, including its routing preamble |
 | Context | `history_transfer`, `memory_injection`, `memory_suggestion` | `message`: summary; memory notices retain `memory_page_ids` and `memory_recall_details`; confirmed injections also retain the exact injected message in `notice.details`; transfers retain `historical_context` |
-| Messaging and agents | `agent_message_sent`, `agent_spawned`, `agent_archived` | `notice.details`: outcome and request |
-| Memory writes | `self_memory_saved`, `shared_memory_saved`, `shared_memory_deleted` | `notice.details`: outcome and request |
+| Messaging and agents | `agent_message_sent`, `agent_spawned`, `agent_archived`, `agent_stopped` | `notice.details`: outcome and request |
+| Memory writes | `self_memory_saved`, `shared_memory_saved`, `shared_memory_deleted`, `private_note_saved`, `private_note_deleted` | `notice.details`: outcome and request |
 | Standing agents | `standing_agent_created`, `standing_agent_updated`, `standing_agent_deleted` | `notice.details`: outcome and request |
-| Apps | `app_created`, `app_renamed`, `app_agent_updated`, `app_ui_published`, `app_data_changed`, `app_collection_changed` | `notice.details`: outcome and request |
+| Apps | `app_created`, `app_renamed`, `app_agent_updated`, `app_ui_published`, `app_data_changed`, `app_collection_changed`, `app_collection_grants_updated`, `app_collection_grants_revoked` | `notice.details`: outcome and request |
 
 There are no generic kinds. `INPUT_KINDS`, `CONTEXT_KINDS`, `ACTION_KINDS`, and
 `NOTICE_KINDS` define the catalog centrally. No separate origin, status, or tool

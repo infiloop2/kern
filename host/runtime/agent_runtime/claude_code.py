@@ -9,7 +9,7 @@ run one turn, and close the running process for turn stops.
 
 from __future__ import annotations
 
-from host.runtime.agent_runtime import token_usage
+from host.runtime.agent_runtime.claude_usage import ClaudeUsage
 
 from collections import deque
 from dataclasses import dataclass
@@ -306,6 +306,7 @@ class ClaudeCodeSession:
         result_session_id = session_id
         self._last_session_id = session_id
         final: str | None = None
+        usage = ClaudeUsage()
         # Steers Claude has not yet started. Claude queues stream-json input
         # that arrives mid-turn and starts it at its next safe point: after
         # the in-flight tool calls return, or as a follow-up query once the
@@ -377,12 +378,10 @@ class ClaudeCodeSession:
                     )
                 ):
                     self._on_session_id(reported_session_id)
+            measured = usage.add(message)
+            if measured is not None:
+                on_message(measured)
             if message.get("type") == "assistant":
-                response = message.get("message")
-                if isinstance(response, dict):
-                    measured = token_usage.record(response.get("id"), response.get("usage"), "claude")
-                    if measured is not None:
-                        on_message(measured)
                 text = _assistant_text(message)
                 if text:
                     last_message = text

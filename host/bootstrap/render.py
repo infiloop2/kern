@@ -97,6 +97,9 @@ def _write_runtime_code_archive(code_path: Path) -> None:
         # delivered tree, the same as on a fetched checkout.
         tar.add(root / "host", arcname="host", filter=runtime_only)
         tar.add(root / "VERSION", arcname="VERSION")
+        # Carry the project license with every deployed runtime copy.
+        tar.add(root / "LICENSE", arcname="LICENSE")
+        tar.add(root / "NOTICE", arcname="NOTICE")
 
 
 def _render_ssh_user_data(payload: dict[str, Any], deploy_public_key: str) -> str:

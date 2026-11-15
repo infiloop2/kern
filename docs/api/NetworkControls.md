@@ -1,4 +1,8 @@
-# Network Controls
+# Network Policy Reference
+
+This page is the policy schema: the integrations and domain rules an operator
+or API client can set. How the host enforces them is in
+[Network controls](../architecture/network-controls.md).
 
 Network controls are runtime policy managed through the admin UI/API, not
 deployment config. By default, all network access for the agent is closed. The
@@ -13,11 +17,13 @@ separate `kern-tools` uid has DNS and HTTPS access for bundled tool
 packages; tool calls follow each action's data policy and approval contract,
 not the agent's domain policy. The separate `kern-host-inference` service
 also has direct DNS/HTTPS egress for its fixed host-owned provider calls;
-see [Host AI inference](../architecture/host-ai-inference.md). When a
+see [Host AI inference](../architecture/host-ai-inference.md). The separate
+`kern-browser` service has DNS and public TCP `443`/`7000` egress for connected
+browsers; private-address destinations are blocked. When a
 Cloudflare Tunnel operator endpoint is configured, the dedicated `cloudflared` uid
 has outbound access only for DNS, TCP `443`, and TCP/UDP `7844`. The host does
 not install or configure the AWS SSM agent, and snapd is stopped and masked
-during bootstrap. Root, proxy, tools, host-inference, and optional `cloudflared` egress are still
+during bootstrap. Root, proxy, tools, host-inference, browser, and optional `cloudflared` egress are still
 bounded by the EC2 security group, which keeps TCP/UDP `7844` open only when a
 `cloudflare_tunnel` operator endpoint is configured. That `7844` rule is
 outbound-only and nftables allows it only for the `cloudflared` uid, not for the
@@ -753,7 +759,7 @@ general-purpose HTTP response path.
 Path guards use Python `re` syntax and must match the full request target path.
 For example, `^/dist(?:/.*)?$` allows `/dist` and `/dist/index.js`. If query
 strings are allowed, include them in the regex, such as
-`^/simple(?:/.*)?(?:\\?.*)?$`.
+`^/simple(?:/.*)?(?:\?.*)?$`.
 
 Custom-domain requests must match the configured domain, method, and path.
 With `guard_request_content: true`, the guard checks URLs (including hostnames),
