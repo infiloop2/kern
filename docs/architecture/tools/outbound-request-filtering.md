@@ -217,15 +217,19 @@ third-party destinations:
   targets are provider-echoed and repeat the structural public-URL checks,
   tracking-parameter removal, public-address vetting, and shared request
   deadline rather than the agent-input guard. URLs are limited to 200 ASCII
-  characters, except for exact hostnames in Web Fetch's reviewed `TRUSTED_DOMAINS`
-  list (initially `scontent-iad3-2.cdninstagram.com`), which allow 4,096.
+  characters, except for Instagram media hosts `scontent.cdninstagram.com` and
+  `scontent-<three letters><digits>-<digits>.cdninstagram.com`, which allow 4,096.
+  Web Fetch matches the entire lower-cased parsed hostname against
+  `scontent(?:-[a-z]{3}[0-9]+-[0-9]+)?\.cdninstagram\.com`. This deliberately
+  replaces the exact-node list because Instagram rotates serving nodes; it does
+  not grant an exception to other `cdninstagram.com` subdomains or Meta domains.
   For these hosts only, the wire URL and decoded components use
   `allow_longer_text=True` and `allow_machine_tokens=True` so signed CDN paths
   and query values can pass. Explicit secret, credential, and personal-identifier
   checks remain enabled. Each redirect destination gets its own hostname/length
-  check; the source host grants no exception to another destination. Subdomains,
-  suffix matches, and trailing-dot aliases do not inherit the exception.
-  Changes to this list require a host release, not agent tool input;
+  check; the source host grants no exception to another destination. Additional
+  subdomains, suffix matches, and trailing-dot aliases do not inherit the exception.
+  Changes to this pattern require a host release, not agent tool input;
 - generation and speech prompts, and external media URLs supplied to a generation tool that the provider then fetches (Runway image_url / video_url, Seedance image_url);
 - slugs and hashtags (after their stricter grammar checks);
 - package-registry names and query values on the agent network path
