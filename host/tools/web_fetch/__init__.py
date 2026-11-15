@@ -59,13 +59,16 @@ MAX_CONTENT_CHARS = 100_000
 MAX_PREVIEW_CHARS = 1024
 MAX_REDIRECTS = 3
 MAX_URL_CHARS = 200
-# Exact hostnames only; additions require a reviewed host change. This grants
-# longer signed URLs and opaque provider tokens, not a wildcard CDN exception.
-TRUSTED_DOMAINS = frozenset({"scontent-iad3-2.cdninstagram.com"})
+# Instagram rotates media nodes, so trust this narrowly defined hostname family
+# instead of enumerating exact nodes. This intentionally grants longer signed
+# URLs and opaque provider tokens to these media hosts, not all cdninstagram.com
+# subdomains. Changes to the family require a reviewed host release.
+_TRUSTED_MEDIA_HOST_RE = re.compile(r"scontent(?:-[a-z]{3}[0-9]+-[0-9]+)?\.cdninstagram\.com")
 MAX_TRUSTED_URL_CHARS = 4096
 _URL_LIMIT_DESCRIPTION = (
-    f"Up to {MAX_URL_CHARS} ASCII characters, or {MAX_TRUSTED_URL_CHARS} for domains on the trusted list. "
-    "Only trusted domains permit opaque provider tokens; "
+    f"Up to {MAX_URL_CHARS} ASCII characters, or {MAX_TRUSTED_URL_CHARS} for Instagram media hosts: "
+    "scontent.cdninstagram.com or scontent-<three letters><digits>-<digits>.cdninstagram.com. "
+    "Only these media hosts permit opaque provider tokens; "
     "secret and personal-identifier checks still apply."
 )
 FETCH_USER_AGENT = "KernWebFetch/1.0 (https://kernai.cloud)"
@@ -302,10 +305,11 @@ MANIFEST = ToolManifest(
     technical_details=(
         PARAM_GUARD_TECHNICAL_DETAIL,
         _URL_LIMIT_DESCRIPTION + " The longer-text and machine-token exceptions apply only to "
-        "exact hosts in TRUSTED_DOMAINS, on the complete wire URL and every decoded path/query view. "
+        "this media-host family, matched against the entire lower-cased parsed hostname, "
+        "on the complete wire URL and every decoded path/query view. "
         "Other hosts retain the default guard. Each redirect target is independently checked "
-        "against the hostname list and length limit; permission is not inherited from the source. "
-        "The list is maintained in the Web Fetch package and cannot be changed by tool input.",
+        "against the hostname pattern and length limit; permission is not inherited from the source. "
+        "The pattern is maintained in the Web Fetch package and cannot be changed by tool input.",
         "The tool resolves each hostname itself, verifies every resolved address is publicly "
         "routable, and tries the vetted addresses within the shared deadline with TLS verified "
         "against the hostname, so a DNS entry pointing at a private or link-local address cannot "
@@ -383,6 +387,10 @@ class _MediaResponseError(ValueError):
     """A safe, fixed message for a rejected media response."""
 
 
+def _is_trusted_media_host(hostname: str) -> bool:
+    return _TRUSTED_MEDIA_HOST_RE.fullmatch(hostname.lower()) is not None
+
+
 def _structural_page_url(url: str, invalid_message: str) -> str:
     """Apply the shared structural checks and normalize the URL for fetching.
 
@@ -401,7 +409,7 @@ def _structural_page_url(url: str, invalid_message: str) -> str:
         raise ValueError(invalid_message)
     parsed = urllib.parse.urlsplit(url)
     hostname = parsed.hostname or ""
-    limit = MAX_TRUSTED_URL_CHARS if hostname in TRUSTED_DOMAINS else MAX_URL_CHARS
+    limit = MAX_TRUSTED_URL_CHARS if _is_trusted_media_host(hostname) else MAX_URL_CHARS
     if hostname.endswith(".") or len(url) > limit:
         raise ValueError(invalid_message)
     query = _query_without_tracking_parameters(parsed.query)
@@ -875,7 +883,7 @@ class WebFetchTool(Tool):
             return ActionFailed("Unsupported Web Fetch action.")
         try:
             url = _validated_page_url(tool_input.get("url"))
-            trusted_domain = urllib.parse.urlsplit(url).hostname in TRUSTED_DOMAINS
+            trusted_domain = _is_trusted_media_host(urllib.parse.urlsplit(url).hostname or "")
             guarded_url = guard_url_parameter_string(
                 url, api, allow_longer_text=trusted_domain, allow_machine_tokens=trusted_domain,
             )

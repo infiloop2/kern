@@ -38,44 +38,76 @@ def _addrinfo(address: str) -> list[tuple[object, object, int, str, tuple[str, i
 
 
 class WebFetchLongUrlTests(unittest.TestCase):
-    host = "scontent-iad3-2.cdninstagram.com"
+    hosts = (
+        "scontent-iad3-2.cdninstagram.com",
+        "scontent-lhr6-1.cdninstagram.com",
+        "scontent-lhr6-2.cdninstagram.com",
+        "scontent-lhr11-1.cdninstagram.com",
+        "scontent-lga3-1.cdninstagram.com",
+        "scontent-bos5-1.cdninstagram.com",
+        "scontent.cdninstagram.com",
+    )
+    host = hosts[3]
     # Synthetic opaque CDN parameters: no live signature or expiring asset.
     url = f"https://{host}/o1/video.mp4?efg=" + "Ab9_ef-X3" * 160 + "&oh=example"
 
-    def test_listed_host_accepts_opaque_urls_in_all_actions(self) -> None:
-        for action in ("fetch_page", "fetch_page_file", "head_url", "download_media"):
-            with self.subTest(action=action), patch.object(
-                web_fetch, "_fetch_once", return_value=_response(),
-            ) as fetch, patch.object(web_fetch, "_open_media_stream") as stream:
-                result = BUNDLED_TOOL.execute(action, {"url": self.url}, FakeHostAPI())
-                self.assertNotIsInstance(result, ActionFailed)
-                if action == "download_media":
-                    assert isinstance(result, StreamingAsset)
-                    result.open_stream()
-                    stream.assert_called_once_with(self.url)
-                else:
-                    self.assertEqual(fetch.call_args.args[0], self.url)
+    def test_media_hosts_accept_opaque_urls_in_all_actions(self) -> None:
+        for host in (*self.hosts, self.hosts[1].upper(), self.hosts[-1].upper()):
+            url = self.url.replace(self.host, host)
+            for action in ("fetch_page", "fetch_page_file", "head_url", "download_media"):
+                with self.subTest(host=host, action=action), patch.object(
+                    web_fetch, "_fetch_once", return_value=_response(),
+                ) as fetch, patch.object(web_fetch, "_open_media_stream") as stream:
+                    result = BUNDLED_TOOL.execute(action, {"url": url}, FakeHostAPI())
+                    self.assertNotIsInstance(result, ActionFailed)
+                    if action == "download_media":
+                        assert isinstance(result, StreamingAsset)
+                        result.open_stream()
+                        stream.assert_called_once_with(url)
+                    else:
+                        self.assertEqual(fetch.call_args.args[0], url)
 
-    def test_host_match_is_exact_and_case_insensitive(self) -> None:
-        self.assertEqual(web_fetch._validated_page_url(self.url.replace(self.host, self.host.upper())),
-                         self.url.replace(self.host, self.host.upper()))
-        for host in ("example.com", "cdninstagram.com", "scontent-iad3-1.cdninstagram.com",
-                     "sub." + self.host, self.host + ".example.com", self.host + ".",
-                     self.host + "@example.com", "user@" + self.host, self.host + ":8443"):
-            with self.subTest(host=host), patch.object(web_fetch, "_fetch_once") as fetch:
-                result = BUNDLED_TOOL.execute("fetch_page", {"url": self.url.replace(self.host, host)}, FakeHostAPI())
-                self.assertIsInstance(result, ActionFailed)
-                fetch.assert_not_called()
+    def test_other_hosts_do_not_receive_either_exception(self) -> None:
+        for host in (
+            "example.com", "cdninstagram.com", "static.cdninstagram.com",
+            "cdninstagram.com.example.org", "evil-cdninstagram.com",
+            "scontent-lhr6-1.cdninstagram.com.evil.tld", "scontent.fbcdn.net",
+            "scontent-lh6-1.cdninstagram.com", "scontent-lhrr6-1.cdninstagram.com",
+            "scontent-lhr-1.cdninstagram.com", "scontent-lhr6-.cdninstagram.com",
+            "scontent-lhr6-1-2.cdninstagram.com", "scontent-1236-1.cdninstagram.com",
+            "sub." + self.host, self.host + ".example.com", self.host + ".",
+        ):
+            # Exceed the 128-character token cap while keeping the URL under 200.
+            urls = (self.url.replace(self.host, host), f"https://{host}/?q=" + "Ab9_ef-X3" * 15)
+            self.assertLess(len(urls[1]), 200)
+            for url in urls:
+                with self.subTest(host=host, url=url), patch.object(web_fetch, "_fetch_once") as fetch:
+                    result = BUNDLED_TOOL.execute("fetch_page", {"url": url}, FakeHostAPI())
+                    self.assertIsInstance(result, ActionFailed)
+                    fetch.assert_not_called()
+
+    def test_media_hosts_keep_structural_restrictions(self) -> None:
+        for host in self.hosts:
+            for url in (
+                self.url.replace(self.host, host + "@example.com"),
+                self.url.replace(self.host, "user@" + host),
+                self.url.replace(self.host, host + ":8443"),
+                self.url.replace(self.host, host).replace("https://", "http://"),
+            ):
+                with self.subTest(url=url), patch.object(web_fetch, "_fetch_once") as fetch:
+                    result = BUNDLED_TOOL.execute("fetch_page", {"url": url}, FakeHostAPI())
+                    self.assertIsInstance(result, ActionFailed)
+                    fetch.assert_not_called()
 
     def test_length_boundaries_and_shared_default_unchanged(self) -> None:
-        for host, limit in ((self.host, 4096), ("example.com", 200)):
+        for host, limit in (*((host, 4096) for host in self.hosts), ("example.com", 200)):
             prefix = f"https://{host}/"
             url = prefix + "a" * (limit - len(prefix))
             with self.subTest(host=host):
                 self.assertEqual(web_fetch._validated_page_url(url), url)
                 with self.assertRaises(ValueError):
                     web_fetch._validated_page_url(url + "a")
-                if host == self.host:
+                if host in self.hosts:
                     with patch.object(web_fetch, "_fetch_once", return_value=_response()) as fetch:
                         result = BUNDLED_TOOL.execute("fetch_page", {"url": url}, FakeHostAPI())
                         self.assertIsInstance(result, ActionExecuted)
@@ -94,7 +126,7 @@ class WebFetchLongUrlTests(unittest.TestCase):
                     self.assertIsInstance(result, ActionFailed)
                     fetch.assert_not_called()
 
-    def test_unlisted_short_urls_keep_machine_token_guard(self) -> None:
+    def test_untrusted_short_urls_keep_machine_token_guard(self) -> None:
         url = "https://example.com/?q=" + "Ab9_ef-X3" * 16
         self.assertLess(len(url), 200)
         with patch.object(web_fetch, "_fetch_once") as fetch:
@@ -103,8 +135,12 @@ class WebFetchLongUrlTests(unittest.TestCase):
         fetch.assert_not_called()
 
     def test_redirects_recompute_length_permission_for_every_hop(self) -> None:
-        for source, target in (("https://example.com/start", self.url),
-                               (self.url, "https://example.com/short")):
+        for source, target in (
+            ("https://example.com/start", self.url),
+            (self.url, self.url.replace(self.host, self.hosts[1])),
+            (self.url, self.url.replace(self.host, self.hosts[-1])),
+            (self.url, "https://example.com/short"),
+        ):
             with self.subTest(source=source), patch.object(web_fetch, "_fetch_once", side_effect=[
                 _response(status=302, headers={"location": target}), _response(),
             ]) as fetch:
@@ -113,6 +149,7 @@ class WebFetchLongUrlTests(unittest.TestCase):
                 self.assertEqual(fetch.call_args.args[0], target)
         for target in (self.url.replace(self.host, "example.com"),
                        self.url.replace(self.host, "sub." + self.host),
+                       self.url.replace(self.host, "static.cdninstagram.com"),
                        self.url.replace(self.host, "127.0.0.1"),
                        f"https://{self.host}/" + "a" * 4096):
             with self.subTest(target=target), patch.object(web_fetch, "_fetch_once", return_value=
@@ -122,7 +159,7 @@ class WebFetchLongUrlTests(unittest.TestCase):
                 self.assertIsInstance(result, ActionFailed)
                 self.assertEqual(fetch.call_count, 1)
 
-    def test_listed_host_still_rejects_private_dns(self) -> None:
+    def test_media_host_still_rejects_private_dns(self) -> None:
         with patch.object(web_fetch.socket, "getaddrinfo", return_value=_addrinfo("10.0.0.8")), patch.object(
             web_fetch, "_PinnedHTTPSConnection",
         ) as connection:
