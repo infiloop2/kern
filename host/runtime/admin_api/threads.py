@@ -188,6 +188,8 @@ def send_thread_message(
     peer_sender_thread_id: str | None,
     operator_sent_message: bool,
     retry_attempt: int,
+    *,
+    recovery: turn_retries.Retry | None = None,
 ) -> dict[str, Any]:
     """Start or steer one turn through the ordinary thread path."""
     if PRODUCT_THREAD_ID_RE.fullmatch(thread_id) is None:
@@ -205,6 +207,8 @@ def send_thread_message(
     if not isinstance(notice, dict):
         raise ApiError(HTTPStatus.BAD_REQUEST, "Kern input requires a specific notice kind and summary")
     with _thread_send_lock(thread_id):
+        if recovery is not None and turn_retries.current(thread_id) != recovery:
+            raise ApiError(HTTPStatus.CONFLICT, "automatic recovery was cancelled or replaced")
         session_config = state.thread_session_config(thread_id)
         agent_runtime, model, effort = _resolve_session_config(body, session_config, thread_id)
         # Follow-ups belong to the live turn; supplied settings apply on admission.
@@ -228,6 +232,16 @@ def send_thread_message(
                 recalled_pages, recall_details = _recalled_memory_pages(thread_id, task_context)
             after_commit: list[Callable[[], None]] = []
             with state.mutation(after_commit=after_commit) as cur:
+                if recovery is not None:
+                    current_config = state.thread_session_config(thread_id, cur)
+                    if (current_config is None or current_config["status"] != "idle"
+                        or current_config["run_number"] != recovery.run_number
+                        or (current_config["agent_runtime"], current_config["model"], current_config["effort"])
+                           != (recovery.runtime, recovery.model, recovery.effort)):
+                        raise ApiError(HTTPStatus.CONFLICT, "thread changed before automatic recovery")
+                    state.recovery_destination(cur, thread_id, recovery.runtime, recovery.model,
+                                               recovery.effort, recovery.target_runtime, utc_now())
+                    turn_retries.claim(cur, recovery)
                 # Re-read inside the admission transaction. The send lock keeps
                 # same-thread messages ordered, while this snapshot keeps the
                 # initial session row and turn events in one commit.
@@ -236,6 +250,10 @@ def send_thread_message(
                 switching_session = _session_configuration_changed(
                     session_config, agent_runtime, model, effort
                 )
+                if switching_session and recovery is None:
+                    saved_settings = state.product_session_settings(cur, thread_id)
+                    if saved_settings is not None and saved_settings != (agent_runtime, model, effort):
+                        raise ApiError(HTTPStatus.CONFLICT, "agent settings changed; resend with current settings")
                 launch_message = message
                 handoff_message = ""
                 session_change_activity = None
@@ -360,12 +378,15 @@ def retry_failed_turn(retry: turn_retries.Retry) -> None:
     # Keep status reads and Stop outside the gap between claiming a retry
     # and admitting its turn. send_thread_message takes this same RLock.
     with _thread_send_lock(retry.thread_id):
-        if not turn_retries.take(retry):
+        if turn_retries.current(retry.thread_id) != retry:
             return
         send_thread_message(retry.thread_id, {
-            "message": message_templates.retry_message(retry.attempt, retry.error),
-            "kern_notice": message_templates.retry_notice(retry.attempt),
-        }, None, operator_sent_message=False, retry_attempt=retry.attempt)
+            "message": (message_templates.RESTART_MESSAGE if retry.kind == "restart" else
+                        message_templates.retry_message(retry.attempt, retry.error)),
+            "kern_notice": (message_templates.restart_notice() if retry.kind == "restart" else
+                            message_templates.retry_notice(retry.attempt)),
+            "agent_runtime": retry.target_runtime, "model": retry.model, "effort": retry.effort,
+        }, None, operator_sent_message=False, retry_attempt=retry.attempt, recovery=retry)
 
 
 def _memory_task_query(thread_id: str, message: str, notice: dict[str, str] | None = None) -> str:
@@ -500,11 +521,11 @@ def stop_thread(thread_id: str) -> dict[str, str]:
         if config is None:
             raise ApiError(HTTPStatus.NOT_FOUND, "thread not found")
         stopped = orchestrator.stop_thread_turn(thread_id)
-        cancelled = turn_retries.cancel(thread_id)
-        if not stopped and not cancelled:
-            raise ApiError(HTTPStatus.CONFLICT, "the thread has no running work")
-        if cancelled and not stopped:
-            with state.mutation() as cur:
+        with state.mutation() as cur:
+            cancelled = turn_retries.cancel(thread_id, cur)
+            if not stopped and not cancelled:
+                raise ApiError(HTTPStatus.CONFLICT, "the thread has no running work")
+            if cancelled and not stopped:
                 state.append_agent_event(cur, "thread.stopped", thread_id, {}, run_number=config["run_number"])
         return {"status": "accepted"}
 
@@ -562,13 +583,13 @@ def clear_thread_memory(thread_id: str) -> dict[str, str]:
             )
             try:
                 state.clear_thread_context(cur, thread_id, cleared_seq, utc_now())
+                state.cancel_thread_recovery(cur, thread_id)
             except ValueError as exc:
                 raise ApiError(
                     HTTPStatus.CONFLICT,
                     "working memory can be cleared only while the thread is idle",
                 ) from exc
         memory_delivery.clear(thread_id)
-        turn_retries.cancel(thread_id)
     return {"status": "cleared"}
 
 def list_threads(

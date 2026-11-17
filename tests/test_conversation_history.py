@@ -11,6 +11,34 @@ from host.runtime.agent_shim import mcp_shim
 
 
 class TypedHistoryTests(unittest.TestCase):
+    def test_errors_keep_exact_text_but_never_export_unrelated_payload_fields(self):
+        event = {"event_id": "event_7", "timestamp": "2026-11-17T00:00:00Z",
+                 "event_type": "thread.error", "payload": {
+                     "error_message": "You've hit your limit.\nTry later.",
+                     "secret": "not a thread error", "traceback": "not exported",
+                 }}
+        result = history._conversation_event(event, True)
+        self.assertEqual(result, {"event_id": "event_7", "timestamp": event["timestamp"],
+                                  "type": "error", "error_message": event["payload"]["error_message"],
+                                  "truncated": False})
+        event["payload"]["error_message"] = '😀"\\\n' * 100_000
+        bounded = history._conversation_event(event, False)
+        self.assertTrue(bounded["truncated"])
+        self.assertLessEqual(len(json.dumps(bounded["error_message"]).encode()), history.CONVERSATION_MESSAGE_BYTES)
+
+    def test_error_filter_is_independent_and_reaches_cursor_bounds(self):
+        for include in (True, False):
+            with patch.object(history.state, "page_thread_events", return_value=[{
+                "event_id": "event_7", "timestamp": "2026-11-17T00:00:00Z",
+                "event_type": "thread.error", "payload": {"error_message": "capacity"},
+            }]) as page, patch.object(history.state, "thread_event_page_bounds", return_value=(True, False)) as bounds:
+                history.read_conversation_history({"thread_id": "thread-1", "roles": [],
+                                                   "notice_kinds": [], "include_errors": include})
+                for call in (page.call_args, bounds.call_args):
+                    self.assertEqual("thread.error" in call.kwargs["event_types"], include)
+        with self.assertRaisesRegex(Exception, "include_errors must be a boolean"):
+            history.read_conversation_history({"thread_id": "thread-1", "include_errors": 1})
+
     def test_incoming_notices_keep_their_kind_and_delivered_text(self) -> None:
         for kind in INPUT_KINDS:
             with self.subTest(kind=kind):

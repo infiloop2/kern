@@ -19,7 +19,7 @@ can break when a harness package is upgraded.
 
 | Harness | Package | Pinned version | Runtime id | Adapter |
 | --- | --- | --- | --- | --- |
-| Codex | `@openai/codex` | `0.164.0` | `codex`, `codex-2`, `codex-3` | `host/runtime/agent_runtime/codex_app_server.py` |
+| Codex | `@openai/codex` | `0.169.0` | `codex`, `codex-2`, `codex-3` | `host/runtime/agent_runtime/codex_app_server.py` |
 | Claude Code | `@anthropic-ai/claude-code` | `2.1.322` | `claude_code` | `host/runtime/agent_runtime/claude_code.py` |
 | Grok Build | `@xai-official/grok` | `1.0.70` | `grok`, `grok-2` | `host/runtime/agent_runtime/grok_agent.py` |
 | Hermes | `hermes-agent[bedrock,mcp]` | `0.19.0` | `hermes` | `host/runtime/agent_runtime/hermes_agent.py` |
@@ -94,18 +94,17 @@ Expected methods:
 | `turn/start` | Accepts `threadId`, text input, and the selected `model`, reasoning `effort`, and `serviceTier` for speed presets. Returns `turn.id`. It may emit notifications before the response. |
 | `turn/steer` | Accepts `threadId`, `expectedTurnId`, and text input. The submitting API request waits for its JSON-RPC response; `no active turn` is returned to the caller as a retryable `409`, not retained by a host mailbox. |
 
-Kern offers `gpt-6.1-sol` and `gpt-6-astra` with `high`, `max`, `ultra`,
-`high-fast`, and `high-ultrafast`; `gpt-6-luna` offers only `high` and `max`. All three Codex
-accounts default to `gpt-6.1-sol`. GPT-6 Sol is retired from the picker;
-historical conversations retain their recorded model and can switch while idle.
-Saved App and schedule settings move from GPT-6 Sol to GPT-6.1 Sol on upgrade.
+Kern offers `gpt-6.2-sol` and `gpt-6.2-astra`
+with `high`, `max`, `ultra`, `high-fast`, and `high-ultrafast`.
+`gpt-6-luna` offers `high` and `max`. All three Codex accounts default to
+`gpt-6.2-sol`.
 
 The adapter maps `high-fast` to High reasoning with `serviceTier: "fast"`,
 and `high-ultrafast` to High reasoning with `serviceTier: "ultrafast"`.
 High, Max, and Ultra keep the normal behavior without a speed override.
 Changing runtime, model, or preset starts a fresh provider session; resuming
 keeps the selected preset. Ultra is Codex's delegation mode, independent of Ultrafast.
-The pinned 0.164.0 CLI enables the `fast_mode` and `ultrafast_mode` features by
+The pinned 0.169.0 CLI enables the `fast_mode` and `ultrafast_mode` features by
 default and gates them independently, so Kern adds no
 feature flag to its managed config. The app-server accepts the service tier as a string. Kern does not filter these presets by plan, workspace, model catalog, or rollout, and does
 not retry unsupported requests with a different model or tier. Codex's error
@@ -688,6 +687,13 @@ Expected behavior:
 | exit code | ``0`` on success; any non-zero exit fails the turn with the process's stderr/stdout tail. |
 | stderr | ``--pass-session-id`` prints a ``session_id: <id>`` line; the host mints nothing, it reads Hermes's id and resumes with ``--resume``. |
 | stdout | The final answer text, interleaved with sentinel-framed live activity records (below). The adapter streams stdout line by line, routes the activity lines away, and keeps the remaining lines (minus the session line) as the answer. |
+
+Hermes offers `deepseek.v3.2`, `qwen.qwen3-coder-next`,
+`us.moonshotai.kimi-k3.1`, `us.zai.glm-5.3`, and `minimax.minimax-m2.5`.
+Its default is `us.moonshotai.kimi-k3.1`. The Kimi and GLM IDs use US
+cross-region profiles; invocation still goes to the configured regional
+Bedrock Runtime endpoint. GLM 5.3 access requires AWS eligibility. Hermes
+uses Converse, so Bedrock Mantle-only models are outside this catalog.
 
 ### Live activity
 

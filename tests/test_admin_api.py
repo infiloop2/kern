@@ -59,9 +59,9 @@ def save_approved_openai_account(account_id: str, **extra: Any) -> None:
 # One offered (model, effort) pair per runtime for tests that do not care
 # which configuration a thread runs.
 DEFAULT_SESSION_OPTIONS = {
-    "codex": ("gpt-6-astra", "high"),
-    "codex-2": ("gpt-6-astra", "high"),
-    "codex-3": ("gpt-6-astra", "high"),
+    "codex": ("gpt-6.2-astra", "high"),
+    "codex-2": ("gpt-6.2-astra", "high"),
+    "codex-3": ("gpt-6.2-astra", "high"),
     "claude_code": ("claude-opus-5-5", "high"),
     "grok": ("grok-4.7", "high"),
     "grok-2": ("grok-4.7", "high"),
@@ -568,6 +568,115 @@ class AgentFileUploadHttpTests(unittest.TestCase):
         process.kill.assert_called_once_with()
 
 
+class ChatImagePreviewHttpTests(unittest.TestCase):
+    setUp = AgentFileUploadHttpTests.setUp
+
+    def test_preview_accepts_boundary_and_rejects_oversize_before_bytes(self) -> None:
+        from test_image_previews import png_header
+        for size, status in [(24, 200), (5 * 1024 * 1024, 200), (5 * 1024 * 1024 + 1, 400)]:
+            with self.subTest(size=size):
+                payload = png_header(10, 10) + b"x" * (size - 24)
+                process = MagicMock()
+                process.stdout = io.BytesIO(json.dumps({
+                    "size_bytes": size, "media_type": "image/png",
+                }).encode() + b"\n" + payload)
+                process.poll.return_value = 0
+                request = urllib.request.Request(self.base_url + "/v1/agent-files/image-preview?path=/image.png")
+                _add_session_auth(request, self.session_token)
+                with patch("host.runtime.admin_api.service.subprocess.Popen", return_value=process):
+                    if status == 200:
+                        with urllib.request.urlopen(request, timeout=5) as response:
+                            self.assertEqual(response.headers["Content-Type"], "image/png")
+                            self.assertIn("no-store", response.headers["Cache-Control"])
+                            self.assertEqual(response.read(), payload)
+                    else:
+                        with self.assertRaises(urllib.error.HTTPError) as error:
+                            urllib.request.urlopen(request, timeout=5)
+                        self.assertEqual(error.exception.code, status)
+                        self.assertIn("5 MiB", error.exception.read().decode())
+                        self.assertEqual(process.stdout.read(), payload)
+                        process.kill.assert_called_once()
+
+    def test_preview_rejects_non_images_without_starting_helper(self) -> None:
+        for path in ("/video.mp4", "/vector.svg", "/animation.gif", "/page.html"):
+            with self.subTest(path=path):
+                request = urllib.request.Request(self.base_url + "/v1/agent-files/image-preview?path=" + path)
+                _add_session_auth(request, self.session_token)
+                with patch("host.runtime.admin_api.service.subprocess.Popen") as popen:
+                    with self.assertRaises(urllib.error.HTTPError) as error:
+                        urllib.request.urlopen(request, timeout=5)
+                    self.assertEqual(error.exception.code, 400)
+                    error.exception.read()
+                    popen.assert_not_called()
+
+    def test_preview_accepts_jpeg_and_webp_signatures(self) -> None:
+        from test_image_previews import jpeg_header, webp_header
+        for suffix, media_type, payload in (
+            ("jpg", "image/jpeg", jpeg_header(10, 10)),
+            ("jpeg", "image/jpeg", jpeg_header(10, 10)),
+            ("webp", "image/webp", webp_header(10, 10)),
+        ):
+            with self.subTest(suffix=suffix):
+                process = MagicMock()
+                process.stdout = io.BytesIO(json.dumps({
+                    "size_bytes": len(payload), "media_type": media_type,
+                }).encode() + b"\n" + payload)
+                process.poll.return_value = 0
+                request = urllib.request.Request(self.base_url + "/v1/agent-files/image-preview?path=/image." + suffix)
+                _add_session_auth(request, self.session_token)
+                with patch("host.runtime.admin_api.service.subprocess.Popen", return_value=process):
+                    with urllib.request.urlopen(request, timeout=5) as response:
+                        self.assertEqual(response.headers["Content-Type"], media_type)
+                        self.assertEqual(response.read(), payload)
+
+    def test_preview_rejects_disguised_and_empty_images(self) -> None:
+        for payload in (b"", b"GIF89a" + b"x" * 20, b"<svg>not a PNG</svg>"):
+            with self.subTest(payload=payload):
+                process = MagicMock()
+                process.stdout = io.BytesIO(json.dumps({
+                    "size_bytes": len(payload), "media_type": "image/png",
+                }).encode() + b"\n" + payload)
+                process.poll.return_value = 0
+                request = urllib.request.Request(self.base_url + "/v1/agent-files/image-preview?path=/image.png")
+                _add_session_auth(request, self.session_token)
+                with patch("host.runtime.admin_api.service.subprocess.Popen", return_value=process):
+                    with self.assertRaises(urllib.error.HTTPError) as error:
+                        urllib.request.urlopen(request, timeout=5)
+                    self.assertEqual(error.exception.code, 400)
+                    self.assertIn("not a supported image", error.exception.read().decode())
+                    process.kill.assert_called_once()
+
+    def test_preview_rejects_small_file_with_huge_dimensions_before_response(self) -> None:
+        from test_image_previews import png_header
+        payload = png_header(16384, 16384)
+        process = MagicMock()
+        process.stdout = io.BytesIO(json.dumps({
+            "size_bytes": len(payload), "media_type": "image/png",
+        }).encode() + b"\n" + payload)
+        process.poll.return_value = 0
+        request = urllib.request.Request(self.base_url + "/v1/agent-files/image-preview?path=/large.png")
+        _add_session_auth(request, self.session_token)
+        with patch("host.runtime.admin_api.service.subprocess.Popen", return_value=process):
+            with self.assertRaises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request, timeout=5)
+            self.assertEqual(error.exception.code, 400)
+            self.assertIn("16 megapixel", error.exception.read().decode())
+            process.kill.assert_called_once()
+
+    def test_preview_requires_session_and_csrf(self) -> None:
+        for cookie in (False, True):
+            with self.subTest(cookie=cookie):
+                request = urllib.request.Request(self.base_url + "/v1/agent-files/image-preview?path=/image.png")
+                if cookie:
+                    request.add_header("Cookie", "tc_admin_session=" + self.session_token)
+                with patch("host.runtime.admin_api.service.subprocess.Popen") as popen:
+                    with self.assertRaises(urllib.error.HTTPError) as error:
+                        urllib.request.urlopen(request, timeout=5)
+                    self.assertIn(error.exception.code, (401, 403))
+                    error.exception.read()
+                    popen.assert_not_called()
+
+
 class AgentProcessSnapshotTests(unittest.TestCase):
     def test_agent_processes_reads_descendant_cgroup_proc_metadata(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
@@ -716,7 +825,6 @@ class AdminApiTestCase(unittest.TestCase):
         memory_delivery = MemoryDelivery()
         self.enterContext(patch.object(admin_threads, "memory_delivery", memory_delivery))
         self.enterContext(patch.object(orchestrator, "memory_delivery", memory_delivery))
-        self.enterContext(patch.object(orchestrator.turn_retries, "_pending", {}))
         self.reconcile_patch = patch(
             "host.runtime.admin_api.service.orchestrator.reconcile_runtime_status_after_policy_change"
         )
@@ -1377,7 +1485,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
                     "operator_sent_message": True,
                     "message": "from app",
                     "agent_runtime": "codex",
-                    "model": "gpt-6-astra",
+                    "model": "gpt-6.2-astra",
                     "effort": "high",
                 },
             )
@@ -1414,7 +1522,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
             "operator_sent_message": True,
             "message": "from app",
             "agent_runtime": "codex",
-            "model": "gpt-6-astra",
+            "model": "gpt-6.2-astra",
             "effort": "high",
         }
         with patch.object(
@@ -1440,7 +1548,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
                     "operator_sent_message": True,
                     "message": "from app",
                     "agent_runtime": "codex",
-                    "model": "gpt-6-astra",
+                    "model": "gpt-6.2-astra",
                     "effort": "high",
                 },
             )
@@ -1499,7 +1607,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
                 {
                     "message": "too long",
                     "agent_runtime": "codex",
-                    "model": "gpt-6-astra",
+                    "model": "gpt-6.2-astra",
                     "effort": "high",
                 },
             )
@@ -2482,7 +2590,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
         invalid = [
             {"model": "gpt-6-luna", "effort": "ultra"},
             {"model": "claude-opus-5-5", "effort": "high"},
-            {"model": "gpt-6-astra"},
+            {"model": "gpt-6.2-astra"},
             {"effort": "high"},
             {"model": None, "effort": None},
         ]
@@ -2502,7 +2610,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
         body = {
             "message": "first",
             "agent_runtime": "codex",
-            "model": "gpt-6-astra",
+            "model": "gpt-6.2-astra",
             "effort": "high",
         }
         path = "/v1/threads/thread-fixed-options/messages"
@@ -2522,8 +2630,8 @@ class AdminApiIntegrationTests(AdminApiTestCase):
 
             self.mock_memory_recall.reset_mock()
             for fields in (
-                {"model": "gpt-6.1-sol", "effort": "high"},
-                {"model": "gpt-6-astra", "effort": "max"},
+                {"model": "gpt-6.2-sol", "effort": "high"},
+                {"model": "gpt-6.2-astra", "effort": "max"},
                 {"agent_runtime": "claude_code", "model": "claude-opus-5-5", "effort": "high"},
             ):
                 with self.subTest(fields=fields):
@@ -2537,7 +2645,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
             self.assertEqual(launch.call_args.args[0].server.messages, ["matching repeat", "continue", "continue", "continue"])
             with self.assertRaises(urllib.error.HTTPError) as partial_error:
                 self.request(
-                    "POST", path, {"message": "partial conflict", "model": "gpt-6-astra"}
+                    "POST", path, {"message": "partial conflict", "model": "gpt-6.2-astra"}
                 )
             self.assertEqual(partial_error.exception.code, 400)
             self.assertIn("must be provided together", partial_error.exception.read().decode())
@@ -2554,7 +2662,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
         from host.runtime.workspace import agent_messages, schedules
         from host.runtime.workspace.web_apps import backend as apps
         old = {"agent_runtime": "claude_code", "model": "claude-opus-5-5", "effort": "high"}
-        new = {"agent_runtime": "codex", "model": "gpt-6.1-sol", "effort": "high"}
+        new = {"agent_runtime": "codex", "model": "gpt-6.2-sol", "effort": "high"}
         save_policy({"network_integrations": {"openai": {"enabled": True}, "claude": {"enabled": True}}}, "2026-06-08T00:00:00Z")
         set_runtime_statuses(codex="active", claude_code="active")
         with patch.object(apps, "active_agent_runtimes", return_value=["claude_code"]):
@@ -2627,7 +2735,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
         seed_thread_session(
             "thread-switchable",
             "codex",
-            model="gpt-6-astra",
+            model="gpt-6.2-astra",
             effort="high",
             provider_session_id="old-provider-session",
         )
@@ -2706,7 +2814,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
         self.assertEqual(change["title"], "Agent provider changed")
         self.assertEqual(change["kind"], "status")
         self.assertEqual(change["phase"], "completed")
-        self.assertIn("Codex · gpt-6-astra · high", change["detail"])
+        self.assertIn("Codex · gpt-6.2-astra · high", change["detail"])
         self.assertIn("Claude Code · claude-opus-5-5 · max", change["detail"])
         visible_messages = [
             event["payload"]["message"]
@@ -2953,7 +3061,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
                 {
                     "message": "unowned",
                     "agent_runtime": "codex",
-                    "model": "gpt-6-astra",
+                    "model": "gpt-6.2-astra",
                     "effort": "high",
                 },
             )
@@ -2994,98 +3102,71 @@ class AdminApiIntegrationTests(AdminApiTestCase):
             state.thread_session_config("thread-rotatable")["agent_runtime"], "codex"
         )
 
-    def test_retired_codex_threads_can_switch_to_gpt_6_without_changing_accounts(self) -> None:
+    def test_codex_threads_reject_retired_models_without_changing_accounts(self) -> None:
         set_runtime_statuses(**{r: "active" for r in ("codex", "codex-2", "codex-3")})
         for runtime in ("codex", "codex-2", "codex-3"):
-            for old_model, new_model in (
-                ("gpt-5.6-sol", "gpt-6.1-sol"),
-                ("gpt-6-sol", "gpt-6.1-sol"),
-                ("gpt-5.6-luna", "gpt-6-luna"),
-                ("gpt-5.6-terra", "gpt-6-astra"),
-            ):
+            for old_model in ("gpt-5.6-sol", "gpt-6-sol", "gpt-5.6-luna",
+                              "gpt-5.6-terra", "gpt-6.1-sol", "gpt-6-astra"):
                 thread_id = f"thread-{runtime}-{old_model}".replace(".", "-")
                 with self.subTest(runtime=runtime, model=old_model):
-                    seed_thread_session(thread_id, runtime, model=old_model, effort="high")
+                    seed_thread_session(thread_id, runtime, model="gpt-6-luna", effort="high")
                     with self.assertRaises(urllib.error.HTTPError) as error:
-                        self.request("POST", f"/v1/threads/{thread_id}/messages", {"message": "continue"})
-                    self.assertEqual(error.exception.code, 409)
-                    self.assertIn("no longer offered", error.exception.read().decode())
+                        self.request(
+                            "POST", f"/v1/threads/{thread_id}/messages",
+                            {"message": "continue", "agent_runtime": runtime,
+                             "model": old_model, "effort": "high"},
+                        )
+                    self.assertEqual(error.exception.code, 400)
+                    self.assertIn("model must be one of", error.exception.read().decode())
+                    self.assertEqual(state.thread_session_config(thread_id)["model"], "gpt-6-luna")
                     with patch.object(orchestrator, "launch_turn"):
                         _, switched = self.request(
                             "POST", f"/v1/threads/{thread_id}/messages",
                             {"message": "continue", "agent_runtime": runtime,
-                             "model": new_model, "effort": "high"},
+                             "model": "gpt-6.2-sol", "effort": "high"},
                         )
                     self.assertEqual(switched["thread"]["agent_runtime"], runtime)
-                    self.assertEqual(switched["thread"]["model"], new_model)
+                    self.assertEqual(switched["thread"]["model"], "gpt-6.2-sol")
 
-    def test_thread_on_superseded_fable_5_1_can_switch_to_an_offered_model(self) -> None:
+    def test_fable_thread_rejects_superseded_models_and_accepts_current_model(self) -> None:
         save_policy(
             {"network_integrations": {"claude": {"enabled": True}}},
             "2026-06-08T00:00:00Z",
         )
         set_runtime_statuses(claude_code="active")
         seed_thread_session(
-            "thread-fable-5-thread",
-            "claude_code",
-            model="claude-fable-5-1",
-            effort="high",
-            last_used_at="2026-06-08T00:00:01Z",
+            "thread-fable-5-thread", "claude_code", model="claude-opus-5-5",
+            effort="high", last_used_at="2026-06-08T00:00:01Z",
         )
-
-        for fields in (
-            {},
-            {
-                "agent_runtime": "claude_code",
-                "model": "claude-fable-5-1",
-                "effort": "high",
-            },
-        ):
-            with self.subTest(fields=fields), self.assertRaises(urllib.error.HTTPError) as error:
+        for old_model in ("fable", "claude-fable-5", "claude-fable-5-1"):
+            with self.subTest(model=old_model), self.assertRaises(urllib.error.HTTPError) as error:
                 self.request(
-                    "POST",
-                    "/v1/threads/thread-fable-5-thread/messages",
-                    {"message": "follow up", **fields},
+                    "POST", "/v1/threads/thread-fable-5-thread/messages",
+                    {"message": "follow up", "agent_runtime": "claude_code",
+                     "model": old_model, "effort": "high"},
                 )
-            self.assertEqual(error.exception.code, 409)
-            self.assertIn("no longer offered", error.exception.read().decode())
-
+            self.assertEqual(error.exception.code, 400)
+            self.assertIn("model must be one of", error.exception.read().decode())
+            self.assertEqual(state.thread_session_config("thread-fable-5-thread")["model"], "claude-opus-5-5")
         with patch.object(orchestrator, "launch_turn"):
             _, switched = self.request(
-                "POST",
-                "/v1/threads/thread-fable-5-thread/messages",
-                {
-                    "message": "continue on a current model",
-                    "agent_runtime": "claude_code",
-                    "model": "claude-fable-5-2",
-                    "effort": "high",
-                },
+                "POST", "/v1/threads/thread-fable-5-thread/messages",
+                {"message": "continue on a current model", "agent_runtime": "claude_code",
+                 "model": "claude-fable-5-2", "effort": "high"},
             )
         self.assertEqual(switched["thread"]["agent_runtime"], "claude_code")
         self.assertEqual(switched["thread"]["model"], "claude-fable-5-2")
-
-        # The same thread stays in the listing on its replacement
-        # configuration, and a superseded model is still refused for new
-        # threads.
         _, threads = self.request("GET", "/v1/threads")
         listed = {thread["thread_id"]: thread for thread in threads["threads"]}
         self.assertEqual(listed["thread-fable-5-thread"]["model"], "claude-fable-5-2")
-        self.assertEqual(listed["thread-fable-5-thread"]["status"], "running")
-
-        with self.assertRaises(admin_api.ApiError) as new_thread_error:
+        with self.assertRaises(admin_api.ApiError) as error:
             self.workspace_request(
-                "POST",
-                "/v1/threads/thread-new-fable-5/messages",
-                {
-                    "operator_sent_message": True,
-                    "message": "new thread",
-                    "agent_runtime": "claude_code",
-                    "model": "claude-fable-5-1",
-                    "effort": "high",
-                },
+                "POST", "/v1/threads/thread-new-fable-5/messages",
+                {"operator_sent_message": True, "message": "new thread",
+                 "agent_runtime": "claude_code", "model": "claude-fable-5-1", "effort": "high"},
             )
-        self.assertEqual(new_thread_error.exception.status, HTTPStatus.BAD_REQUEST)
-        self.assertIn("model must be one of", new_thread_error.exception.message)
+        self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
+        self.assertIn("model must be one of", error.exception.message)
 
     def test_message_without_session_options_requires_an_existing_thread(self) -> None:
         with self.assertRaises(admin_api.ApiError) as error:
@@ -3102,7 +3183,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
             self.workspace_request(
                 "POST",
                 "/v1/threads/thread-partial-options/messages",
-                {"message": "first", "agent_runtime": "codex", "model": "gpt-6-astra", "operator_sent_message": True},
+                {"message": "first", "agent_runtime": "codex", "model": "gpt-6.2-astra", "operator_sent_message": True},
             )
 
         self.assertEqual(error.exception.status, HTTPStatus.BAD_REQUEST)
@@ -3222,7 +3303,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
             {
                 "thread_id": "thread-t1",
                 "agent_runtime": "codex",
-                "model": "gpt-6-astra",
+                "model": "gpt-6.2-astra",
                 "effort": "high",
                 "last_used_at": "2026-06-08T00:00:03Z",
                 "status": "idle",
@@ -3289,7 +3370,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
             for n in range(map_limit + 5):
                 state.save_thread_session(
                     cur, "codex", f"thread-codex-chat-{n}", f"thread_{n}",
-                    f"2026-06-08T{n // 60:02d}:{n % 60:02d}:00Z", "gpt-6-astra", "high",
+                    f"2026-06-08T{n // 60:02d}:{n % 60:02d}:00Z", "gpt-6.2-astra", "high",
                 )
                 state.save_thread_session(
                     cur, "claude_code", f"thread-claude-chat-{n}", f"session_{n}",
@@ -3392,7 +3473,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
         seed_thread_session(
             "thread-switched",
             "codex",
-            model="gpt-6-astra",
+            model="gpt-6.2-astra",
             effort="high",
             provider_session_id="codex-session",
         )
@@ -3409,7 +3490,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
                 {
                     "message": "fresh start",
                     "agent_runtime": "codex",
-                    "model": "gpt-6.1-sol",
+                    "model": "gpt-6.2-sol",
                     "effort": "max",
                 },
             )
@@ -3601,7 +3682,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
             self.request(
                 "POST",
                 "/v1/threads/thread-used-by-codex/messages",
-                {"message": "bad", "model": "gpt-6.1-sol"},
+                {"message": "bad", "model": "gpt-6.2-sol"},
             )
         self.assertEqual(codex_error.exception.code, 400)
 
@@ -3907,7 +3988,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
                 {
                     "message": "hello",
                     "agent_runtime": "codex",
-                    "model": "gpt-6-astra",
+                    "model": "gpt-6.2-astra",
                     "effort": "high",
                 },
             )
@@ -3919,7 +4000,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
                 {
                     "message": "hello",
                     "agent_runtime": "codex",
-                    "model": "gpt-6-astra",
+                    "model": "gpt-6.2-astra",
                     "effort": "high",
                 },
                 None,
@@ -3935,7 +4016,7 @@ class AdminApiIntegrationTests(AdminApiTestCase):
                     "operator_sent_message": True,
                     "message": "hello",
                     "agent_runtime": "codex",
-                    "model": "gpt-6-astra",
+                    "model": "gpt-6.2-astra",
                     "effort": "high",
                 },
             )
@@ -5691,10 +5772,11 @@ class AdminApiIntegrationTests(AdminApiTestCase):
         self.assertEqual(turn.phase, orchestrator.ExecutionPhase.FINISHING)
         turn.server.interrupt.assert_called_once_with()
         _, events = self.request("GET", "/v1/threads/thread-chat/events")
-        self.assertEqual([event["event_type"] for event in events["events"]], ["thread.error"])
+        self.assertEqual([event["event_type"] for event in events["events"]], ["thread.notice", "thread.error"])
+        self.assertEqual(events["events"][0]["payload"]["notice"]["summary"], "Automatic recovery stopped")
         self.assertIn(
             "linked provider account was reset by the operator",
-            events["events"][0]["payload"]["error_message"],
+            events["events"][1]["payload"]["error_message"],
         )
         self.assertIsNone(read_openai_account().get("account_id"))
         self.assertIsNone(read_proxy_openai_account_id())
@@ -6159,58 +6241,59 @@ class AdminApiIntegrationTests(AdminApiTestCase):
         self.assertEqual(body["updated_at"], "2026-06-08T00:00:03Z")
 
     def test_initialize_state_fails_turns_orphaned_by_a_restart(self) -> None:
-        seed_thread_session("thread-t1")
-        seed_thread_session("thread-t2")
+        seed_thread_session("thread-101")
+        seed_thread_session("thread-102")
         with state.mutation() as cur:
-            run_number = state.start_thread_run(cur, "thread-t1")
+            cur.execute("INSERT INTO chat_threads (thread_id) VALUES ('thread-101')")
+            run_number = state.start_thread_run(cur, "thread-101")
             state.append_agent_event(
                 cur,
                 "thread.message",
-                "thread-t1",
+                "thread-101",
                 {"message": "interrupted turn", "source": "user"},
                 run_number=run_number,
             )
 
         interrupted = admin_api.initialize_state()
-        self.assertEqual(interrupted, ["thread-t1"])
+        self.assertEqual(interrupted, ["thread-101"])
 
-        _, open_events = self.request("GET", "/v1/threads/thread-t1/events")
+        _, open_events = self.request("GET", "/v1/threads/thread-101/events")
         self.assertEqual(
             [event["event_type"] for event in open_events["events"]],
-            ["thread.message", "thread.error"],
+            ["thread.message", "thread.notice", "thread.error"],
         )
         self.assertIn(
             "restarted while the thread was running",
             open_events["events"][-1]["payload"]["error_message"],
         )
         # A thread whose newest turn already ended is left alone.
-        _, closed_events = self.request("GET", "/v1/threads/thread-t2/events")
+        _, closed_events = self.request("GET", "/v1/threads/thread-102/events")
         self.assertEqual(
             [event["event_type"] for event in closed_events["events"]],
             [],
         )
-        self.assertEqual(state.thread_session_config("thread-t1")["status"], "idle")
+        self.assertEqual(state.thread_session_config("thread-101")["status"], "idle")
         self.assertEqual(admin_api.initialize_state(), [])
 
         with (
-            patch.object(orchestrator, "refresh_runtime_status", return_value="active"),
+            patch.object(orchestrator, "runtime_status", return_value="active"),
             patch.object(orchestrator, "launch_turn") as launch,
         ):
             admin_api.restart_interrupted_agents(interrupted)
         launch.assert_called_once()
         self.assertIn("Kern was restarted. Please resume your work.", launch.call_args.args[1])
         self.mock_memory_recall.assert_called_once_with(
-            "thread-t1", "User: interrupted turn"
+            "thread-101", "User: interrupted turn"
         )
-        _, resumed_events = self.request("GET", "/v1/threads/thread-t1/events")
+        _, resumed_events = self.request("GET", "/v1/threads/thread-101/events")
         self.assertEqual(
             [event["event_type"] for event in resumed_events["events"]],
             [
-                "thread.message", "thread.error", "thread.notice",
+                "thread.message", "thread.notice", "thread.error", "thread.notice",
                 "thread.notice",
             ],
         )
-        self.assertEqual(resumed_events["events"][2]["payload"], {
+        self.assertEqual(resumed_events["events"][3]["payload"], {
             "message": admin_api.RESTART_MESSAGE,
             "source": "user",
             "notice": {"kind": "restart", "summary": "Kern restarted. Resume requested."},

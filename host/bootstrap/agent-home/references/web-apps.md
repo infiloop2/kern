@@ -21,7 +21,7 @@ grants, except for explicitly granted collection writes. Archived or agent-locke
   → supported efforts) and `active_runtimes`. Use these choices, not guessed
   model names.
 - `PUT /agent/apps/{app_id}/agent-settings` requires all three fields:
-  `{"agent_runtime":"codex","model":"gpt-6.1-sol","effort":"high"}`.
+  `{"agent_runtime":"codex","model":"gpt-6.2-sol","effort":"high"}`.
   Use a currently supported combination. Saving does not start a turn;
   the current turn and its follow-ups keep their configuration, and the next
   turn uses the new settings.

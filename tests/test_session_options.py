@@ -160,13 +160,13 @@ class SessionOptionsTests(unittest.TestCase):
         self.assertEqual(
             DEFAULT_INTERACTIVE_MODELS,
             {
-                "codex": "gpt-6.1-sol",
-                "codex-2": "gpt-6.1-sol",
-                "codex-3": "gpt-6.1-sol",
+                "codex": "gpt-6.2-sol",
+                "codex-2": "gpt-6.2-sol",
+                "codex-3": "gpt-6.2-sol",
                 "claude_code": "claude-opus-5-5",
                 "grok": "grok-4.7",
                 "grok-2": "grok-4.7",
-                "hermes": "moonshotai.kimi-k2.5",
+                "hermes": "us.moonshotai.kimi-k3.1",
             },
         )
         for runtime, model in DEFAULT_INTERACTIVE_MODELS.items():
@@ -179,19 +179,19 @@ class SessionOptionsTests(unittest.TestCase):
             INTERACTIVE_SESSION_OPTIONS,
             {
                 "codex": {
-                    "gpt-6.1-sol": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
+                    "gpt-6.2-sol": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
+                    "gpt-6.2-astra": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
                     "gpt-6-luna": ("high", "max"),
-                    "gpt-6-astra": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
                 },
                 "codex-2": {
-                    "gpt-6.1-sol": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
+                    "gpt-6.2-sol": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
+                    "gpt-6.2-astra": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
                     "gpt-6-luna": ("high", "max"),
-                    "gpt-6-astra": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
                 },
                 "codex-3": {
-                    "gpt-6.1-sol": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
+                    "gpt-6.2-sol": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
+                    "gpt-6.2-astra": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
                     "gpt-6-luna": ("high", "max"),
-                    "gpt-6-astra": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
                 },
                 "claude_code": {
                     "claude-opus-5-5": ("high", "max", "ultracode"),
@@ -207,8 +207,9 @@ class SessionOptionsTests(unittest.TestCase):
                 "hermes": {
                     "deepseek.v3.2": ("high",),
                     "qwen.qwen3-coder-next": ("high",),
-                    "moonshotai.kimi-k2.5": ("high",),
-                    "zai.glm-5": ("high",),
+                    "us.moonshotai.kimi-k3.1": ("high",),
+                    "us.zai.glm-5.3": ("high",),
+                    "minimax.minimax-m2.5": ("high",),
                 },
             },
         )
@@ -237,7 +238,7 @@ class SessionOptionsTests(unittest.TestCase):
                 )
         # ...and it leaves the model runtimes exactly as they were.
         self.assertIsNone(
-            session_config_error("codex", "gpt-6.1-sol", "ultra", allow_script=True)
+            session_config_error("codex", "gpt-6.2-sol", "ultra", allow_script=True)
         )
         self.assertIsNotNone(
             session_config_error("codex", "gpt-6-luna", "ultra", allow_script=True)
@@ -251,7 +252,7 @@ class SessionOptionsTests(unittest.TestCase):
         )
 
     def test_rejects_cross_runtime_and_unsupported_luna_presets(self) -> None:
-        self.assertIsNone(session_config_error("codex", "gpt-6.1-sol", "ultra"))
+        self.assertIsNone(session_config_error("codex", "gpt-6.2-sol", "ultra"))
         self.assertIsNone(session_config_error("claude_code", "claude-fable-5-2", "ultracode"))
         for runtime in ("codex", "codex-2", "codex-3"):
             for effort in ("ultra", "high-fast", "high-ultrafast"):
@@ -306,7 +307,7 @@ class SessionOptionsTests(unittest.TestCase):
 
     def test_retired_codex_models_are_readable_but_cannot_run_new_work(self) -> None:
         for runtime in ("codex", "codex-2", "codex-3"):
-            for model in ("gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-terra"):
+            for model in ("gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.6-terra", "gpt-6-terra", "gpt-6.1-sol", "gpt-6-astra"):
                 with self.subTest(runtime=runtime, model=model):
                     self.assertIsNotNone(session_config_error(runtime, model, "high"))
                     self.assertIsNotNone(
@@ -327,10 +328,16 @@ class SessionOptionsTests(unittest.TestCase):
                 (runtime, "grok-4.6", "high"),
             )
 
+    def test_retired_hermes_models_cannot_start_new_work(self) -> None:
+        for model in ("moonshotai.kimi-k2.5", "zai.glm-5"):
+            with self.subTest(model=model):
+                self.assertIsNotNone(session_config_error("hermes", model, "high"))
+                self.assertIsNotNone(session_config_error("hermes", model, "high", allow_script=True))
+
     def test_public_options_are_json_facing_copies(self) -> None:
         options = public_session_options()
         self.assertEqual(options["codex"]["gpt-6-luna"], ["high", "max"])
-        self.assertEqual(options["codex"]["gpt-6-astra"], ["high", "max", "ultra", "high-fast", "high-ultrafast"])
+        self.assertEqual(options["codex"]["gpt-6.2-astra"], ["high", "max", "ultra", "high-fast", "high-ultrafast"])
         self.assertEqual(
             options["claude_code"]["claude-fable-5-2"],
             ["high", "max", "ultracode"],
@@ -340,7 +347,7 @@ class SessionOptionsTests(unittest.TestCase):
         schedule_session_options()["script"]["bash"].append("invalid")
         self.assertEqual(SESSION_OPTIONS["codex"]["gpt-6-luna"], ("high", "max"))
         self.assertEqual(
-            SESSION_OPTIONS["codex"]["gpt-6-astra"], ("high", "max", "ultra", "high-fast", "high-ultrafast")
+            SESSION_OPTIONS["codex"]["gpt-6.2-astra"], ("high", "max", "ultra", "high-fast", "high-ultrafast")
         )
         self.assertEqual(SESSION_OPTIONS["script"]["bash"], ("fixed",))
 

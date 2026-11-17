@@ -826,7 +826,7 @@ def seed_state() -> None:
                     if spec["agent_runtime"] == "claude_code"
                     else "grok-4.7"
                     if spec["agent_runtime"] in {"grok", "grok-2"}
-                    else "gpt-6-astra"
+                    else "gpt-6.2-astra"
                 ),
                 "effort": "high",
                 "last_used_at": ago(spec["completed_min"]),

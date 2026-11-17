@@ -221,7 +221,7 @@
     return compacted;
   }
 
-  function inlineMarkdown(source) {
+  function inlineMarkdown(source, workspaceImages = false) {
     const tokens = [];
     const stash = html => {
       const index = tokens.push(html) - 1;
@@ -230,20 +230,32 @@
     let text = String(source ?? "");
     text = text.replace(/`([^`\n]+)`/g, (_, code) =>
       stash(`<code>${escapeHtml(code)}</code>`));
-    text = text.replace(/(!?)\[([^\]\n]+)\]\((?:<([^>\n]+)>|([^)\s]+))(?:\s+"[^"]*")?\)/g,
+    text = text.replace(/(!?)\[([^\]\n]*)\]\((?:<([^>\n]+)>|([^)\s]+))(?:\s+"[^"]*")?\)/g,
       (_, image, label, bracketedHref, plainHref) => {
       const rawHref = bracketedHref || plainHref;
-      const filePath = !image && workspaceFilePath(rawHref);
+      const filePath = workspaceFilePath(rawHref);
       if (filePath) {
+        const fileLabel = label || filePath.split("/").pop() || "Open file";
         const fallbackPath = workspaceFileFallbackPath(rawHref);
         const fallbackAttribute = fallbackPath
           ? ` data-fallback-path="${escapeHtml(fallbackPath)}"`
           : "";
-        return stash(
+        const fileLink =
           `<button type="button" class="md-open-file" ` +
           `data-file-path="${escapeHtml(filePath)}"${fallbackAttribute} ` +
-          `title="Open in Agent workspace">${escapeHtml(label)}</button>`,
-        );
+          `title="Open in Agent workspace">${escapeHtml(fileLabel)}</button>`;
+        if (workspaceImages && /\.(jpe?g|png|webp)$/i.test(filePath)) {
+          return stash(
+            `<span class="chat-image" data-image-path="${escapeHtml(filePath)}">` +
+            `<button type="button" class="chat-image-preview" disabled ` +
+            `aria-label="Expand image: ${escapeHtml(fileLabel)}">` +
+            `<span class="chat-image-status">Loading preview…</span>` +
+            `<img alt="${escapeHtml(fileLabel)}" decoding="async" hidden></button>` +
+            `<span class="chat-image-caption">${fileLink}</span>` +
+            `<button type="button" class="chat-image-retry" hidden>Retry preview</button></span>`,
+          );
+        }
+        return stash(fileLink);
       }
       const href = safeHref(rawHref);
       if (!href) return image ? `[image: ${label}]` : label;
@@ -280,7 +292,8 @@
     return line.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map(cell => cell.trim());
   }
 
-  function renderMarkdown(source, blockquoteDepth = 0) {
+  function renderMarkdown(source, blockquoteDepth = 0, workspaceImages = false) {
+    const inline = value => inlineMarkdown(value, workspaceImages);
     const lines = String(source ?? "").replace(/\r\n?/g, "\n").split("\n");
     const html = [];
     let index = 0;
@@ -320,7 +333,7 @@
       const heading = line.match(/^(#{1,6})\s+(.+)$/);
       if (heading) {
         const level = heading[1].length;
-        html.push(`<h${level}>${inlineMarkdown(heading[2])}</h${level}>`);
+        html.push(`<h${level}>${inline(heading[2])}</h${level}>`);
         index += 1;
         continue;
       }
@@ -339,9 +352,9 @@
         }
         html.push(
           `<div class="md-table-wrap"><table><thead><tr>${headings.map(cell =>
-            `<th>${inlineMarkdown(cell)}</th>`).join("")}</tr></thead><tbody>${rows.map(row =>
+            `<th>${inline(cell)}</th>`).join("")}</tr></thead><tbody>${rows.map(row =>
             `<tr>${headings.map((_, cellIndex) =>
-              `<td>${inlineMarkdown(row[cellIndex] || "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`,
+              `<td>${inline(row[cellIndex] || "")}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`,
         );
         continue;
       }
@@ -352,8 +365,8 @@
           index += 1;
         }
         const content = blockquoteDepth < MAX_BLOCKQUOTE_DEPTH
-          ? renderMarkdown(quoted.join("\n"), blockquoteDepth + 1)
-          : `<p>${inlineMarkdown(quoted.join("\n"))}</p>`;
+          ? renderMarkdown(quoted.join("\n"), blockquoteDepth + 1, workspaceImages)
+          : `<p>${inline(quoted.join("\n"))}</p>`;
         html.push(`<blockquote>${content}</blockquote>`);
         continue;
       }
@@ -368,9 +381,9 @@
           let item = match[2];
           const task = item.match(/^\[([ xX])\]\s+(.+)$/);
           if (task) {
-            item = `<input type="checkbox" disabled${task[1].toLowerCase() === "x" ? " checked" : ""}> ${inlineMarkdown(task[2])}`;
+            item = `<input type="checkbox" disabled${task[1].toLowerCase() === "x" ? " checked" : ""}> ${inline(task[2])}`;
           } else {
-            item = inlineMarkdown(item);
+            item = inline(item);
           }
           items.push(`<li>${item}</li>`);
           index += 1;
@@ -385,7 +398,7 @@
         paragraph.push(lines[index].trim());
         index += 1;
       }
-      html.push(`<p>${paragraph.map(inlineMarkdown).join("<br>")}</p>`);
+      html.push(`<p>${paragraph.map(inline).join("<br>")}</p>`);
     }
     return html.join("");
   }

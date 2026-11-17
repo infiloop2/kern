@@ -303,7 +303,7 @@ def run_turn_retries(page: Any, url: str, log_in: Any) -> None:
 
     def chat_index(route: Any) -> None:
         thread = {"thread_id": "thread-1", "name": "Retry test", "status": "idle",
-                  "agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high",
+                  "agent_runtime": "codex", "model": "gpt-6.2-astra", "effort": "high",
                   "has_session": True, "schedule_id": None, "archived": False}
         if pending["chat"]:
             thread["retry"] = retry
@@ -311,7 +311,7 @@ def run_turn_retries(page: Any, url: str, log_in: Any) -> None:
 
     def app_conversation(route: Any) -> None:
         body = {"status": "idle", "session": {
-            "agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high"}}
+            "agent_runtime": "codex", "model": "gpt-6.2-astra", "effort": "high"}}
         if pending["app"]:
             body["retry"] = retry
         route.fulfill(json=body)

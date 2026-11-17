@@ -27,7 +27,7 @@ policy = load("check_review")
 preflight = load("preflight")
 REPO = "infiversehq/kern"
 HEAD, BASE = "a" * 40, "b" * 40
-PR = {"number": 7, "state": "open", "draft": False,
+PR: dict[str, Any] = {"number": 7, "state": "open", "draft": False,
       "head": {"sha": HEAD, "ref": "feature", "repo": {"full_name": REPO}},
       "base": {"sha": BASE, "ref": "main"}}
 ROOT_API = f"/repos/{REPO}"
@@ -43,6 +43,18 @@ def summary_comment(**changes):
                                  "has_any_findings": None, "has_unresolved_findings": None}}
     state["code_review"].update(changes)
     return {**COMMENT, "body": policy.SUMMARY + "\n<!-- codex-review-state:v1 " + json.dumps(state) + " -->\n\nRendered summary"}
+
+
+def nonblocking_security_comment(**changes: Any) -> dict[str, Any]:
+    state = policy.summary_state(summary_comment()["body"])
+    state["security_review"] = {
+        "commit_sha": HEAD, "status": "completed",
+        "has_any_findings": None, "has_unresolved_findings": None, **changes,
+    }
+    metadata = {"headSha": HEAD, "status": "completed", "mergeGateEnabled": False}
+    return {**COMMENT, "body": policy.SUMMARY
+            + "\n<!-- codex-review-state:v1 " + json.dumps(state) + " -->"
+            + "\n<!-- codex-security-review:v1 " + json.dumps(metadata) + " -->"}
 
 
 class ReviewGateTests(unittest.TestCase):
@@ -104,6 +116,54 @@ class ReviewGateTests(unittest.TestCase):
             with self.subTest(security=security):
                 self.assertEqual(self.verdict(comments=[{**good, "body": body}]), ready)
 
+    def test_completed_nonblocking_security_summary_preserves_clean_receipt(self) -> None:
+        summary = {**nonblocking_security_comment(), "id": 20,
+                   "updated_at": "2026-10-28T02:00:00Z"}
+        receipt = {**COMMENT, "body": "<!-- codex-review-receipt:v1 -->\n\n" + COMMENT["body"]}
+        self.assertTrue(policy.clean_body(summary["body"]))
+        self.assertTrue(self.verdict(comments=[receipt, summary]))
+        self.assertTrue(self.verdict(comments=[summary]))
+        finding = {"id": 30, "user": {"login": policy.CODEX}, "commit_id": HEAD,
+                   "submitted_at": summary["updated_at"], "body": "Found bug", "state": "COMMENTED"}
+        self.assertFalse(self.verdict(comments=[receipt, summary], reviews=[finding]))
+
+    def test_null_security_flags_require_exact_completed_nonblocking_metadata(self) -> None:
+        good = nonblocking_security_comment()
+        marker = "\n<!-- codex-security-review:v1 "
+        prefix = good["body"].split(marker)[0]
+        metadata = {"headSha": HEAD, "status": "completed", "mergeGateEnabled": False}
+        cases: list[object] = [{**metadata, "headSha": "c" * 40}, {**metadata, "headSha": HEAD[:10]},
+                 {**metadata, "status": "in_progress"}, {**metadata, "status": "failed"},
+                 {**metadata, "mergeGateEnabled": True}, {**metadata, "mergeGateEnabled": 0},
+                 {key: value for key, value in metadata.items() if key != "mergeGateEnabled"},
+                 None, []]
+        bodies = [prefix, prefix + marker + "{invalid} -->",
+                  good["body"].replace("codex-security-review:v1", "codex-security-review:v2"),
+                  prefix + "\nRendered text" + marker + json.dumps(metadata) + " -->"]
+        bodies += [prefix + marker + json.dumps(value) + " -->" for value in cases]
+        for body in bodies:
+            with self.subTest(body=body):
+                self.assertFalse(policy.clean_body(body))
+                self.assertFalse(self.verdict(comments=[{**good, "body": body}]))
+
+    def test_nonblocking_security_metadata_cannot_hide_pending_findings_or_missing_flags(self) -> None:
+        cases: list[dict[str, Any]] = [{"commit_sha": "c" * 40}, {"status": "in_progress"}, {"status": "failed"},
+                 {"has_any_findings": True}, {"has_unresolved_findings": True},
+                 {"has_any_findings": False}, {"has_unresolved_findings": False},
+                 {"has_any_findings": 0}, {"has_unresolved_findings": "false"}]
+        for changes in cases:
+            summary = nonblocking_security_comment(**changes)
+            with self.subTest(changes=changes):
+                self.assertFalse(policy.clean_body(summary["body"]))
+                self.assertFalse(self.verdict(comments=[summary]))
+        good = nonblocking_security_comment()
+        for key in ("has_any_findings", "has_unresolved_findings"):
+            body = good["body"].replace('"' + key + '": null', '"unknown": null')
+            with self.subTest(missing=key):
+                self.assertFalse(self.verdict(comments=[{**good, "body": body}]))
+        body = good["body"].replace('"has_any_findings": false', '"has_any_findings": null')
+        self.assertFalse(self.verdict(comments=[{**good, "body": body}]))
+
     def test_pending_or_malformed_summary_revokes_earlier_clean_comment(self):
         later = {**summary_comment(status="in_progress"), "id": 20,
                  "updated_at": "2026-10-28T02:00:00Z"}
@@ -155,6 +215,19 @@ class ReviewGateTests(unittest.TestCase):
                     with self.assertRaises(RuntimeError):
                         policy.gate(event, REPO)
 
+    def test_stacked_pr_gate_requires_clean_review_and_current_head_and_base(self) -> None:
+        stacked = {**PR, "base": {"sha": BASE, "ref": "feature/parent"}}
+        event = {"number": 7, "pull_request": stacked}
+        for clean in (False, True):
+            with self.subTest(clean=clean), patch.object(policy, "request", return_value=stacked), patch.object(policy, "clean_review", return_value=clean):
+                self.assertEqual(policy.gate(event, REPO), clean)
+        for changed in ({**stacked, "base": {"sha": "c" * 40, "ref": "feature/parent"}},
+                        {**stacked, "head": {**PR["head"], "sha": "c" * 40}}):
+            for reads in ([changed, stacked], [stacked, changed]):
+                with self.subTest(changed=changed, reads=reads), patch.object(policy, "request", side_effect=reads), patch.object(policy, "clean_review", return_value=True):
+                    with self.assertRaises(RuntimeError):
+                        policy.gate(event, REPO)
+
     def test_missing_review_is_deferred_without_exception(self):
         with patch.object(policy, "request", return_value=deepcopy(PR)), patch.object(policy, "clean_review", return_value=False):
             self.assertFalse(policy.gate({"number": 7, "pull_request": PR}, REPO))
@@ -199,23 +272,34 @@ class AutomaticStartTests(unittest.TestCase):
         self.jobs: list[dict[str, Any]] = [{"name": "Cheap checks and review gate", "steps": [
             {"name": "Wait for clean Codex review", "conclusion": "failure"}]}]
 
-    def invoke(self, *, clean: bool = True, current: Any = None, moved: bool = False) -> Any:
+    def invoke(self, *, clean: bool = True, current: Any = None, moved: bool = False, pr: Any = PR) -> Any:
         def get(path: str) -> Any:
             if "/pulls/" in path:
-                return {**PR, "state": "closed"} if moved else deepcopy(PR)
+                return {**pr, "state": "closed"} if moved else deepcopy(pr)
             return deepcopy(self.run_record if current is None else current)
 
         def pages(path: str, key: str) -> Any:
             return [deepcopy(self.run_record)] if "/workflows/" in path else self.jobs
 
         with patch.object(policy, "request", side_effect=get), patch.object(policy, "pages", side_effect=pages), patch.object(policy, "clean_review", return_value=clean), patch.object(self.worker.subprocess, "run") as launch:
-            self.worker.start(deepcopy(PR), REPO)
+            self.worker.start(deepcopy(pr), REPO)
             return launch.call_args_list
 
     def test_clean_review_starts_original_run_once(self) -> None:
         calls = self.invoke()
         self.assertEqual(len(calls), len(self.worker.WORKFLOWS))
         self.assertEqual(calls[0].args[0], ["gh", "api", "--method", "POST", f"{ROOT_API}/actions/runs/99/rerun"])
+
+    def test_stacked_pr_starts_once_with_clean_review_and_matching_base(self) -> None:
+        stacked = {**PR, "base": {"sha": BASE, "ref": "feature/parent"}}
+        self.run_record["pull_requests"] = [stacked]
+        self.assertEqual(len(self.invoke(pr=stacked)), len(self.worker.WORKFLOWS))
+        self.assertFalse(self.invoke(pr=stacked, clean=False))
+        self.run_record["pull_requests"] = [{**stacked, "base": {"sha": "c" * 40}}]
+        self.assertFalse(self.invoke(pr=stacked))
+        self.run_record["pull_requests"] = [stacked]
+        self.run_record["run_attempt"] = 2
+        self.assertFalse(self.invoke(pr=stacked))
 
     def test_no_review_busy_stale_or_already_started_run_does_not_launch(self) -> None:
         self.assertFalse(self.invoke(clean=False))
@@ -274,6 +358,13 @@ class AutomaticStartTests(unittest.TestCase):
             event["comment"] = summary_comment(status="in_progress")
             self.worker.handle(event, "issue_comment", REPO)
             start.assert_not_called()
+
+    def test_completed_nonblocking_security_summary_starts_ci(self) -> None:
+        event = {"issue": {"number": 7, "pull_request": {"url": "PR"}},
+                 "comment": nonblocking_security_comment()}
+        with patch.object(policy, "request", return_value=deepcopy(PR)), patch.object(self.worker, "start") as start:
+            self.worker.handle(event, "issue_comment", REPO)
+            start.assert_called_once_with(PR, REPO)
 
     def test_concurrent_acceptance_is_deduplicated_but_denial_is_reported(self) -> None:
         for after in [self.run_record, {**self.run_record, "run_attempt": 2, "status": "queued"}]:

@@ -209,7 +209,7 @@ def desktop_smoke(page: Any) -> None:
         "#chat-nav-items [data-action='open-chat'][data-item-id='thread-1']"
     )
     expect(thread_nav.locator(".workspace-nav-meta")).to_have_text(
-        "Codex · gpt-6-astra · high"
+        "Codex · gpt-6.2-astra · high"
     )
     expect(website_nav.locator(".workspace-nav-error[aria-label='Agent error']")).to_have_count(1)
     expect(thread_nav.locator(".workspace-nav-error")).to_have_count(0)
@@ -488,7 +488,8 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#new-task-effort")).to_contain_text("Xhigh")
     frame.locator("#new-task-runtime").select_option("codex")
     expect(frame.locator("#new-task-model option")).to_have_count(3)
-    expect(frame.locator("#new-task-model option[value='gpt-6-astra']")).to_have_count(1)
+    expect(frame.locator("#new-task-model option[value='gpt-6.2-sol']")).to_have_count(1)
+    expect(frame.locator("#new-task-model option[value='gpt-6.2-astra']")).to_have_count(1)
     frame.locator("#new-task-model").select_option("gpt-6-luna")
     expect(frame.locator("#new-task-effort option")).to_have_text(["High", "Max"])
     expect(frame.locator("#new-task-effort option[value=ultra]")).to_have_count(0)
@@ -615,7 +616,7 @@ def desktop_smoke(page: Any) -> None:
     expect(frame.locator("#new-task-effort")).to_have_value("max")
     _start_host_chat(page)
     expect(frame.locator("#new-task-runtime")).to_have_value("codex")
-    expect(frame.locator("#new-task-model")).to_have_value("gpt-6.1-sol")
+    expect(frame.locator("#new-task-model")).to_have_value("gpt-6.2-sol")
     expect(frame.locator("#new-task-effort")).to_have_value("high")
     expect(frame.locator("#new-task-effort option")).to_have_text([
         "High", "Max", "Ultra", "High Fast", "High Ultrafast",

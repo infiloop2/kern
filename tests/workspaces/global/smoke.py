@@ -452,7 +452,7 @@ def _seed_demo() -> None:
     schedules = [
         {
             "id": 1, "name": "Morning release review", "triggers": [{"type": "daily", "times": ["09:00"], "prompt": "Summarize open release work and identify blockers."}],
-            "agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high",
+            "agent_runtime": "codex", "model": "gpt-6.2-astra", "effort": "high",
             "revision": 2, "deleted": False,
             "thread_id": "schedule-1",
             "last_run_at": schedule_backend._format_ts(daily_last),

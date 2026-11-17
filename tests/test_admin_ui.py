@@ -2605,7 +2605,7 @@ class AdminUiStaticTests(unittest.TestCase):
             None,
             20,
             before=None,
-            event_types=("thread.message", "thread.notice", "thread.activity"), notice_kinds=INPUT_KINDS,
+            event_types=("thread.message", "thread.notice", "thread.error", "thread.activity"), notice_kinds=INPUT_KINDS,
             message_sources=("user", "agent"),
         )
         self.assertEqual([event["type"] for event in response["events"]], ["message", "activity"])
@@ -2650,7 +2650,7 @@ class AdminUiStaticTests(unittest.TestCase):
             response = admin_api.read_conversation_history({
                 "thread_id": "thread-1", "notice_kinds": list(INPUT_KINDS + CONTEXT_KINDS), "include_details": True, "after": "event_1",
             })
-        event_types = ("thread.message", "thread.notice")
+        event_types = ("thread.message", "thread.notice", "thread.error")
         page.assert_called_once_with("thread-1", 1, 20, event_types=event_types, notice_kinds=INPUT_KINDS + CONTEXT_KINDS, message_sources=("user", "agent"))
         bounds.assert_called_once_with("thread-1", 2, 5, event_types=event_types, notice_kinds=INPUT_KINDS + CONTEXT_KINDS, message_sources=("user", "agent"))
         self.assertEqual(response["instruction_authority"], "none")
@@ -2680,7 +2680,7 @@ class AdminUiStaticTests(unittest.TestCase):
                             "thread_id": "thread-1", "include_activity": include_activity,
                             "notice_kinds": list(INPUT_KINDS + CONTEXT_KINDS if include_context else INPUT_KINDS), **cursor,
                         })
-                        expected = ("thread.message", "thread.notice")
+                        expected = ("thread.message", "thread.notice", "thread.error")
                         if include_activity:
                             expected += ("thread.activity",)
                         called = around if "around_event_id" in cursor else page

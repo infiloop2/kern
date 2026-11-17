@@ -153,15 +153,15 @@ is required. Write and test the durable script under agent home first.
 default 50); `?thread_id=ID` returns that thread's hourly rows, or one `day`
 with `&day=YYYY-MM-DD`. The four buckets are disjoint; null means unmeasured.
 
-## Links
+## Files, images and links
 
-Use Markdown HTTPS links in Chat and anchors in Apps. Safe-navigation providers
-open directly; other valid links offer copying. Never put secrets in URLs or
-disguise destinations.
+Use native links: `[Image](/mnt/kern-agent/agent-home/image.png)`.
+No `sandbox:`, `file://`, localhost or invented file URLs.
+Before sharing files/images, read
+`/opt/kern-host/host/bootstrap/agent-home/references/workspace-files.md`.
 
-Link files with absolute `/mnt/kern-agent/agent-home/...` targets, optionally
-`:line` or `:line:column`; wrap spaced paths in angle brackets. App anchors with
-the same path open Files. Never link outside agent home.
+Web links use HTTPS; never secrets/disguised URLs. Safe-navigation providers
+open directly; others offer copying.
 
 ## Network and GitHub
 

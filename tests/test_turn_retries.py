@@ -1,5 +1,8 @@
 """Backoff and delivery behavior without a clock wait or provider process."""
 from concurrent.futures import ThreadPoolExecutor
+from copy import deepcopy
+from dataclasses import asdict
+from contextlib import contextmanager
 from http import HTTPStatus
 from threading import Event
 import unittest
@@ -16,28 +19,61 @@ from host.runtime.workspace.host_api import WorkspaceError
 
 class TurnRetryTests(unittest.TestCase):
     def setUp(self):
-        self.enterContext(patch.object(retries, '_pending', {}))
+        self.saved = {}
+        self.enterContext(patch.object(retries.state, 'thread_recovery', side_effect=lambda thread, cur=None:
+            deepcopy(self.saved.get(thread, {'attempts': 0, 'pending': None}))))
+        self.enterContext(patch.object(retries.state, 'save_thread_recovery', side_effect=lambda cur, thread, attempts, pending:
+            self.saved.update({thread: {'attempts': attempts, 'pending': deepcopy(pending)}})))
+        def cancel(cur, thread):
+            value = self.saved.get(thread)
+            existed = bool(value and value['pending'])
+            if value:
+                value['pending'] = None
+            return existed
+        self.enterContext(patch.object(retries.state, 'cancel_thread_recovery', side_effect=cancel))
+        self.enterContext(patch.object(retries.state, 'pending_thread_recoveries', side_effect=lambda:
+            [(thread, deepcopy(value['pending'])) for thread, value in self.saved.items() if value['pending']]))
+        @contextmanager
+        def mutation(**kwargs):
+            before = deepcopy(self.saved)
+            try:
+                yield MagicMock()
+            except Exception:
+                self.saved = before
+                raise
+            for callback in kwargs.get('after_commit', []):
+                callback()
+        self.enterContext(patch.object(retries.state, 'mutation', side_effect=mutation))
+        self.enterContext(patch.object(retries.state, 'append_agent_event'))
+        self.enterContext(patch.object(orchestrator, 'runtime_status', return_value='active'))
+        self.enterContext(patch.object(orchestrator, 'live_thread_ids', return_value=set()))
         self.clock = self.enterContext(patch.object(retries.time, 'time', return_value=1000))
         self.config = {'run_number': 4, 'status': 'idle', 'agent_runtime': 'codex',
-                       'model': 'gpt-6-astra', 'effort': 'high'}
+                       'model': 'gpt-6.2-astra', 'effort': 'high'}
         self.enterContext(patch.object(threads.state, 'thread_session_config', side_effect=lambda *args: self.config))
         self.send = self.enterContext(patch.object(threads, 'send_thread_message'))
         self.report = self.enterContext(patch.object(threads.host_errors, 'report_warning'))
 
+    def schedule(self, thread='thread-1', attempts=0, error='provider at capacity'):
+        self.saved[thread] = {'attempts': attempts, 'pending': None}
+        check = retries.record_outcome(MagicMock(), thread, 'codex', 'gpt-6.2-astra', 'high', 4, error)
+        return check or retries.current(thread)
+
     def due(self, attempts):
-        retries.schedule('thread-1', attempts, 'provider unavailable')
+        retry = self.schedule(attempts=attempts)
         self.clock.return_value += retries.DELAYS[attempts]
-        return retries._pending['thread-1']
+        return retry
 
     def test_five_attempts_follow_backoff_and_keep_notice_provenance(self):
-        def fail_turn(thread_id, body, sender, operator_sent_message, retry_attempt):
+        def fail_turn(thread_id, body, sender, operator_sent_message, retry_attempt, recovery):
             self.assertFalse(operator_sent_message)
             self.assertEqual(body['kern_notice']['kind'], 'retry')
             self.assertIn(f'automatic retry {retry_attempt}/5', body['message'])
-            retries.schedule(thread_id, retry_attempt, 'still unavailable')
+            retries.claim(MagicMock(), recovery)
+            retries.record_outcome(MagicMock(), thread_id, 'codex', 'gpt-6.2-astra', 'high', 4, 'still at capacity')
 
         self.send.side_effect = fail_turn
-        retries.schedule('thread-1', 0, 'provider unavailable')
+        self.schedule()
         for attempt, delay in enumerate((300, 1200, 3600, 14400, 43200), 1):
             self.clock.return_value += delay - 1
             retries.deliver_due(threads.retry_failed_turn)
@@ -58,6 +94,17 @@ class TurnRetryTests(unittest.TestCase):
         self.report.assert_called_once()
         self.assertIsNone(retries.pending('thread-1'))
 
+    def test_usage_worker_start_failure_stops_without_pending_retry(self):
+        check = self.schedule(error='limit reached')
+        with patch.object(retries.threading, 'Thread') as worker:
+            worker.return_value.start.side_effect = RuntimeError('thread limit reached')
+            retries.start_limit_check(check)
+        self.report.assert_called_once()
+        self.assertIsNone(retries.pending('thread-1'))
+        notice = retries.state.append_agent_event.call_args.args[3]['notice']
+        self.assertEqual(notice['summary'], 'Automatic recovery stopped')
+        self.assertIn('usage check could not start', notice['details'])
+
     def test_success_and_cancelled_or_replaced_attempts_do_not_repeat(self):
         retry = self.due(0)
         retries.cancel('thread-1')
@@ -67,6 +114,7 @@ class TurnRetryTests(unittest.TestCase):
         current = self.due(0)
         threads.retry_failed_turn(old)
         self.send.assert_not_called()
+        self.send.side_effect = lambda *args, **kwargs: retries.claim(MagicMock(), kwargs['recovery'])
         threads.retry_failed_turn(current)
         threads.retry_failed_turn(current)
         self.send.assert_called_once()
@@ -108,7 +156,7 @@ class TurnRetryTests(unittest.TestCase):
         self.send.assert_not_called()
 
     def test_apps_and_schedules_refuse_pending_retries_before_writing(self):
-        schedule_row = (1, 'Research', [], 'codex', 'gpt-6-astra', 'high', 1,
+        schedule_row = (1, 'Research', [], 'codex', 'gpt-6.2-astra', 'high', 1,
                         None, None, None, '', '', 'schedule-1', '')
         for backend, target, row, action in [
             (apps, 'app-1', (1,), lambda: apps.set_web_app_archived('app-1', True)),
@@ -119,7 +167,7 @@ class TurnRetryTests(unittest.TestCase):
                     patch.object(backend, 'call_admin_api') as admin:
                 cursor = transaction.return_value.__enter__.return_value
                 cursor.fetchone.return_value = row
-                retries.schedule(target, 0, 'provider unavailable')
+                self.schedule(target)
                 admin.return_value = {'thread': {'status': 'idle', 'retry': retries.pending(target)}}
                 with self.assertRaisesRegex(WorkspaceError, 'cancel the automatic retry'):
                     action()
@@ -136,6 +184,7 @@ class TurnRetryTests(unittest.TestCase):
             with threads._thread_send_lock('thread-1'):
                 dispatching.set()
                 self.assertTrue(release.wait(5))
+                retries.claim(MagicMock(), kwargs['recovery'])
                 live.add('thread-1')
 
         self.send.side_effect = admit
@@ -166,23 +215,63 @@ class TurnRetryTests(unittest.TestCase):
                 response = result.result(timeout=5)
                 self.assertEqual(response['status'], 'running' if operation == 'status' else 'accepted')
 
-    def test_failed_completion_schedules_only_after_commit(self):
-        for runtime, error, expected in [('codex', 'failed', True), ('codex', None, False), ('script', 'failed', False)]:
-            with self.subTest(runtime=runtime, error=error), \
-                    patch.object(orchestrator.state, 'touch_thread_session'), \
-                    patch.object(orchestrator.state, 'finish_thread_run'), \
-                    patch.object(orchestrator.state, 'append_agent_event'), \
-                    patch.object(orchestrator.memory_monitor, 'finish'):
-                retries.cancel('thread-1')
-                turn = orchestrator._Turn(runtime, 'thread-1', '', '', 4, retry_attempt=2)
-                callbacks = []
-                orchestrator._record_turn_finished(MagicMock(), callbacks, turn, error_message=error)
-                self.assertIsNone(retries.pending('thread-1'))
-                for callback in callbacks:
-                    callback()
+    def test_counter_survives_cancellation_unknown_errors_and_success_resets_it(self):
+        self.schedule(attempts=2)
+        retries.cancel('thread-1')
+        self.assertEqual(self.saved['thread-1']['attempts'], 2)
+        retries.record_outcome(MagicMock(), 'thread-1', 'codex', '', '', 4, 'authentication failed')
+        self.assertIsNone(retries.pending('thread-1'))
+        self.assertEqual(self.saved['thread-1']['attempts'], 2)
+        retries.record_outcome(MagicMock(), 'thread-1', 'codex', '', '', 4, None)
+        self.assertEqual(self.saved['thread-1'], {'attempts': 0, 'pending': None})
+
+    def test_unknown_and_hermes_limit_errors_stop_but_timeout_retries(self):
+        for runtime, error, expected in [('codex', 'failed', False), ('hermes', 'usage limit', False),
+                                         ('script', 'timed out', False), ('hermes', 'timed out', True)]:
+            with self.subTest(runtime=runtime, error=error):
+                retries.record_outcome(MagicMock(), 'thread-1', runtime, '', '', 4, error)
                 self.assertEqual(retries.pending('thread-1') is not None, expected)
-                if expected:
-                    self.assertEqual(retries.pending('thread-1')['attempt'], 3)
+
+    def test_limit_resolution_does_not_reset_counter_and_newer_work_wins(self):
+        retry = self.schedule(attempts=2, error='usage LIMIT reached')
+        self.assertIsNone(retries.pending('thread-1'))
+        with patch.object(retries.recovery_policy, 'limit_recovery', return_value=('codex-2', 1000)):
+            resolved = retries.resolve(retry)
+        self.assertEqual(resolved.attempt, 3)
+        retries.claim(MagicMock(), resolved)
+        retries.record_outcome(MagicMock(), 'thread-1', 'codex-2', '', '', 5, 'timed out')
+        self.assertEqual(retries.current('thread-1').due_at, 1000 + 14400)
+        retry = self.schedule(error='limit')
+        def change_during_probe(*args):
+            self.config['run_number'] += 1
+            return ('codex-2', 1000)
+        with patch.object(retries.recovery_policy, 'limit_recovery', side_effect=change_during_probe):
+            self.assertIsNone(retries.resolve(retry))
+        self.assertIsNone(retries.pending('thread-1'))
+
+    def test_unknown_usage_stops_without_delivery(self):
+        for failure in (None, TimeoutError('usage timed out'), ValueError('invalid usage')):
+            retry = self.schedule(error='limit')
+            with patch.object(retries.recovery_policy, 'limit_recovery', return_value=None, side_effect=failure):
+                self.assertIsNone(retries.resolve(retry))
+            retries.deliver_due(self.send)
+            self.send.assert_not_called()
+            self.assertIsNone(retries.pending('thread-1'))
+
+    def test_admission_rollback_restores_pending_recovery(self):
+        retry = self.due(0)
+        with self.assertRaises(RuntimeError), retries.state.mutation() as cur:
+            retries.claim(cur, retry)
+            raise RuntimeError('admission failed')
+        self.assertEqual(retries.current('thread-1'), retry)
+        self.assertEqual(self.saved['thread-1']['attempts'], 0)
+
+    def test_loading_on_boot_does_not_consume_due_recovery(self):
+        retry = self.due(0)
+        with patch.object(orchestrator, 'runtime_status', return_value='loading'):
+            retries.deliver_due(self.send)
+        self.send.assert_not_called()
+        self.assertEqual(retries.current('thread-1'), retry)
 
     def test_cleanup_error_does_not_schedule_a_retry(self):
         turn = orchestrator._Turn('codex', 'thread-1', '', '', 4,

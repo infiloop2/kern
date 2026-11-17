@@ -21,6 +21,7 @@ The standard event envelope contains `seq`, `event_id`, `timestamp`, `thread_id`
 | --- | --- | --- |
 | Delivered input | `reminder`, `scheduled_trigger`, `approval_outcome`, `restart`, `retry`, `agent_message` | `source: "user"`, `message`: exact provider input, including its routing preamble |
 | Context | `history_transfer`, `memory_injection`, `memory_suggestion` | `message`: summary; memory notices retain `memory_page_ids` and `memory_recall_details`; confirmed injections also retain the exact injected message in `notice.details`; transfers retain `historical_context` |
+| Recovery decisions | `recovery` | `notice.details`: classification, attempt, deadline, subscription choice or stop reason |
 | Messaging and agents | `agent_message_sent`, `agent_spawned`, `agent_archived`, `agent_stopped` | `notice.details`: outcome and request |
 | Memory writes | `self_memory_saved`, `shared_memory_saved`, `shared_memory_deleted`, `private_note_saved`, `private_note_deleted` | `notice.details`: outcome and request |
 | Standing agents | `standing_agent_created`, `standing_agent_updated`, `standing_agent_deleted` | `notice.details`: outcome and request |

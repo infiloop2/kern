@@ -46,7 +46,7 @@ from typing import Any, Callable, cast, NamedTuple
 from urllib.parse import parse_qs, quote, urlparse
 
 from host.config import AGENT_RUNTIMES, ConfigError, parse_network_controls
-from host.agent_messages import INPUT_KINDS, RESTART_MESSAGE, restart_notice
+from host.agent_messages import INPUT_KINDS, RESTART_MESSAGE
 from host.constants import ADMIN_API_PORT, LOOPBACK, MAX_REQUEST_BODY_BYTES
 from host.runtime.admin_api import browser as browser_admin
 from host.runtime.admin_api import database_storage, health, github_maintenance, xai_video_storage
@@ -71,7 +71,9 @@ from host.runtime.agent_runtime import (
     grok_agent,
     orchestrator,
 )
+from host.runtime.admin_api.image_previews import validate_image_dimensions
 from host.runtime.admin_api.agent_files import (
+    CHAT_IMAGE_MAX_BYTES as AGENT_FILE_CHAT_IMAGE_MAX_BYTES,
     DOWNLOAD_MAX_BYTES as AGENT_FILE_DOWNLOAD_MAX_BYTES,
     HELPER_COMMAND as AGENT_FILE_HELPER_COMMAND,
     HELPER_TIMEOUT_SECONDS as AGENT_FILE_HELPER_TIMEOUT_SECONDS,
@@ -83,6 +85,7 @@ from host.runtime.admin_api.agent_files import (
     UPLOAD_MAX_BYTES as AGENT_FILE_UPLOAD_MAX_BYTES,
     content_disposition as _agent_file_content_disposition,
     helper_error_message as _helper_error_message,
+    image_signature_matches as _image_signature_matches,
     list_files as agent_file_list,
     path_from_query as _agent_file_path,
     read_file as agent_file_read,
@@ -330,7 +333,7 @@ CONVERSATION_VARIANT_LIMIT = 8
 CONVERSATION_CURSOR_BYTES = 8192
 CONVERSATION_MESSAGE_BYTES = 16 * 1024
 CONVERSATION_RESPONSE_BYTES = 256 * 1024
-CONVERSATION_EVENT_TYPES = ("thread.message", "thread.notice", "thread.activity")
+CONVERSATION_EVENT_TYPES = ("thread.message", "thread.notice", "thread.error", "thread.activity")
 CONVERSATION_SEMANTIC_CANDIDATES = 200
 # Relevance cursors are short-lived capabilities owned by this admin API
 # process.  Signing snapshot cursors prevents a caller from replacing the
@@ -482,6 +485,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if path.path.startswith("/v1/admin-passkeys"):
                 self._handle_admin_passkeys(method, path.path, principal)
+                return
+            if method == "GET" and path.path == "/v1/agent-files/image-preview":
+                self._send_agent_file(_agent_file_path(parse_qs(path.query)), image_preview=True)
                 return
             if method == "GET" and path.path == "/v1/agent-files/content":
                 self._send_agent_file(_agent_file_path(parse_qs(path.query)))
@@ -812,12 +818,14 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
-    def _send_agent_file(self, path: str, *, download: bool = False) -> None:
+    def _send_agent_file(self, path: str, *, download: bool = False, image_preview: bool = False) -> None:
         expected_media_type = (
             "application/octet-stream"
             if download
             else AGENT_FILE_STREAM_MEDIA_TYPES.get(Path(path).suffix.lower())
         )
+        if image_preview and expected_media_type not in {"image/jpeg", "image/png", "image/webp"}:
+            raise ApiError(HTTPStatus.BAD_REQUEST, "image previews support only JPEG, PNG, or WebP files")
         if expected_media_type is None:
             raise ApiError(
                 HTTPStatus.BAD_REQUEST,
@@ -865,6 +873,22 @@ class Handler(BaseHTTPRequestHandler):
             ):
                 process.kill()
                 raise ApiError(HTTPStatus.INTERNAL_SERVER_ERROR, "agent file helper returned invalid metadata")
+            if image_preview and size_bytes > AGENT_FILE_CHAT_IMAGE_MAX_BYTES:
+                process.kill()
+                raise ApiError(HTTPStatus.BAD_REQUEST, "image is larger than the 5 MiB chat preview limit")
+            prefix = b""
+            if image_preview:
+                # Buffer only the already byte-bounded preview. Inspect headers
+                # before the browser receives anything it could decode.
+                prefix = process.stdout.read(size_bytes)
+                if not _image_signature_matches(expected_media_type, prefix):
+                    process.kill()
+                    raise ApiError(HTTPStatus.BAD_REQUEST, "file is not a supported image")
+                try:
+                    validate_image_dimensions(expected_media_type, prefix)
+                except ValueError as exc:
+                    process.kill()
+                    raise ApiError(HTTPStatus.BAD_REQUEST, str(exc)) from exc
             self.send_response(HTTPStatus.OK.value)
             self.send_header("Content-Type", expected_media_type)
             self.send_header("Content-Length", str(size_bytes))
@@ -877,8 +901,10 @@ class Handler(BaseHTTPRequestHandler):
                 _agent_file_content_disposition(path) if download else "inline",
             )
             self.end_headers()
-            remaining = size_bytes
+            remaining = size_bytes - len(prefix)
             try:
+                if prefix:
+                    self.wfile.write(prefix)
                 while remaining:
                     chunk = process.stdout.read(min(1024 * 1024, remaining))
                     if not chunk:
@@ -1741,6 +1767,12 @@ def initialize_state() -> list[str]:
     interrupted: list[str] = []
     with state.mutation() as cur:
         for thread_id, run_number in state.recover_interrupted_thread_runs(cur):
+            config = state.thread_session_config(thread_id, cur)
+            if config is not None and config["agent_runtime"] != session_options.SCRIPT_RUNTIME:
+                orchestrator.turn_retries.record_outcome(
+                    cur, thread_id, config["agent_runtime"], config["model"], config["effort"],
+                    run_number, error_message, restart=True,
+                )
             state.append_agent_event(
                 cur,
                 "thread.error",
@@ -1753,23 +1785,12 @@ def initialize_state() -> list[str]:
 
 
 def restart_interrupted_agents(thread_ids: list[str]) -> None:
-    """Resume interrupted model turns once, after their errors are committed."""
-    refreshed: set[str] = set()
-    for thread_id in thread_ids:
-        try:
-            config = state.thread_session_config(thread_id)
-            if config is None or config["agent_runtime"] == session_options.SCRIPT_RUNTIME:
-                continue
-            runtime_type = config["agent_runtime"]
-            if runtime_type not in refreshed:
-                orchestrator.refresh_runtime_status(runtime_type)
-                refreshed.add(runtime_type)
-            send_thread_message(thread_id, {"message": RESTART_MESSAGE, "kern_notice": restart_notice()}, None, operator_sent_message=False, retry_attempt=0)
-        except Exception as exc:
-            host_errors.report_warning(
-                "admin_api.restart_interrupted_agent", exc,
-                context={"thread_id": thread_id},
-            )
+    """Interrupted turns and already-waiting retries use the same durable queue.
+
+    The retry worker waits for runtime startup. There is no independent boot
+    send that could race a pending continuation or reset its attempt counter.
+    """
+    orchestrator.turn_retries.deliver_due(retry_failed_turn)
 
 
 def main() -> int:

@@ -20,6 +20,7 @@ UPLOAD_HELPER_COMMAND = ["/usr/bin/sudo", "-n", "/usr/local/lib/kern-host/upload
 UPLOAD_MAX_BYTES = 25 * 1024 * 1024
 UPLOAD_FILENAME_MAX_BYTES = 200
 STREAM_MAX_BYTES = 25 * 1024 * 1024
+CHAT_IMAGE_MAX_BYTES = 5 * 1024 * 1024
 IMAGE_STREAM_MAX_BYTES = 25 * 1024 * 1024
 DOWNLOAD_MAX_BYTES = 200_000_000
 STREAM_MEDIA_TYPES = {
@@ -30,6 +31,16 @@ STREAM_MEDIA_TYPES = {
     ".png": "image/png",
     ".webp": "image/webp",
 }
+
+
+def image_signature_matches(media_type: str, prefix: bytes) -> bool:
+    if media_type == "image/png":
+        return prefix.startswith(b"\x89PNG\r\n\x1a\n")
+    if media_type == "image/jpeg":
+        return prefix.startswith(b"\xff\xd8\xff")
+    if media_type == "image/webp":
+        return prefix.startswith(b"RIFF") and prefix[8:12] == b"WEBP"
+    return False
 
 
 def list_files(path: str) -> dict[str, Any]:

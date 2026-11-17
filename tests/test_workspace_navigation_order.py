@@ -106,7 +106,7 @@ class NavigationOrderDatabaseTests(unittest.TestCase):
         ids = [schedules.create_schedule({
             "name": f"Schedule {index}", "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "Review"}],
              "agent_runtime": "codex",
-            "model": "gpt-6-astra", "effort": "high",
+            "model": "gpt-6.2-astra", "effort": "high",
         }, actor="user")["thread_id"] for index in range(3)]
         ordering.move("schedules", {"item_id": ids[0], "before_id": None})
         with patch.object(chat, "_host_thread_summaries", return_value=[]):

@@ -7,7 +7,7 @@ from host.runtime.agent_runtime import orchestrator
 from host.runtime.workspace.web_apps import backend as apps
 
 OLD = {"agent_runtime": "claude_code", "model": "claude-opus-5-5", "effort": "high"}
-NEW = {"agent_runtime": "codex", "model": "gpt-6.1-sol", "effort": "high"}
+NEW = {"agent_runtime": "codex", "model": "gpt-6.2-sol", "effort": "high"}
 
 
 class NextTurnSettingsTests(unittest.TestCase):

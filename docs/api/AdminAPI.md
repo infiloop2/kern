@@ -562,7 +562,7 @@ Agent account response fields:
 | `accounts[].bedrock_usage.currency` | string |  | Always `USD` (the catalog rates' currency). |
 | `accounts[].bedrock_usage.requests` | number |  | Allowed Bedrock invocations forwarded this month. |
 | `accounts[].bedrock_usage.metered_requests` | number |  | Invocations whose response carried a parseable usage record. A gap below `requests` means AWS errors or unparsed responses, that is, possible undercounting. A model outside the price table is still metered; its tokens count but it adds nothing to `month_to_date`. |
-| `accounts[].bedrock_usage.input_tokens`, `.output_tokens`, `.cache_read_tokens`, `.cache_write_tokens` | number |  | Month-to-date token totals as AWS reported them per response. The cached-token counters mirror the Converse usage shape but stay zero: Bedrock prompt caching covers only model families outside this catalog. |
+| `accounts[].bedrock_usage.input_tokens`, `.output_tokens`, `.cache_read_tokens`, `.cache_write_tokens` | number |  | Month-to-date token totals as AWS reported them per response. The cached-token counters mirror the Converse usage shape, including cache reads and writes reported for supported models. |
 
 Codex OAuth login response:
 
@@ -724,7 +724,7 @@ Send message request:
 ```json
 {
   "agent_runtime": "codex",
-  "model": "gpt-6.1-sol",
+  "model": "gpt-6.2-sol",
   "effort": "high",
   "message": "Implement this change and report the result."
 }
@@ -736,7 +736,7 @@ Send message request fields:
 | --- | --- | --- | --- |
 | `message` | Yes | string | Message for the agent runtime. Must be 1 to 50,000 characters. The host handles idle and running threads; callers use the same operation for both. |
 | `agent_runtime` | New thread or configuration change | enum | Runtime for the thread: `codex`, `codex-2`, `codex-3`, `claude_code`, `grok`, `grok-2`, or `hermes`. Supply it together with `model` and `effort`. On an existing thread, a matching triple resumes or steers the current provider session; a different triple starts a fresh provider session only while the thread is idle. |
-| `model` | New thread or configuration change | enum | Model for this session. Codex accepts `gpt-6.1-sol`, `gpt-6-luna`, or `gpt-6-astra`; Claude Code accepts `claude-opus-5-5`, `claude-fable-5-2`, or `claude-sonnet-5-5`; Grok accepts `grok-4.7`; Hermes accepts the Bedrock model ids `deepseek.v3.2`, `qwen.qwen3-coder-next`, `moonshotai.kimi-k2.5`, or `zai.glm-5`. Must be supplied together with `agent_runtime` and `effort`. A thread created under an earlier catalog keeps its recorded model and stays readable. It can continue by switching to an offered complete triple while idle; the superseded value cannot start a new provider session. |
+| `model` | New thread or configuration change | enum | Model for this session. Codex accepts `gpt-6.2-sol`, `gpt-6.2-astra`, or `gpt-6-luna`; Claude Code accepts `claude-opus-5-5`, `claude-fable-5-2`, or `claude-sonnet-5-5`; Grok accepts `grok-4.7`; Hermes accepts the Bedrock model ids `deepseek.v3.2`, `qwen.qwen3-coder-next`, `us.moonshotai.kimi-k3.1`, `us.zai.glm-5.3`, or `minimax.minimax-m2.5`. Must be supplied together with `agent_runtime` and `effort`. List and get responses expose the current session configuration; retained conversation and usage records preserve their history. |
 | `effort` | New thread or configuration change | enum | Effort for this session. Codex accepts `high`, `max`, `ultra`, `high-fast`, or `high-ultrafast`, except Luna accepts only `high` and `max`. The two speed presets request High reasoning with Fast or Ultrafast processing; the other presets send no speed override. Model, plan, and workspace availability are enforced by Codex; Kern surfaces provider errors without falling back. Claude Code accepts `high`, `max`, or `ultracode`; `ultracode` enables its xhigh effort plus dynamic workflow orchestration. Grok accepts `xhigh` or `high`. Hermes accepts `high` (its headless CLI exposes no effort control). Must be supplied together with `agent_runtime` and `model`. |
 
 The path's `thread_id` must be at most 64 lowercase letters, digits, or
@@ -785,7 +785,7 @@ Send message response:
   "thread": {
     "thread_id": "thread-feature-1",
     "agent_runtime": "codex",
-    "model": "gpt-6.1-sol",
+    "model": "gpt-6.2-sol",
     "effort": "high",
     "last_used_at": "2026-06-08T00:00:00Z",
     "status": "running"
@@ -844,7 +844,7 @@ Thread list response:
     {
       "thread_id": "thread-feature-1",
       "agent_runtime": "codex",
-      "model": "gpt-6.1-sol",
+      "model": "gpt-6.2-sol",
       "effort": "high",
       "last_used_at": "2026-06-08T00:05:00Z",
       "status": "running"

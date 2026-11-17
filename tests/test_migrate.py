@@ -237,6 +237,114 @@ class MigrateRunnerTests(unittest.TestCase):
                             (runtime, f"new-{runtime}-{model}-{effort}", model, effort),
                         )
 
+    def test_latest_model_migration_preserves_settings_and_history(self) -> None:
+        from host.session_options import SESSION_OPTIONS
+
+        migrate.up(target=100, quiet=True)
+        codex_replacements = {
+            "gpt-5.6-terra": "gpt-6.2-sol", "gpt-5.6-sol": "gpt-6.2-sol",
+            "gpt-6-sol": "gpt-6.2-sol", "gpt-6.1-sol": "gpt-6.2-sol",
+            "gpt-6-astra": "gpt-6.2-astra", "gpt-5.6-luna": "gpt-6-luna",
+            "gpt-6-luna": "gpt-6-luna",
+        }
+        claude_replacements = {
+            "opus": "claude-opus-5-5", "claude-opus-5": "claude-opus-5-5",
+            "fable": "claude-fable-5-2", "claude-fable-5": "claude-fable-5-2",
+            "claude-fable-5-1": "claude-fable-5-2", "sonnet": "claude-sonnet-5-5",
+            "claude-sonnet-5": "claude-sonnet-5-5", "claude-opus-5-5": "claude-opus-5-5",
+        }
+        cases = [(runtime, old, new) for runtime in ("codex", "codex-2", "codex-3")
+                 for old, new in codex_replacements.items()]
+        cases += [("claude_code", old, new) for old, new in claude_replacements.items()]
+        cases += [("grok", "grok-4.6", "grok-4.7"), ("grok-2", "grok-4.6", "grok-4.7"),
+                  ("hermes", "moonshotai.kimi-k2.5", "us.moonshotai.kimi-k3.1"),
+                  ("hermes", "zai.glm-5", "us.zai.glm-5.3"),
+                  ("hermes", "deepseek.v3.2", "deepseek.v3.2")]
+        successors = {(runtime, old): new for runtime, old, new in cases}
+        with db.transaction() as cur:
+            for index, (runtime, model, _) in enumerate(cases, 900):
+                effort = "high-fast" if runtime.startswith("codex") and "luna" not in model else "high"
+                cur.execute(
+                    "INSERT INTO web_apps (app_id, name, archived, revision, agent_runtime, agent_model,"
+                    " agent_effort, created_at, updated_at)"
+                    " VALUES (%s, 'Saved app', %s, 7, %s, %s, %s, 'then', 'then')",
+                    (f"app-{index}", index % 2 == 0, runtime, model, effort),
+                )
+                triggers = '[]' if index % 2 else '[{"type":"daily","times":["09:00"],"prompt":"Keep this prompt"}]'
+                cur.execute(
+                    "INSERT INTO schedules (id, thread_id, name, triggers, agent_runtime,"
+                    " model, effort, next_run_at, created_at, updated_at)"
+                    " VALUES (%s, %s, 'Saved job', %s::jsonb, %s, %s, %s, %s, 'then', 'then')",
+                    (index, f"schedule-{index}", triggers, runtime, model, effort,
+                     None if index % 2 else "2026-12-01T09:00:00Z"),
+                )
+                cur.execute(
+                    "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort, provider_session_id)"
+                    " VALUES (%s, %s, %s, %s, 'original-session')",
+                    (runtime, f"recorded-{index}", model, effort),
+                )
+            cur.execute(
+                "INSERT INTO schedules (id, thread_id, name, triggers, agent_runtime, model, effort,"
+                " next_run_at, created_at, updated_at)"
+                " VALUES (999, 'schedule-999', 'Bash job', '[]'::jsonb, 'script', 'bash', 'fixed', NULL, 'then', 'then')"
+            )
+            cur.execute(
+                "INSERT INTO agent_events (created_at, event_type, thread_id, source, message)"
+                " VALUES ('then', 'thread.message', 'recorded-900', 'agent', 'Historical model gpt-5.6-terra')"
+            )
+            cur.execute("SELECT to_jsonb(a) FROM web_apps a ORDER BY app_id")
+            apps_before = [row[0] for row in cur.fetchall()]
+            cur.execute("SELECT to_jsonb(s) FROM schedules s ORDER BY id")
+            schedules_before = [row[0] for row in cur.fetchall()]
+            cur.execute("SELECT to_jsonb(t) FROM thread_sessions t ORDER BY thread_id")
+            sessions_before = [row[0] for row in cur.fetchall()]
+            cur.execute("SELECT to_jsonb(e) FROM agent_events e ORDER BY seq")
+            history_before = cur.fetchall()
+        self.assertEqual(migrate.up(target=101, quiet=True), [101])
+        self.assertEqual(migrate.up(target=101, quiet=True), [])
+        for app in apps_before:
+            app["agent_model"] = successors.get((app["agent_runtime"], app["agent_model"]), app["agent_model"])
+        for schedule in schedules_before:
+            schedule["model"] = successors.get((schedule["agent_runtime"], schedule["model"]), schedule["model"])
+        for session in sessions_before:
+            model = successors[(session["agent_runtime"], session["model"])]
+            if model != session["model"]:
+                session["model"] = model
+                session["provider_session_id"] = None
+        with db.transaction() as cur:
+            cur.execute("SELECT to_jsonb(a) FROM web_apps a ORDER BY app_id")
+            self.assertEqual([row[0] for row in cur.fetchall()], apps_before)
+            cur.execute("SELECT to_jsonb(s) FROM schedules s ORDER BY id")
+            self.assertEqual([row[0] for row in cur.fetchall()], schedules_before)
+            cur.execute("SELECT to_jsonb(t) FROM thread_sessions t ORDER BY thread_id")
+            self.assertEqual([row[0] for row in cur.fetchall()], sessions_before)
+            cur.execute("SELECT to_jsonb(e) FROM agent_events e ORDER BY seq")
+            self.assertEqual(cur.fetchall(), history_before)
+            for runtime, models in SESSION_OPTIONS.items():
+                for model, efforts in models.items():
+                    for effort in efforts:
+                        cur.execute(
+                            "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort)"
+                            " VALUES (%s, %s, %s, %s)",
+                            (runtime, f"new-{runtime}-{model}-{effort}", model, effort),
+                        )
+        for runtime, old, new in cases:
+            if old == new:
+                continue
+            with self.subTest(runtime=runtime, retired=old), self.assertRaises(Exception):
+                with db.transaction() as cur:
+                    cur.execute(
+                        "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort)"
+                        " VALUES (%s, 'retired', %s, 'high')", (runtime, old),
+                    )
+        for effort in ("ultra", "high-fast", "high-ultrafast"):
+            with self.subTest(luna_effort=effort), self.assertRaises(Exception):
+                with db.transaction() as cur:
+                    cur.execute(
+                        "INSERT INTO thread_sessions (agent_runtime, thread_id, model, effort)"
+                        " VALUES ('codex', 'invalid-luna', 'gpt-6-luna', %s)", (effort,),
+                    )
+
     def test_sol_6_1_host_usage_migration_preserves_history(self) -> None:
         migrate.up(target=80, quiet=True)
         with db.transaction() as cur:
@@ -287,7 +395,7 @@ class MigrateRunnerTests(unittest.TestCase):
                     "INSERT INTO schedules (id, thread_id, name, message, cadence, interval_minutes, daily_time,"
                     " agent_runtime, model, effort, revision, next_run_at, last_run_at, created_at, updated_at, purpose)"
                     " VALUES (%s, %s, 'Retained', 'Original prompt', %s, %s, %s,"
-                    " 'codex', 'gpt-6-astra', 'high', 2, %s, '2026-09-20T00:00:00Z',"
+                    " 'codex', 'gpt-6-luna', 'high', 2, %s, '2026-09-20T00:00:00Z',"
                     " '2026-09-19T00:00:00Z', '2026-09-20T00:00:00Z', 'Retained purpose')",
                     (identity, f"schedule-{identity}", cadence, minutes, time,
                      "2026-09-29T09:00:00Z" if time else "2026-09-29T15:55:14+02:00"),

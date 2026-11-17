@@ -54,13 +54,13 @@ let activityToggleSequence = 0;
 let sessionOptions = {};
 let activeRuntimes = null;
 const DEFAULT_MODELS = Object.freeze({
-  codex: "gpt-6.1-sol",
-  "codex-2": "gpt-6.1-sol",
-  "codex-3": "gpt-6.1-sol",
+  codex: "gpt-6.2-sol",
+  "codex-2": "gpt-6.2-sol",
+  "codex-3": "gpt-6.2-sol",
   claude_code: "claude-opus-5-5",
   grok: "grok-4.7",
   "grok-2": "grok-4.7",
-  hermes: "moonshotai.kimi-k2.5",
+  hermes: "us.moonshotai.kimi-k3.1",
 });
 // Captured on first render, before any "(not activated)" suffix is applied.
 const RUNTIME_OPTION_LABELS = new Map();
@@ -163,7 +163,7 @@ const modelLabel = (runtime, value) => {
   return optionLabel(model);
 };
 const esc = value => KernRichText.escapeHtml(value);
-const markdown = value => KernRichText.renderMarkdown(value);
+const markdown = value => KernRichText.renderMarkdown(value, 0, true);
 const escAttr = value => esc(value).replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 const formatDateTime = value => {
   const date = new Date(value);
@@ -442,7 +442,7 @@ function updateComposer() {
   $("composer-running").hidden = !running && !retry;
   $("composer-running").querySelector(".agent-working > span").textContent = running
     ? "Agent is working"
-    : retry ? `Retry ${retry.attempt}/5 at ${new Date(retry.at).toLocaleTimeString()}` : "";
+    : retry ? `Retry ${retry.attempt}/5 at ${new Date(retry.at).toLocaleString()}` : "";
   $("composer-running").querySelector(".working-dots").hidden = !running;
   $("stop-task").textContent = running ? "Stop" : "Cancel retry";
   $("new-task").placeholder = running
@@ -1090,6 +1090,7 @@ function renderThreadHistory() {
           <h2>What should the agent work on?</h2>
           <p>Messages continue in the same agent session. Supported agents can also receive another message while working.</p>
         </div>`;
+    window.KernHost.refreshChatImages(detail);
     return;
   }
   renderHistoryLoader();
@@ -1130,6 +1131,7 @@ function renderThreadHistory() {
       detail.lastElementChild.remove();
     }
   }
+  window.KernHost.refreshChatImages(detail);
   // Every explicit open lands on the latest message. Keep each thread's
   // loaded event window across switches, but do not restore an old reading
   // position that makes the operator hunt for new replies.

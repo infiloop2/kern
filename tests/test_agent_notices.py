@@ -164,7 +164,7 @@ class NoticeSummaryTests(TestCase):
     def test_resource_and_change_summaries_cover_every_action_kind(self):
         cases = [
             ("POST", "/agent/messages", {"thread_id": "app-1", "message": "Review the release"}, {}, "agent_message_sent", "Sent message to Portfolio: Review the release"),
-            ("POST", "/agent/agents", {"name": "Reviewer", "model": "gpt-6.1-sol", "message": "Check changes"}, {}, "agent_spawned", "Started Reviewer (gpt-6.1-sol): Check changes"),
+            ("POST", "/agent/agents", {"name": "Reviewer", "model": "gpt-6.2-sol", "message": "Check changes"}, {}, "agent_spawned", "Started Reviewer (gpt-6.2-sol): Check changes"),
             ("POST", "/agent/agents/archive", {"thread_id": "thread-2"}, {}, "agent_archived", "Archived Portfolio"),
             ("POST", "/agent/apps/app-1/stop", None, {}, "agent_stopped", "Stopped Portfolio"),
             ("POST", "/agent/apps/app-1/archive", None, {}, "agent_archived", "Archived Portfolio"),
@@ -181,12 +181,13 @@ class NoticeSummaryTests(TestCase):
             ("DELETE", "/agent/apps/app-1/grants/thread-2", None, {}, "app_collection_grants_revoked", "Revoked Portfolio collection grants for thread-2"),
             ("POST", "/agent/apps", {}, {"app": {"name": "Portfolio"}}, "app_created", "Created Portfolio"),
             ("PUT", "/agent/apps/app-1/name", {"name": "Portfolio"}, {}, "app_renamed", "Renamed App to Portfolio"),
-            ("PUT", "/agent/apps/app-1/agent-settings", {"agent_runtime": "codex", "model": "gpt-6.1-sol", "effort": "high"}, {}, "app_agent_updated", "Updated Portfolio agent: codex · gpt-6.1-sol · high"),
+            ("PUT", "/agent/apps/app-1/agent-settings", {"agent_runtime": "codex", "model": "gpt-6.2-sol", "effort": "high"}, {}, "app_agent_updated", "Updated Portfolio agent: codex · gpt-6.2-sol · high"),
             ("POST", "/agent/apps/app-1/actions", {"action": "publish_ui"}, {}, "app_ui_published", "Published Portfolio UI"),
             ("POST", "/agent/apps/app-1/actions", {"action": "set", "path": ["positions", 0, "status"]}, {}, "app_data_changed", "Changed Portfolio data: 1 set (positions.0.status)"),
             ("POST", "/agent/apps/app-1/collections/holdings/actions", {"operations": [{"action": "upsert"}, {"action": "upsert"}, {"action": "delete"}]}, {}, "app_collection_changed", "Updated Portfolio / holdings: 2 saved, 1 deleted"),
         ]
-        self.assertEqual({case[4] for case in cases}, messages.ACTION_KINDS)
+        # Recovery decisions originate in the host, not a Workspace action.
+        self.assertEqual({case[4] for case in cases}, messages.ACTION_KINDS - {"recovery"})
         with patch.object(agent_notices, "thread_name", return_value="Portfolio"):
             for method, path, body, response, kind, label in cases:
                 with self.subTest(kind=kind):

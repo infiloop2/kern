@@ -13,10 +13,10 @@ def auto_approval_smoke(browser, url, screenshot_dir=None):
     page.on("pageerror", lambda error: errors.append(str(error)))
     policies = [{"tool_id": "gmail", "action_id": "send_email", "instructions": "Approve routine follow-ups from the support account. Leave discounts, attachments and new recipients for my review."}]
     checks = [{"id": 1, "tool_id": "gmail", "action_id": "send_email", "summary": "Follow up on a delivery date", "checked_at": 1788960000,
-               "policy": policies[0]["instructions"], "reason": "The message follows up on an existing delivery without changing terms.", "model": "gpt-6.1-sol",
+               "policy": policies[0]["instructions"], "reason": "The message follows up on an existing delivery without changing terms.", "model": "gpt-6.2-sol",
                "outcome": "approved", "status": "executed", "result": "Message sent.", "approval_id": "approval_1.token"},
               {"id": 2, "tool_id": "gmail", "action_id": "send_email", "summary": "Offer a renewal discount", "checked_at": 1788960000,
-               "policy": policies[0]["instructions"], "reason": "This message offers a 15% discount, which your policy excludes.", "model": "gpt-6.1-sol",
+               "policy": policies[0]["instructions"], "reason": "This message offers a 15% discount, which your policy excludes.", "model": "gpt-6.2-sol",
                "outcome": "left_pending", "status": "pending", "result": "", "approval_id": "approval_2.token"}]
     pending = {"id": "approval_2.token", "kind": "tool", "tool_id": "gmail", "source": "Gmail", "action_id": "send_email", "summary": "Offer a renewal discount",
                "status": "pending", "created_at": 1788960000, "updated_at": 1788960000, "has_auto_policy": True,
@@ -153,7 +153,7 @@ def auto_approval_smoke(browser, url, screenshot_dir=None):
     expect(page.locator(".auto-policy-row")).to_contain_text("Push changing .github/")
     expect(page.locator(".auto-policy-row .auto-edit-label")).to_contain_text("View")
     checks.append({"id": 3, "kind": "github_push", "tool_id": "github", "action_id": "push", "summary": "Push to owner/repo", "checked_at": 1788960000,
-                   "policy": PUSH_POLICY, "reason": "Routine CI change.", "model": "gpt-6.1-sol", "outcome": "approved", "status": "approved", "result": "",
+                   "policy": PUSH_POLICY, "reason": "Routine CI change.", "model": "gpt-6.2-sol", "outcome": "approved", "status": "approved", "result": "",
                    "approval_id": "push-abc123", "request": {"push_id": "abc123", "ref_updates": [{"old": "abc", "new": "def", "ref": "refs/heads/topic"}], "changed_paths": [".github/workflows/ci.yml"]}})
     page.locator('[data-action="approval-refresh"]').click()
     push_row = page.locator(".auto-history-row").filter(has_text="Push to owner/repo")

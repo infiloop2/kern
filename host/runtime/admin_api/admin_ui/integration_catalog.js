@@ -230,9 +230,15 @@ export const MANAGED_INTEGRATIONS = {
       },
       {
         title: "Request model access in Bedrock",
-        description: "In the Bedrock console's Model access page, enable the models you plan to use in your region.",
+        description: "In the Bedrock console, enable the models you plan to use. Kimi K3.1 and GLM 5.3 use US cross-region profiles; your IAM policy must permit their destination models. GLM 5.3 also requires AWS eligibility.",
         linkUrl: "https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html",
         linkLabel: "View AWS's model access guide",
+      },
+      {
+        title: "GLM 5.3 account access",
+        description: "GLM 5.3 is limited to eligible AWS accounts. If AWS returns 'not available for this account', contact AWS Sales to request access before selecting this model in Hermes.",
+        linkUrl: "https://aws.amazon.com/contact-us/sales-support/",
+        linkLabel: "Request GLM 5.3 access from AWS",
       },
       { title: "Connect AWS", description: "On Home, open Hermes (AWS Bedrock), paste the access key id and secret access key, choose the region matching your model access, and connect them together." },
       { title: "Enable Bedrock", description: "Choose Enable. Hermes becomes available." },

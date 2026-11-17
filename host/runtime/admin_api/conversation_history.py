@@ -37,7 +37,7 @@ CONVERSATION_VARIANT_LIMIT = 8
 CONVERSATION_CURSOR_BYTES = 8192
 CONVERSATION_MESSAGE_BYTES = 16 * 1024
 CONVERSATION_RESPONSE_BYTES = 256 * 1024
-CONVERSATION_EVENT_TYPES = ("thread.message", "thread.notice", "thread.activity")
+CONVERSATION_EVENT_TYPES = ("thread.message", "thread.notice", "thread.error", "thread.activity")
 CONVERSATION_SEMANTIC_CANDIDATES = 200
 _CONVERSATION_CURSOR_SIGNING_KEY = secrets.token_bytes(32)
 HISTORY_PROVENANCE = "retained_conversation_history"
@@ -764,6 +764,7 @@ def read_conversation_history(body: Any) -> dict[str, Any]:
         "after",
         "around_event_id",
         "include_activity",
+        "include_errors",
         "roles",
         "notice_kinds",
         "include_details",
@@ -799,13 +800,18 @@ def read_conversation_history(body: Any) -> dict[str, Any]:
     include_activity = body.get("include_activity", False)
     if not isinstance(include_activity, bool):
         raise ApiError(HTTPStatus.BAD_REQUEST, "include_activity must be a boolean")
+    include_errors = body.get("include_errors", True)
+    if not isinstance(include_errors, bool):
+        raise ApiError(HTTPStatus.BAD_REQUEST, "include_errors must be a boolean")
     include_details = body.get("include_details", False)
     if not isinstance(include_details, bool):
         raise ApiError(HTTPStatus.BAD_REQUEST, "include_details must be a boolean")
     roles, notice_kinds = _history_filters(body, NOTICE_KINDS)
     message_sources = tuple("user" if role == "user" else "agent" for role in roles)
     limit = _conversation_limit(body.get("limit", 20), CONVERSATION_READ_LIMIT)
-    event_types = CONVERSATION_EVENT_TYPES if include_activity else ("thread.message", "thread.notice")
+    event_types = tuple(kind for kind in CONVERSATION_EVENT_TYPES
+                        if (include_activity or kind != "thread.activity")
+                        and (include_errors or kind != "thread.error"))
     if "around" in cursors:
         raw_events = state.page_thread_events_around(
             thread_id,
@@ -871,6 +877,12 @@ def _history_identity(event_type: str, source: Any, notice: Any) -> dict[str, An
 def _conversation_event(event: dict[str, Any], include_details: bool) -> dict[str, Any]:
     payload = event.get("payload")
     payload = payload if isinstance(payload, dict) else {}
+    if event["event_type"] == "thread.error":
+        error = payload.get("error_message")
+        error = error if isinstance(error, str) else ""
+        bounded = _clip_json_encoded_text(error, CONVERSATION_MESSAGE_BYTES)
+        return {"event_id": event["event_id"], "timestamp": event["timestamp"],
+                "type": "error", "error_message": bounded, "truncated": bounded != error}
     if event["event_type"] in {"thread.message", "thread.notice"}:
         result: dict[str, Any] = {
             "event_id": event["event_id"],

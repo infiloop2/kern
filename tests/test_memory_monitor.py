@@ -258,7 +258,7 @@ class MemoryMonitorTests(unittest.TestCase):
         self.assertEqual(self.monitor.turns[('thread-1', 2)].known, {})
 
     def test_operator_redirect_after_selection_still_delivers_suggestion(self):
-        turn = orch._Turn('codex', 'thread-1', 'gpt-6.1-sol', 'low', 1, retry_attempt=0)
+        turn = orch._Turn('codex', 'thread-1', 'gpt-6.2-sol', 'low', 1, retry_attempt=0)
         turn.phase = orch.ExecutionPhase.RUNNING
         turn.server = Mock()
         def deliver(pages):
@@ -356,7 +356,7 @@ class MemoryMonitorTests(unittest.TestCase):
         self.monitor.turns[self.key].update_task.assert_not_called()
 
     def test_title_update_respects_incoming_generation_at_save_time(self):
-        turn = orch._Turn('codex', 'thread-1', 'gpt-6.1-sol', 'low', 1, retry_attempt=0)
+        turn = orch._Turn('codex', 'thread-1', 'gpt-6.2-sol', 'low', 1, retry_attempt=0)
         turn.phase = orch.ExecutionPhase.RUNNING
         def update(title, still_current):
             self.redirect()
@@ -453,7 +453,7 @@ class SuggestionDeliveryTests(unittest.TestCase):
     def setUp(self):
         self.memory_delivery = mm.memory_context.MemoryDelivery()
         self.enterContext(patch.object(orch, 'memory_delivery', self.memory_delivery))
-        self.turn = orch._Turn('codex', 'thread-1', 'gpt-6.1-sol', 'low', 1, retry_attempt=0)
+        self.turn = orch._Turn('codex', 'thread-1', 'gpt-6.2-sol', 'low', 1, retry_attempt=0)
         self.turn.phase = orch.ExecutionPhase.RUNNING
         self.turn.server = Mock()
 

@@ -22,6 +22,7 @@ RESTART_MESSAGE = AUTOMATED_TRIGGER_PREFIX + "Kern was restarted. Please resume 
 INPUT_KINDS = ("reminder", "scheduled_trigger", "approval_outcome", "restart", "retry", "agent_message")
 CONTEXT_KINDS = ("history_transfer", "memory_injection", "memory_suggestion")
 ACTION_KINDS = frozenset({
+    "recovery",
     "agent_message_sent", "agent_spawned", "agent_archived", "agent_stopped", "self_memory_saved",
     "shared_memory_saved", "shared_memory_deleted", "private_note_saved", "private_note_deleted", "standing_agent_created",
     "standing_agent_updated", "standing_agent_deleted", "app_created", "app_renamed",

@@ -116,6 +116,7 @@ exclusive. Each event has `event_id`, `timestamp`, `type`, and `truncated`:
 | --- | --- |
 | `message` | `role`, `content` |
 | `notice` | `notice: {kind, summary}`; incoming input also has its exact delivered `content`, including the routing preamble |
+| `error` | Bounded `error_message` (16 KiB); included by default, independently of message/notice filters. Set `include_errors: false` to exclude. |
 | `activity` | Bounded `activity` summary, only with `include_activity: true` |
 
 Context and action notices are compact by default. Selecting their kinds does

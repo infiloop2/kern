@@ -23,7 +23,7 @@ from host.runtime.workspace.web_apps import backend as web_apps
 
 SESSION = {
     "agent_runtime": "codex",
-    "model": "gpt-6-astra",
+    "model": "gpt-6.2-astra",
     "effort": "high",
 }
 SCRIPT_SESSION = {
@@ -1507,7 +1507,7 @@ class WorkspaceGlobalDatabaseTests(unittest.TestCase):
 
         summaries = {"threads": [
             {
-                "thread_id": thread_id, "agent_runtime": "codex", "model": "gpt-6.1-sol",
+                "thread_id": thread_id, "agent_runtime": "codex", "model": "gpt-6.2-sol",
                 "effort": "high", "status": "idle", "last_used_at": "2026-09-27T12:00:00Z",
             }
             for thread_id in (user_id, spawned_id)
