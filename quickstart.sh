@@ -138,7 +138,7 @@ main() {
   local source_dir="${KERN_SOURCE_DIR:-$HOME/kern}"
   local repository='https://github.com/infiloop2/kern.git'
   if [[ -L "$source_dir" ]]; then echo "Refusing a symlink checkout: $source_dir" >&2; return 1; fi
-  echo "2/3 Preparing source in $source_dir…"
+  echo "2/3 Preparing source in ${source_dir}..."
   if [[ ! -e "$source_dir" ]] || [[ -d "$source_dir" && -z "$(ls -A "$source_dir")" ]]; then
     git clone --depth 1 --branch main "$repository" "$source_dir"
   else
