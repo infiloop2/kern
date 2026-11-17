@@ -9,7 +9,7 @@ def fixture():
     fields = ['input_tokens', 'cached_input_tokens', 'cache_write_tokens', 'output_tokens']
     groups = []
     for i, (kind, thread, name, runtime, model) in enumerate([
-        ('chats', 'thread-1', 'Research <notes>', 'codex', 'gpt-6-astra'),
+        ('chats', 'thread-1', 'Research <notes>', 'codex', 'gpt-6.2-astra'),
         ('apps', 'app-1', 'Project dashboard', 'claude_code', 'claude-fable-5-1'),
         ('schedules', 'schedule-1', 'Daily research', 'grok', 'grok-4.7'),
     ]):

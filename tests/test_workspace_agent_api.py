@@ -567,7 +567,7 @@ class McpShimTests(unittest.TestCase):
         shim = self.start_shim(socket_path)
         definition = {
             "name": "Research", "purpose": "Research ongoing work", "triggers": [],
-            "agent_runtime": "codex", "model": "gpt-6.1-sol", "effort": "high",
+            "agent_runtime": "codex", "model": "gpt-6.2-sol", "effort": "high",
         }
         created = {"id": 2, **definition}
         for caller in ("thread-1", "app-1", "schedule-1"):
@@ -615,7 +615,7 @@ class McpShimTests(unittest.TestCase):
         socket_path = self.start_server()
         shim = self.start_shim(socket_path)
         definition = {"expected_revision": 3, "name": "Research", "triggers": [],
-                      "agent_runtime": "codex-2", "model": "gpt-6.1-sol", "effort": "high"}
+                      "agent_runtime": "codex-2", "model": "gpt-6.2-sol", "effort": "high"}
         with patch.object(agent_api, "_peer_thread_id", return_value="thread-1"), patch.object(agent_api.schedules, "update_schedule", return_value={"id": 2, "revision": 4}) as update:
             called = self.rpc(shim, {
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",

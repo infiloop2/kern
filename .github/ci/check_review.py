@@ -34,7 +34,23 @@ def summary_state(body):
     return state
 
 
-def clean_summary(state):
+def completed_nonblocking_security(body, head):
+    """Null security findings need the adjacent explicit nonblocking receipt."""
+    match = re.match(re.escape(SUMMARY)
+                     + r"\n<!-- codex-review-state:v1 \{[^\r\n]*\} -->"
+                     + r"\n<!-- codex-security-review:v1 (\{[^\r\n]*\}) -->", body)
+    if not match:
+        return False
+    try:
+        security = json.loads(match[1])
+    except ValueError:
+        return False
+    return (isinstance(security, dict) and security.get("headSha") == head
+            and security.get("status") == "completed"
+            and security.get("mergeGateEnabled") is False)
+
+
+def clean_summary(state, body):
     head = state["code_review"]["commit_sha"]
     for name in ("code_review", "security_review"):
         review = state.get(name)
@@ -45,10 +61,19 @@ def clean_summary(state):
                         ("status", "commit_sha", "has_any_findings", "has_unresolved_findings"))):
             continue
         if (not isinstance(review, dict) or review.get("commit_sha") != head
-                or review.get("status") != "completed"
-                or review.get("has_any_findings") is not False
-                or review.get("has_unresolved_findings") is not False):
+                or review.get("status") != "completed"):
             return False
+        if (review.get("has_any_findings") is False
+                and review.get("has_unresolved_findings") is False):
+            continue
+        # Codex omits security verdicts when its merge gate is disabled. This
+        # completion cannot weaken the explicit no-findings code review above.
+        if (name == "security_review"
+                and review.get("has_any_findings", False) is None
+                and review.get("has_unresolved_findings", False) is None
+                and completed_nonblocking_security(body, head)):
+            continue
+        return False
     return True
 
 
@@ -73,8 +98,8 @@ def pages(path, key=None):
 
 
 def eligible(pr, repo, head, base):
+    # Stacked PRs use their own base; policy still comes from trusted main.
     return (pr["state"] == "open" and not pr["draft"]
-            and pr["base"]["ref"] == "main"
             and (pr["head"].get("repo") or {}).get("full_name") == repo
             and pr["head"]["sha"] == head and pr["base"]["sha"] == base)
 
@@ -82,7 +107,7 @@ def eligible(pr, repo, head, base):
 def clean_body(body):
     if body.startswith(SUMMARY):
         state = summary_state(body)
-        return state is not None and clean_summary(state)
+        return state is not None and clean_summary(state, body)
     # Current Codex receipts prepend this exact marker; older comments do not.
     body = body.removeprefix("<!-- codex-review-receipt:v1 -->").lstrip()
     return body.startswith(CLEAN)
@@ -99,7 +124,7 @@ def current_verdict(head, comments, reviews, resolve_commit):
             if state is not None and state["code_review"]["commit_sha"] != head:
                 continue
             verdicts.append((item["updated_at"], item["id"], item,
-                             state is not None and clean_summary(state)))
+                             state is not None and clean_summary(state, item["body"])))
             continue
         match = re.search(r"\*\*Reviewed commit:\*\* `([0-9a-f]{10,40})`", item["body"])
         if not match or not head.startswith(match[1]):

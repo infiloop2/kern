@@ -9,7 +9,7 @@ from host.runtime.core import db
 from host.runtime.workspace import schedules
 from host.runtime.workspace.host_api import WorkspaceError
 
-SESSION = {"agent_runtime": "codex", "model": "gpt-6.1-sol", "effort": "high"}
+SESSION = {"agent_runtime": "codex", "model": "gpt-6.2-sol", "effort": "high"}
 DAILY = {"type": "daily", "times": ["08:00", "20:00"], "prompt": "Research"}
 WEEKLY = {"type": "weekly", "days": ["mon", "fri"], "time": "08:00", "prompt": "Review"}
 

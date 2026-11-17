@@ -15,7 +15,7 @@ from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.workspace.purpose import validate_purpose
 from host.runtime.agent_shim import mcp_shim
 
-SESSION = {"agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high"}
+SESSION = {"agent_runtime": "codex", "model": "gpt-6.2-astra", "effort": "high"}
 
 
 class AgentMessageTests(unittest.TestCase):
@@ -49,7 +49,7 @@ class AgentMessageTests(unittest.TestCase):
         self.assertIn("Sender thread: thread-3", post.call_args.args[2]["message"])
 
     def test_sender_header_comes_from_host(self):
-        self.cursor.fetchone.return_value = ("codex", "gpt-6-astra", "high", False, False)
+        self.cursor.fetchone.return_value = ("codex", "gpt-6.2-astra", "high", False, False)
         with patch.object(
             agent_messages, "call_admin_api", return_value={"status": "accepted"}
         ) as post:
@@ -110,7 +110,7 @@ class AgentMessageTests(unittest.TestCase):
             ),
             (
                 "thread-1",
-                {"message": "Review", "agent_runtime": "codex", "model": "gpt-6-astra", "effort": "nope"},
+                {"message": "Review", "agent_runtime": "codex", "model": "gpt-6.2-astra", "effort": "nope"},
             ),
         ]
         for sender, body in cases:
@@ -286,8 +286,8 @@ class AgentMessageTests(unittest.TestCase):
 
     def test_destination_eligibility(self):
         for target, row, expected in [
-            ("app-1", None, 404), ("app-1", ("codex", "gpt-6-astra", "high", True, False), 409),
-            ("app-1", ("codex", "gpt-6-astra", "high", False, True), 423),
+            ("app-1", None, 404), ("app-1", ("codex", "gpt-6.2-astra", "high", True, False), 409),
+            ("app-1", ("codex", "gpt-6.2-astra", "high", False, True), 423),
             ("schedule-1", None, 404), ("schedule-1", ("script", "bash", "fixed"), 409),
             ("thread-2", None, 404), ("thread-2", (True,), 409),
         ]:
@@ -440,8 +440,7 @@ class AgentMessageDatabaseTests(unittest.TestCase):
         def admin_call(method, path, body=None):
             return workspace_api.route_workspace_request(method, path, {}, body)
 
-        with patch.object(turn_retries, '_pending', {}), \
-                patch.object(chat, 'call_admin_api', side_effect=admin_call), \
+        with patch.object(chat, 'call_admin_api', side_effect=admin_call), \
                 patch.object(apps, 'call_admin_api', side_effect=admin_call), \
                 patch.object(schedules, 'call_admin_api', side_effect=admin_call), \
                 patch.object(orchestrator, 'stop_thread_turn', return_value=False), \
@@ -454,8 +453,9 @@ class AgentMessageDatabaseTests(unittest.TestCase):
                  lambda: schedules.restore_revision(schedule['id'], 1, {'expected_revision': 2})),
             ]:
                 with self.subTest(target=target):
-                    turn_retries.schedule(target, 0, 'provider unavailable')
-                    retry = turn_retries._pending[target]
+                    with state.mutation() as cur:
+                        turn_retries.record_outcome(cur, target, 'codex', SESSION['model'], SESSION['effort'], 0, 'provider capacity')
+                    retry = turn_retries.current(target)
                     with self.assertRaisesRegex(WorkspaceError, 'cancel the automatic retry'):
                         archive()
                     admin_call('POST', f'/v1/threads/{target}/stop')

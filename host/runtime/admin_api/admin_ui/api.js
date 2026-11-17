@@ -266,12 +266,13 @@ export async function api(method, path, body, extraHeaders) {
   return method === "GET" ? withReadDeadline(request, path) : request(undefined, ++nextRequestId);
 }
 
-export async function apiBlob(path) {
+export async function apiBlob(path, signal) {
   const requestId = ++nextRequestId;
   const response = await availableFetch(path, {
     method: "GET",
     headers: authenticatedHeaders(),
     credentials: "same-origin",
+    ...(signal ? { signal } : {}),
   }, { requestId });
   if (response.status === 401) { unauthorizedHandler(); throw new Error("unauthorized"); }
   if (!response.ok) {

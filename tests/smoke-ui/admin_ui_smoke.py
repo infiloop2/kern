@@ -110,7 +110,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--scope",
-        choices=("all", "core", "admin-layout", "workspaces", "database-storage", "overload", "oauth-poll", "runtime-accounts", "training-privacy", "reminders", "navigation-order", "swarm", "notices", "google-ads", "x-ads", "instagram-ads"),
+        choices=("all", "core", "admin-layout", "workspaces", "database-storage", "overload", "oauth-poll", "runtime-accounts", "training-privacy", "reminders", "navigation-order", "swarm", "notices", "google-ads", "x-ads", "instagram-ads", "chat-images"),
         default="all",
         help="Run all smoke tests, the host core, workspaces, or a focused feature (admin-layout covers desktop, phone and PWA).",
     )
@@ -169,6 +169,15 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
                 f"or set {CHROMIUM_EXECUTABLE_ENV} to an existing Chromium/Chrome executable."
             ) from exc
         try:
+            if scope in {"all", "core", "chat-images"}:
+                import chat_image_smokes
+                for mobile in (False, True):
+                    image_context = browser.new_context(
+                        viewport=IPHONE_VIEWPORT if mobile else {"width": 1280, "height": 900},
+                        is_mobile=mobile, has_touch=mobile, service_workers="block",
+                    )
+                    chat_image_smokes.run(image_context.new_page(), url, log_in)
+                    image_context.close()
             if scope in {"all", "core", "database-storage"}:
                 import database_storage_smokes
                 for mobile in (False, True):
@@ -467,6 +476,17 @@ def run_browser_smoke(url: str, *, headed: bool, scope: str, webkit: bool = Fals
             browser.close()
         if webkit and scope in {"all", "workspaces"}:
             run_webkit_worker_startup_canary(playwright, url, headed=headed)
+        if webkit and scope in {"all", "workspaces", "chat-images"}:
+            import chat_image_smokes
+            webkit_browser = playwright.webkit.launch(headless=not headed)
+            try:
+                image_context = webkit_browser.new_context(
+                    viewport=IPHONE_VIEWPORT, is_mobile=True, has_touch=True, service_workers="block",
+                )
+                chat_image_smokes.run(image_context.new_page(), url, log_in)
+                image_context.close()
+            finally:
+                webkit_browser.close()
 
 
 @timed_group("webkit-worker-startup-and-browser-ui")

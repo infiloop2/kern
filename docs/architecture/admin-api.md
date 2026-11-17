@@ -267,7 +267,9 @@ and show up in the same agent slice.
   internal send path used after host restart; there is no retry endpoint.
   `GET /v1/threads` and `GET /v1/threads/{id}` include an optional
   `retry: {"attempt": 1, "at": "2026-10-05T12:05:00Z"}` on a thread while
-  an attempt is pending. `attempt` is 1–5 and `at` is a UTC timestamp. The
+  an attempt is pending. `attempt` is 1–5 and `at` is a UTC timestamp. Additional fields are
+  `kind` (`transient`, `limit`, `restart`) and `target_runtime`. Only confirmed
+  retries appear here; usage checks have no persisted or API state. The
   field is absent when no retry is pending; the thread remains `idle` while
   waiting. See [automatic continuation](agent-provider-lifecycle.md#automatic-continuation-after-a-failed-model-turn)
   for backoff and reset behavior.
@@ -376,3 +378,27 @@ The auto-approver calls the same tools decision path as manual approval and
 records its decision before that call. Call errors are stored separately from
 the decision and tool execution status. The tools service receives no auto-approval
 metadata. See [Host AI inference](host-ai-inference.md#auto-approval).
+
+## Chat workspace image previews
+
+Chat renders native workspace links to JPEG, PNG and WebP images as compact,
+uncropped previews, with a fullscreen modal on activation. Both Markdown links
+and Markdown image syntax use absolute agent-home paths. Other files retain the
+Files action; remote images are not fetched automatically.
+
+`GET /v1/agent-files/image-preview?path=...` uses the same operator session and
+CSRF checks, confined file helper, MIME allowlist and response security headers
+as Files content streaming. It checks image signatures and rejects non-image
+extensions and files above
+5 MiB before sending image bytes. Preview data is buffered within that byte cap
+to read image dimensions without decoding pixels; images above 16 megapixels or
+8192 pixels per edge are rejected before the browser receives image data. The Files content/download limits are unchanged.
+The browser fetches at most two previews concurrently near the viewport, releases
+object URLs for removed or offscreen previews, and retains a Files link if a file
+is missing, unsupported, oversized or cannot be decoded. Temporary network,
+timeout and server failures offer a Retry preview button. The modal traps focus,
+closes with Escape or its Close button, and returns focus to the preview.
+
+Agent-facing examples live in the installed
+[workspace file and image guidance](../../host/bootstrap/agent-home/references/workspace-files.md),
+shared by the Codex, Claude and Grok harnesses.

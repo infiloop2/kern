@@ -157,7 +157,7 @@ SMOKE_OAUTH_RUNTIMES = ("codex", "claude_code")
 SMOKE_MANAGED_PROVIDERS = {"openai": True, "claude": True, "bedrock": True}
 SMOKE_BEDROCK_REGION = "us-east-1"
 SMOKE_RUNTIME_MODELS = {
-    "codex": "gpt-6-astra",
+    "codex": "gpt-6.2-astra",
     "claude_code": "claude-opus-5-5",
     "grok": "grok-4.7",
     "hermes": "qwen.qwen3-coder-next",
@@ -165,8 +165,9 @@ SMOKE_RUNTIME_MODELS = {
 SMOKE_BEDROCK_MODELS = (
     "deepseek.v3.2",
     "qwen.qwen3-coder-next",
-    "moonshotai.kimi-k2.5",
-    "zai.glm-5",
+    "us.moonshotai.kimi-k3.1",
+    "us.zai.glm-5.3",
+    "minimax.minimax-m2.5",
 )
 SMOKE_GITHUB_INTEGRATION = {"enabled": True, "write_repositories": [{"owner": "infiloop2", "repo": "kern"}]}
 SMOKE_MANAGED_DOMAINS = (

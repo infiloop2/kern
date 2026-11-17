@@ -1,3 +1,4 @@
+import { clearChatImages, refreshChatImages } from "./chat_images.js";
 import { openAutoPolicy } from "./auto_approvals.js";
 import "/workspace/dictation.js";
 import { refreshAnalytics } from "./analytics.js";
@@ -479,6 +480,7 @@ if (window.visualViewport) {
 }
 
 function showLogin() {
+  clearChatImages();
   setMobileNavOpen(false);
   hideIPhoneInstallUi();
   releaseWorkspaceInputFocus();
@@ -777,7 +779,10 @@ function showApp() {
   $("runtime-overview").hidden = false;
   setMobileNavOpen(false);
   const workspaceReady = initializeWorkspaces();
-  workspaceReady.catch(error => notice(error.message, "error"));
+  workspaceReady.then(() => {
+    const root = window.KernWorkspaceRoots?.chat;
+    if (root) refreshChatImages(root);
+  }).catch(error => notice(error.message, "error"));
   refreshPasskeySetup();
   scheduleIPhoneInstallCoach();
   loadPolicy().catch(() => {});
@@ -846,6 +851,7 @@ function showApp() {
 }
 
 window.KernHost = {
+  refreshChatImages,
   api,
   apiUpload,
   refreshNavigation() {

@@ -162,8 +162,8 @@ class ApprovalDestinationTests(unittest.TestCase):
         from host.runtime.core import db
         cases = [
             ("thread-34", (True,)),
-            ("app-1", ("codex", "gpt-6-astra", "high", True, False)),
-            ("app-1", ("codex", "gpt-6-astra", "high", False, True)),
+            ("app-1", ("codex", "gpt-6.2-astra", "high", True, False)),
+            ("app-1", ("codex", "gpt-6.2-astra", "high", False, True)),
             ("schedule-1", None),
             ("schedule-1", ("script", "bash", "fixed")),
         ]
@@ -177,7 +177,7 @@ class ApprovalDestinationTests(unittest.TestCase):
     def test_host_notifications_use_current_app_runtime_settings(self):
         from host.runtime.core import db
         with patch.object(db, "transaction") as transaction, patch.object(threads, "send_thread_message", return_value={"status": "accepted"}) as send:
-            transaction.return_value.__enter__.return_value.fetchone.return_value = ("codex-2", "gpt-6-astra", "high", False, False)
+            transaction.return_value.__enter__.return_value.fetchone.return_value = ("codex-2", "gpt-6.2-astra", "high", False, False)
             outcomes.notify(record() | {"origin_thread_id": "app-1"})
             self.assertEqual(send.call_args.args[1]["agent_runtime"], "codex-2")
 
@@ -272,7 +272,6 @@ class GitHubApprovalDatabaseTests(unittest.TestCase):
         from host.runtime.agent_runtime import orchestrator
         orchestrator._LIVE.clear()
         self.addCleanup(orchestrator._LIVE.clear)
-        self.enterContext(patch.object(orchestrator.turn_retries, "_pending", {}))
         state.enqueue_pending_push("abc123", "org", "repo", [{"ref": "refs/heads/feature", "old": "0" * 40, "new": "1" * 40}],
                                    [".github/workflows/test.yml"], origin_thread_id="thread-34")
         state.save_proxy_github_token("ghs_working")

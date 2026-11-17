@@ -31,6 +31,7 @@ The categories are:
 | `operator_connections` | fixed | At most one SSH and one tunnel row. |
 | `counters` | fixed | Internal named counters, including four lifetime token totals. Never pruned with detailed usage. |
 | `thread_sessions` | retention | Sessions referenced by retained events or turn usage are preserved; unreferenced sessions retain the newest 100,000 per runtime. |
+| `thread_recovery` | current state | One counter and optional pending retry per thread; removed with its session mapping. Success resets the counter and clears pending recovery. |
 | `agent_events` | retention | Newest 100,000,000-event sequence window, with at most 499 rows of amortization slack; sequence gaps can leave fewer rows. Large details expire only when both outside the newest 1,000,000-event sequence window globally and older than three calendar months. Message text is length-bounded and survives detail expiry. |
 | `conversation_message_embeddings` | retention | Derived vectors for the newest 250,000 user/agent messages, with at most roughly 800 newly indexed messages of amortization slack; activity and lifecycle events do not consume this quota. Rows cascade with source events. |
 | `oauth_logins` | fixed | At most one row for each supported OAuth runtime. |

@@ -15,7 +15,7 @@ from host.runtime.workspace.host_api import WorkspaceError
 from host.runtime.admin_api import service as admin_service
 from host.agent_messages import INPUT_KINDS
 
-SESSION = {"agent_runtime": "codex", "model": "gpt-6.1-sol", "effort": "high"}
+SESSION = {"agent_runtime": "codex", "model": "gpt-6.2-sol", "effort": "high"}
 
 
 class ReminderValidationTests(unittest.TestCase):

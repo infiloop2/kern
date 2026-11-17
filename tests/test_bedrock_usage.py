@@ -187,9 +187,9 @@ class BedrockResponseMeterTests(unittest.TestCase):
 class PricingTests(unittest.TestCase):
     def test_every_catalog_model_has_a_hardcoded_rate(self) -> None:
         # A catalog model missing from the price table would silently record
-        # $0 cost for its traffic; pin the two lists together.
+        # $0 cost for its traffic. Historical models can retain their rates.
         catalog = set(SESSION_OPTIONS["hermes"])
-        self.assertEqual(catalog, set(MODEL_PRICING_PER_MILLION))
+        self.assertLessEqual(catalog, set(MODEL_PRICING_PER_MILLION))
 
     def test_glm_response_is_metered_with_us_standard_pricing(self) -> None:
         meter = usage.BedrockResponseMeter("zai.glm-5")
@@ -199,9 +199,16 @@ class PricingTests(unittest.TestCase):
         # 1,350 input (including cache counters), 345 output, at $1/$3.20 per M.
         record.assert_called_once_with("zai.glm-5", COUNTERS, 0.002454)
 
+    def test_current_us_profiles_include_cache_read_and_write_prices(self) -> None:
+        for model, expected in (("us.moonshotai.kimi-k3.1", 32.12),
+                                ("us.zai.glm-5.3", 10.3092)):
+            with self.subTest(model=model):
+                self.assertAlmostEqual(estimate_cost_usd(model, 1_000_000, 1_000_000,
+                                                       1_000_000, 1_000_000), expected)
+
     def test_estimate_prices_input_output_and_conservative_cache(self) -> None:
         # deepseek.v3.2: $0.62/M input, $1.85/M output; cached tokens (zero
-        # today — no catalog model supports Bedrock prompt caching) would be
+        # for models without a separately reviewed cache discount) would be
         # priced at the input rate, never silently free.
         cost = estimate_cost_usd("deepseek.v3.2", 1_000_000, 100_000, 0, 0)
         assert cost is not None

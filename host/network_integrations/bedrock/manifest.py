@@ -41,9 +41,8 @@ def region_host(region: str) -> str:
 ROUTING_ACCESS_KEY_ID = "AKIAKERNHERMES"
 ROUTING_SECRET_ACCESS_KEY = "kern-bedrock-dummy-secret"
 
-# Hardcoded on-demand Bedrock inference rates for the session model catalog,
-# in USD per one million (input, output) tokens: US-region serverless pricing
-# for the supported regions (us-east-1, us-east-2, us-west-2), checked 2026-07.
+# Reviewed Standard Bedrock rates, in USD per million (input, output)
+# tokens: US serverless models and US geographic inference profiles.
 # The proxy prices each metered response with these rates when it records it
 # and stores the resulting cost, so editing a rate only affects subsequently
 # metered requests -- recorded cost is final. Like SUPPORTED_REGIONS, a rate
@@ -54,6 +53,18 @@ MODEL_PRICING_PER_MILLION: dict[str, tuple[float, float]] = {
     "moonshotai.kimi-k2.5": (0.60, 3.00),
     # https://aws.amazon.com/bedrock/pricing/ — US standard, checked 2026-09-16.
     "zai.glm-5": (1.00, 3.20),
+    # https://aws.amazon.com/bedrock/pricing/ — Standard US, checked 2026-11-17.
+    "us.moonshotai.kimi-k3.1": (4.40, 22.00),
+    "us.zai.glm-5.3": (1.848, 5.808),
+    "minimax.minimax-m2.5": (0.30, 1.20),
+}
+
+# Current profiles support implicit caching. Other models retain the reviewed
+# conservative input rate for cache counters. Old model rates remain available
+# for metering responses; the selectable catalog is owned by session_options.
+MODEL_CACHE_PRICING_PER_MILLION: dict[str, tuple[float, float]] = {
+    "us.moonshotai.kimi-k3.1": (0.22, 5.50),
+    "us.zai.glm-5.3": (0.3432, 2.31),
 }
 
 # Where usage for a model outside the price table is recorded. Collapsing
@@ -78,18 +89,19 @@ def estimate_cost_usd(
 ) -> float | None:
     """The USD estimate for one usage total, or None for an unpriced model.
 
-    Bedrock prompt caching covers only the Claude and Nova families, none of
-    which is in this catalog, so the cached-token counters stay zero today.
-    Should AWS ever report them for a catalog model, they are priced at the
-    full input rate — a conservative over-estimate — rather than silently
-    free; a discounted cache rate would be a reviewed edit here."""
+    Current profile cache rates are explicit. Models without a reviewed cache
+    discount use their input rate for both counters, conservatively.
+    """
     rates = MODEL_PRICING_PER_MILLION.get(model_id)
     if rates is None:
         return None
     input_rate, output_rate = rates
+    cache_read_rate, cache_write_rate = MODEL_CACHE_PRICING_PER_MILLION.get(
+        model_id, (input_rate, input_rate)
+    )
     return (
-        (input_tokens + cache_read_tokens + cache_write_tokens) * input_rate
-        + output_tokens * output_rate
+        input_tokens * input_rate + output_tokens * output_rate
+        + cache_read_tokens * cache_read_rate + cache_write_tokens * cache_write_rate
     ) / 1_000_000
 
 

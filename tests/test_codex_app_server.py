@@ -43,20 +43,20 @@ for line in sys.stdin:
     if method == "initialize":
         send({"id": msg["id"], "result": {}})
     elif method == "thread/start":
-        assert msg["params"]["model"] == "gpt-6.1-sol"
+        assert msg["params"]["model"] == "gpt-6.2-sol"
         assert "effort" not in msg["params"]
         send({"id": msg["id"], "result": {"thread": {"id": "thread_1"}}})
     elif method == "thread/resume":
         assert msg["params"]["threadId"] == "thread_existing"
         assert msg["params"]["excludeTurns"] is True
-        assert msg["params"]["model"] == "gpt-6.1-sol"
+        assert msg["params"]["model"] == "gpt-6.2-sol"
         assert msg["params"]["developerInstructions"].startswith(
             "You are running inside Kern."
         )
         assert "effort" not in msg["params"]
         send({"id": msg["id"], "result": {"thread": {"id": "thread_existing", "turns": []}}})
     elif method == "turn/start":
-        assert msg["params"]["model"] == "gpt-6.1-sol"
+        assert msg["params"]["model"] == "gpt-6.2-sol"
         assert msg["params"]["effort"] == "ultra"
         assert "serviceTier" not in msg["params"]
         send({"method": "item/agentMessage/delta", "params": {"delta": "Hel"}})
@@ -1413,7 +1413,7 @@ class CodexAppServerTests(unittest.TestCase):
                 server,
                 "do the task",
                 None,
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 "ultra",
                 messages.append,
             )
@@ -1436,8 +1436,24 @@ class CodexAppServerTests(unittest.TestCase):
             for existing in (None, "thread_existing"):
                 with self.subTest(preset=preset, existing=existing):
                     with CodexAppServer([sys.executable, "-u", "-c", script]) as server:
-                        _, output = run_turn(server, "do the task", existing, "gpt-6.1-sol", preset, lambda _: None)
+                        _, output = run_turn(server, "do the task", existing, "gpt-6.2-sol", preset, lambda _: None)
                         self.assertEqual(output, "Final answer")
+
+    def test_codex_6_2_presets_on_new_and_resumed_turns(self) -> None:
+        for model in ("gpt-6.2-sol", "gpt-6.2-astra"):
+            for preset in ("high", "max", "ultra", "high-fast", "high-ultrafast"):
+                script = FAKE_APP_SERVER.replace("gpt-6.2-sol", model)
+                effort = "high" if preset.startswith("high-") else preset
+                script = script.replace('assert msg["params"]["effort"] == "ultra"',
+                                        f'assert msg["params"]["effort"] == {effort!r}')
+                if preset.startswith("high-"):
+                    script = script.replace('assert "serviceTier" not in msg["params"]',
+                                            f'assert msg["params"]["serviceTier"] == {preset.removeprefix("high-")!r}')
+                for existing in (None, "thread_existing"):
+                    with self.subTest(model=model, preset=preset, existing=existing):
+                        with CodexAppServer([sys.executable, "-u", "-c", script]) as server:
+                            _, output = run_turn(server, "do the task", existing, model, preset, lambda _: None)
+                            self.assertEqual(output, "Final answer")
 
     def test_unavailable_speed_tier_surfaces_provider_error_without_fallback(self) -> None:
         server = MagicMock()
@@ -1446,7 +1462,7 @@ class CodexAppServerTests(unittest.TestCase):
             CodexAppServerError("Ultrafast is not available for this plan"),
         ]
         with self.assertRaisesRegex(CodexAppServerError, "Ultrafast is not available for this plan"):
-            run_turn(server, "do the task", "thread_existing", "gpt-6.1-sol", "high-ultrafast", lambda _: None)
+            run_turn(server, "do the task", "thread_existing", "gpt-6.2-sol", "high-ultrafast", lambda _: None)
         self.assertEqual(server.call.call_count, 2)
         self.assertEqual(server.call.call_args.args[1]["serviceTier"], "ultrafast")
 
@@ -1480,12 +1496,12 @@ class CodexAppServerTests(unittest.TestCase):
                     server.read_message.side_effect = notifications
                     messages = []
                     if status == "completed":
-                        result = run_turn(server, "Status update", "thread_existing", "gpt-6.1-sol", "high", messages.append)
+                        result = run_turn(server, "Status update", "thread_existing", "gpt-6.2-sol", "high", messages.append)
                         self.assertEqual(result, ("thread_existing", ""))
                     else:
                         expected = "Provider failed" if status == "failed" else "Codex turn failed"
                         with self.assertRaisesRegex(CodexAppServerError, expected):
-                            run_turn(server, "Status update", "thread_existing", "gpt-6.1-sol", "high", messages.append)
+                            run_turn(server, "Status update", "thread_existing", "gpt-6.2-sol", "high", messages.append)
                     self.assertEqual(messages, [])
                     server.clear_active_turn.assert_called_once_with()
 
@@ -1498,7 +1514,7 @@ class CodexAppServerTests(unittest.TestCase):
                 server,
                 "do the task",
                 None,
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 "high",
                 messages.append,
             )
@@ -1519,7 +1535,7 @@ class CodexAppServerTests(unittest.TestCase):
                 server,
                 "do the task",
                 None,
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 "high",
                 messages.append,
             )
@@ -1538,7 +1554,7 @@ class CodexAppServerTests(unittest.TestCase):
                 server,
                 "do the task",
                 None,
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 "high",
                 messages.append,
             )
@@ -1618,7 +1634,7 @@ for line in sys.stdin:
                         server.steer(suggestion, memory_suggestion=trusted)
                         return True
                     server._on_ready = ready
-                    _, output = run_turn(server, "research", None, "gpt-6.1-sol", "high", messages.append)
+                    _, output = run_turn(server, "research", None, "gpt-6.2-sol", "high", messages.append)
                     self.assertEqual(output, expected)
                 self.assertEqual(messages[0], "Saved thesis.")
                 self.assertNotIn("", messages)
@@ -1632,7 +1648,7 @@ for line in sys.stdin:
                 server,
                 "do the task",
                 None,
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 "high",
                 messages.append,
             )
@@ -1652,7 +1668,7 @@ for line in sys.stdin:
                 server,
                 "do the task",
                 None,
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 "high",
                 messages.append,
             )
@@ -1707,7 +1723,7 @@ for line in sys.stdin:
                     server,
                     "do the task",
                     None,
-                    "gpt-6.1-sol",
+                    "gpt-6.2-sol",
                     "ultra",
                     lambda _m: None,
                 )
@@ -1903,7 +1919,7 @@ for line in sys.stdin:
                 server,
                 "test it",
                 None,
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 "high",
                 events.append,
             )
@@ -1929,7 +1945,7 @@ for line in sys.stdin:
                 server,
                 "run it",
                 None,
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 "high",
                 events.append,
             )
@@ -1961,7 +1977,7 @@ for line in sys.stdin:
                 calls.append((method, params))
                 return {"thread": {"id": "thread_1"}}
 
-        thread = codex_app_server_module._start_thread(RecordingServer(), "gpt-6.1-sol")  # type: ignore[arg-type]
+        thread = codex_app_server_module._start_thread(RecordingServer(), "gpt-6.2-sol")  # type: ignore[arg-type]
 
         self.assertEqual(thread["id"], "thread_1")
         self.assertEqual(calls[0][0], "thread/start")
@@ -1975,7 +1991,7 @@ for line in sys.stdin:
                 server,
                 "continue",
                 "thread_existing",
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 "ultra",
                 lambda _m: None,
             )
@@ -2005,7 +2021,7 @@ for line in sys.stdin:
                 server,  # type: ignore[arg-type]
                 "continue",
                 None,
-                "gpt-6.1-sol",
+                "gpt-6.2-sol",
                 "high",
                 lambda _m: None,
             )
@@ -2023,7 +2039,7 @@ for line in sys.stdin:
         with self.assertRaisesRegex(
             codex_app_server_module.ProviderSessionLost, "send the message again"
         ):
-            run_turn(server, "continue", session_id, "gpt-6.1-sol", "high", lambda _m: None)
+            run_turn(server, "continue", session_id, "gpt-6.2-sol", "high", lambda _m: None)
 
         self.assertEqual([call.args[0] for call in server.call.call_args_list], ["thread/resume"])
         self.assertIsNone(server.last_known_session_id)
@@ -2041,7 +2057,7 @@ for line in sys.stdin:
                 server = MagicMock(last_known_session_id=None)
                 server.call.side_effect = error
                 with self.assertRaises(CodexAppServerError) as raised:
-                    run_turn(server, "continue", "saved-session", "gpt-6.1-sol", "high", lambda _m: None)
+                    run_turn(server, "continue", "saved-session", "gpt-6.2-sol", "high", lambda _m: None)
                 self.assertIs(raised.exception, error)
                 self.assertNotIsInstance(raised.exception, codex_app_server_module.ProviderSessionLost)
                 self.assertEqual([call.args[0] for call in server.call.call_args_list], ["thread/resume"])
@@ -2055,7 +2071,7 @@ for line in sys.stdin:
                 server,
                 "do the task",
                 None,
-                "gpt-6-astra",
+                "gpt-6.2-astra",
                 "high",
                 messages.append,
             )

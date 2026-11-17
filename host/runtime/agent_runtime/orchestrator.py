@@ -773,6 +773,10 @@ def admit_turn(
                 f"{label} runtime is already running {TURN_LIMIT_PER_RUNTIME} concurrent threads; retry when one finishes",
             )
         run_number = state.start_thread_run(cur, thread_id)
+        # The stored chain survives manual sends, settings changes and boot.
+        # Only a successful completed turn resets it.
+        retry_attempt = state.thread_recovery(thread_id, cur)["attempts"]
+        state.cancel_thread_recovery(cur, thread_id)
         turn = _Turn(runtime_type, thread_id, model, effort, run_number, retry_attempt, message)
         if runtime_type != "script":
             state.start_turn_usage(cur, thread_id, run_number, runtime_type, model)
@@ -881,8 +885,6 @@ def steer_live_turn(
                     "event_type": "thread.message" if operator_sent_message else "thread.notice",
                     "payload": {"message": message, "source": "user", "notice": input_notice},
                 }, incoming=True)
-                # A newly delivered request starts its own failure chain.
-                turn.retry_attempt = 0
     if server_to_interrupt is not None:
         _interrupt_turn(server_to_interrupt)
     if failure is not None:
@@ -950,7 +952,6 @@ def _deliver_memory_context(
 
 
 def _publish_turn(turn: _Turn) -> None:
-    turn_retries.cancel(turn.thread_id)
     with _LIVE_LOCK:
         _LIVE[_live_key(turn.runtime_type, turn.thread_id)] = turn
 
@@ -1311,6 +1312,11 @@ def _record_turn_finished(
             accepted_session_id,
         )
     state.touch_thread_session(cur, turn.thread_id, utc_now())
+    if turn.runtime_type != "script":
+        usage_check = turn_retries.record_outcome(cur, turn.thread_id, turn.runtime_type, turn.model,
+                                                  turn.effort, turn.run_number, error_message)
+        if usage_check is not None:
+            after_commit.append(partial(turn_retries.start_limit_check, usage_check))
     if error_message is not None:
         state.append_agent_event(
             cur,
@@ -1321,11 +1327,6 @@ def _record_turn_finished(
         )
     state.finish_thread_run(cur, turn.thread_id, turn.run_number)
     after_commit.append(partial(_mark_finishing, turn, accepted_session_id))
-    if error_message is not None and turn.runtime_type != "script":
-        after_commit.append(partial(
-            turn_retries.schedule, turn.thread_id,
-            turn.retry_attempt, error_message,
-        ))
 
 
 def _finish_turn(

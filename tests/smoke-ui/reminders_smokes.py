@@ -27,7 +27,7 @@ def run(page: Any, url: str, log_in: Any) -> None:
     app = page.evaluate("() => window.KernHost.api('POST', '/v1/workspace/web-apps/apps', {})")
     app_id = app["app"]["app_id"] if "app" in app else app["app_id"]
     schedule = page.evaluate("""() => window.KernHost.api('POST', '/v1/workspace/schedules', {
-      name: 'Reminder agent', triggers: [], agent_runtime: 'codex', model: 'gpt-6.1-sol', effort: 'high'
+      name: 'Reminder agent', triggers: [], agent_runtime: 'codex', model: 'gpt-6.2-sol', effort: 'high'
     })""")["schedule"]
     targets = [("thread-1", "chat"), ("thread-6", "chat"),
                (schedule["thread_id"], "chat"), (app_id, "web-apps")]

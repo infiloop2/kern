@@ -517,30 +517,32 @@ another refresh holding the runtime's refresh lock.
 
 ## Automatic continuation after a failed model turn
 
-Failed model turns get up to five automated continuations, waiting 5 minutes,
-20 minutes, 1 hour, 4 hours, then 12 hours after each failure. A host worker
-checks in-memory deadlines every 15 seconds and sends an ordinary `retry`
-notice using the thread's recorded runtime, model and effort. The message asks
-the agent to check completed work before continuing. A successful turn ends the
-chain. New admitted messages start a fresh chain; accepted steering resets the running turn's retry count.
+Model threads share a persistent cap of five automatic recovery attempts,
+including subscription switches and restart continuations. Success resets it;
+new messages and settings changes do not. Bash scripts do not retry.
 
-Only failed turn completion schedules this work. Operator stops, successful
-turns, cleanup-only errors, and Bash scripts do not. New admitted work, Stop,
-and clearing working memory cancel attempts still waiting. Chat, standing-agent
-and App composers show the next attempt and let the operator cancel it.
+| Error | Recovery |
+| --- | --- |
+| Contains `timed`, `timeout` or `capacity` (case-insensitive) | Back off by shared attempt number: 5m, 20m, 1h, 4h, 12h. |
+| Contains `limit`, on Codex or Grok | Check fresh usage. Switch permanently to an enabled compatible subscription below 100% in every applicable window, preserving model/effort and App/Standing settings. Otherwise keep the current subscription and wait for its own reset. |
+| Contains `limit`, on Claude | Wait until all exhausted applicable windows reset: session, weekly, and Fable weekly only for Fable models. |
+| Unknown error, Hermes limit, failed/inconclusive usage check | Stop recovery. |
 
-Once the worker claims an attempt, it sends through the same host path as
-restart continuation. Normal delivery handles any concurrent messages; there
-is no extra locking or Workspace eligibility policy. A delivery failure is
-logged and ends the chain, just like a failed restart continuation. Only a
-failed model turn schedules the next attempt. There is no error-text classifier
-or model fallback.
+Limit matching takes precedence over transient matching. Only usage ≥100%
+means exhausted; 99% remains eligible. Reset deadlines come from usage, not
+error text, with a one-minute buffer. Grok currently exposes one billing window;
+missing percentages remain unknown. Usage checks are one-shot and in memory:
+only a confirmed retry or switch is saved, and unfinished checks are lost on restart.
 
-Retry deadlines and counters are deliberately process memory only. Restarting
-or redeploying discards pending retries. The existing one-shot continuation for
-turns interrupted by a host restart remains separate and starts a fresh chain
-if that continuation fails. No retry database state, recovery scan or schema
-migration is involved.
+Typed `thread_recovery` columns persist the counter and pending retry. Boot
+restores future/overdue retries and queues interrupted model turns through the
+same worker. Stop, context clear and newly admitted work cancel pending retries.
+Recovery is best effort: changed settings, unavailable destinations or failed
+admission stop it rather than starting another recovery mechanism.
+
+The UI shows the retry date/time and cancellation control. `recovery` notices
+record decisions; MCP history includes bounded thread errors. Continuations must
+reconcile completed actions before proceeding; they never authorize duplicate writes.
 
 ## Optional additional accounts
 

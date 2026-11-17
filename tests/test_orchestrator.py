@@ -54,7 +54,7 @@ from host.runtime.core.state import (
 
 # The default (model, effort) per runtime for seeded threads and turns.
 DEFAULT_SESSION = {
-    "codex": ("gpt-6-astra", "high"),
+    "codex": ("gpt-6.2-astra", "high"),
     "claude_code": ("claude-opus-5-5", "high"),
     "grok": ("grok-4.7", "high"),
     "hermes": ("qwen.qwen3-coder-next", "high"),
@@ -178,7 +178,6 @@ class OrchestratorTests(unittest.TestCase):
         FakeServer.instances = []
         orchestrator._LIVE.clear()
         self.addCleanup(orchestrator._LIVE.clear)
-        self.enterContext(patch.object(orchestrator.turn_retries, "_pending", {}))
         save_policy(
             {
                 "network_integrations": {
@@ -345,6 +344,8 @@ class OrchestratorTests(unittest.TestCase):
         return fake_run_turn
 
     def test_failed_turn_retries_through_ordinary_admission(self) -> None:
+        with db.transaction() as cur:
+            cur.execute("INSERT INTO chat_threads (thread_id) VALUES ('thread-1')")
         with patch.object(orchestrator.turn_retries.time, "time", return_value=1000) as clock, \
                 patch.object(orchestrator, "launch_turn") as launch:
             self.send_message("thread-1", "Finish the report")
@@ -364,7 +365,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(orchestrator.turn_retries.pending("thread-1")["attempt"], 2)
             self.send_message("thread-1", "Change of plan")
             third = launch.call_args.args[0]
-            self.assertEqual(third.retry_attempt, 0)
+            self.assertEqual(third.retry_attempt, 1)
             self.assertIsNone(orchestrator.turn_retries.pending("thread-1"))
             orchestrator._finish_turn(third)
             orchestrator._close_turn(third, None)
@@ -608,7 +609,7 @@ class OrchestratorTests(unittest.TestCase):
             self.assertEqual(response["thread"]["thread_id"], "thread-chat")
             self.wait_until_idle("thread-chat")
 
-        self.assertEqual(observed_config, [("gpt-6-astra", "high")])
+        self.assertEqual(observed_config, [("gpt-6.2-astra", "high")])
         events = thread_events("thread-chat")
         self.assertEqual(
             event_summary(events),
@@ -1490,7 +1491,7 @@ class OrchestratorTests(unittest.TestCase):
                         " ('thread-73', TRUE, NULL)")
             for n in (71, 72, 73):
                 state.save_thread_session(cur, "codex", f"thread-{n}", f"session-{n}",
-                                          state.utc_now(), "gpt-6-astra", "high")
+                                          state.utc_now(), "gpt-6.2-astra", "high")
         self.assertEqual([t[0] for t in state.codex_cleanup_candidates("codex") if t[2]], ["thread-71"])
         with state.mutation() as cur:
             for n in (72, 73):
@@ -1505,7 +1506,7 @@ class OrchestratorTests(unittest.TestCase):
         with state.mutation() as cur:
             cur.execute("INSERT INTO chat_threads (thread_id, archived, archived_at)"
                         " VALUES ('thread-71', TRUE, CURRENT_TIMESTAMP - INTERVAL '8 days')")
-            state.save_thread_session(cur, "codex", "thread-71", "session-71", state.utc_now(), "gpt-6-astra", "high")
+            state.save_thread_session(cur, "codex", "thread-71", "session-71", state.utc_now(), "gpt-6.2-astra", "high")
         with patch.object(chat, "call_admin_api", return_value={"thread": {"status": "idle"}}):
             chat.archive_chat_thread("thread-71")
             self.assertEqual([t[0] for t in state.codex_cleanup_candidates("codex") if t[2]], ["thread-71"])
@@ -1520,13 +1521,13 @@ class OrchestratorTests(unittest.TestCase):
             app_id = apps.create_web_app()["app_id"]
         schedule = schedules.create_schedule({
             "name": "Archive cleanup", "triggers": [], "agent_runtime": "codex",
-            "model": "gpt-6-astra", "effort": "high",
+            "model": "gpt-6.2-astra", "effort": "high",
         }, actor="user")
         schedule_id = schedule["thread_id"]
         with state.mutation() as cur:
             for thread_id in (app_id, schedule_id):
                 state.save_thread_session(cur, "codex", thread_id, "session-" + thread_id,
-                                          state.utc_now(), "gpt-6-astra", "high")
+                                          state.utc_now(), "gpt-6.2-astra", "high")
         with patch.object(apps, "call_admin_api", return_value={"thread": {"status": "idle"}}):
             apps.set_web_app_archived(app_id, True)
         with patch.object(schedules, "call_admin_api", return_value={"thread": {"status": "idle"}}):
@@ -1557,7 +1558,7 @@ class OrchestratorTests(unittest.TestCase):
         with state.mutation() as cur:
             cur.execute("INSERT INTO chat_threads (thread_id, archived, archived_at)"
                         " VALUES (%s, TRUE, CURRENT_TIMESTAMP - INTERVAL '8 days')", (thread_id,))
-            state.save_thread_session(cur, "codex", thread_id, "retired-session", state.utc_now(), "gpt-6-astra", "high")
+            state.save_thread_session(cur, "codex", thread_id, "retired-session", state.utc_now(), "gpt-6.2-astra", "high")
             state.append_agent_event(cur, "thread.message", thread_id, {
                 "source": "user", "message": "Keep the deployment paused until Friday.",
             })
@@ -1622,7 +1623,7 @@ class OrchestratorTests(unittest.TestCase):
     def test_large_codex_session_rotates_and_next_send_receives_history(self) -> None:
         schedule = schedules.create_schedule({
             "name": "Long-lived Codex", "triggers": [{"type": "daily", "times": [f"{hour:02}:00" for hour in range(24)], "prompt": "continue the work"}],
-            "agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high",
+            "agent_runtime": "codex", "model": "gpt-6.2-astra", "effort": "high",
         }, actor="user")
         for thread_id in ("thread-rotation", schedule["thread_id"]):
             with self.subTest(thread_id=thread_id):
@@ -1679,7 +1680,7 @@ class OrchestratorTests(unittest.TestCase):
         with state.mutation() as cur:
             state.save_thread_session(
                 cur, "codex", thread_id, "deleted-session", state.utc_now(),
-                "gpt-6-astra", "high",
+                "gpt-6.2-astra", "high",
             )
             state.append_agent_event(
                 cur, "thread.message", thread_id,
@@ -1992,9 +1993,14 @@ class OrchestratorTests(unittest.TestCase):
             response = self.send_message("thread-chat", "hi")
 
         self.assertEqual(response["status"], "accepted")
-        failed = thread_events("thread-chat")[-1]
+        events = thread_events("thread-chat")
+        failed = next(event for event in events if event["event_type"] == "thread.error")
         self.assertEqual(failed["event_type"], "thread.error")
         self.assertIn("thread limit reached", failed["payload"]["error_message"])
+        notices = [event["payload"]["notice"] for event in read_agent_events()
+                   if event["thread_id"] == "thread-chat" and event["event_type"] == "thread.notice"]
+        self.assertEqual(notices[-1]["summary"], "Automatic recovery stopped")
+        self.assertIsNone(orchestrator.turn_retries.pending("thread-chat"))
         self.assertNotIn("codex:thread-chat", orchestrator._LIVE)
 
     def test_failed_idle_transition_leaves_run_retryable(self) -> None:

@@ -41,13 +41,13 @@ const localFiles = new Map();
 let sessionOptions = {};
 let activeRuntimes = null;
 const DEFAULT_MODELS = Object.freeze({
-  codex: "gpt-6.1-sol",
-  "codex-2": "gpt-6.1-sol",
-  "codex-3": "gpt-6.1-sol",
+  codex: "gpt-6.2-sol",
+  "codex-2": "gpt-6.2-sol",
+  "codex-3": "gpt-6.2-sol",
   claude_code: "claude-opus-5-5",
   grok: "grok-4.7",
   "grok-2": "grok-4.7",
-  hermes: "moonshotai.kimi-k2.5",
+  hermes: "us.moonshotai.kimi-k3.1",
 });
 let apps = [];
 let selectedAppId = null;
@@ -2272,7 +2272,7 @@ function renderChat() {
   $("composer-running").hidden = !running && !retry;
   $("composer-running").querySelector(".agent-working > span").textContent = running
     ? "Agent is working"
-    : retry ? `Retry ${retry.attempt}/5 at ${new Date(retry.at).toLocaleTimeString()}` : "";
+    : retry ? `Retry ${retry.attempt}/5 at ${new Date(retry.at).toLocaleString()}` : "";
   $("composer-running").querySelector(".working-dots").hidden = !running;
   $("stop-turn").textContent = running ? "Stop" : "Cancel retry";
   $("clear-memory").hidden = !snapshot.session || selectedAppOutsideActiveIndex;

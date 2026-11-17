@@ -147,6 +147,19 @@ class CodexReviewPolicyTests(unittest.TestCase):
             with self.subTest(changes=changes), self.assertRaisesRegex(RuntimeError, 'clean Codex verdict'):
                 self.invoke(mode='stamp', comments=[verdict({**code, **changes})], reviews=[])
 
+    def test_completed_nonblocking_security_summary_stamps_exact_head(self):
+        code = {'commit_sha': HEAD, 'status': 'completed',
+                'has_any_findings': False, 'has_unresolved_findings': False}
+        state = {'code_review': code, 'security_review': {
+            **code, 'has_any_findings': None, 'has_unresolved_findings': None}}
+        security = {'headSha': HEAD, 'status': 'completed', 'mergeGateEnabled': False}
+        verdict = {**VERDICT, 'body': policy.check_review.SUMMARY
+                   + '\n<!-- codex-review-state:v1 ' + json.dumps(state) + ' -->'
+                   + '\n<!-- codex-security-review:v1 ' + json.dumps(security) + ' -->'}
+        self.assertEqual(self.invoke(mode='stamp', comments=[verdict], reviews=[]),
+                         [(f'/repos/{REPO}/pulls/1/reviews', {
+                             'commit_id': HEAD, 'event': 'APPROVE', 'body': policy.stamp_body(verdict)})])
+
     def test_stamp_rejects_conflicting_verdicts_in_same_second(self):
         finding = {'id': 1, 'user': {'login': policy.CODEX}, 'commit_id': HEAD,
                    'state': 'COMMENTED', 'body': 'Found bug', 'submitted_at': VERDICT['updated_at']}

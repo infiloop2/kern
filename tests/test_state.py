@@ -52,7 +52,7 @@ def seed_thread(
     runtime: str = "codex",
     provider_session_id: str | None = None,
     last_used_at: str | None = "2026-06-08T00:00:00Z",
-    model: str = "gpt-6-astra",
+    model: str = "gpt-6.2-astra",
     effort: str = "high",
 ) -> None:
     state.save_thread_session(
@@ -337,7 +337,7 @@ class StateStorageTests(unittest.TestCase):
                 cur,
                 "thread-t2",
                 runtime="claude_code",
-                model="claude-fable-5",
+                model="claude-fable-5-2",
                 effort="max",
                 provider_session_id="sess-2",
                 last_used_at=None,
@@ -354,7 +354,7 @@ class StateStorageTests(unittest.TestCase):
             {
                 "thread_id": "thread-t1",
                 "agent_runtime": "codex",
-                "model": "gpt-6-astra",
+                "model": "gpt-6.2-astra",
                 "effort": "high",
                 "last_used_at": "2026-06-08T00:00:01Z",
                 "status": "idle",
@@ -446,7 +446,7 @@ class StateStorageTests(unittest.TestCase):
                 "fixed-thread",
                 None,
                 "2026-06-08T00:00:00Z",
-                "gpt-6-astra",
+                "gpt-6.2-astra",
                 "high",
             )
 
@@ -457,7 +457,7 @@ class StateStorageTests(unittest.TestCase):
                 "fixed-thread",
                 None,
                 "2026-06-08T00:00:01Z",
-                "gpt-6-sol",
+                "gpt-6.2-sol",
                 "high",
             )
 
@@ -466,7 +466,7 @@ class StateStorageTests(unittest.TestCase):
         with state.mutation() as cur:
             config = state.thread_session_config("fixed-thread", cur)
         assert config is not None
-        self.assertEqual((config["model"], config["effort"]), ("gpt-6-astra", "high"))
+        self.assertEqual((config["model"], config["effort"]), ("gpt-6.2-astra", "high"))
         self.assertEqual(state.thread_session_config("fixed-thread"), config)
 
     def test_idle_thread_session_can_rotate_and_running_thread_cannot(self) -> None:
@@ -496,7 +496,7 @@ class StateStorageTests(unittest.TestCase):
                 cur,
                 "chat",
                 "codex",
-                "gpt-6-astra",
+                "gpt-6.2-astra",
                 "high",
                 "2026-06-08T00:00:10Z",
             )
@@ -1279,7 +1279,7 @@ class StateStorageTests(unittest.TestCase):
                     provider_session_id=f"ct_{number}",
                     last_used_at=f"2026-06-08T00:00:{number:02d}Z",
                 )
-            seed_thread(cur, "thread-c1", runtime="claude_code", model="claude-fable-5", effort="high")
+            seed_thread(cur, "thread-c1", runtime="claude_code", model="claude-fable-5-2", effort="high")
             state.append_agent_event(cur, "thread.message", "thread-t1", {"message": "keep", "source": "user"})
         with state.mutation() as cur:
             state.prune_thread_sessions(cur, "codex", 3)
@@ -1295,13 +1295,13 @@ class StateStorageTests(unittest.TestCase):
         with state.mutation() as cur:
             seed_thread(cur, "thread-old", last_used_at="2026-06-08T00:00:00Z")
             run = state.start_thread_run(cur, "thread-old")
-            state.start_turn_usage(cur, "thread-old", run, "codex", "gpt-6-astra")
+            state.start_turn_usage(cur, "thread-old", run, "codex", "gpt-6.2-astra")
             state.finish_thread_run(cur, "thread-old", run)
             seed_thread(cur, "thread-new", last_used_at="2099-01-01T00:00:00Z")
             state.prune_thread_sessions(cur, "codex", 1)
             next_run = state.start_thread_run(cur, "thread-old")
             self.assertEqual(next_run, run + 1)
-            state.start_turn_usage(cur, "thread-old", next_run, "codex", "gpt-6-astra")
+            state.start_turn_usage(cur, "thread-old", next_run, "codex", "gpt-6.2-astra")
             state.finish_thread_run(cur, "thread-old", next_run)
         remaining = {row["thread_id"] for row in state.page_thread_summaries(None, 100)}
         self.assertEqual(remaining, {"thread-old", "thread-new"})

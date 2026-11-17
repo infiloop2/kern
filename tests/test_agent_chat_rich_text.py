@@ -9,6 +9,38 @@ import unittest
 
 class AgentChatRichTextTests(unittest.TestCase):
     @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
+    def test_chat_image_links_are_opt_in_confined_and_escaped(self) -> None:
+        renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
+        source = (
+            '![](/mnt/kern-agent/agent-home/empty.png) '
+            '[Landscape](/mnt/kern-agent/agent-home/a.PNG) '
+            '![Portrait](</mnt/kern-agent/agent-home/my photos/b.webp>) '
+            '[Vector](/mnt/kern-agent/agent-home/c.svg) '
+            '[GIF](/mnt/kern-agent/agent-home/d.gif) '
+            '[Remote](https://example.com/a.png) '
+            '[Escape](/mnt/kern-agent/agent-home/../a.png) '
+            '[Other](/etc/a.png) '
+            '[Line](/mnt/kern-agent/agent-home/a.jpg:12) '
+            '[<unsafe & label>](/mnt/kern-agent/agent-home/e.jpeg)'
+        )
+        script = (
+            f"const rich = require({json.dumps(str(renderer))});"
+            "process.stdout.write(JSON.stringify([rich.renderMarkdown(process.argv[1], 0, true),"
+            "rich.renderMarkdown(process.argv[1])]));"
+        )
+        chat, shared = json.loads(subprocess.run(
+            ["node", "-e", script, source], check=True, capture_output=True, text=True,
+        ).stdout)
+        self.assertEqual(chat.count('class="chat-image"'), 4)
+        self.assertEqual(chat.count('class="md-open-file"'), 7)
+        self.assertIn('data-image-path="/my photos/b.webp"', chat)
+        self.assertIn('alt="empty.png"', chat)
+        self.assertIn('alt="&lt;unsafe &amp; label&gt;"', chat)
+        self.assertNotIn('<unsafe', chat)
+        self.assertNotIn('<img src=', chat)
+        self.assertNotIn('class="chat-image"', shared)
+
+    @unittest.skipUnless(shutil.which("node"), "node is required for the UI renderer test")
     def test_user_upload_reference_opens_workspace_file_without_rendering_other_markup(self) -> None:
         renderer = Path("host/runtime/workspace/chat/ui/rich_text.js").resolve()
         script = (

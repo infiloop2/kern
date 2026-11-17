@@ -36,14 +36,14 @@ class AgenticWebAppContractTests(unittest.TestCase):
                 False,
                 False,
                 "codex",
-                "gpt-6-astra",
+                "gpt-6.2-astra",
                 "high",
                 "",
             ),
             {
                 "status": "idle",
                 "agent_runtime": "codex",
-                "model": "gpt-6-astra",
+                "model": "gpt-6.2-astra",
                 "effort": "high",
                 "last_used_at": "2026-08-18T10:02:00Z",
                 "latest_event_seq": 42,
@@ -59,15 +59,15 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertEqual(summary["task"], "Publish release notes")
         self.assertEqual(
             summary["agent_settings"],
-            {"agent_runtime": "codex", "model": "gpt-6-astra", "effort": "high"},
+            {"agent_runtime": "codex", "model": "gpt-6.2-astra", "effort": "high"},
         )
 
     def test_app_summary_without_host_history_has_no_latest_event_type(self) -> None:
         row = ("app-1", "New App", 0, "created", "updated", False, False,
-               "codex", "gpt-6-astra", "high", "")
+               "codex", "gpt-6.2-astra", "high", "")
         for host_summary in (None, {
             "status": "idle", "agent_runtime": "codex",
-            "model": "gpt-6-astra", "effort": "high",
+            "model": "gpt-6.2-astra", "effort": "high",
         }):
             with self.subTest(host_summary=host_summary):
                 summary = backend._web_app_summary(row, host_summary)
@@ -92,7 +92,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
         expected_models = {
             "claude_code": "claude-opus-5-5",
             "grok": "grok-4.7",
-            "hermes": "moonshotai.kimi-k2.5",
+            "hermes": "us.moonshotai.kimi-k3.1",
         }
         for runtime, model in expected_models.items():
             with self.subTest(runtime=runtime), patch.object(
@@ -111,7 +111,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
                 backend.default_app_agent_settings(),
                 {
                     "agent_runtime": "codex",
-                    "model": "gpt-6.1-sol",
+                    "model": "gpt-6.2-sol",
                     "effort": "high",
                 },
             )
@@ -203,9 +203,9 @@ class AgenticWebAppContractTests(unittest.TestCase):
         self.assertIn("selectedAgentSettings = app.agent_settings;", source)
         self.assertIn("selectedAgentSettings = response.app.agent_settings;", source)
         self.assertIn("runtimeRunnable(savedSettings.agent_runtime)", source)
-        self.assertIn('codex: "gpt-6.1-sol"', source)
+        self.assertIn('codex: "gpt-6.2-sol"', source)
         self.assertIn('claude_code: "claude-opus-5-5"', source)
-        self.assertIn('hermes: "moonshotai.kimi-k2.5"', source)
+        self.assertIn('hermes: "us.moonshotai.kimi-k3.1"', source)
         self.assertIn("await agentSettingsSaveQueue", source)
         send_message = source.split("async function sendMessage", 1)[1].split(
             "\nasync function stopRunningTurn", 1
@@ -537,7 +537,7 @@ class AgenticWebAppContractTests(unittest.TestCase):
             for text in (instructions, web_apps, web_app_ui, memory, schedules)
         )
         self.assertIn("## Kern capabilities", instructions)
-        for reference in ("web-apps.md", "web-app-ui.md", "memory.md", "schedules.md", "agent-messaging.md"):
+        for reference in ("web-apps.md", "web-app-ui.md", "memory.md", "schedules.md", "agent-messaging.md", "workspace-files.md"):
             self.assertIn(
                 f"/opt/kern-host/host/bootstrap/agent-home/references/{reference}", instructions
             )
@@ -837,7 +837,7 @@ class BrowserRoutingTests(unittest.TestCase):
     def test_browser_app_creation_rejects_agent_configuration(self) -> None:
         settings = {
             "agent_runtime": "codex",
-            "model": "gpt-6.1-sol",
+            "model": "gpt-6.2-sol",
             "effort": "high",
         }
         with self.assertRaises(backend.WorkspaceError) as error:
@@ -849,7 +849,7 @@ class BrowserRoutingTests(unittest.TestCase):
             "app_id": "app-2",
             "agent_settings": {
                 "agent_runtime": "codex",
-                "model": "gpt-6-astra",
+                "model": "gpt-6.2-astra",
                 "effort": "high",
             },
         }
@@ -1082,7 +1082,7 @@ class BrowserRoutingTests(unittest.TestCase):
         apply.assert_not_called()
 
     def test_agent_can_read_app_session_options(self) -> None:
-        options = {"codex": {"gpt-6.1-sol": ["high"]}}
+        options = {"codex": {"gpt-6.2-sol": ["high"]}}
         with (
             patch.object(backend, "public_session_options", return_value=options),
             patch.object(backend, "active_agent_runtimes", return_value=["codex"]),
@@ -1101,7 +1101,7 @@ class BrowserRoutingTests(unittest.TestCase):
         for resource, function, body in (
             ("name", "rename_web_app", {"name": "Marketing HQ"}),
             ("agent-settings", "set_app_agent_settings", {
-                "agent_runtime": "codex", "model": "gpt-6.1-sol", "effort": "high",
+                "agent_runtime": "codex", "model": "gpt-6.2-sol", "effort": "high",
             }),
         ):
             with (
@@ -1146,7 +1146,7 @@ class BrowserRoutingTests(unittest.TestCase):
 
     def test_agent_metadata_routes_validate_before_writing(self) -> None:
         settings = {
-            "agent_runtime": "codex", "model": "gpt-6.1-sol", "effort": "high",
+            "agent_runtime": "codex", "model": "gpt-6.2-sol", "effort": "high",
         }
         with (
             patch.object(backend, "_require_web_app"),
@@ -1188,7 +1188,7 @@ class BrowserRoutingTests(unittest.TestCase):
             (
                 {
                     "agent_runtime": "codex",
-                    "model": "gpt-6.1-sol",
+                    "model": "gpt-6.2-sol",
                     "effort": "high",
                 },
                 None,
@@ -1756,7 +1756,7 @@ class ConversationTests(unittest.TestCase):
 
     SESSION = {
         "agent_runtime": "codex",
-        "model": "gpt-6-astra",
+        "model": "gpt-6.2-astra",
         "effort": "high",
     }
 
@@ -2608,13 +2608,13 @@ class AgenticWebAppDbTests(unittest.TestCase):
             created["agent_settings"],
             {
                 "agent_runtime": "codex",
-                "model": "gpt-6.1-sol",
+                "model": "gpt-6.2-sol",
                 "effort": "high",
             },
         )
         settings = {
             "agent_runtime": "codex",
-            "model": "gpt-6-astra",
+            "model": "gpt-6.2-astra",
             "effort": "high",
         }
         with patch.object(

@@ -119,7 +119,7 @@ class SwarmPersistenceTests(unittest.TestCase):
     def setUp(self) -> None:
         pg_harness.reset_database()
         with state.mutation() as cur:
-            state.save_thread_session(cur, 'codex', 'thread-1', None, state.utc_now(), 'gpt-5.6-terra', 'high')
+            state.save_thread_session(cur, 'codex', 'thread-1', None, state.utc_now(), 'gpt-6.2-sol', 'high')
             cur.execute("INSERT INTO chat_threads (thread_id, archived) VALUES ('thread-1', FALSE)")
             self.run = state.start_thread_run(cur, 'thread-1')
             state.reset_swarm_ai(cur, 'thread-1', self.run)
@@ -215,7 +215,7 @@ class SwarmPersistenceTests(unittest.TestCase):
             for number in range(2, 261):
                 thread_id = f'thread-{number}'
                 state.save_thread_session(
-                    cur, 'codex', thread_id, None, state.utc_now(), 'gpt-5.6-terra', 'high',
+                    cur, 'codex', thread_id, None, state.utc_now(), 'gpt-6.2-sol', 'high',
                 )
                 cur.execute(
                     'INSERT INTO chat_threads (thread_id, name, archived) VALUES (%s, %s, FALSE)',
@@ -301,7 +301,7 @@ class SwarmPersistenceTests(unittest.TestCase):
         from host.runtime.workspace import schedules
         schedule = schedules.create_schedule({
             "name": "Deleted research", "triggers": [{"type": "daily", "times": ["12:00"], "prompt": "Research"}],
-            "agent_runtime": "codex", "model": "gpt-6-sol", "effort": "high",
+            "agent_runtime": "codex", "model": "gpt-6.2-sol", "effort": "high",
         }, actor="user")
         retired_schedule = schedule['thread_id']
         with patch.object(swarm, '_interaction_window', return_value=('2026-09-26', '2026-10-02')), \
@@ -313,7 +313,7 @@ class SwarmPersistenceTests(unittest.TestCase):
                 cur.execute(
                     "INSERT INTO web_apps (app_id, name, revision, created_at, updated_at, archived,"
                     " agent_runtime, agent_model, agent_effort) VALUES ('app-9', 'Old app', 0,"
-                    " '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z', TRUE, 'codex', 'gpt-5.6-sol', 'high')")
+                    " '2026-09-12T00:00:00Z', '2026-09-12T00:00:00Z', TRUE, 'codex', 'gpt-6.2-sol', 'high')")
                 # Strong links to retired agents would fill the whole cap before.
                 cur.execute("INSERT INTO swarm_interaction_days VALUES"
                             " ('2026-10-02','thread-1','thread-2',50),"

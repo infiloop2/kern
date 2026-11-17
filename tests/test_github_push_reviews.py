@@ -211,7 +211,7 @@ class PushStorageTests(unittest.TestCase):
     def test_once_only_and_shared_history_with_distinct_execution_status(self):
         state.set_auto_approval_policy("github", "push", prompt.POLICY)
         self.assertEqual(len(state.pending_push_auto_approvals()), 1)
-        state.save_push_auto_approval_review("abc123", 123, prompt.POLICY, "approved", "Routine", "gpt-6.1-sol")
+        state.save_push_auto_approval_review("abc123", 123, prompt.POLICY, "approved", "Routine", "gpt-6.2-sol")
         state.save_push_auto_approval_error("abc123", "remote moved")
         state.set_auto_approval_policy("github", "push", None)
         self.assertEqual(state.pending_push_auto_approvals(), [])

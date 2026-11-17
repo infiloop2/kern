@@ -74,9 +74,9 @@ INTERACTIVE_RUNTIMES: tuple[str, ...] = tuple(
 )
 
 _CODEX_SESSION_OPTIONS = {
-    "gpt-6.1-sol": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
+    "gpt-6.2-sol": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
+    "gpt-6.2-astra": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
     "gpt-6-luna": ("high", "max"),
-    "gpt-6-astra": ("high", "max", "ultra", "high-fast", "high-ultrafast"),
 }
 
 INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
@@ -87,8 +87,7 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
     # but an alias re-points to a new model generation whenever the pinned CLI
     # is upgraded, silently moving existing threads across generations. The
     # catalog names the exact model instead, so the CLI pin never decides which
-    # model a thread runs. Threads created under the aliases stay readable but
-    # run no further tasks; their rows are preserved, not migrated.
+    # model a thread runs.
     "claude_code": {
         "claude-opus-5-5": ("high", "max", "ultracode"),
         "claude-fable-5-2": ("high", "max", "ultracode"),
@@ -106,21 +105,22 @@ INTERACTIVE_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {
     "hermes": {
         "deepseek.v3.2": ("high",),
         "qwen.qwen3-coder-next": ("high",),
-        "moonshotai.kimi-k2.5": ("high",),
-        "zai.glm-5": ("high",),
+        "us.moonshotai.kimi-k3.1": ("high",),
+        "us.zai.glm-5.3": ("high",),
+        "minimax.minimax-m2.5": ("high",),
     },
 }
 
 # Defaults are named deliberately rather than inferred from catalog order.
 # Model ordering is presentation, not a capability ranking.
 DEFAULT_INTERACTIVE_MODELS: dict[str, str] = {
-    "codex": "gpt-6.1-sol",
-    "codex-2": "gpt-6.1-sol",
-    "codex-3": "gpt-6.1-sol",
+    "codex": "gpt-6.2-sol",
+    "codex-2": "gpt-6.2-sol",
+    "codex-3": "gpt-6.2-sol",
     "claude_code": "claude-opus-5-5",
     "grok": "grok-4.7",
     "grok-2": "grok-4.7",
-    "hermes": "moonshotai.kimi-k2.5",
+    "hermes": "us.moonshotai.kimi-k3.1",
 }
 
 SCRIPT_SESSION_OPTIONS: dict[str, dict[str, tuple[str, ...]]] = {

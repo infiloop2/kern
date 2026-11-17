@@ -639,3 +639,39 @@ button.icon-button.quiet svg { height: 18px; width: 18px; }
 @media (pointer: coarse) {
   .memory-notice > button { min-height: 44px; }
 }
+
+/* Compact, uncropped image attachments with a stable footprint while loading. */
+.chat-image {
+  display: inline-flex;
+  vertical-align: top;
+  flex-direction: column;
+  width: min(100%, 420px);
+  margin: 8px 0;
+  gap: 6px;
+}
+.chat-image-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: clamp(120px, 25svh, 240px);
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  color: var(--muted);
+  cursor: zoom-in;
+}
+.chat-image-preview:disabled { cursor: default; opacity: 1; }
+.chat-image-preview img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.chat-image-status { padding: 16px; font-size: 12px; }
+.chat-image-caption { font-size: 12px; overflow-wrap: anywhere; }
+.chat-image-preview:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+
+.chat-image-failed .chat-image-preview { height: auto; justify-content: flex-start; border: 0; background: none; }
+.chat-image-failed .chat-image-status { padding: 0; }
+
+.chat-image-caption .md-open-file { text-align: left; }
+
+.chat-image-retry { align-self: flex-start; min-height: 44px; padding: 8px 12px; font-size: 12px; }
